@@ -36,11 +36,15 @@ session from here on will feel like Claude already knows your business.
 >
 > The fields I know you'll ask about:
 > - My name and company name
-> - How many units I manage and what city/area
-> - My properties (address, bedrooms/bathrooms, tenant name if occupied, lease end date)
+> - Roughly how many units I manage and what city/area I operate in
 > - My tech stack: PM software, email, team chat, phone system, texting tool,
 >   lease signing tool, payment system, accounting software, maintenance tool,
 >   process/workflow software
+>
+> Do not ask me to list my individual properties. My portfolio changes constantly
+> and my PM software is the source of truth. When you need property or tenant data
+> for a specific task, ask me to pull a report or export from my PM software at
+> that time.
 >
 > After you have all my answers, update the CLAUDE.md file with my real
 > information. When you're done, show me a summary of what changed.

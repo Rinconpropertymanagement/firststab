@@ -126,16 +126,23 @@ Full specs for each specialist: `.claude/agents/`
 
 ---
 
-## My Properties
+## My Portfolio
 
 ```
-Properties:
-- [123 Main St, Unit A — 2BD/1BA — Tenant: Jane Smith — Lease ends: 2025-08-31]
-- [123 Main St, Unit B — 1BD/1BA — Vacant]
-- [456 Oak Ave — 3BD/2BA — Tenant: John Doe — Lease ends: 2025-11-15]
+Portfolio size: [NUMBER] units
+Market(s): [CITY/AREA]
 ```
 
-(Replace with your real properties.)
+**Do not list individual properties here.** Property data lives in my PM software
+and changes constantly — units turn over, new properties are added, tenants move.
+A static list here would be wrong within weeks.
+
+When you need property or tenant data, do one of these:
+1. Ask me to export a report from my PM software and paste or upload it
+2. Connect directly to my PM software via its API (ask me for my credentials when needed)
+3. Ask me the specific information you need right now
+
+Never assume you know my current portfolio. Always pull from the source.
 
 ---
 

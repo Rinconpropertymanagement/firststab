@@ -322,10 +322,6 @@
       </div>
     </div>
 
-    <div class="field">
-      <label>A few of your properties <span class="hint">— one per line, e.g. "123 Main St — 12 units — mostly residential"</span></label>
-      <textarea id="properties" placeholder="123 Main St — 8 units — all occupied&#10;456 Oak Ave — 4 units — 1 vacant&#10;789 Pine Rd — single family — long-term tenant"></textarea>
-    </div>
   </div>
 
   <!-- STEP 2: Tech Stack -->
@@ -551,7 +547,6 @@ function generate() {
   const company = val('company') || '[YOUR COMPANY NAME]';
   const city = val('city') || '[CITY/AREA]';
   const units = val('units') || '[NUMBER]';
-  const properties = val('properties') || '[List your properties here — one per line]';
   const pmSoftware = val('pm-software') || 'Not specified';
   const pmManual = val('pm-manual') || 'Not specified';
   const processSoftware = val('process-software') || 'None';
@@ -566,8 +561,6 @@ function generate() {
   const vendors = val('vendors') || 'Not specified';
   const pain1 = val('pain1') || 'Not specified';
   const pain2 = val('pain2');
-
-  const propsFormatted = properties.split('\n').map(p => p.trim()).filter(Boolean).map(p => `- ${p}`).join('\n');
 
   const md = `# My AI Assistant — Wolf Pack Property Management Harness
 
@@ -636,9 +629,15 @@ These are the tasks I do manually today that I want to automate:
 
 ---
 
-## My Properties
+## My Portfolio
 
-${propsFormatted}
+Portfolio size: ${units} units
+Market: ${city}
+
+Property and tenant data lives in my PM software — do not ask me to maintain
+a list here. When you need property or tenant data for a specific task, ask me
+to pull a report or export from my PM software at that time. Never assume you
+know my current portfolio. Always pull from the source.
 
 ---
 

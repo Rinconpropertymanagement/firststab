@@ -1,0 +1,22 @@
+{
+  "name": "llm-router",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local-first AI router — send cheap questions to a free model on your own server, pay for the cloud only when you need it.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "openai": "^4.70.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

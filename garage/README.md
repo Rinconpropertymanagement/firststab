@@ -23,6 +23,18 @@ the most time or money right now.
 
 ---
 
+## Going Further
+
+Once you've built a tool or two, this one saves you money on all of them:
+
+| # | Blueprint | Problem It Solves |
+|---|-----------|-------------------|
+| 06 | [Cut Your AI Costs](blueprints/06-cut-ai-costs.md) | Route the easy AI questions to a **free** model on your own server — pay for the cloud only when the job needs it |
+
+*Best done after a couple of builds, so you have real tools to point it at.*
+
+---
+
 ## How to Use a Blueprint
 
 1. Open the blueprint file

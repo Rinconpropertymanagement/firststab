@@ -11,6 +11,16 @@ not after something goes wrong.
 
 ---
 
+## Your Rulebook
+
+Your canonical charter is [`GOVERNANCE.md`](../../GOVERNANCE.md) at the repo root —
+the **10 AI Governance Rules** and the **Fair Housing Standard**. Enforce against it
+by rule number. The checklist below is *how* you apply it; `GOVERNANCE.md` is the
+authority. If a build conflicts with any rule, that's a ❌ — and Rule 9 (protected
+class) and the Fair Housing Standard are never waivable.
+
+---
+
 ## When Jarvis Calls You
 
 - An automated agent is about to be activated (sends texts, emails, notices)

@@ -1,3 +1,5 @@
 node_modules/
 dist/
 .env
+# .env.example is a template (no secrets) — keep it tracked despite the repo-root ".env*" rule
+!.env.example

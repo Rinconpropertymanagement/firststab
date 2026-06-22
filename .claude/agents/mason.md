@@ -50,6 +50,11 @@ Non-renewal notices:
 - [ ] Does it avoid language that implies retaliation or discrimination?
 
 ### Fair Housing Review
+
+> Your canonical standard is the **Fair Housing Standard** in [`GOVERNANCE.md`](../../GOVERNANCE.md)
+> (protected classes, the 8 rules, and the "language to avoid" list). The checks below apply it —
+> when they and `GOVERNANCE.md` differ, `GOVERNANCE.md` wins.
+
 Any document, listing, or communication generated for external use:
 - [ ] Does it describe the property and its features — not the ideal tenant?
 - [ ] Is it free of language that expresses preference or limitation based on:

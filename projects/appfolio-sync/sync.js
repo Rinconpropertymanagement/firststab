@@ -183,12 +183,7 @@ const REPORT_CONFIG = [
     },
   },
 
-  // ── 8. Owner directory (no table yet — included for future use) ───────────
-  {
-    reportName: 'owner_directory',
-    table: null,
-    buildRow() { return null; },
-  },
+  // owner_directory is handled by syncOwnerDirectory() — see below.
 
   // ── 9. Work orders ───────────────────────────────────────────────────────
   {
@@ -358,8 +353,140 @@ async function supabaseUpsert(table, rows) {
   }
 }
 
+// Like supabaseUpsert but takes an explicit list of conflict columns.
+// Used for tables whose unique key spans more than one column (e.g. property_owners).
+async function supabaseUpsertComposite(table, conflictCols, rows) {
+  if (rows.length === 0) return;
+  const sbHost   = new URL(SB_URL).hostname;
+  const body     = JSON.stringify(rows);
+  const conflict = conflictCols.join(',');
+  const result   = await httpsRequest({
+    hostname: sbHost,
+    path:     `/rest/v1/${table}?on_conflict=${conflict}`,
+    method:   'POST',
+    headers:  {
+      'apikey':         SB_KEY,
+      'Authorization':  `Bearer ${SB_KEY}`,
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Prefer':         'resolution=merge-duplicates',
+    },
+  }, body);
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    const detail = typeof result.body === 'object'
+      ? JSON.stringify(result.body)
+      : String(result.body).substring(0, 300);
+    throw new Error(`Supabase upsert to "${table}" returned HTTP ${result.statusCode}: ${detail}`);
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OWNER DIRECTORY — special case: one report writes to two tables
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Fetches owner_directory, writes unique owners to `owners` and per-property
+// links to `property_owners`. Logs counts only — no names or phone numbers.
+async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
+  const reportName = 'owner_directory';
+
+  console.log(`[${reportName}] Fetching...`);
+
+  let rows;
+  try {
+    rows = await fetchAllPages(reportName);
+  } catch (err) {
+    console.error(`[${reportName}] FETCH ERROR: ${err.message}`);
+    summary.push({ reportName, status: 'FETCH_ERROR', error: err.message });
+    return;
+  }
+
+  if (isDiscover) {
+    const keys = rows.length > 0 ? Object.keys(rows[0]) : [];
+    console.log(`[${reportName}] ${rows.length} rows — FIELDS: ${JSON.stringify(keys)}\n`);
+    summary.push({ reportName, status: 'DISCOVERED', rowCount: rows.length });
+    return;
+  }
+
+  console.log(`[${reportName}] Fetched ${rows.length} rows.`);
+
+  // owner_directory has one row per owner (not per property).
+  // properties_owned_i_ds is a comma-separated list of AppFolio property IDs.
+  const ownerRows         = [];
+  const propertyOwnerRows = [];
+
+  for (const row of rows) {
+    const ownerId = String(row.owner_id || '').trim();
+    if (!ownerId || ownerId === 'null') continue;
+
+    // Phone numbers come as "Mobile: (805) 555-1234, Work: (805) 555-5678" — take the first number only
+    let phone = null;
+    if (row.phone_numbers) {
+      const firstPhone = String(row.phone_numbers).split(',')[0];
+      phone = firstPhone.replace(/^[^(]+/, '').trim() || null; // strip label like "Mobile: "
+    }
+
+    // Count how many properties this owner owns by splitting the IDs
+    const propIds = row.properties_owned_i_ds
+      ? String(row.properties_owned_i_ds).split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+
+    ownerRows.push({
+      appfolio_id: ownerId,
+      name:        row.name       || null,
+      phone,
+      email:       row.email      || null,
+      total_units: null, // not available per-owner in this report; calculated from property_owners
+    });
+
+    for (const propId of propIds) {
+      propertyOwnerRows.push({
+        appfolio_property_id: propId,
+        appfolio_owner_id:    ownerId,
+        unit_count:           null, // unit count per property not in owner_directory
+      });
+    }
+  }
+
+  console.log(`[${reportName}] Mapped ${ownerRows.length} unique owners → owners.`);
+  console.log(`[${reportName}] Mapped ${propertyOwnerRows.length} links → property_owners.`);
+
+  if (isDryRun) {
+    console.log(`[${reportName}] DRY RUN — would upsert ${ownerRows.length} to owners, ${propertyOwnerRows.length} to property_owners.\n`);
+    summary.push({
+      reportName, table: 'owners + property_owners', status: 'DRY_RUN',
+      rowsMapped: ownerRows.length + propertyOwnerRows.length,
+    });
+    return;
+  }
+
+  try {
+    await supabaseUpsert('owners', ownerRows);
+    console.log(`[${reportName}] Upserted ${ownerRows.length} rows to owners.`);
+  } catch (err) {
+    console.error(`[${reportName}] UPSERT ERROR (owners): ${err.message}\n`);
+    summary.push({ reportName, table: 'owners', status: 'UPSERT_ERROR', error: err.message });
+    return;
+  }
+
+  try {
+    await supabaseUpsertComposite(
+      'property_owners',
+      ['appfolio_property_id', 'appfolio_owner_id'],
+      propertyOwnerRows,
+    );
+    console.log(`[${reportName}] Upserted ${propertyOwnerRows.length} rows to property_owners.\n`);
+    summary.push({
+      reportName, table: 'owners + property_owners', status: 'OK',
+      rowsUpserted: ownerRows.length + propertyOwnerRows.length,
+    });
+  } catch (err) {
+    console.error(`[${reportName}] UPSERT ERROR (property_owners): ${err.message}\n`);
+    summary.push({ reportName, table: 'property_owners', status: 'UPSERT_ERROR', error: err.message });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,6 +583,8 @@ async function main() {
       summary.push({ reportName, table, status: 'UPSERT_ERROR', error: err.message });
     }
   }
+
+  await syncOwnerDirectory(isDryRun, isDiscover, summary);
 
   console.log('\n=== Summary ===');
   for (const r of summary) {

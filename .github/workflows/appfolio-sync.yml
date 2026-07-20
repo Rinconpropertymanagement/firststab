@@ -1,0 +1,45 @@
+name: AppFolio → Supabase Sync
+
+on:
+  # Manual trigger — Peter can run this anytime from the GitHub Actions tab
+  workflow_dispatch:
+
+  schedule:
+    # Business hours: every 2 hours, 8am–4pm PDT Mon–Fri
+    # PDT = UTC-7: 8am=15:00, 10am=17:00, 12pm=19:00, 2pm=21:00, 4pm=23:00 UTC
+    - cron: '0 15,17,19,21,23 * * 1-5'
+
+    # 6pm PDT Mon–Fri — this lands at 01:00 UTC the next day (Tue–Sat in UTC)
+    - cron: '0 1 * * 2-6'
+
+    # Nightly at 2am PDT (9am UTC) — catches any updates from overnight
+    - cron: '0 9 * * *'
+
+jobs:
+  sync:
+    name: Sync AppFolio data to Supabase
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: projects/appfolio-sync/package.json
+
+      - name: Install dependencies
+        working-directory: projects/appfolio-sync
+        run: npm install
+
+      - name: Run sync
+        working-directory: projects/appfolio-sync
+        run: node sync.js
+        env:
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APPFOLIO_CLIENT_ID:        ${{ secrets.APPFOLIO_CLIENT_ID }}
+          APPFOLIO_CLIENT_SECRET:    ${{ secrets.APPFOLIO_CLIENT_SECRET }}

@@ -1,0 +1,14 @@
+{
+  "name": "rincon-appfolio-sync",
+  "version": "1.0.0",
+  "description": "Pulls data from AppFolio and syncs it to the Rincon Management Supabase database",
+  "main": "sync.js",
+  "scripts": {
+    "sync": "node sync.js",
+    "discover": "node sync.js --discover",
+    "dry-run": "node sync.js --dry-run"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0"
+  }
+}

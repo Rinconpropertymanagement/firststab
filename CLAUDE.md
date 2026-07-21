@@ -17,9 +17,9 @@ the task genuinely doesn't match any specialist's domain.
 
 ## Who I Am
 
-My name is [YOUR NAME]. I am a property manager.
-My company is called [YOUR COMPANY NAME].
-I manage [NUMBER] units across [CITY/AREA].
+My name is Peter McKenzie. I am a property manager.
+My company is called Rincon Management.
+I manage 150–500 units across Southern California.
 
 I am NOT a software developer. I am a business operator using AI to automate
 repetitive tasks and run my business better. Keep everything as simple as possible.
@@ -151,8 +151,8 @@ Full specs for each specialist: `.claude/agents/`
 ## My Portfolio
 
 ```
-Portfolio size: [NUMBER] units
-Market(s): [CITY/AREA]
+Portfolio size: 150–500 units
+Market(s): Southern California
 ```
 
 **Do not list individual properties here.** Property data lives in my PM software
@@ -174,71 +174,75 @@ When building something for me, always check this list first.
 Prefer connecting to tools I already use over building something new.
 
 ### Property Management Software
-> Examples: AppFolio, Buildium, Yardi, Propertyware, Rent Manager, DoorLoop, TenantCloud
 ```
-I use: [YOUR PM SOFTWARE]
-I use it for: [leases, maintenance, payments, reporting]
-What I still do manually: [...]
+I use: AppFolio
+I use it for: leases, maintenance, payments, tenant communication, reporting
 ```
 
 ### Process & Workflow Software
-> Examples: LeadSimple, Aptly, Process Street, Monday.com, Notion
 ```
-I use: [YOUR PROCESS TOOL or "none"]
-I use it for: [lead follow-up, move-in checklists, SOPs]
+I use: none currently
 ```
 
 ### Email
-> Examples: Gmail (Google Workspace), Outlook (Microsoft 365)
 ```
-I use: [YOUR EMAIL SYSTEM]
-I send emails to: [tenants / owners / vendors / all three]
+I use: Gmail (Google Workspace)
+I send emails to: tenants, owners, and vendors
 ```
 
 ### Internal Communication
-> Examples: Slack, Microsoft Teams, Google Chat
 ```
-I use: [YOUR TEAM CHAT or "just email/text"]
-My team size: [number of people]
+My team size: 6–15 people
 ```
 
 ### Phone System
-> Examples: RingCentral, Zoom Phone, Google Voice, OpenPhone
 ```
-I use: [YOUR PHONE SYSTEM or "my personal cell"]
-Does it support texting? [Yes / No]
+I use: Aircall (remote team members) + AT&T cell phones (in-office staff)
+Does it support texting? Yes (Aircall)
 ```
 
 ### Tenant Communication & Texting
-> Examples: OpenPhone, Twilio, built into PM software, manual texting
 ```
-I use: [YOUR TEXTING TOOL]
-I text tenants about: [rent reminders, maintenance updates, renewals]
+I use: AppFolio built-in messaging
+I text tenants about: rent reminders, maintenance updates, renewals
 ```
 
 ### Lease & Document Signing
-> Examples: DocuSign, HelloSign, DotLoop, Adobe Sign
 ```
-I use: [YOUR SIGNING TOOL]
+I use: Zip Forms
 ```
 
 ### Payments & Rent Collection
 ```
-I use: [YOUR PAYMENT SYSTEM]
-Tenants pay via: [online portal / check / Zelle / mix]
+I use: AppFolio online portal
+Tenants pay via: mix of online portal and check
 ```
 
 ### Accounting
-> Examples: QuickBooks, Wave, Xero
 ```
-I use: [YOUR ACCOUNTING TOOL]
+I use: AppFolio (day-to-day) + QuickBooks (books)
 ```
 
 ### Maintenance Coordination
 ```
-I use: [YOUR MAINTENANCE TOOL or "phone/email"]
-My vendor list lives in: [spreadsheet / contacts / PM software]
+I use: AppFolio
+My vendor list lives in: AppFolio
 ```
+
+### Database
+```
+I use: Supabase (PostgreSQL)
+Project name: rincon-management
+What lives here: properties, units, tenants, leases, maintenance_requests
+Schema location: supabase/migrations/20260626000000_initial_schema.sql
+Credentials: stored in .env (never committed to git — see .env.example)
+```
+
+When building any tool that needs to save or retrieve data:
+1. Neo owns the schema — always involve Neo when adding tables or changing structure
+2. Connection credentials come from environment variables (SUPABASE_URL, SUPABASE_ANON_KEY)
+3. Row-Level Security is enabled on all tables — access policies must be explicitly added per tool
+4. Never store SSNs, bank accounts, passwords, or protected-class data in any table
 
 ---
 

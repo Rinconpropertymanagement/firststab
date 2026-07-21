@@ -1,0 +1,805 @@
+<!-- Replace sb_publishable_cgZHeK5PSfjqQuaTS-MWmQ_3DufPATJ with your Supabase anon key -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Insurance Compliance — Rincon Management</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 1400px; margin: 0 auto; padding: 0 16px 48px; }
+
+    /* ── Warning Banner ── */
+    .banner-warning {
+      background: #fef3c7;
+      border-bottom: 2px solid #d97706;
+      color: #92400e;
+      text-align: center;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Pod Banner ── */
+    .banner-pod {
+      background: #eff6ff;
+      border-bottom: 2px solid #3b82f6;
+      color: #1d4ed8;
+      text-align: center;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      display: none;
+    }
+    .banner-pod.visible { display: block; }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 20px 0 16px;
+    }
+    .header-left h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.2;
+    }
+    .header-left p {
+      font-size: 13px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .last-updated {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .btn-refresh {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: #374151;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-refresh:hover { background: #f3f4f6; }
+    .btn-refresh:active { background: #e5e7eb; }
+
+    /* ── Summary Tiles ── */
+    .tiles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .tile {
+      flex: 1 1 140px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 16px 18px;
+      min-width: 120px;
+    }
+    .tile-number {
+      font-size: 30px;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .tile-label {
+      font-size: 12px;
+      color: #6b7280;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .tile-blue   .tile-number { color: #2563eb; }
+    .tile-green  .tile-number { color: #16a34a; }
+    .tile-amber  .tile-number { color: #d97706; }
+    .tile-red    .tile-number { color: #dc2626; }
+    .tile-gray   .tile-number { color: #6b7280; }
+
+    /* ── Filter Row ── */
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .filter-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .filter-btn {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: #374151;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .filter-btn:hover { background: #f3f4f6; border-color: #9ca3af; }
+    .filter-btn.active {
+      background: #1f2937;
+      border-color: #1f2937;
+      color: #fff;
+    }
+
+    /* ── Table Wrapper ── */
+    .table-wrapper {
+      overflow-x: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 900px;
+    }
+
+    thead th {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+      position: sticky;
+      top: 0;
+    }
+    thead th:hover { color: #374151; }
+    thead th .sort-arrow { margin-left: 4px; opacity: 0.4; }
+    thead th.sort-asc .sort-arrow,
+    thead th.sort-desc .sort-arrow { opacity: 1; color: #374151; }
+
+    tbody tr {
+      border-bottom: 1px solid #f3f4f6;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+    tbody tr.expanded { background: #eff6ff; }
+
+    td {
+      padding: 10px 12px;
+      font-size: 13px;
+      color: #374151;
+      vertical-align: top;
+    }
+
+    td.property-name { font-weight: 600; color: #111827; }
+    td.pod-cell { color: #6b7280; }
+
+    .days-green  { color: #16a34a; font-weight: 600; }
+    .days-amber  { color: #d97706; font-weight: 600; }
+    .days-red    { color: #dc2626; font-weight: 600; }
+    .days-gray   { color: #9ca3af; }
+
+    /* ── Status Badge ── */
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .badge-compliant     { background: #16a34a; color: #fff; }
+    .badge-expiring_soon { background: #d97706; color: #fff; }
+    .badge-expired       { background: #dc2626; color: #fff; }
+    .badge-pending_review{ background: #6b7280; color: #fff; }
+    .badge-no_policy     { background: #e5e7eb; color: #374151; }
+    .badge-unknown       { background: #e5e7eb; color: #6b7280; }
+
+    /* ── Check / X ── */
+    .check { color: #16a34a; font-size: 15px; }
+    .cross { color: #dc2626; font-size: 15px; }
+    .dash  { color: #9ca3af; }
+
+    /* ── Detail Panel ── */
+    tr.detail-row td {
+      padding: 0;
+      border-bottom: 1px solid #bfdbfe;
+      cursor: default;
+    }
+    .detail-panel {
+      background: #f0f7ff;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px 24px;
+    }
+    .detail-panel dl dt {
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 2px;
+    }
+    .detail-panel dl dd {
+      font-size: 13px;
+      color: #111827;
+    }
+    .detail-panel dl dd.notes-text {
+      font-style: italic;
+      color: #4b5563;
+    }
+    .detail-link {
+      display: inline-block;
+      margin-top: 4px;
+      color: #2563eb;
+      font-size: 13px;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .detail-link:hover { text-decoration: underline; }
+
+    /* ── Empty / Error States ── */
+    .state-message {
+      text-align: center;
+      padding: 48px 20px;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .state-message.error { color: #dc2626; }
+    .state-message strong { display: block; font-size: 16px; margin-bottom: 6px; color: #374151; }
+    .state-message.error strong { color: #dc2626; }
+
+    /* ── Loading spinner ── */
+    .spinner-wrap {
+      text-align: center;
+      padding: 48px 20px;
+      color: #9ca3af;
+    }
+    .spinner {
+      width: 28px; height: 28px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #6b7280;
+      border-radius: 50%;
+      display: inline-block;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      .header { padding: 14px 0 12px; }
+      .header-left h1 { font-size: 18px; }
+      .tile { flex: 1 1 calc(50% - 6px); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Warning Banner ── -->
+<div class="banner-warning">
+  &#9888;&#65039; This page is not yet protected by login. Do not share this URL publicly.
+</div>
+
+<!-- ── Pod Banner ── -->
+<div class="banner-pod" id="podBanner"></div>
+
+<div class="page">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div class="header-left">
+      <h1>Insurance Compliance</h1>
+      <p>Rincon Management</p>
+    </div>
+    <div class="header-right">
+      <span class="last-updated" id="lastUpdated">Loading…</span>
+      <button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>
+    </div>
+  </div>
+
+  <!-- ── Summary Tiles ── -->
+  <div class="tiles">
+    <div class="tile tile-blue">
+      <div class="tile-number" id="tileTotal">—</div>
+      <div class="tile-label">Total Properties</div>
+    </div>
+    <div class="tile tile-green">
+      <div class="tile-number" id="tileCompliant">—</div>
+      <div class="tile-label">Compliant</div>
+    </div>
+    <div class="tile tile-amber">
+      <div class="tile-number" id="tileExpiring">—</div>
+      <div class="tile-label">Expiring ≤30 Days</div>
+    </div>
+    <div class="tile tile-red">
+      <div class="tile-number" id="tileExpired">—</div>
+      <div class="tile-label">Expired</div>
+    </div>
+    <div class="tile tile-gray">
+      <div class="tile-number" id="tilePending">—</div>
+      <div class="tile-label">No Policy / Pending</div>
+    </div>
+  </div>
+
+  <!-- ── Filters ── -->
+  <div class="filters">
+    <div class="filter-group">
+      <span class="filter-label">Pod</span>
+      <button class="filter-btn active" data-filter="pod" data-value="all">All</button>
+      <button class="filter-btn" data-filter="pod" data-value="Solimar">Solimar</button>
+      <button class="filter-btn" data-filter="pod" data-value="Faria">Faria</button>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Status</span>
+      <button class="filter-btn active" data-filter="status" data-value="all">All</button>
+      <button class="filter-btn" data-filter="status" data-value="compliant">Compliant</button>
+      <button class="filter-btn" data-filter="status" data-value="expiring_soon">Expiring Soon</button>
+      <button class="filter-btn" data-filter="status" data-value="expired">Expired</button>
+      <button class="filter-btn" data-filter="status" data-value="pending_review">Pending Review</button>
+      <button class="filter-btn" data-filter="status" data-value="no_policy">No Policy</button>
+    </div>
+  </div>
+
+  <!-- ── Table ── -->
+  <div class="table-wrapper" id="tableWrapper">
+    <div class="spinner-wrap" id="loadingState">
+      <div class="spinner"></div><br>Loading insurance records…
+    </div>
+    <table id="mainTable" style="display:none">
+      <thead>
+        <tr>
+          <th data-col="property_name">Property <span class="sort-arrow">↕</span></th>
+          <th data-col="pod">Pod <span class="sort-arrow">↕</span></th>
+          <th data-col="policy_number">Policy # <span class="sort-arrow">↕</span></th>
+          <th data-col="insurer_name">Insurer <span class="sort-arrow">↕</span></th>
+          <th data-col="expiration_date">Expiry Date <span class="sort-arrow">↕</span></th>
+          <th data-col="days_left">Days Left <span class="sort-arrow">↑</span></th>
+          <th data-col="coverage_amount">Coverage <span class="sort-arrow">↕</span></th>
+          <th data-col="additional_insured_verified">Add'l Insured <span class="sort-arrow">↕</span></th>
+          <th data-col="coverage_amount_verified">Coverage OK <span class="sort-arrow">↕</span></th>
+          <th data-col="status">Status <span class="sort-arrow">↕</span></th>
+          <th data-col="updated_at">Last Updated <span class="sort-arrow">↕</span></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+    <div id="emptyState" style="display:none"></div>
+    <div id="errorState" style="display:none"></div>
+  </div>
+
+</div><!-- /page -->
+
+<script>
+  // ── Supabase connection ──────────────────────────────────────────────
+  const SUPABASE_URL = 'https://mnqyhrihmopwqjipsldj.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_cgZHeK5PSfjqQuaTS-MWmQ_3DufPATJ';
+
+  const { createClient } = supabase;
+  const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  // ── State ────────────────────────────────────────────────────────────
+  let allRows = [];
+  let sortCol = 'days_left';
+  let sortDir = 'asc';
+  let filterPod = 'all';
+  let filterStatus = 'all';
+  let expandedId = null;
+  let autoRefreshTimer = null;
+
+  // ── Init from URL params ─────────────────────────────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlPod = (urlParams.get('pod') || '').toLowerCase();
+  if (urlPod === 'solimar') filterPod = 'Solimar';
+  else if (urlPod === 'faria') filterPod = 'Faria';
+
+  // ── Helpers ──────────────────────────────────────────────────────────
+  function daysLeft(expirationDate) {
+    if (!expirationDate) return null;
+    const now = new Date();
+    const exp = new Date(expirationDate);
+    const diff = Math.floor((exp - now) / 86400000);
+    return diff;
+  }
+
+  function formatDate(dateStr) {
+    if (!dateStr) return '—';
+    const d = new Date(dateStr);
+    if (isNaN(d)) return '—';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function formatCurrency(amount) {
+    if (amount == null) return '—';
+    return '$' + Number(amount).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  }
+
+  function timeAgo(dateStr) {
+    if (!dateStr) return '—';
+    const d = new Date(dateStr);
+    if (isNaN(d)) return '—';
+    const secs = Math.floor((Date.now() - d) / 1000);
+    if (secs < 60) return 'Just now';
+    if (secs < 3600) return Math.floor(secs / 60) + ' min ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    const days = Math.floor(secs / 86400);
+    if (days === 1) return '1 day ago';
+    if (days < 30) return days + ' days ago';
+    if (days < 365) return Math.floor(days / 30) + ' mo ago';
+    return Math.floor(days / 365) + 'y ago';
+  }
+
+  function nowTimestamp() {
+    return new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  }
+
+  function boolCell(val) {
+    if (val === true) return '<span class="check">✓</span>';
+    if (val === false) return '<span class="cross">✗</span>';
+    return '<span class="dash">—</span>';
+  }
+
+  function daysCell(days) {
+    if (days === null) return '<span class="dash">—</span>';
+    if (days === 0) return '<span class="days-red">Today</span>';
+    if (days < 0) return '<span class="days-red">' + days + ' days</span>';
+    if (days <= 30) return '<span class="days-amber">' + days + ' days</span>';
+    return '<span class="days-green">' + days + ' days</span>';
+  }
+
+  function statusBadge(status) {
+    const map = {
+      compliant:      ['badge-compliant',      'Compliant'],
+      expiring_soon:  ['badge-expiring_soon',  'Expiring Soon'],
+      expired:        ['badge-expired',         'Expired'],
+      pending_review: ['badge-pending_review',  'Pending Review'],
+      no_policy:      ['badge-no_policy',       'No Policy'],
+    };
+    const [cls, label] = map[status] || ['badge-unknown', 'Unknown'];
+    return '<span class="badge ' + cls + '">' + label + '</span>';
+  }
+
+  // ── Data fetch ───────────────────────────────────────────────────────
+  async function fetchData() {
+    showLoading();
+    try {
+      const { data, error } = await db
+        .from('property_insurance')
+        .select(`
+          id,
+          policy_number,
+          insurer_name,
+          expiration_date,
+          effective_date,
+          coverage_amount,
+          additional_insured_verified,
+          coverage_amount_verified,
+          status,
+          updated_at,
+          created_at,
+          notes,
+          named_insured,
+          property_address_on_policy,
+          properties (
+            name,
+            pod,
+            address,
+            appfolio_id
+          )
+        `)
+        .eq('is_current', true)
+        .order('expiration_date', { ascending: true, nullsFirst: false });
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        allRows = [];
+        showError('No data available. RLS policies may need to be configured — contact your administrator.', false);
+        updateTiles([]);
+        document.getElementById('lastUpdated').textContent = 'Last updated: ' + nowTimestamp();
+        return;
+      }
+
+      // Flatten joined property fields
+      allRows = data.map(r => ({
+        ...r,
+        property_name: r.properties?.name || '—',
+        pod:           r.properties?.pod || '—',
+        property_address: r.properties?.address || '—',
+        appfolio_property_id: r.properties?.appfolio_id || '—',
+        days_left: daysLeft(r.expiration_date),
+      }));
+
+      document.getElementById('lastUpdated').textContent = 'Last updated: ' + nowTimestamp();
+      updateTiles(allRows);
+      render();
+    } catch (err) {
+      console.error(err);
+      showError('Could not load data: ' + (err.message || 'Unknown error') + '. RLS policies may need to be configured — contact your administrator.', true);
+      document.getElementById('lastUpdated').textContent = 'Error loading data';
+    }
+  }
+
+  // ── Tiles ────────────────────────────────────────────────────────────
+  function updateTiles(rows) {
+    document.getElementById('tileTotal').textContent     = rows.length;
+    document.getElementById('tileCompliant').textContent = rows.filter(r => r.status === 'compliant').length;
+    document.getElementById('tileExpiring').textContent  = rows.filter(r => r.days_left !== null && r.days_left >= 0 && r.days_left <= 30).length;
+    document.getElementById('tileExpired').textContent   = rows.filter(r => r.status === 'expired' || (r.days_left !== null && r.days_left < 0)).length;
+    document.getElementById('tilePending').textContent   = rows.filter(r => r.status === 'no_policy' || r.status === 'pending_review').length;
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────
+  function render() {
+    hideAllStates();
+
+    let rows = [...allRows];
+
+    // Pod filter
+    if (filterPod !== 'all') {
+      rows = rows.filter(r => (r.pod || '').toLowerCase() === filterPod.toLowerCase());
+    }
+
+    // Status filter
+    if (filterStatus !== 'all') {
+      rows = rows.filter(r => r.status === filterStatus);
+    }
+
+    // Sort
+    rows.sort((a, b) => {
+      let av = a[sortCol], bv = b[sortCol];
+      // Nulls last
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    // Update sort arrows on headers
+    document.querySelectorAll('thead th').forEach(th => {
+      const col = th.dataset.col;
+      th.classList.remove('sort-asc', 'sort-desc');
+      const arrow = th.querySelector('.sort-arrow');
+      if (col === sortCol) {
+        th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        if (arrow) arrow.textContent = sortDir === 'asc' ? '↑' : '↓';
+      } else {
+        if (arrow) arrow.textContent = '↕';
+      }
+    });
+
+    if (rows.length === 0) {
+      document.getElementById('mainTable').style.display = 'none';
+      const msg = allRows.length === 0
+        ? 'No insurance records found. Upload a declaration page to get started.'
+        : 'No properties match the current filters.';
+      showEmptyMsg(msg);
+      return;
+    }
+
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = '';
+
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = row.id;
+      if (expandedId === row.id) tr.classList.add('expanded');
+
+      tr.innerHTML =
+        '<td class="property-name">' + esc(row.property_name) + '</td>' +
+        '<td class="pod-cell">' + esc(row.pod) + '</td>' +
+        '<td>' + esc(row.policy_number || '—') + '</td>' +
+        '<td>' + esc(row.insurer_name || '—') + '</td>' +
+        '<td>' + formatDate(row.expiration_date) + '</td>' +
+        '<td>' + daysCell(row.days_left) + '</td>' +
+        '<td>' + formatCurrency(row.coverage_amount) + '</td>' +
+        '<td style="text-align:center">' + boolCell(row.additional_insured_verified) + '</td>' +
+        '<td style="text-align:center">' + boolCell(row.coverage_amount_verified) + '</td>' +
+        '<td>' + statusBadge(row.status) + '</td>' +
+        '<td>' + timeAgo(row.updated_at) + '</td>';
+
+      tr.addEventListener('click', () => toggleDetail(row, tr));
+      tbody.appendChild(tr);
+
+      // If this row is expanded, inject detail row
+      if (expandedId === row.id) {
+        injectDetailRow(row, tr);
+      }
+    });
+
+    document.getElementById('mainTable').style.display = '';
+  }
+
+  // ── Detail panel ─────────────────────────────────────────────────────
+  function toggleDetail(row, tr) {
+    if (expandedId === row.id) {
+      expandedId = null;
+    } else {
+      expandedId = row.id;
+    }
+    render();
+  }
+
+  function injectDetailRow(row, afterTr) {
+    const detailTr = document.createElement('tr');
+    detailTr.className = 'detail-row';
+    const td = document.createElement('td');
+    td.colSpan = 11;
+
+    td.innerHTML =
+      '<div class="detail-panel">' +
+        '<dl><dt>Property Address</dt><dd>' + esc(row.property_address || '—') + '</dd></dl>' +
+        '<dl><dt>Named Insured</dt><dd>' + esc(row.named_insured || '—') + '</dd></dl>' +
+        '<dl><dt>Address on Policy</dt><dd>' + esc(row.property_address_on_policy || '—') + '</dd></dl>' +
+        '<dl><dt>Effective Date</dt><dd>' + formatDate(row.effective_date) + '</dd></dl>' +
+        '<dl><dt>Policy #</dt><dd>' + esc(row.policy_number || '—') + '</dd></dl>' +
+        '<dl><dt>Record Created</dt><dd>' + formatDate(row.created_at) + '</dd></dl>' +
+        (row.notes ? '<dl><dt>Notes</dt><dd class="notes-text">' + esc(row.notes) + '</dd></dl>' : '') +
+        '<dl><dt>Declaration Page</dt><dd><a class="detail-link" href="#">View Declaration Page</a></dd></dl>' +
+      '</div>';
+
+    detailTr.appendChild(td);
+    afterTr.insertAdjacentElement('afterend', detailTr);
+  }
+
+  // ── UI states ─────────────────────────────────────────────────────────
+  function showLoading() {
+    document.getElementById('loadingState').style.display = '';
+    document.getElementById('mainTable').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+  }
+
+  function hideAllStates() {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+  }
+
+  function showEmptyMsg(msg) {
+    const el = document.getElementById('emptyState');
+    el.className = 'state-message';
+    el.innerHTML = '<strong>No results</strong>' + esc(msg);
+    el.style.display = '';
+  }
+
+  function showError(msg, isError) {
+    const el = document.getElementById('errorState');
+    el.className = 'state-message' + (isError ? ' error' : '');
+    el.innerHTML = '<strong>' + (isError ? 'Could not load data' : 'No data available') + '</strong>' + esc(msg);
+    el.style.display = '';
+    document.getElementById('mainTable').style.display = 'none';
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+  }
+
+  // ── Escape HTML ───────────────────────────────────────────────────────
+  function esc(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Column sort ────────────────────────────────────────────────────────
+  document.querySelectorAll('thead th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (sortCol === col) {
+        sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortCol = col;
+        sortDir = 'asc';
+      }
+      expandedId = null;
+      render();
+    });
+  });
+
+  // ── Filter buttons ─────────────────────────────────────────────────────
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.filter;
+      const value = btn.dataset.value;
+
+      // Deactivate siblings
+      btn.closest('.filter-group').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      if (filter === 'pod') filterPod = value;
+      if (filter === 'status') filterStatus = value;
+
+      expandedId = null;
+      render();
+    });
+  });
+
+  // ── Refresh button ─────────────────────────────────────────────────────
+  document.getElementById('refreshBtn').addEventListener('click', () => {
+    expandedId = null;
+    fetchData();
+  });
+
+  // ── Pod banner & active pod filter button from URL ────────────────────
+  function setupPodFromUrl() {
+    if (filterPod === 'all') return;
+
+    // Show pod banner
+    const banner = document.getElementById('podBanner');
+    banner.textContent = 'Showing: ' + filterPod + ' Team';
+    banner.classList.add('visible');
+
+    // Activate correct filter button
+    document.querySelectorAll('[data-filter="pod"]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.value === filterPod);
+    });
+  }
+
+  // ── Auto-refresh every 5 minutes ──────────────────────────────────────
+  function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(() => {
+      expandedId = null;
+      fetchData();
+    }, 5 * 60 * 1000);
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  setupPodFromUrl();
+  fetchData();
+  startAutoRefresh();
+</script>
+</body>
+</html>

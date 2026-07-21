@@ -1,0 +1,4 @@
+# Supabase local dev files — do not commit
+.branches
+.temp
+.env

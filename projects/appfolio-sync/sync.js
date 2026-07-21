@@ -13,8 +13,9 @@
  *   node sync.js --dry-run    Fetch and map data, print row counts, no Supabase writes
  */
 
-const https = require('https');
-const path  = require('path');
+const https  = require('https');
+const path   = require('path');
+const { google } = require('googleapis');
 
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 
@@ -606,7 +607,33 @@ async function main() {
   console.log(`\nFinished: ${new Date().toISOString()}\n`);
 }
 
-main().catch((err) => {
+async function sendSyncFailureAlert(err) {
+  const recipients = ['peter@rinconmanagement.com', 'stephen@rinconmanagement.com'].filter(Boolean);
+  const timestamp  = new Date().toISOString();
+  const subject    = `[ALERT] AppFolio sync failed — ${timestamp}`;
+  const body       = `The AppFolio → Supabase nightly sync failed at ${timestamp}.\n\nError: ${err.message}\n\n${err.stack || ''}`;
+
+  try {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GMAIL_CLIENT_ID,
+      process.env.GMAIL_CLIENT_SECRET
+    );
+    oauth2Client.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    for (const to of recipients) {
+      const message = [`To: ${to}`, `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].join('\n');
+      const encoded = Buffer.from(message).toString('base64url');
+      await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encoded } });
+      console.error(`[alert] Failure alert sent to ${to}`);
+    }
+  } catch (alertErr) {
+    console.error(`[alert] Could not send failure alert email: ${alertErr.message}`);
+  }
+}
+
+main().catch(async (err) => {
   console.error('\nFATAL ERROR:', err.message);
+  await sendSyncFailureAlert(err);
   process.exit(1);
 });

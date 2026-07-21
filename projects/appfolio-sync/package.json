@@ -9,6 +9,7 @@
     "dry-run": "node sync.js --dry-run"
   },
   "dependencies": {
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "googleapis": "^140.0.0"
   }
 }

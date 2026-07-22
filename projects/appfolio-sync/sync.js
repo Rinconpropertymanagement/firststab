@@ -32,6 +32,22 @@ const RATE_LIMIT_BATCH = 7;
 const RATE_LIMIT_PAUSE = 15_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SYNC CONFLICT RULE
+//
+// Supabase upserts with `Prefer: resolution=merge-duplicates` only update the
+// columns present in the JSON body — columns not in the body are left untouched.
+//
+// Rule: buildRow() must NEVER include fields that the workflow system owns:
+//   - properties.pod          (set by ops team, managed by workflow)
+//   - units.property_id       (set by FK-join process, not by sync)
+//   - leases.unit_id          (set by FK-join process)
+//   - leases.tenant_id        (set by FK-join process)
+//   - maintenance_requests.unit_id  (set by FK-join process)
+//
+// Omit these fields entirely — do not send them as null. Sending null overwrites.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
 // REPORT CONFIG
 // Field names here are the real AppFolio field names confirmed by --discover.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +79,6 @@ const REPORT_CONFIG = [
 
     buildRow(row) {
       return {
-        property_id:  null,
         unit_number:  row.unit_name                    || null,
         bedrooms:     parseInt(row.bedrooms)           || null,
         bathrooms:    parseFloat(row.bathrooms)        || null,
@@ -108,8 +123,6 @@ const REPORT_CONFIG = [
     buildRow(row) {
       const balance = row.amount_receivable || null;
       return {
-        unit_id:      null,
-        tenant_id:    null,
         lease_start:  row.move_in  || null,
         lease_end:    row.move_out || null,
         monthly_rent: parseFloat(row.rent) || null,
@@ -132,8 +145,6 @@ const REPORT_CONFIG = [
       if (event.includes('move-out') || event.includes('notice')) status = 'terminated';
       else if (event.includes('move-in')) status = 'pending';
       return {
-        unit_id:      null,
-        tenant_id:    null,
         lease_start:  row.lease_from || null,
         lease_end:    row.lease_to   || null,
         monthly_rent: parseFloat(row.rent) || null,
@@ -153,8 +164,6 @@ const REPORT_CONFIG = [
 
     buildRow(row) {
       return {
-        unit_id:      null,
-        tenant_id:    null,
         lease_start:  row.move_in        || null,
         lease_end:    row.lease_expires  || null, // AppFolio field is lease_expires here
         monthly_rent: parseFloat(row.rent) || null,
@@ -172,10 +181,7 @@ const REPORT_CONFIG = [
 
     buildRow(row) {
       return {
-        property_id:  null,
         unit_number:  row.unit    || null,
-        bedrooms:     null, // not in vacancy report — unit_directory has it
-        bathrooms:    null,
         sqft:         parseInt(row.sqft)           || null,
         monthly_rent: parseFloat(row.new_rent || row.schd_rent) || null,
         status:       'vacant',
@@ -218,7 +224,6 @@ const REPORT_CONFIG = [
       }
 
       return {
-        unit_id:      null,
         title:        desc ? String(desc).substring(0, 100) : `Work order ${row.work_order_number || ''}`,
         description:  desc || null,
         status:       STATUS_MAP[rawStatus]   || 'open',
@@ -246,8 +251,6 @@ const REPORT_CONFIG = [
       if (statusRaw.includes('notice')) status = 'terminated';
       else if (statusRaw.includes('past')) status = 'expired';
       return {
-        unit_id:      null,
-        tenant_id:    null,
         lease_start:  row.lease_from || null,
         lease_end:    row.lease_to   || null,
         monthly_rent: parseFloat(row.rent || row.market_rent) || null,
@@ -440,7 +443,6 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
       name:        row.name       || null,
       phone,
       email:       row.email      || null,
-      total_units: null, // not available per-owner in this report; calculated from property_owners
     });
 
     for (const propId of propIds) {

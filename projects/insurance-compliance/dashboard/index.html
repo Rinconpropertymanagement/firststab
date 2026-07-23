@@ -318,6 +318,206 @@
       .header-left h1 { font-size: 18px; }
       .tile { flex: 1 1 calc(50% - 6px); }
     }
+
+    /* ── Batch Upload Button ── */
+    .btn-batch {
+      background: #1d4ed8;
+      border: 1px solid #1d4ed8;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-batch:hover  { background: #1e40af; }
+    .btn-batch:active { background: #1e3a8a; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 24px 16px;
+      overflow-y: auto;
+    }
+    .modal {
+      background: #fff;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 1200px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 1;
+      border-radius: 12px 12px 0 0;
+    }
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 22px;
+      cursor: pointer;
+      color: #6b7280;
+      line-height: 1;
+      padding: 2px 6px;
+    }
+    .modal-close:hover { color: #111827; }
+    .modal-body { padding: 20px; }
+
+    /* ── Drop zone ── */
+    .batch-drop-zone {
+      border: 2px dashed #d1d5db;
+      border-radius: 10px;
+      padding: 40px 20px;
+      text-align: center;
+      color: #6b7280;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      margin-bottom: 16px;
+    }
+    .batch-drop-zone:hover,
+    .batch-drop-zone.drag-over {
+      border-color: #2563eb;
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+    .batch-drop-zone strong {
+      display: block;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: inherit;
+    }
+    .batch-file-hint { font-size: 12px; color: #9ca3af; margin-top: 6px; }
+    .batch-file-list { margin: 0 0 16px; padding: 0; font-size: 13px; }
+    .batch-file-list li { list-style: none; padding: 3px 0; color: #374151; }
+
+    /* ── Progress ── */
+    .batch-progress {
+      text-align: center;
+      padding: 24px;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .batch-progress-bar-wrap {
+      background: #e5e7eb;
+      border-radius: 9999px;
+      height: 8px;
+      margin: 12px auto;
+      max-width: 300px;
+    }
+    .batch-progress-bar {
+      background: #2563eb;
+      height: 8px;
+      border-radius: 9999px;
+      transition: width 0.3s;
+    }
+
+    /* ── Review table ── */
+    .batch-table-wrap {
+      overflow-x: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      margin-bottom: 16px;
+    }
+    .batch-review-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      min-width: 1100px;
+    }
+    .batch-review-table thead th {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 10px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .batch-review-table tbody tr { border-bottom: 1px solid #f3f4f6; }
+    .batch-review-table tbody tr:last-child { border-bottom: none; }
+    .batch-review-table tbody tr.row-error { background: #fef2f2; }
+    .batch-review-table td { padding: 8px 10px; vertical-align: middle; }
+    .batch-review-table td.filename-cell {
+      font-size: 11px;
+      color: #4b5563;
+      max-width: 220px;
+      word-break: break-word;
+    }
+    .batch-review-table select {
+      font-size: 12px;
+      padding: 3px 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      min-width: 160px;
+      max-width: 200px;
+      background: #fff;
+      color: #111827;
+    }
+    .batch-review-table select.unmatched { border-color: #f59e0b; background: #fffbeb; }
+    .badge-dup {
+      background: #fef3c7;
+      color: #92400e;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-row-error {
+      background: #fee2e2;
+      color: #991b1b;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    /* ── Action bar ── */
+    .batch-action-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-top: 12px;
+    }
+    .btn-primary {
+      background: #1d4ed8;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 18px;
+      font-size: 13px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .batch-result-msg { font-size: 13px; color: #374151; }
+    .batch-result-msg.success { color: #16a34a; font-weight: 600; }
+    .batch-result-msg.error   { color: #dc2626; }
   </style>
 </head>
 <body>
@@ -339,6 +539,7 @@
       <p>Rincon Management</p>
     </div>
     <div class="header-right">
+      <button class="btn-batch" id="batchBtn">Batch Upload</button>
       <span class="last-updated" id="lastUpdated">Loading…</span>
       <button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>
     </div>
@@ -415,6 +616,37 @@
   </div>
 
 </div><!-- /page -->
+
+<!-- ── Batch Upload Modal ── -->
+<div class="modal-overlay" id="batchModal" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Batch Upload — Declaration Pages</span>
+      <button class="modal-close" id="batchModalClose" title="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <!-- Step 1: File picker -->
+      <div id="batchStep1">
+        <input type="file" id="batchFileInput" multiple accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+        <div class="batch-drop-zone" id="batchDropZone" tabindex="0" role="button" aria-label="Select files">
+          <strong>Click to select files</strong>
+          or drag and drop here
+          <div class="batch-file-hint">PDF, JPG, PNG &mdash; up to 50 files, 20 MB each</div>
+        </div>
+        <ul class="batch-file-list" id="batchFileList" style="display:none"></ul>
+        <div class="batch-progress" id="batchProgress" style="display:none">
+          <div id="batchProgressMsg">Processing&hellip;</div>
+          <div class="batch-progress-bar-wrap">
+            <div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div>
+          </div>
+        </div>
+        <button class="btn-primary" id="batchUploadBtn" style="display:none">Upload &amp; Extract</button>
+      </div>
+      <!-- Step 2: Review table (injected by JS) -->
+      <div id="batchStep2" style="display:none"></div>
+    </div>
+  </div>
+</div>
 
 <script>
   // ── Supabase connection ──────────────────────────────────────────────
@@ -800,6 +1032,304 @@
   setupPodFromUrl();
   fetchData();
   startAutoRefresh();
+
+  // ── Batch Upload ──────────────────────────────────────────────────────
+  const INSURANCE_API = '';
+
+  let batchItems      = []; // accumulates per-file results + base64
+  let batchProperties = []; // full property list for dropdown
+  let batchFiles      = []; // File objects selected by user
+
+  // ── Open / close modal ─────────────────────────────────────────────────
+  document.getElementById('batchBtn').addEventListener('click', openBatchModal);
+  document.getElementById('batchModalClose').addEventListener('click', closeBatchModal);
+  document.getElementById('batchModal').addEventListener('click', function(e) {
+    if (e.target === this) closeBatchModal();
+  });
+
+  function openBatchModal() {
+    resetBatchModal();
+    document.getElementById('batchModal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    // Pre-fetch properties for the dropdown (parallel to any user action)
+    fetch(INSURANCE_API + '/api/insurance/properties')
+      .then(r => r.json())
+      .then(data => { batchProperties = Array.isArray(data) ? data : []; })
+      .catch(() => { batchProperties = []; });
+  }
+
+  function closeBatchModal() {
+    document.getElementById('batchModal').style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  function resetBatchModal() {
+    batchItems = [];
+    batchFiles = [];
+    document.getElementById('batchStep1').style.display = '';
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchFileList').style.display = 'none';
+    document.getElementById('batchFileList').innerHTML = '';
+    document.getElementById('batchProgress').style.display = 'none';
+    document.getElementById('batchUploadBtn').style.display = 'none';
+    document.getElementById('batchUploadBtn').disabled = false;
+    var fi = document.getElementById('batchFileInput');
+    fi.value = '';
+  }
+
+  // ── File picker / drop zone ────────────────────────────────────────────
+  var dropZone  = document.getElementById('batchDropZone');
+  var fileInput = document.getElementById('batchFileInput');
+
+  dropZone.addEventListener('click', function() { fileInput.click(); });
+  dropZone.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') fileInput.click();
+  });
+  dropZone.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', function() {
+    dropZone.classList.remove('drag-over');
+  });
+  dropZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    onFilesSelected(Array.from(e.dataTransfer.files));
+  });
+  fileInput.addEventListener('change', function() {
+    onFilesSelected(Array.from(fileInput.files));
+  });
+
+  function onFilesSelected(files) {
+    var valid = files.filter(function(f) { return /\.(pdf|jpg|jpeg|png)$/i.test(f.name); });
+    if (!valid.length) return;
+    batchFiles = valid.slice(0, 50);
+    var listEl = document.getElementById('batchFileList');
+    listEl.innerHTML = batchFiles.map(function(f) {
+      return '<li>&#128196; ' + esc(f.name) +
+        ' <span style="color:#9ca3af">(' + (f.size / 1048576).toFixed(1) + ' MB)</span></li>';
+    }).join('');
+    listEl.style.display = '';
+    document.getElementById('batchUploadBtn').style.display = '';
+  }
+
+  // ── Upload & Extract ───────────────────────────────────────────────────
+  document.getElementById('batchUploadBtn').addEventListener('click', runBatchUpload);
+
+  function fileToBase64(file) {
+    return new Promise(function(resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function() {
+        var b64 = reader.result.split(',')[1];
+        resolve({ base64: b64, mimeType: file.type || 'application/octet-stream' });
+      };
+      reader.onerror = function() { reject(new Error('FileReader error')); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function runBatchUpload() {
+    document.getElementById('batchUploadBtn').disabled = true;
+    document.getElementById('batchProgress').style.display = '';
+    batchItems = [];
+    var total = batchFiles.length;
+
+    for (var i = 0; i < total; i++) {
+      var file = batchFiles[i];
+      document.getElementById('batchProgressMsg').textContent =
+        'Processing ' + (i + 1) + ' of ' + total + ' — ' + file.name + '…';
+      document.getElementById('batchProgressBar').style.width =
+        Math.round((i / total) * 100) + '%';
+
+      var b64Info = { base64: null, mimeType: 'application/octet-stream' };
+      try { b64Info = await fileToBase64(file); } catch(e) {}
+
+      try {
+        var fd = new FormData();
+        fd.append('files', file);
+        var resp = await fetch(INSURANCE_API + '/api/insurance/batch-upload', {
+          method: 'POST',
+          body: fd,
+        });
+        var data = await resp.json();
+        var result = (data.results && data.results[0]) || {
+          original_filename:   file.name,
+          clean_filename:      null,
+          extracted:           null,
+          matched_property:    null,
+          has_existing_policy: false,
+          error:               'Server returned no result',
+        };
+        batchItems.push(Object.assign({}, result, {
+          fileBase64:   b64Info.base64,
+          fileMimeType: b64Info.mimeType,
+        }));
+      } catch(err) {
+        batchItems.push({
+          original_filename:   file.name,
+          clean_filename:      null,
+          extracted:           null,
+          matched_property:    null,
+          has_existing_policy: false,
+          error:               err.message || 'Upload failed',
+          fileBase64:          b64Info.base64,
+          fileMimeType:        b64Info.mimeType,
+        });
+      }
+    }
+
+    document.getElementById('batchProgressBar').style.width = '100%';
+    document.getElementById('batchProgressMsg').textContent = 'Extraction complete. Review below.';
+    document.getElementById('batchStep1').style.display = 'none';
+    document.getElementById('batchStep2').style.display = '';
+    renderBatchReviewTable();
+  }
+
+  // ── Review table ───────────────────────────────────────────────────────
+  function renderBatchReviewTable() {
+    var step2 = document.getElementById('batchStep2');
+    var html = '<div class="batch-table-wrap"><table class="batch-review-table"><thead><tr>' +
+      '<th style="width:32px">Include</th>' +
+      '<th>Proposed Filename</th>' +
+      '<th>Property</th>' +
+      '<th>Insurer</th>' +
+      '<th>Effective</th>' +
+      '<th>Expiry</th>' +
+      '<th>Coverage</th>' +
+      '<th style="text-align:center">Add\'l Insured</th>' +
+      '<th style="text-align:center">Coverage OK</th>' +
+      '<th>Status</th>' +
+      '</tr></thead><tbody>';
+
+    var propOptions = batchProperties.map(function(p) {
+      return '<option value="' + esc(p.id) + '" data-appfolio="' + esc(p.appfolio_id || '') + '">' +
+        esc(p.name || p.address || p.id) + '</option>';
+    }).join('');
+
+    batchItems.forEach(function(item, i) {
+      var hasError = !!item.error;
+      html += '<tr' + (hasError ? ' class="row-error"' : '') + '>';
+
+      // Include checkbox
+      var cbDisabled = (hasError || !item.fileBase64) ? ' disabled' : '';
+      html += '<td style="text-align:center"><input type="checkbox" id="row-cb-' + i + '"' +
+        cbDisabled + (cbDisabled ? '' : ' checked') + '></td>';
+
+      // Proposed filename
+      html += '<td class="filename-cell">' + esc(item.clean_filename || item.original_filename || '—') + '</td>';
+
+      // Property dropdown
+      var isUnmatched = !item.matched_property;
+      var matchedId   = item.matched_property ? item.matched_property.id : '';
+      html += '<td><select id="row-prop-' + i + '" class="' + (isUnmatched ? 'unmatched' : '') + '"' +
+        (hasError ? ' disabled' : '') + '>' +
+        '<option value="">— Select property —</option>' + propOptions + '</select></td>';
+
+      var ex = item.extracted || {};
+      html += '<td>' + esc(ex.insurer_name || '—') + '</td>';
+      html += '<td>' + esc(ex.effective_date || '—') + '</td>';
+      html += '<td>' + esc(ex.expiration_date || '—') + '</td>';
+      html += '<td>' + (ex.coverage_amount != null ? '$' + Number(ex.coverage_amount).toLocaleString() : '—') + '</td>';
+      html += '<td style="text-align:center"><input type="checkbox" id="row-ai-' + i + '"' + (hasError ? ' disabled' : '') + '></td>';
+      html += '<td style="text-align:center"><input type="checkbox" id="row-cov-' + i + '"' + (hasError ? ' disabled' : '') + '></td>';
+
+      var badges = '';
+      if (hasError)
+        badges = '<span class="badge-row-error">Error: ' + esc((item.error || '').substring(0, 60)) + '</span>';
+      else if (item.has_existing_policy)
+        badges = '<span class="badge-dup">Duplicate</span>';
+      else
+        badges = '<span style="color:#16a34a;font-weight:600;font-size:11px">Ready</span>';
+      html += '<td>' + badges + '</td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+    html += '<div class="batch-action-bar">' +
+      '<button class="btn-primary" id="batchSaveBtn">Save Selected</button>' +
+      '<span class="batch-result-msg" id="batchResultMsg"></span>' +
+      '</div>';
+
+    step2.innerHTML = html;
+
+    // Pre-select matched properties now that the DOM exists
+    batchItems.forEach(function(item, i) {
+      if (item.matched_property) {
+        var sel = document.getElementById('row-prop-' + i);
+        if (sel) sel.value = item.matched_property.id;
+      }
+    });
+
+    document.getElementById('batchSaveBtn').addEventListener('click', runBatchSave);
+  }
+
+  // ── Save selected ──────────────────────────────────────────────────────
+  async function runBatchSave() {
+    var btn   = document.getElementById('batchSaveBtn');
+    var msgEl = document.getElementById('batchResultMsg');
+    btn.disabled = true;
+    msgEl.className = 'batch-result-msg';
+    msgEl.textContent = 'Saving…';
+
+    var records = [];
+    batchItems.forEach(function(item, i) {
+      var cb  = document.getElementById('row-cb-'  + i);
+      var sel = document.getElementById('row-prop-' + i);
+      if (!cb || !cb.checked || !sel || !sel.value) return;
+      var opt  = sel.options[sel.selectedIndex];
+      var aiCb = document.getElementById('row-ai-'  + i);
+      var coCb = document.getElementById('row-cov-' + i);
+      records.push({
+        file_data:                   item.fileBase64,
+        file_mime_type:              item.fileMimeType,
+        clean_filename:              item.clean_filename,
+        extracted:                   item.extracted,
+        property_id:                 sel.value,
+        appfolio_property_id:        (opt && opt.dataset.appfolio) || null,
+        additional_insured_verified: !!(aiCb && aiCb.checked),
+        coverage_amount_verified:    !!(coCb && coCb.checked),
+      });
+    });
+
+    if (records.length === 0) {
+      msgEl.className = 'batch-result-msg error';
+      msgEl.textContent = 'No rows selected with a property chosen.';
+      btn.disabled = false;
+      return;
+    }
+
+    try {
+      var resp = await fetch(INSURANCE_API + '/api/insurance/batch-save', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ records: records }),
+      });
+      var result = await resp.json();
+      if (resp.ok) {
+        msgEl.className = 'batch-result-msg success';
+        msgEl.textContent = result.saved + ' saved' +
+          (result.failed > 0 ? ', ' + result.failed + ' failed' : '') + '.';
+        if (result.saved > 0) {
+          setTimeout(function() {
+            closeBatchModal();
+            expandedId = null;
+            fetchData();
+          }, 2000);
+        } else {
+          btn.disabled = false;
+        }
+      } else {
+        msgEl.className = 'batch-result-msg error';
+        msgEl.textContent = result.error || 'Save failed.';
+        btn.disabled = false;
+      }
+    } catch(err) {
+      msgEl.className = 'batch-result-msg error';
+      msgEl.textContent = 'Network error: ' + err.message;
+      btn.disabled = false;
+    }
+  }
 </script>
 </body>
 </html>

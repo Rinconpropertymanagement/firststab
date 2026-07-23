@@ -47,6 +47,7 @@ const express    = require('express');
 const multer     = require('multer');
 const path       = require('path');
 const fs         = require('fs');
+const crypto     = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { extractPolicy } = require('./extract-policy');
 
@@ -91,7 +92,7 @@ const upload = multer({
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
 
 // Allow all origins — dashboard and server may be on different ports
 app.use((req, res, next) => {
@@ -298,6 +299,292 @@ app.post('/api/insurance/save', async (req, res) => {
 
   console.log(`[${ts}] Policy saved. insurance_id=${insuranceId}`);
   return res.json({ success: true, insurance_id: insuranceId });
+});
+
+// ─── Address helpers ──────────────────────────────────────────────────────────
+function normalizeAddress(addr) {
+  if (!addr) return '';
+  return addr.split(',')[0]
+    .toLowerCase()
+    .replace(/[.#]/g, '')
+    .replace(/\bstreet\b/g,    'st')
+    .replace(/\bavenue\b/g,    'ave')
+    .replace(/\bboulevard\b/g, 'blvd')
+    .replace(/\bdrive\b/g,     'dr')
+    .replace(/\broad\b/g,      'rd')
+    .replace(/\blane\b/g,      'ln')
+    .replace(/\bcourt\b/g,     'ct')
+    .replace(/\bplace\b/g,     'pl')
+    .replace(/\bcircle\b/g,    'cir')
+    .replace(/\bhighway\b/g,   'hwy')
+    .replace(/\bnorth\b/g,     'n')
+    .replace(/\bsouth\b/g,     's')
+    .replace(/\beast\b/g,      'e')
+    .replace(/\bwest\b/g,      'w')
+    .replace(/\s+/g,           ' ')
+    .trim();
+}
+
+function addressWordScore(normA, normB) {
+  const wa = normA.split(' ').filter(w => w.length > 1);
+  const wb = new Set(normB.split(' ').filter(w => w.length > 1));
+  if (!wa.length || !wb.size) return 0;
+  return wa.filter(w => wb.has(w)).length / Math.max(wa.length, wb.size);
+}
+
+function findBestPropertyMatch(extractedAddress, properties) {
+  if (!extractedAddress || !properties || !properties.length) return null;
+  const normExt = normalizeAddress(extractedAddress);
+  if (!normExt) return null;
+  let best = null, bestScore = 0;
+  for (const prop of properties) {
+    const score = addressWordScore(normExt, normalizeAddress(prop.address || ''));
+    if (score > bestScore && score >= 0.6) { bestScore = score; best = prop; }
+  }
+  return best;
+}
+
+// ─── Clean filename ────────────────────────────────────────────────────────────
+function makeCleanFilename(extracted, ext) {
+  const parts = [];
+  if (extracted && extracted.property_address)
+    parts.push(extracted.property_address.split(',')[0].trim());
+  if (extracted && extracted.insurer_name)
+    parts.push(extracted.insurer_name);
+  if (extracted && extracted.expiration_date)
+    parts.push('exp ' + extracted.expiration_date);
+  const name = (parts.length ? parts.join(' - ') : 'insurance-document')
+    .replace(/[/\\:*?"<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return name + (ext || '.pdf');
+}
+
+// ─── Storage bucket ────────────────────────────────────────────────────────────
+async function ensureStorageBucket() {
+  const { error } = await supabase.storage.createBucket('insurance-documents', { public: false });
+  // Ignore "already exists" — any other error is logged but non-fatal
+  if (error && error.message && !/already exist|duplicate/i.test(error.message)) {
+    console.warn('[batch] Storage bucket warn:', error.message);
+  }
+}
+
+// ─── GET /api/insurance/properties ───────────────────────────────────────────
+app.get('/api/insurance/properties', async (req, res) => {
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id, name, address, appfolio_id')
+    .order('name');
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
+// ─── POST /api/insurance/batch-upload ────────────────────────────────────────
+app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded.' });
+  }
+  const ts = new Date().toISOString();
+  console.log(`[${ts}] Batch upload: ${req.files.length} file(s)`);
+
+  const { data: properties } = await supabase
+    .from('properties')
+    .select('id, name, address, appfolio_id');
+
+  const results = [];
+
+  for (const file of req.files) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    try {
+      const extracted = await extractPolicy(file.path);
+      const cleanFilename = makeCleanFilename(extracted, ext);
+      const matched = findBestPropertyMatch(
+        extracted.property_address,
+        properties || []
+      );
+
+      let has_existing_policy = false;
+      if (matched && matched.appfolio_id) {
+        const { data: existing } = await supabase
+          .from('property_insurance')
+          .select('id')
+          .eq('appfolio_property_id', matched.appfolio_id)
+          .eq('is_current', true)
+          .limit(1);
+        has_existing_policy = !!(existing && existing.length > 0);
+      }
+
+      results.push({
+        original_filename:   file.originalname,
+        clean_filename:      cleanFilename,
+        extracted,
+        matched_property:    matched
+          ? { id: matched.id, appfolio_id: matched.appfolio_id, name: matched.name, address: matched.address }
+          : null,
+        has_existing_policy,
+        error:               null,
+      });
+    } catch (err) {
+      console.error(`[${ts}] Batch extract error (${file.originalname}):`, err.message);
+      results.push({
+        original_filename:   file.originalname,
+        clean_filename:      null,
+        extracted:           null,
+        matched_property:    null,
+        has_existing_policy: false,
+        error:               err.message,
+      });
+    } finally {
+      fs.unlink(file.path, () => {});
+    }
+  }
+
+  return res.json({ results });
+});
+
+// ─── POST /api/insurance/batch-save ──────────────────────────────────────────
+app.post('/api/insurance/batch-save', async (req, res) => {
+  const ts = new Date().toISOString();
+  const records = req.body.records;
+
+  if (!Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: 'records array is required.' });
+  }
+
+  console.log(`[${ts}] Batch save: ${records.length} record(s)`);
+  await ensureStorageBucket();
+
+  const MIME_MAP = {
+    '.pdf':  'application/pdf',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png':  'image/png',
+  };
+
+  let saved = 0;
+  const failures = [];
+  const outcomes = [];
+
+  for (const record of records) {
+    const {
+      file_data,
+      file_mime_type,
+      clean_filename,
+      extracted,
+      property_id,
+      appfolio_property_id,
+      additional_insured_verified,
+      coverage_amount_verified,
+    } = record;
+
+    const label = (extracted && extracted.property_address)
+      ? extracted.property_address.split(',')[0].trim()
+      : (clean_filename || appfolio_property_id || 'unknown');
+
+    try {
+      // Upload to Supabase Storage
+      const fileBuffer  = Buffer.from(file_data, 'base64');
+      const ext         = path.extname(clean_filename || '').toLowerCase();
+      const contentType = file_mime_type || MIME_MAP[ext] || 'application/octet-stream';
+
+      const { error: uploadErr } = await supabase.storage
+        .from('insurance-documents')
+        .upload(clean_filename, fileBuffer, { contentType, upsert: true });
+      if (uploadErr) throw new Error('Storage upload failed: ' + uploadErr.message);
+
+      const { data: urlData } = supabase.storage
+        .from('insurance-documents')
+        .getPublicUrl(clean_filename);
+      const fileUrl = urlData.publicUrl;
+
+      // Flip existing current policy to inactive
+      if (appfolio_property_id) {
+        await supabase
+          .from('property_insurance')
+          .update({ is_current: false, updated_at: new Date().toISOString() })
+          .eq('appfolio_property_id', appfolio_property_id)
+          .eq('is_current', true);
+      }
+
+      // Insert document record
+      const { data: docRow, error: docErr } = await supabase
+        .from('documents')
+        .insert({
+          file_name:   clean_filename,
+          file_path:   fileUrl,
+          file_type:   'insurance_certificate',
+          mime_type:   contentType,
+          entity_type: 'property',
+          entity_id:   property_id,
+        })
+        .select('id')
+        .single();
+      if (docErr) throw new Error('Document insert failed: ' + docErr.message);
+
+      // Insert new property_insurance record
+      const now = new Date().toISOString();
+      const { error: insErr } = await supabase.from('property_insurance').insert({
+        property_id,
+        appfolio_property_id,
+        policy_number:               (extracted && extracted.policy_number)    || null,
+        insurer_name:                (extracted && extracted.insurer_name)     || null,
+        effective_date:              (extracted && extracted.effective_date)   || null,
+        expiration_date:             (extracted && extracted.expiration_date)  || null,
+        coverage_amount:             (extracted && extracted.coverage_amount)  || null,
+        named_insured:               (extracted && extracted.named_insured)    || null,
+        property_address_on_policy:  (extracted && extracted.property_address) || null,
+        additional_insured_verified: !!additional_insured_verified,
+        coverage_amount_verified:    !!coverage_amount_verified,
+        status:                      'compliant',
+        is_current:                  true,
+        document_id:                 docRow.id,
+        verified_at:                 now,
+      });
+      if (insErr) throw new Error('Insurance insert failed: ' + insErr.message);
+
+      // Audit log
+      await supabase.from('audit_log').insert({
+        action:      'insurance.batch_saved',
+        entity_type: 'property',
+        entity_id:   property_id,
+        details:     {
+          policy_number:   (extracted && extracted.policy_number)   || null,
+          expiration_date: (extracted && extracted.expiration_date) || null,
+          clean_filename,
+        },
+      });
+
+      saved++;
+      outcomes.push(label + ': saved');
+    } catch (err) {
+      console.error(`[${ts}] Batch save error (${label}):`, err.message);
+      failures.push({ address: label, error: err.message });
+      outcomes.push(label + ': error — ' + err.message);
+    }
+  }
+
+  // One summary task for the whole batch
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 1);
+  const { error: taskErr } = await supabase.from('tasks').insert({
+    title:       `Batch insurance import: ${saved} of ${records.length} policies saved`,
+    description: outcomes.join('\n'),
+    status:      'open',
+    priority:    'medium',
+    assigned_to: null,
+    due_date:    dueDate.toISOString().slice(0, 10),
+    entity_type: 'batch_import',
+    entity_id:   crypto.randomUUID(),
+  });
+  if (taskErr) console.warn(`[${ts}] Summary task warn: ${taskErr.message}`);
+
+  console.log(`[${ts}] Batch save complete. Saved: ${saved} / Failed: ${failures.length}`);
+  return res.json({
+    saved,
+    failed: failures.length,
+    total:  records.length,
+    ...(failures.length > 0 && { errors: failures }),
+  });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

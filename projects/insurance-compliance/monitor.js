@@ -252,60 +252,71 @@ async function main() {
         .update({ status: 'expired', updated_at: new Date().toISOString() })
         .eq('id', policy.id);
 
-      const pm         = await lookupPm(property.pod);
-      const ownerEmail = await lookupOwnerEmail(policy.appfolio_property_id);
-
-      // Email PM
-      if (pm && pm.email) {
-        try {
-          const email = expiredPmEmail(policy, property);
-          await sendEmail({ to: pm.email, ...email });
-          await logCommunication({
-            recipient_email: pm.email,
-            subject:         email.subject,
-            type:            'insurance_expired_pm',
-            entity_type:     'property',
-            entity_id:       propertyId,
-          });
-          console.log(`[${now}]   Expired email sent to PM: ${pm.email}`);
-        } catch (err) {
-          console.error(`[${now}]   PM email error: ${err.message}`);
-        }
+      // Flood guard: if the policy record was updated in the last 24h (e.g. a batch
+      // import just ran), skip alerts so we don't immediately fire on a fresh upload.
+      // policy.updated_at reflects the value at fetch time, before the status update above.
+      const expiredFloodGuard = policy.updated_at &&
+        new Date(policy.updated_at) >= new Date(Date.now() - 86400000);
+      if (expiredFloodGuard) {
+        console.log(`[${now}]   Flood guard: alerts skipped for ${policy.appfolio_property_id} (updated within 24h)`);
       }
 
-      // Email owner
-      if (ownerEmail) {
-        try {
-          const email = expiredOwnerEmail(policy, property);
-          await sendEmail({ to: ownerEmail, ...email });
-          await logCommunication({
-            recipient_email: ownerEmail,
-            subject:         email.subject,
-            type:            'insurance_expired_owner',
-            entity_type:     'property',
-            entity_id:       propertyId,
-          });
-          console.log(`[${now}]   Expired email sent to owner: ${ownerEmail}`);
-        } catch (err) {
-          console.error(`[${now}]   Owner email error: ${err.message}`);
-        }
-      }
+      if (!expiredFloodGuard) {
+        const pm         = await lookupPm(property.pod);
+        const ownerEmail = await lookupOwnerEmail(policy.appfolio_property_id);
 
-      // Create task if none already open
-      const alreadyHasTask = propertyId ? await hasOpenTask(propertyId, 'insurance_compliance') : false;
-      if (!alreadyHasTask) {
-        const { error: taskErr } = await supabase.from('tasks').insert({
-          title:         `URGENT: Insurance expired — ${property.name || policy.appfolio_property_id}`,
-          entity_type:   'property',
-          entity_id:     propertyId || null,
-          assigned_to:   pm ? pm.id : null,
-          workflow_type: 'insurance_compliance',
-          priority:      'urgent',
-          status:        'open',
-          due_date:      new Date().toISOString().slice(0, 10), // due today
-        });
-        if (taskErr) console.warn(`[${now}]   Task insert warn: ${taskErr.message}`);
-        else console.log(`[${now}]   Urgent task created`);
+        // Email PM
+        if (pm && pm.email) {
+          try {
+            const email = expiredPmEmail(policy, property);
+            await sendEmail({ to: pm.email, ...email });
+            await logCommunication({
+              recipient_email: pm.email,
+              subject:         email.subject,
+              type:            'insurance_expired_pm',
+              entity_type:     'property',
+              entity_id:       propertyId,
+            });
+            console.log(`[${now}]   Expired email sent to PM: ${pm.email}`);
+          } catch (err) {
+            console.error(`[${now}]   PM email error: ${err.message}`);
+          }
+        }
+
+        // Email owner
+        if (ownerEmail) {
+          try {
+            const email = expiredOwnerEmail(policy, property);
+            await sendEmail({ to: ownerEmail, ...email });
+            await logCommunication({
+              recipient_email: ownerEmail,
+              subject:         email.subject,
+              type:            'insurance_expired_owner',
+              entity_type:     'property',
+              entity_id:       propertyId,
+            });
+            console.log(`[${now}]   Expired email sent to owner: ${ownerEmail}`);
+          } catch (err) {
+            console.error(`[${now}]   Owner email error: ${err.message}`);
+          }
+        }
+
+        // Create task if none already open
+        const alreadyHasTask = propertyId ? await hasOpenTask(propertyId, 'insurance_compliance') : false;
+        if (!alreadyHasTask) {
+          const { error: taskErr } = await supabase.from('tasks').insert({
+            title:         `URGENT: Insurance expired — ${property.name || policy.appfolio_property_id}`,
+            entity_type:   'property',
+            entity_id:     propertyId || null,
+            assigned_to:   pm ? pm.id : null,
+            workflow_type: 'insurance_compliance',
+            priority:      'urgent',
+            status:        'open',
+            due_date:      new Date().toISOString().slice(0, 10),
+          });
+          if (taskErr) console.warn(`[${now}]   Task insert warn: ${taskErr.message}`);
+          else console.log(`[${now}]   Urgent task created`);
+        }
       }
 
       await logAudit({
@@ -326,43 +337,51 @@ async function main() {
         .update({ status: 'expiring_soon', updated_at: new Date().toISOString() })
         .eq('id', policy.id);
 
-      const pm = await lookupPm(property.pod);
-
-      if (pm && pm.email) {
-        try {
-          const email = expiringSoonEmail(policy, property);
-          await sendEmail({ to: pm.email, ...email });
-          await logCommunication({
-            recipient_email: pm.email,
-            subject:         email.subject,
-            type:            'insurance_expiring_soon',
-            entity_type:     'property',
-            entity_id:       propertyId,
-          });
-          console.log(`[${now}]   Expiring soon email sent to PM: ${pm.email}`);
-        } catch (err) {
-          console.error(`[${now}]   PM email error: ${err.message}`);
-        }
+      // Flood guard: skip alerts if the record was updated within the last 24h.
+      const soonFloodGuard = policy.updated_at &&
+        new Date(policy.updated_at) >= new Date(Date.now() - 86400000);
+      if (soonFloodGuard) {
+        console.log(`[${now}]   Flood guard: alerts skipped for ${policy.appfolio_property_id} (updated within 24h)`);
       }
 
-      const alreadyHasTask = propertyId ? await hasOpenTask(propertyId, 'insurance_compliance') : false;
-      if (!alreadyHasTask) {
-        // Task due 7 days before expiration
-        const dueDate = new Date(expDate);
-        dueDate.setDate(dueDate.getDate() - 7);
+      if (!soonFloodGuard) {
+        const pm = await lookupPm(property.pod);
 
-        const { error: taskErr } = await supabase.from('tasks').insert({
-          title:         `Insurance expiring soon — ${property.name || policy.appfolio_property_id}`,
-          entity_type:   'property',
-          entity_id:     propertyId || null,
-          assigned_to:   pm ? pm.id : null,
-          workflow_type: 'insurance_compliance',
-          priority:      'high',
-          status:        'open',
-          due_date:      dueDate.toISOString().slice(0, 10),
-        });
-        if (taskErr) console.warn(`[${now}]   Task insert warn: ${taskErr.message}`);
-        else console.log(`[${now}]   High-priority task created (due ${dueDate.toISOString().slice(0, 10)})`);
+        if (pm && pm.email) {
+          try {
+            const email = expiringSoonEmail(policy, property);
+            await sendEmail({ to: pm.email, ...email });
+            await logCommunication({
+              recipient_email: pm.email,
+              subject:         email.subject,
+              type:            'insurance_expiring_soon',
+              entity_type:     'property',
+              entity_id:       propertyId,
+            });
+            console.log(`[${now}]   Expiring soon email sent to PM: ${pm.email}`);
+          } catch (err) {
+            console.error(`[${now}]   PM email error: ${err.message}`);
+          }
+        }
+
+        const alreadyHasTask = propertyId ? await hasOpenTask(propertyId, 'insurance_compliance') : false;
+        if (!alreadyHasTask) {
+          const dueDate = new Date(expDate);
+          dueDate.setDate(dueDate.getDate() - 7);
+
+          const { error: taskErr } = await supabase.from('tasks').insert({
+            title:         `Insurance expiring soon — ${property.name || policy.appfolio_property_id}`,
+            entity_type:   'property',
+            entity_id:     propertyId || null,
+            assigned_to:   pm ? pm.id : null,
+            workflow_type: 'insurance_compliance',
+            priority:      'high',
+            status:        'open',
+            due_date:      dueDate.toISOString().slice(0, 10),
+          });
+          if (taskErr) console.warn(`[${now}]   Task insert warn: ${taskErr.message}`);
+          else console.log(`[${now}]   High-priority task created (due ${dueDate.toISOString().slice(0, 10)})`);
+        }
       }
 
       await logAudit({

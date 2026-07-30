@@ -630,8 +630,9 @@
         <input type="file" id="batchFileInput" multiple accept=".pdf,.jpg,.jpeg,.png" style="display:none">
         <div class="batch-drop-zone" id="batchDropZone" tabindex="0" role="button" aria-label="Select files">
           <strong>Click to select files</strong>
-          or drag and drop here
+          or drag and drop from Finder
           <div class="batch-file-hint">PDF, JPG, PNG &mdash; up to 50 files, 20 MB each</div>
+          <div class="batch-file-hint" style="margin-top:4px">Hold <strong>⌘ Cmd</strong> (Mac) or <strong>Ctrl</strong> (Windows) to select multiple files at once</div>
         </div>
         <ul class="batch-file-list" id="batchFileList" style="display:none"></ul>
         <div class="batch-progress" id="batchProgress" style="display:none">
@@ -745,6 +746,7 @@
         .from('property_insurance')
         .select(`
           id,
+          document_id,
           policy_number,
           insurer_name,
           expiration_date,
@@ -763,6 +765,11 @@
             pod,
             address,
             appfolio_id
+          ),
+          documents (
+            id,
+            file_name,
+            file_path
           )
         `)
         .eq('is_current', true)
@@ -917,7 +924,9 @@
         '<dl><dt>Policy #</dt><dd>' + esc(row.policy_number || '—') + '</dd></dl>' +
         '<dl><dt>Record Created</dt><dd>' + formatDate(row.created_at) + '</dd></dl>' +
         (row.notes ? '<dl><dt>Notes</dt><dd class="notes-text">' + esc(row.notes) + '</dd></dl>' : '') +
-        '<dl><dt>Declaration Page</dt><dd><a class="detail-link" href="#">View Declaration Page</a></dd></dl>' +
+        '<dl><dt>Declaration Page</dt><dd>' + (row.document_id
+          ? '<a class="detail-link" href="' + INSURANCE_API + '/api/insurance/document/' + esc(row.document_id) + '" target="_blank">' + esc((row.documents && row.documents.file_name) || 'View Declaration Page') + '</a>'
+          : '<span style="color:#9ca3af">No document on file</span>') + '</dd></dl>' +
       '</div>';
 
     detailTr.appendChild(td);

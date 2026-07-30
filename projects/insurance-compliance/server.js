@@ -301,6 +301,25 @@ app.post('/api/insurance/save', async (req, res) => {
   return res.json({ success: true, insurance_id: insuranceId });
 });
 
+// ─── GET /api/insurance/document/:id ─────────────────────────────────────────
+app.get('/api/insurance/document/:id', async (req, res) => {
+  const { data: doc, error } = await supabase
+    .from('documents')
+    .select('file_name, file_path')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !doc) return res.status(404).send('Document not found.');
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from('insurance-documents')
+    .createSignedUrl(doc.file_name, 3600);
+
+  if (signErr || !signed) return res.status(500).send('Could not generate download link.');
+
+  res.redirect(signed.signedUrl);
+});
+
 // ─── Address helpers ──────────────────────────────────────────────────────────
 function normalizeAddress(addr) {
   if (!addr) return '';

@@ -602,7 +602,7 @@
           <th data-col="insurer_name">Insurer <span class="sort-arrow">↕</span></th>
           <th data-col="expiration_date">Expiry Date <span class="sort-arrow">↕</span></th>
           <th data-col="days_left">Days Left <span class="sort-arrow">↑</span></th>
-          <th data-col="coverage_amount">Coverage <span class="sort-arrow">↕</span></th>
+          <th data-col="coverage_amount">Premises Liability <span class="sort-arrow">↕</span></th>
           <th data-col="additional_insured_verified">Add'l Insured <span class="sort-arrow">↕</span></th>
           <th data-col="coverage_amount_verified">Coverage OK <span class="sort-arrow">↕</span></th>
           <th data-col="status">Status <span class="sort-arrow">↕</span></th>
@@ -924,7 +924,7 @@
         '<dl><dt>Policy #</dt><dd>' + esc(row.policy_number || '—') + '</dd></dl>' +
         '<dl><dt>Record Created</dt><dd>' + formatDate(row.created_at) + '</dd></dl>' +
         '<dl><dt>Additional Insured</dt><dd><label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="additional_insured_verified"' + (row.additional_insured_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
-        '<dl><dt>Coverage Amount</dt><dd><label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="coverage_amount_verified"' + (row.coverage_amount_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
+        '<dl><dt>Premises Liability</dt><dd>' + formatCurrency(row.coverage_amount) + ' &nbsp;<label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="coverage_amount_verified"' + (row.coverage_amount_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
         (row.notes ? '<dl><dt>Notes</dt><dd class="notes-text">' + esc(row.notes) + '</dd></dl>' : '') +
         '<dl><dt>Declaration Page</dt><dd>' + (row.document_id
           ? '<a class="detail-link" href="' + INSURANCE_API + '/api/insurance/document/' + esc(row.document_id) + '" target="_blank">' + esc((row.documents && row.documents.file_name) || 'View Declaration Page') + '</a>'
@@ -1231,9 +1231,9 @@
       '<th>Insurer</th>' +
       '<th>Effective</th>' +
       '<th>Expiry</th>' +
-      '<th>Coverage Amount</th>' +
+      '<th>Premises Liability</th>' +
       '<th style="text-align:center">Add\'l Insured</th>' +
-      '<th style="text-align:center">Coverage Met</th>' +
+      '<th style="text-align:center">Liability Met</th>' +
       '<th>Status</th>' +
       '</tr></thead><tbody>';
 
@@ -1271,11 +1271,11 @@
       html += '<td><input type="date" id="row-eff-' + i + '" value="' + esc(ex.effective_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
       html += '<td><input type="date" id="row-exp-' + i + '" value="' + esc(ex.expiration_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
 
-      // Coverage amount — editable + threshold indicator
+      // Premises liability — editable + threshold indicator
       var cov = ex.coverage_amount != null ? Number(ex.coverage_amount) : null;
       var covColor = cov == null ? '#9ca3af' : cov >= 500000 ? '#16a34a' : '#dc2626';
       var covLabel = cov == null ? 'Not found' : cov >= 1000000 ? '✓ $' + (cov/1000000).toFixed(cov%1000000===0?0:1) + 'M' : cov >= 500000 ? '✓ $' + (cov/1000).toFixed(0) + 'K' : '⚠ $' + cov.toLocaleString();
-      html += '<td><input type="number" id="row-cov-amt-' + i + '" value="' + (cov != null ? cov : '') + '" placeholder="e.g. 500000"' + dis + ' style="width:100px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
+      html += '<td><input type="number" id="row-cov-amt-' + i + '" value="' + (cov != null ? cov : '') + '" placeholder="Premises liability amt"' + dis + ' style="width:100px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
         '<div id="row-cov-lbl-' + i + '" style="font-size:11px;color:' + covColor + ';margin-top:2px">' + covLabel + '</div></td>';
 
       html += '<td style="text-align:center"><input type="checkbox" id="row-ai-' + i + '"' + dis + '></td>';

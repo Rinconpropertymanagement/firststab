@@ -52,14 +52,14 @@ Environment variable required:
   process.exit(0);
 }
 
-const PROMPT = `You are extracting structured data from an insurance declaration page. Return ONLY a valid JSON object with these exact fields. If a field is not visible or cannot be determined with confidence, return null for that field. Do not guess or infer values you cannot read directly from the document.
+const PROMPT = `You are extracting structured data from an insurance declaration page for a property management company. Return ONLY a valid JSON object with these exact fields. If a field is not visible or cannot be determined with confidence, return null for that field. Do not guess or infer values you cannot read directly from the document.
 
 {
   "policy_number": "<string or null>",
   "insurer_name": "<string or null>",
   "effective_date": "<YYYY-MM-DD or null>",
   "expiration_date": "<YYYY-MM-DD or null>",
-  "coverage_amount": <number with no currency symbol, e.g. 1000000, or null>,
+  "coverage_amount": <PREMISES LIABILITY amount as a number with no currency symbol — this is the LIABILITY protection section, NOT the dwelling or structure value. Look for labels like "Personal Liability", "Premises Liability", "Coverage E", "Liability Coverage", or "Each Occurrence" in the liability section of the policy. Typical values are 300000, 500000, or 1000000. Return null if you cannot find a liability coverage amount.>,
   "named_insured": "<string or null>",
   "property_address": "<string or null>"
 }

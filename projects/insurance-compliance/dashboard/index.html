@@ -233,12 +233,15 @@
       white-space: nowrap;
       letter-spacing: 0.02em;
     }
-    .badge-compliant     { background: #16a34a; color: #fff; }
-    .badge-expiring_soon { background: #d97706; color: #fff; }
-    .badge-expired       { background: #dc2626; color: #fff; }
-    .badge-pending_review{ background: #6b7280; color: #fff; }
-    .badge-no_policy     { background: #e5e7eb; color: #374151; }
-    .badge-unknown       { background: #e5e7eb; color: #6b7280; }
+    .badge-compliant               { background: #16a34a; color: #fff; }
+    .badge-expiring_soon           { background: #d97706; color: #fff; }
+    .badge-expired                 { background: #dc2626; color: #fff; }
+    .badge-pending_review          { background: #6b7280; color: #fff; }
+    .badge-no_policy               { background: #e5e7eb; color: #374151; }
+    .badge-insufficient_liability  { background: #dc2626; color: #fff; font-weight: 700; letter-spacing: .3px; }
+    .badge-unknown                 { background: #e5e7eb; color: #6b7280; }
+    tr.row-insufficient td         { background: #fff1f2; }
+    tr.row-insufficient td:first-child { border-left: 4px solid #dc2626; }
 
     /* ── Check / X ── */
     .check { color: #16a34a; font-size: 15px; }
@@ -567,6 +570,10 @@
       <div class="tile-number" id="tilePending">—</div>
       <div class="tile-label">No Policy / Pending</div>
     </div>
+    <div class="tile tile-red" style="border: 2px solid #dc2626;">
+      <div class="tile-number" id="tileInsufficient" style="color:#dc2626">—</div>
+      <div class="tile-label" style="color:#dc2626;font-weight:700">⚠ Low Liability</div>
+    </div>
   </div>
 
   <!-- ── Filters ── -->
@@ -585,6 +592,7 @@
       <button class="filter-btn" data-filter="status" data-value="expired">Expired</button>
       <button class="filter-btn" data-filter="status" data-value="pending_review">Pending Review</button>
       <button class="filter-btn" data-filter="status" data-value="no_policy">No Policy</button>
+      <button class="filter-btn" data-filter="status" data-value="insufficient_liability" style="color:#dc2626;border-color:#dc2626;font-weight:700">⚠ Low Liability</button>
     </div>
   </div>
 
@@ -728,11 +736,12 @@
 
   function statusBadge(status) {
     const map = {
-      compliant:      ['badge-compliant',      'Compliant'],
-      expiring_soon:  ['badge-expiring_soon',  'Expiring Soon'],
-      expired:        ['badge-expired',         'Expired'],
-      pending_review: ['badge-pending_review',  'Pending Review'],
-      no_policy:      ['badge-no_policy',       'No Policy'],
+      compliant:               ['badge-compliant',              'Compliant'],
+      expiring_soon:           ['badge-expiring_soon',          'Expiring Soon'],
+      expired:                 ['badge-expired',                'Expired'],
+      pending_review:          ['badge-pending_review',         'Pending Review'],
+      no_policy:               ['badge-no_policy',              'No Policy'],
+      insufficient_liability:  ['badge-insufficient_liability', '⚠ Low Liability'],
     };
     const [cls, label] = map[status] || ['badge-unknown', 'Unknown'];
     return '<span class="badge ' + cls + '">' + label + '</span>';
@@ -808,7 +817,8 @@
   // ── Tiles ────────────────────────────────────────────────────────────
   function updateTiles(rows) {
     document.getElementById('tileTotal').textContent     = rows.length;
-    document.getElementById('tileCompliant').textContent = rows.filter(r => r.status === 'compliant').length;
+    document.getElementById('tileCompliant').textContent    = rows.filter(r => r.status === 'compliant').length;
+    document.getElementById('tileInsufficient').textContent = rows.filter(r => r.status === 'insufficient_liability').length;
     document.getElementById('tileExpiring').textContent  = rows.filter(r => r.days_left !== null && r.days_left >= 0 && r.days_left <= 30).length;
     document.getElementById('tileExpired').textContent   = rows.filter(r => r.status === 'expired' || (r.days_left !== null && r.days_left < 0)).length;
     document.getElementById('tilePending').textContent   = rows.filter(r => r.status === 'no_policy' || r.status === 'pending_review').length;
@@ -873,6 +883,7 @@
       const tr = document.createElement('tr');
       tr.dataset.id = row.id;
       if (expandedId === row.id) tr.classList.add('expanded');
+      if (row.status === 'insufficient_liability') tr.classList.add('row-insufficient');
 
       tr.innerHTML =
         '<td class="property-name">' + esc(row.property_name) + '</td>' +
@@ -1237,11 +1248,6 @@
       '<th>Status</th>' +
       '</tr></thead><tbody>';
 
-    var propOptions = batchProperties.map(function(p) {
-      return '<option value="' + esc(p.id) + '" data-appfolio="' + esc(p.appfolio_id || '') + '">' +
-        esc(p.name || p.address || p.id) + '</option>';
-    }).join('');
-
     batchItems.forEach(function(item, i) {
       var hasError = !!item.error;
       html += '<tr' + (hasError ? ' class="row-error"' : '') + '>';
@@ -1256,12 +1262,29 @@
         (!hasError && item.fileBase64 ? ' <a href="#" class="detail-link batch-preview-link" data-idx="' + i + '" style="font-size:11px;white-space:nowrap">View ↗</a>' : '') +
         '</td>';
 
-      // Property dropdown
-      var isUnmatched = !item.matched_property;
-      var matchedId   = item.matched_property ? item.matched_property.id : '';
-      html += '<td><select id="row-prop-' + i + '" class="' + (isUnmatched ? 'unmatched' : '') + '"' +
-        (hasError ? ' disabled' : '') + '>' +
-        '<option value="">— Select property —</option>' + propOptions + '</select></td>';
+      // Property — show name when AI matched; search box when unmatched
+      if (!hasError && item.matched_property) {
+        var mp = item.matched_property;
+        html += '<td>' +
+          '<div id="row-prop-label-' + i + '" style="font-size:12px">' +
+            '<strong>' + esc(mp.name || mp.address) + '</strong>' +
+            ' <a href="#" class="detail-link prop-change-link" data-idx="' + i + '" style="font-size:11px">Change</a>' +
+          '</div>' +
+          '<input type="hidden" id="row-prop-' + i + '" value="' + esc(mp.id) + '" data-appfolio="' + esc(mp.appfolio_id || '') + '">' +
+          '<div id="row-prop-search-' + i + '" style="display:none;margin-top:4px">' +
+            '<input type="text" class="prop-search-input" data-idx="' + i + '" placeholder="Type to search…" style="width:160px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
+            '<div class="prop-search-results" id="row-prop-results-' + i + '" style="max-height:140px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;background:#fff;font-size:12px;position:absolute;z-index:99;width:200px"></div>' +
+          '</div>' +
+        '</td>';
+      } else {
+        html += '<td>' +
+          '<input type="hidden" id="row-prop-' + i + '" value="" data-appfolio="">' +
+          '<div id="row-prop-search-' + i + '" style="margin-top:0">' +
+            '<input type="text" class="prop-search-input" data-idx="' + i + '" placeholder="Type to search…"' + (hasError ? ' disabled' : '') + ' style="width:160px;font-size:12px;padding:3px 5px;border:1px solid #f59e0b;border-radius:4px">' +
+            '<div class="prop-search-results" id="row-prop-results-' + i + '" style="max-height:140px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;background:#fff;font-size:12px;position:absolute;z-index:99;width:200px"></div>' +
+          '</div>' +
+        '</td>';
+      }
 
       var ex = item.extracted || {};
       var dis = hasError ? ' disabled' : '';
@@ -1304,14 +1327,6 @@
 
     step2.innerHTML = html;
 
-    // Pre-select matched properties and wire preview links
-    batchItems.forEach(function(item, i) {
-      if (item.matched_property) {
-        var sel = document.getElementById('row-prop-' + i);
-        if (sel) sel.value = item.matched_property.id;
-      }
-    });
-
     // Live coverage threshold indicator when user edits the amount
     batchItems.forEach(function(item, i) {
       var amtInput = document.getElementById('row-cov-amt-' + i);
@@ -1352,6 +1367,75 @@
     });
 
     document.getElementById('batchSaveBtn').addEventListener('click', runBatchSave);
+
+    // ── Property "Change" link ──────────────────────────────────────────────
+    document.querySelectorAll('.prop-change-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var idx = parseInt(this.dataset.idx, 10);
+        document.getElementById('row-prop-label-'  + idx).style.display  = 'none';
+        document.getElementById('row-prop-search-' + idx).style.display  = '';
+        var inp = document.querySelector('#row-prop-search-' + idx + ' input[type=text]');
+        if (inp) inp.focus();
+      });
+    });
+
+    // ── Property typeahead ──────────────────────────────────────────────────
+    document.querySelectorAll('.prop-search-input').forEach(function(inp) {
+      inp.addEventListener('input', function() {
+        var idx   = parseInt(this.dataset.idx, 10);
+        var query = this.value.toLowerCase().trim();
+        var res   = document.getElementById('row-prop-results-' + idx);
+        if (!query) { res.innerHTML = ''; return; }
+        var matches = batchProperties.filter(function(p) {
+          return (p.name || '').toLowerCase().includes(query) ||
+                 (p.address || '').toLowerCase().includes(query);
+        }).slice(0, 8);
+        if (!matches.length) {
+          res.innerHTML = '<div style="padding:6px 8px;color:#9ca3af">No match</div>';
+          return;
+        }
+        res.innerHTML = matches.map(function(p) {
+          return '<div class="prop-result-item" data-id="' + esc(p.id) +
+                 '" data-appfolio="' + esc(p.appfolio_id || '') +
+                 '" data-name="' + esc(p.name || p.address) +
+                 '" data-idx="' + idx +
+                 '" style="padding:6px 8px;cursor:pointer">' +
+                 esc(p.name || p.address) + '</div>';
+        }).join('');
+        res.querySelectorAll('.prop-result-item').forEach(function(item) {
+          item.addEventListener('click', function() {
+            var i    = parseInt(this.dataset.idx, 10);
+            var name = this.dataset.name;
+            // Update hidden input
+            var hidden = document.getElementById('row-prop-' + i);
+            hidden.value               = this.dataset.id;
+            hidden.dataset.appfolio    = this.dataset.appfolio;
+            // Show label, hide search
+            var labelDiv = document.getElementById('row-prop-label-' + i);
+            if (labelDiv) {
+              labelDiv.innerHTML = '<strong>' + esc(name) + '</strong>' +
+                ' <a href="#" class="detail-link prop-change-link" data-idx="' + i + '" style="font-size:11px">Change</a>';
+              labelDiv.style.display = '';
+              // Re-bind the change link in the updated label
+              labelDiv.querySelector('.prop-change-link').addEventListener('click', function(e) {
+                e.preventDefault();
+                labelDiv.style.display = 'none';
+                document.getElementById('row-prop-search-' + i).style.display = '';
+                document.querySelector('#row-prop-search-' + i + ' input[type=text]').focus();
+              });
+            } else {
+              // Unmatched row — just clear the search box
+              inp.value = name;
+            }
+            document.getElementById('row-prop-search-' + i).style.display = labelDiv ? 'none' : '';
+            res.innerHTML = '';
+          });
+          item.addEventListener('mouseenter', function() { this.style.background = '#f3f4f6'; });
+          item.addEventListener('mouseleave', function() { this.style.background = ''; });
+        });
+      });
+    });
   }
 
   // ── Save selected ──────────────────────────────────────────────────────
@@ -1368,7 +1452,6 @@
       var sel = document.getElementById('row-prop-' + i);
       if (!cb || !cb.checked || !sel || !sel.value) return;
 
-      var opt     = sel.options[sel.selectedIndex];
       var aiCb    = document.getElementById('row-ai-'    + i);
       var covMet  = document.getElementById('row-covmet-' + i);
 
@@ -1393,7 +1476,7 @@
         clean_filename:              item.clean_filename,
         extracted,
         property_id:                 sel.value,
-        appfolio_property_id:        (opt && opt.dataset.appfolio) || null,
+        appfolio_property_id:        sel.dataset.appfolio || null,
         additional_insured_verified: !!(aiCb   && aiCb.checked),
         coverage_amount_verified:    !!(covMet && covMet.checked),
       });

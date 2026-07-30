@@ -560,7 +560,11 @@ app.post('/api/insurance/batch-save', async (req, res) => {
       if (docErr) throw new Error('Document insert failed: ' + docErr.message);
 
       // Insert new property_insurance record
-      const now = new Date().toISOString();
+      const now        = new Date().toISOString();
+      const covAmt     = (extracted && extracted.coverage_amount) || null;
+      const belowMin   = covAmt != null && covAmt < 500000;
+      const recStatus  = belowMin ? 'insufficient_liability' : 'compliant';
+
       const { error: insErr } = await supabase.from('property_insurance').insert({
         property_id,
         appfolio_property_id,
@@ -568,15 +572,18 @@ app.post('/api/insurance/batch-save', async (req, res) => {
         insurer_name:                (extracted && extracted.insurer_name)     || null,
         effective_date:              (extracted && extracted.effective_date)   || null,
         expiration_date:             (extracted && extracted.expiration_date)  || null,
-        coverage_amount:             (extracted && extracted.coverage_amount)  || null,
+        coverage_amount:             covAmt,
         named_insured:               (extracted && extracted.named_insured)    || null,
         property_address_on_policy:  (extracted && extracted.property_address) || null,
         additional_insured_verified: !!additional_insured_verified,
         coverage_amount_verified:    !!coverage_amount_verified,
-        status:                      'compliant',
+        status:                      recStatus,
         is_current:                  true,
         document_id:                 docRow.id,
         verified_at:                 now,
+        notes:                       belowMin && coverage_amount_verified
+          ? `Low liability accepted: $${covAmt.toLocaleString()} (below $500K minimum — manually accepted)`
+          : null,
       });
       if (insErr) throw new Error('Insurance insert failed: ' + insErr.message);
 

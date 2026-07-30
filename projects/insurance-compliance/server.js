@@ -301,6 +301,25 @@ app.post('/api/insurance/save', async (req, res) => {
   return res.json({ success: true, insurance_id: insuranceId });
 });
 
+// ─── PATCH /api/insurance/policy/:id ─────────────────────────────────────────
+app.patch('/api/insurance/policy/:id', async (req, res) => {
+  const allowed = ['additional_insured_verified', 'coverage_amount_verified'];
+  const updates = {};
+  for (const field of allowed) {
+    if (typeof req.body[field] === 'boolean') updates[field] = req.body[field];
+  }
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update.' });
+  }
+  updates.updated_at = new Date().toISOString();
+  const { error } = await supabase
+    .from('property_insurance')
+    .update(updates)
+    .eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ success: true });
+});
+
 // ─── GET /api/insurance/document/:id ─────────────────────────────────────────
 app.get('/api/insurance/document/:id', async (req, res) => {
   const { data: doc, error } = await supabase

@@ -923,6 +923,8 @@
         '<dl><dt>Effective Date</dt><dd>' + formatDate(row.effective_date) + '</dd></dl>' +
         '<dl><dt>Policy #</dt><dd>' + esc(row.policy_number || '—') + '</dd></dl>' +
         '<dl><dt>Record Created</dt><dd>' + formatDate(row.created_at) + '</dd></dl>' +
+        '<dl><dt>Additional Insured</dt><dd><label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="additional_insured_verified"' + (row.additional_insured_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
+        '<dl><dt>Coverage Amount</dt><dd><label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="coverage_amount_verified"' + (row.coverage_amount_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
         (row.notes ? '<dl><dt>Notes</dt><dd class="notes-text">' + esc(row.notes) + '</dd></dl>' : '') +
         '<dl><dt>Declaration Page</dt><dd>' + (row.document_id
           ? '<a class="detail-link" href="' + INSURANCE_API + '/api/insurance/document/' + esc(row.document_id) + '" target="_blank">' + esc((row.documents && row.documents.file_name) || 'View Declaration Page') + '</a>'
@@ -931,6 +933,30 @@
 
     detailTr.appendChild(td);
     afterTr.insertAdjacentElement('afterend', detailTr);
+
+    // Wire compliance checkboxes — auto-save on toggle
+    detailTr.querySelectorAll('.compliance-cb').forEach(function(cb) {
+      cb.addEventListener('change', async function() {
+        var id    = this.dataset.id;
+        var field = this.dataset.field;
+        var value = this.checked;
+        var label = this.parentElement;
+        label.style.opacity = '0.5';
+        try {
+          var resp = await fetch(INSURANCE_API + '/api/insurance/policy/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [field]: value }),
+          });
+          if (!resp.ok) throw new Error('Save failed');
+          label.style.opacity = '';
+        } catch (err) {
+          this.checked = !value; // revert
+          label.style.opacity = '';
+          alert('Could not save — please try again.');
+        }
+      });
+    });
   }
 
   // ── UI states ─────────────────────────────────────────────────────────
@@ -1200,7 +1226,7 @@
     var step2 = document.getElementById('batchStep2');
     var html = '<div class="batch-table-wrap"><table class="batch-review-table"><thead><tr>' +
       '<th style="width:32px">Include</th>' +
-      '<th>Proposed Filename</th>' +
+      '<th>File</th>' +
       '<th>Property</th>' +
       '<th>Insurer</th>' +
       '<th>Effective</th>' +
@@ -1225,8 +1251,10 @@
       html += '<td style="text-align:center"><input type="checkbox" id="row-cb-' + i + '"' +
         cbDisabled + (cbDisabled ? '' : ' checked') + '></td>';
 
-      // Proposed filename
-      html += '<td class="filename-cell">' + esc(item.clean_filename || item.original_filename || '—') + '</td>';
+      // File + preview link
+      html += '<td class="filename-cell">' + esc(item.clean_filename || item.original_filename || '—') +
+        (!hasError && item.fileBase64 ? ' <a href="#" class="detail-link batch-preview-link" data-idx="' + i + '" style="font-size:11px;white-space:nowrap">View ↗</a>' : '') +
+        '</td>';
 
       // Property dropdown
       var isUnmatched = !item.matched_property;
@@ -1262,12 +1290,28 @@
 
     step2.innerHTML = html;
 
-    // Pre-select matched properties now that the DOM exists
+    // Pre-select matched properties and wire preview links
     batchItems.forEach(function(item, i) {
       if (item.matched_property) {
         var sel = document.getElementById('row-prop-' + i);
         if (sel) sel.value = item.matched_property.id;
       }
+    });
+
+    document.querySelectorAll('.batch-preview-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var idx  = parseInt(this.dataset.idx, 10);
+        var item = batchItems[idx];
+        if (!item || !item.fileBase64) return;
+        var mime = item.fileMimeType || 'application/pdf';
+        var raw  = atob(item.fileBase64);
+        var buf  = new Uint8Array(raw.length);
+        for (var b = 0; b < raw.length; b++) buf[b] = raw.charCodeAt(b);
+        var blob = new Blob([buf], { type: mime });
+        var url  = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+      });
     });
 
     document.getElementById('batchSaveBtn').addEventListener('click', runBatchSave);

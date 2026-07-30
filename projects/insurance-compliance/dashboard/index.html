@@ -1231,9 +1231,9 @@
       '<th>Insurer</th>' +
       '<th>Effective</th>' +
       '<th>Expiry</th>' +
-      '<th>Coverage</th>' +
+      '<th>Coverage Amount</th>' +
       '<th style="text-align:center">Add\'l Insured</th>' +
-      '<th style="text-align:center">Coverage OK</th>' +
+      '<th style="text-align:center">Coverage Met</th>' +
       '<th>Status</th>' +
       '</tr></thead><tbody>';
 
@@ -1264,12 +1264,26 @@
         '<option value="">— Select property —</option>' + propOptions + '</select></td>';
 
       var ex = item.extracted || {};
-      html += '<td>' + esc(ex.insurer_name || '—') + '</td>';
-      html += '<td>' + esc(ex.effective_date || '—') + '</td>';
-      html += '<td>' + esc(ex.expiration_date || '—') + '</td>';
-      html += '<td>' + (ex.coverage_amount != null ? '$' + Number(ex.coverage_amount).toLocaleString() : '—') + '</td>';
-      html += '<td style="text-align:center"><input type="checkbox" id="row-ai-' + i + '"' + (hasError ? ' disabled' : '') + '></td>';
-      html += '<td style="text-align:center"><input type="checkbox" id="row-cov-' + i + '"' + (hasError ? ' disabled' : '') + '></td>';
+      var dis = hasError ? ' disabled' : '';
+
+      // Editable extracted fields — pre-filled by AI, correctable by user
+      html += '<td><input type="text" id="row-insurer-' + i + '" value="' + esc(ex.insurer_name || '') + '" placeholder="Insurer name"' + dis + ' style="width:140px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+      html += '<td><input type="date" id="row-eff-' + i + '" value="' + esc(ex.effective_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+      html += '<td><input type="date" id="row-exp-' + i + '" value="' + esc(ex.expiration_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+
+      // Coverage amount — editable + threshold indicator
+      var cov = ex.coverage_amount != null ? Number(ex.coverage_amount) : null;
+      var covColor = cov == null ? '#9ca3af' : cov >= 500000 ? '#16a34a' : '#dc2626';
+      var covLabel = cov == null ? 'Not found' : cov >= 1000000 ? '✓ $' + (cov/1000000).toFixed(cov%1000000===0?0:1) + 'M' : cov >= 500000 ? '✓ $' + (cov/1000).toFixed(0) + 'K' : '⚠ $' + cov.toLocaleString();
+      html += '<td><input type="number" id="row-cov-amt-' + i + '" value="' + (cov != null ? cov : '') + '" placeholder="e.g. 500000"' + dis + ' style="width:100px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
+        '<div id="row-cov-lbl-' + i + '" style="font-size:11px;color:' + covColor + ';margin-top:2px">' + covLabel + '</div></td>';
+
+      html += '<td style="text-align:center"><input type="checkbox" id="row-ai-' + i + '"' + dis + '></td>';
+
+      // "Coverage Met" — auto-checked if ≥$500K, unchecked if below (override allowed)
+      var covMet = cov != null && cov >= 500000;
+      html += '<td style="text-align:center"><input type="checkbox" id="row-covmet-' + i + '"' + dis + (covMet ? ' checked' : '') + '>' +
+        (cov != null && cov < 500000 ? '<div style="font-size:10px;color:#dc2626;margin-top:2px">Below min</div>' : '') + '</td>';
 
       var badges = '';
       if (hasError)
@@ -1296,6 +1310,29 @@
         var sel = document.getElementById('row-prop-' + i);
         if (sel) sel.value = item.matched_property.id;
       }
+    });
+
+    // Live coverage threshold indicator when user edits the amount
+    batchItems.forEach(function(item, i) {
+      var amtInput = document.getElementById('row-cov-amt-' + i);
+      var lbl      = document.getElementById('row-cov-lbl-' + i);
+      var covMet   = document.getElementById('row-covmet-'  + i);
+      if (!amtInput || !lbl || !covMet) return;
+      amtInput.addEventListener('input', function() {
+        var v = parseFloat(this.value);
+        if (isNaN(v) || !this.value) {
+          lbl.style.color = '#9ca3af'; lbl.textContent = 'Not found';
+          covMet.checked = false; return;
+        }
+        if (v >= 1000000) {
+          lbl.style.color = '#16a34a'; lbl.textContent = '✓ $' + (v/1000000).toFixed(v%1000000===0?0:1) + 'M';
+        } else if (v >= 500000) {
+          lbl.style.color = '#16a34a'; lbl.textContent = '✓ $' + (v/1000).toFixed(0) + 'K';
+        } else {
+          lbl.style.color = '#dc2626'; lbl.textContent = '⚠ $' + v.toLocaleString() + ' — Below min';
+        }
+        covMet.checked = v >= 500000;
+      });
     });
 
     document.querySelectorAll('.batch-preview-link').forEach(function(link) {
@@ -1330,18 +1367,35 @@
       var cb  = document.getElementById('row-cb-'  + i);
       var sel = document.getElementById('row-prop-' + i);
       if (!cb || !cb.checked || !sel || !sel.value) return;
-      var opt  = sel.options[sel.selectedIndex];
-      var aiCb = document.getElementById('row-ai-'  + i);
-      var coCb = document.getElementById('row-cov-' + i);
+
+      var opt     = sel.options[sel.selectedIndex];
+      var aiCb    = document.getElementById('row-ai-'    + i);
+      var covMet  = document.getElementById('row-covmet-' + i);
+
+      // Read values from editable inputs — user corrections override extracted values
+      var insurer  = (document.getElementById('row-insurer-' + i) || {}).value || null;
+      var effDate  = (document.getElementById('row-eff-'     + i) || {}).value || null;
+      var expDate  = (document.getElementById('row-exp-'     + i) || {}).value || null;
+      var covRaw   = (document.getElementById('row-cov-amt-' + i) || {}).value;
+      var covAmt   = covRaw ? parseFloat(covRaw) : null;
+
+      // Merge user-edited values back into extracted object
+      var extracted = Object.assign({}, item.extracted || {}, {
+        insurer_name:     insurer,
+        effective_date:   effDate,
+        expiration_date:  expDate,
+        coverage_amount:  covAmt,
+      });
+
       records.push({
         file_data:                   item.fileBase64,
         file_mime_type:              item.fileMimeType,
         clean_filename:              item.clean_filename,
-        extracted:                   item.extracted,
+        extracted,
         property_id:                 sel.value,
         appfolio_property_id:        (opt && opt.dataset.appfolio) || null,
-        additional_insured_verified: !!(aiCb && aiCb.checked),
-        coverage_amount_verified:    !!(coCb && coCb.checked),
+        additional_insured_verified: !!(aiCb   && aiCb.checked),
+        coverage_amount_verified:    !!(covMet && covMet.checked),
       });
     });
 

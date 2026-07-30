@@ -114,8 +114,11 @@ async function extractPolicy(filePath) {
 
   const responseText = response.content[0].text.trim();
 
+  // Strip markdown code fences if Claude wraps the JSON despite being told not to
+  const cleaned = responseText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+
   try {
-    return JSON.parse(responseText);
+    return JSON.parse(cleaned);
   } catch {
     console.error(`[extract-policy] JSON parse failed. Raw response: ${responseText}`);
     return { extraction_error: true, raw: responseText, ...EMPTY_FIELDS };

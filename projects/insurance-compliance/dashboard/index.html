@@ -1058,7 +1058,7 @@
   // ── Filter buttons ─────────────────────────────────────────────────────
   document.getElementById('propertySearch').addEventListener('input', function() {
     filterSearch = this.value.trim();
-    renderTable();
+    render();
   });
 
   document.querySelectorAll('.filter-btn').forEach(btn => {

@@ -52,19 +52,25 @@ Environment variable required:
   process.exit(0);
 }
 
-const PROMPT = `You are extracting structured data from an insurance declaration page for a property management company. Return ONLY a valid JSON object with these exact fields. If a field is not visible or cannot be determined with confidence, return null for that field. Do not guess or infer values you cannot read directly from the document.
+const PROMPT = `You are extracting structured data from an insurance declaration page for a property management company. The document may cover ONE property or MULTIPLE properties (locations).
 
-{
-  "policy_number": "<string or null>",
-  "insurer_name": "<string or null>",
-  "effective_date": "<YYYY-MM-DD or null>",
-  "expiration_date": "<YYYY-MM-DD or null>",
-  "coverage_amount": <PREMISES LIABILITY amount as a number with no currency symbol — this is the LIABILITY protection section, NOT the dwelling or structure value. Look for labels like "Personal Liability", "Premises Liability", "Coverage E", "Liability Coverage", or "Each Occurrence" in the liability section of the policy. Typical values are 300000, 500000, or 1000000. Return null if you cannot find a liability coverage amount.>,
-  "named_insured": "<string or null>",
-  "property_address": "<string or null>"
-}
+Return ONLY a valid JSON array — one object per covered property/location. If the document covers a single property, return an array with one object. If it covers multiple properties, return one object per property.
 
-Return the JSON object and nothing else. No explanation, no markdown, no code block.`;
+Each object must have exactly these fields. If a field is not visible or cannot be determined with confidence, return null for that field. Do not guess or infer values you cannot read directly from the document.
+
+[
+  {
+    "policy_number": "<string or null — the policy or certificate number, same across all locations on the same document>",
+    "insurer_name": "<string or null — the name of the insurance company issuing the policy, NOT the agent or broker>",
+    "effective_date": "<YYYY-MM-DD or null>",
+    "expiration_date": "<YYYY-MM-DD or null>",
+    "coverage_amount": <PREMISES LIABILITY amount as a number with no currency symbol — this is the LIABILITY protection section, NOT the dwelling or structure value. Look for labels like "Personal Liability", "Premises Liability", "Coverage E", "Liability Coverage", or "Each Occurrence" in the liability section. Typical values are 300000, 500000, or 1000000. Return null if you cannot find a liability coverage amount.>,
+    "named_insured": "<string or null — the name of the insured person or entity>",
+    "property_address": "<the street address of the INSURED PROPERTY — the physical location being covered. NOT the insurance company's address. NOT the agent's or broker's address. NOT a mailing address or billing address. Look for labels like 'Property Address', 'Location', 'Premises Address', 'Risk Location', 'Described Location', 'Location of Premises', or 'Schedule of Locations'. These are typically residential or commercial street addresses in Southern California. If multiple properties appear, each gets its own object. Return null only if you truly cannot find any insured property address.>"
+  }
+]
+
+Return the JSON array and nothing else. No explanation, no markdown, no code block.`;
 
 const MIME_TYPES = {
   '.pdf':  'application/pdf',
@@ -118,10 +124,13 @@ async function extractPolicy(filePath) {
   const cleaned = responseText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
 
   try {
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    // Normalise to array — handle both legacy single-object and new array format
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.map(obj => ({ ...EMPTY_FIELDS, ...obj }));
   } catch {
     console.error(`[extract-policy] JSON parse failed. Raw response: ${responseText}`);
-    return { extraction_error: true, raw: responseText, ...EMPTY_FIELDS };
+    return [{ extraction_error: true, raw: responseText, ...EMPTY_FIELDS }];
   }
 }
 

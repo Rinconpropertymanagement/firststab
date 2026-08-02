@@ -1150,14 +1150,29 @@
   function onFilesSelected(files) {
     var valid = files.filter(function(f) { return /\.(pdf|jpg|jpeg|png)$/i.test(f.name); });
     if (!valid.length) return;
-    batchFiles = valid.slice(0, 50);
+    // Add to existing list, skip duplicates by name, cap at 50 total
+    var existing = new Set(batchFiles.map(function(f) { return f.name; }));
+    valid.forEach(function(f) {
+      if (!existing.has(f.name) && batchFiles.length < 50) {
+        batchFiles.push(f);
+        existing.add(f.name);
+      }
+    });
     var listEl = document.getElementById('batchFileList');
-    listEl.innerHTML = batchFiles.map(function(f) {
-      return '<li>&#128196; ' + esc(f.name) +
-        ' <span style="color:#9ca3af">(' + (f.size / 1048576).toFixed(1) + ' MB)</span></li>';
+    listEl.innerHTML = batchFiles.map(function(f, i) {
+      return '<li style="display:flex;align-items:center;gap:6px">&#128196; ' + esc(f.name) +
+        ' <span style="color:#9ca3af">(' + (f.size / 1048576).toFixed(1) + ' MB)</span>' +
+        ' <a href="#" style="color:#9ca3af;font-size:11px;margin-left:auto" data-remove="' + i + '">✕</a></li>';
     }).join('');
+    listEl.querySelectorAll('[data-remove]').forEach(function(a) {
+      a.addEventListener('click', function(e) {
+        e.preventDefault();
+        batchFiles.splice(parseInt(this.dataset.remove, 10), 1);
+        onFilesSelected([]);
+      });
+    });
     listEl.style.display = '';
-    document.getElementById('batchUploadBtn').style.display = '';
+    document.getElementById('batchUploadBtn').style.display = batchFiles.length ? '' : 'none';
   }
 
   // ── Upload & Extract ───────────────────────────────────────────────────
@@ -1188,9 +1203,6 @@
       document.getElementById('batchProgressBar').style.width =
         Math.round((i / total) * 100) + '%';
 
-      var b64Info = { base64: null, mimeType: 'application/octet-stream' };
-      try { b64Info = await fileToBase64(file); } catch(e) {}
-
       try {
         var fd = new FormData();
         fd.append('files', file);
@@ -1199,18 +1211,23 @@
           body: fd,
         });
         var data = await resp.json();
-        var result = (data.results && data.results[0]) || {
+        var results = (data.results && data.results.length) ? data.results : [{
           original_filename:   file.name,
           clean_filename:      null,
+          file_base64:         null,
+          file_mime_type:      null,
           extracted:           null,
           matched_property:    null,
           has_existing_policy: false,
           error:               'Server returned no result',
-        };
-        batchItems.push(Object.assign({}, result, {
-          fileBase64:   b64Info.base64,
-          fileMimeType: b64Info.mimeType,
-        }));
+        }];
+        // One file may produce multiple rows (multi-property documents)
+        results.forEach(function(result) {
+          batchItems.push(Object.assign({}, result, {
+            fileBase64:   result.file_base64   || null,
+            fileMimeType: result.file_mime_type || 'application/pdf',
+          }));
+        });
       } catch(err) {
         batchItems.push({
           original_filename:   file.name,
@@ -1219,8 +1236,8 @@
           matched_property:    null,
           has_existing_policy: false,
           error:               err.message || 'Upload failed',
-          fileBase64:          b64Info.base64,
-          fileMimeType:        b64Info.mimeType,
+          fileBase64:          null,
+          fileMimeType:        'application/pdf',
         });
       }
     }

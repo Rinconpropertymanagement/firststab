@@ -434,39 +434,48 @@ app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, r
   for (const file of req.files) {
     const ext = path.extname(file.originalname).toLowerCase();
     try {
-      const extracted = await extractPolicy(file.path);
-      const cleanFilename = makeCleanFilename(extracted, ext);
-      const matched = findBestPropertyMatch(
-        extracted.property_address,
-        properties || []
-      );
+      const fileBuffer   = fs.readFileSync(file.path);
+      const fileBase64   = fileBuffer.toString('base64');
+      const extractedArr = await extractPolicy(file.path);
 
-      let has_existing_policy = false;
-      if (matched && matched.appfolio_id) {
-        const { data: existing } = await supabase
-          .from('property_insurance')
-          .select('id')
-          .eq('appfolio_property_id', matched.appfolio_id)
-          .eq('is_current', true)
-          .limit(1);
-        has_existing_policy = !!(existing && existing.length > 0);
+      for (const extracted of extractedArr) {
+        const cleanFilename = makeCleanFilename(extracted, ext);
+        const matched = findBestPropertyMatch(
+          extracted.property_address,
+          properties || []
+        );
+
+        let has_existing_policy = false;
+        if (matched && matched.appfolio_id) {
+          const { data: existing } = await supabase
+            .from('property_insurance')
+            .select('id')
+            .eq('appfolio_property_id', matched.appfolio_id)
+            .eq('is_current', true)
+            .limit(1);
+          has_existing_policy = !!(existing && existing.length > 0);
+        }
+
+        results.push({
+          original_filename:   file.originalname,
+          clean_filename:      cleanFilename,
+          file_base64:         fileBase64,
+          file_mime_type:      file.mimetype,
+          extracted,
+          matched_property:    matched
+            ? { id: matched.id, appfolio_id: matched.appfolio_id, name: matched.name, address: matched.address }
+            : null,
+          has_existing_policy,
+          error:               null,
+        });
       }
-
-      results.push({
-        original_filename:   file.originalname,
-        clean_filename:      cleanFilename,
-        extracted,
-        matched_property:    matched
-          ? { id: matched.id, appfolio_id: matched.appfolio_id, name: matched.name, address: matched.address }
-          : null,
-        has_existing_policy,
-        error:               null,
-      });
     } catch (err) {
       console.error(`[${ts}] Batch extract error (${file.originalname}):`, err.message);
       results.push({
         original_filename:   file.originalname,
         clean_filename:      null,
+        file_base64:         null,
+        file_mime_type:      null,
         extracted:           null,
         matched_property:    null,
         has_existing_policy: false,

@@ -581,8 +581,10 @@ app.post('/api/insurance/batch-save', async (req, res) => {
       const expDate    = (extracted && extracted.expiration_date) || null;
       const isExpired  = expDate && new Date(expDate) < new Date();
       const belowMin   = covAmt != null && covAmt < 500000;
+      const noAddlInsured = !additional_insured_verified;
       const recStatus  = isExpired        ? 'expired'
                        : belowMin         ? 'insufficient_liability'
+                       : noAddlInsured    ? 'no_additional_insured'
                        :                    'compliant';
 
       const { error: insErr } = await supabase.from('property_insurance').insert({

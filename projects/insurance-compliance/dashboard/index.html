@@ -239,9 +239,12 @@
     .badge-pending_review          { background: #6b7280; color: #fff; }
     .badge-no_policy               { background: #e5e7eb; color: #374151; }
     .badge-insufficient_liability  { background: #dc2626; color: #fff; font-weight: 700; letter-spacing: .3px; }
+    .badge-no_additional_insured   { background: #d97706; color: #fff; font-weight: 700; letter-spacing: .3px; }
     .badge-unknown                 { background: #e5e7eb; color: #6b7280; }
     tr.row-insufficient td         { background: #fff1f2; }
     tr.row-insufficient td:first-child { border-left: 4px solid #dc2626; }
+    tr.row-no-addl td              { background: #fffbeb; }
+    tr.row-no-addl td:first-child  { border-left: 4px solid #d97706; }
 
     /* ── Check / X ── */
     .check { color: #16a34a; font-size: 15px; }
@@ -574,6 +577,16 @@
       <div class="tile-number" id="tileInsufficient" style="color:#dc2626">—</div>
       <div class="tile-label" style="color:#dc2626;font-weight:700">⚠ Low Liability</div>
     </div>
+    <div class="tile tile-red" style="border: 2px solid #d97706;">
+      <div class="tile-number" id="tileNoAddl" style="color:#d97706">—</div>
+      <div class="tile-label" style="color:#d97706;font-weight:700">⚠ No Add'l Insured</div>
+    </div>
+  </div>
+
+  <!-- ── Search ── -->
+  <div style="margin-bottom:12px">
+    <input type="text" id="propertySearch" placeholder="Search by property, address, insurer, or owner…"
+      style="width:100%;max-width:480px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;outline:none">
   </div>
 
   <!-- ── Filters ── -->
@@ -593,6 +606,7 @@
       <button class="filter-btn" data-filter="status" data-value="pending_review">Pending Review</button>
       <button class="filter-btn" data-filter="status" data-value="no_policy">No Policy</button>
       <button class="filter-btn" data-filter="status" data-value="insufficient_liability" style="color:#dc2626;border-color:#dc2626;font-weight:700">⚠ Low Liability</button>
+      <button class="filter-btn" data-filter="status" data-value="no_additional_insured" style="color:#d97706;border-color:#d97706;font-weight:700">⚠ No Add'l Insured</button>
     </div>
   </div>
 
@@ -669,8 +683,9 @@
   let allRows = [];
   let sortCol = 'days_left';
   let sortDir = 'asc';
-  let filterPod = 'all';
+  let filterPod    = 'all';
   let filterStatus = 'all';
+  let filterSearch = '';
   let expandedId = null;
   let autoRefreshTimer = null;
 
@@ -742,6 +757,7 @@
       pending_review:          ['badge-pending_review',         'Pending Review'],
       no_policy:               ['badge-no_policy',              'No Policy'],
       insufficient_liability:  ['badge-insufficient_liability', '⚠ Low Liability'],
+      no_additional_insured:   ['badge-no_additional_insured', '⚠ No Add\'l Insured'],
     };
     const [cls, label] = map[status] || ['badge-unknown', 'Unknown'];
     return '<span class="badge ' + cls + '">' + label + '</span>';
@@ -819,6 +835,7 @@
     document.getElementById('tileTotal').textContent     = rows.length;
     document.getElementById('tileCompliant').textContent    = rows.filter(r => r.status === 'compliant').length;
     document.getElementById('tileInsufficient').textContent = rows.filter(r => r.status === 'insufficient_liability').length;
+    document.getElementById('tileNoAddl').textContent = rows.filter(r => r.status === 'no_additional_insured').length;
     document.getElementById('tileExpiring').textContent  = rows.filter(r => r.days_left !== null && r.days_left >= 0 && r.days_left <= 30).length;
     document.getElementById('tileExpired').textContent   = rows.filter(r => r.status === 'expired' || (r.days_left !== null && r.days_left < 0)).length;
     document.getElementById('tilePending').textContent   = rows.filter(r => r.status === 'no_policy' || r.status === 'pending_review').length;
@@ -838,6 +855,17 @@
     // Status filter
     if (filterStatus !== 'all') {
       rows = rows.filter(r => r.status === filterStatus);
+    }
+
+    if (filterSearch) {
+      const q = filterSearch.toLowerCase();
+      rows = rows.filter(r =>
+        (r.property_name        || '').toLowerCase().includes(q) ||
+        (r.property_address     || '').toLowerCase().includes(q) ||
+        (r.insurer_name         || '').toLowerCase().includes(q) ||
+        (r.named_insured        || '').toLowerCase().includes(q) ||
+        (r.policy_number        || '').toLowerCase().includes(q)
+      );
     }
 
     // Sort
@@ -884,6 +912,7 @@
       tr.dataset.id = row.id;
       if (expandedId === row.id) tr.classList.add('expanded');
       if (row.status === 'insufficient_liability') tr.classList.add('row-insufficient');
+      if (row.status === 'no_additional_insured')  tr.classList.add('row-no-addl');
 
       tr.innerHTML =
         '<td class="property-name">' + esc(row.property_name) + '</td>' +
@@ -1027,6 +1056,11 @@
   });
 
   // ── Filter buttons ─────────────────────────────────────────────────────
+  document.getElementById('propertySearch').addEventListener('input', function() {
+    filterSearch = this.value.trim();
+    renderTable();
+  });
+
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const filter = btn.dataset.filter;

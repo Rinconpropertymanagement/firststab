@@ -1089,9 +1089,7 @@
   // ── Open / close modal ─────────────────────────────────────────────────
   document.getElementById('batchBtn').addEventListener('click', openBatchModal);
   document.getElementById('batchModalClose').addEventListener('click', closeBatchModal);
-  document.getElementById('batchModal').addEventListener('click', function(e) {
-    if (e.target === this) closeBatchModal();
-  });
+  // Intentionally not closing on backdrop click — prevents accidental data loss mid-upload
 
   function openBatchModal() {
     resetBatchModal();

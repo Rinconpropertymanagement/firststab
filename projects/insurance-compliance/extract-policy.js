@@ -18,9 +18,10 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
-const fs   = require('fs');
-const path = require('path');
+const fs      = require('fs');
+const path    = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
+const pdfParse = require('pdf-parse');
 
 if (process.argv.includes('--help')) {
   console.log(`
@@ -52,25 +53,33 @@ Environment variable required:
   process.exit(0);
 }
 
-const PROMPT = `You are extracting structured data from an insurance declaration page for a property management company. The document may cover ONE property or MULTIPLE properties (locations).
+const PROMPT = `You are reading an insurance document for a Southern California property management company. Extract the fields below and return them as a JSON array — one object per insured property location. A single document may cover multiple properties; if so, return one object per property.
 
-Return ONLY a valid JSON array — one object per covered property/location. If the document covers a single property, return an array with one object. If it covers multiple properties, return one object per property.
+STEP 1 — Find every insured property address:
+Scan the entire document for any of these labels: "Prop. Loc", "Prop. Loc.", "Prop Loc", "Property Location", "Property Address", "Premises Address", "Described Premises", "Risk Location", "Location of Premises", "Schedule of Locations", "Insured Location", or "Location". Extract the address that follows each label. These addresses will be in California (CA). Addresses may use dashes as separators instead of commas (e.g. "263 S VENTURA RD UNIT 270-PORT HUENEME-CA 93041"). Do NOT use the insurance company's address, agent's address, or any address in the letterhead/return-address area at the top of the document — those will be out-of-state addresses. If multiple California property addresses appear, return one array object per address.
 
-Each object must have exactly these fields. If a field is not visible or cannot be determined with confidence, return null for that field. Do not guess or infer values you cannot read directly from the document.
+STEP 2 — For each property address found, extract:
+- policy_number: the policy or certificate number (string or null)
+- insurer_name: the name of the insurance COMPANY (not agent/broker) (string or null)
+- effective_date: policy start date in YYYY-MM-DD format (or null)
+- expiration_date: policy end date in YYYY-MM-DD format (or null)
+- coverage_amount: the PREMISES LIABILITY dollar amount as a plain number — look for "Premises Liability", "Personal Liability", "Coverage E", "Each Occurrence", or "Liability Coverage". Do NOT use dwelling, structure, or property damage amounts. Typical values: 300000, 500000, 1000000. (number or null)
+- named_insured: name of the insured person or entity (string or null)
+- property_address: the California property address from Step 1 (string or null)
+
+Return ONLY the JSON array. No explanation, no markdown fences, no code blocks.
 
 [
   {
-    "policy_number": "<string or null — the policy or certificate number, same across all locations on the same document>",
-    "insurer_name": "<string or null — the name of the insurance company issuing the policy, NOT the agent or broker>",
-    "effective_date": "<YYYY-MM-DD or null>",
-    "expiration_date": "<YYYY-MM-DD or null>",
-    "coverage_amount": <PREMISES LIABILITY amount as a number with no currency symbol — this is the LIABILITY protection section, NOT the dwelling or structure value. Look for labels like "Personal Liability", "Premises Liability", "Coverage E", "Liability Coverage", or "Each Occurrence" in the liability section. Typical values are 300000, 500000, or 1000000. Return null if you cannot find a liability coverage amount.>,
-    "named_insured": "<string or null — the name of the insured person or entity>",
-    "property_address": "<the street address of the INSURED PROPERTY — the physical location being covered. NOT the insurance company's address. NOT the agent's or broker's address. NOT a mailing address or billing address. Look for labels like 'Property Address', 'Location', 'Premises Address', 'Risk Location', 'Described Location', 'Location of Premises', or 'Schedule of Locations'. These are typically residential or commercial street addresses in Southern California. If multiple properties appear, each gets its own object. Return null only if you truly cannot find any insured property address.>"
+    "policy_number": null,
+    "insurer_name": null,
+    "effective_date": null,
+    "expiration_date": null,
+    "coverage_amount": null,
+    "named_insured": null,
+    "property_address": null
   }
-]
-
-Return the JSON array and nothing else. No explanation, no markdown, no code block.`;
+]`;
 
 const MIME_TYPES = {
   '.pdf':  'application/pdf',
@@ -89,6 +98,28 @@ const EMPTY_FIELDS = {
   property_address: null,
 };
 
+// Extract "Prop. Loc:" style addresses directly from PDF text — faster and
+// more reliable than asking Claude to find them in a cluttered document.
+async function extractPropLocAddresses(filePath) {
+  try {
+    const buf  = fs.readFileSync(filePath);
+    const data = await pdfParse(buf);
+    const text = data.text;
+
+    // Match "Prop. Loc:", "Prop Loc:", "Property Location:", etc. followed by the address
+    const pattern = /Prop(?:erty)?\s*\.?\s*Loc(?:ation)?\.?\s*:?\s*([^\n\r]{5,80})/gi;
+    const found   = [];
+    let m;
+    while ((m = pattern.exec(text)) !== null) {
+      const addr = m[1].trim().replace(/\s+/g, ' ');
+      if (addr) found.push(addr);
+    }
+    return { addresses: found, fullText: text };
+  } catch {
+    return { addresses: [], fullText: '' };
+  }
+}
+
 async function extractPolicy(filePath) {
   const ext      = path.extname(filePath).toLowerCase();
   const mimeType = MIME_TYPES[ext];
@@ -100,6 +131,17 @@ async function extractPolicy(filePath) {
   const fileBuffer = fs.readFileSync(filePath);
   const base64     = fileBuffer.toString('base64');
 
+  // For PDFs, pre-extract "Prop. Loc:" addresses from raw text so Claude
+  // gets them handed to it directly — avoids misreading cluttered letterheads.
+  let propLocHint = '';
+  if (mimeType === 'application/pdf') {
+    const { addresses } = await extractPropLocAddresses(filePath);
+    if (addresses.length > 0) {
+      propLocHint = `\n\nIMPORTANT: The following property addresses were found in this document next to "Prop. Loc" labels. Use these as the property_address values (one object per address):\n${addresses.map((a, i) => `${i + 1}. ${a}`).join('\n')}`;
+      console.error(`[extract-policy] Pre-extracted Prop. Loc addresses: ${addresses.join(' | ')}`);
+    }
+  }
+
   // Build the content block — PDFs use 'document', images use 'image'
   const contentBlock = mimeType === 'application/pdf'
     ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
@@ -108,28 +150,35 @@ async function extractPolicy(filePath) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const response = await client.messages.create({
-    model:      'claude-sonnet-4-5',
-    max_tokens: 1024,
+    model:      'claude-sonnet-5',
+    max_tokens: 4096,
     messages: [
       {
         role:    'user',
-        content: [contentBlock, { type: 'text', text: PROMPT }],
+        content: [contentBlock, { type: 'text', text: PROMPT + propLocHint }],
       },
     ],
   });
 
-  const responseText = response.content[0].text.trim();
+  // sonnet-5 may return thinking blocks before the text block — find the text block explicitly
+  const textBlock = response.content.find(b => b.type === 'text');
+  if (!textBlock) throw new Error('No text block in Claude response');
+  const responseText = textBlock.text.trim();
 
-  // Strip markdown code fences if Claude wraps the JSON despite being told not to
-  const cleaned = responseText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  // Strip any reasoning text before the JSON array/object, then strip markdown fences
+  const jsonStart = responseText.search(/[\[{]/);
+  const trimmed   = jsonStart > 0 ? responseText.slice(jsonStart) : responseText;
+  const cleaned   = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
 
   try {
     const parsed = JSON.parse(cleaned);
     // Normalise to array — handle both legacy single-object and new array format
     const arr = Array.isArray(parsed) ? parsed : [parsed];
-    return arr.map(obj => ({ ...EMPTY_FIELDS, ...obj }));
+    const result = arr.map(obj => ({ ...EMPTY_FIELDS, ...obj }));
+    console.error(`[extract-policy] Extracted ${result.length} propert(ies): ${result.map(r => r.property_address).join(' | ')}`);
+    return result;
   } catch {
-    console.error(`[extract-policy] JSON parse failed. Raw response: ${responseText}`);
+    console.error(`[extract-policy] JSON parse failed. Raw response:\n${responseText}`);
     return [{ extraction_error: true, raw: responseText, ...EMPTY_FIELDS }];
   }
 }

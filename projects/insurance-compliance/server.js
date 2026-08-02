@@ -342,7 +342,7 @@ app.get('/api/insurance/document/:id', async (req, res) => {
 // ─── Address helpers ──────────────────────────────────────────────────────────
 function normalizeAddress(addr) {
   if (!addr) return '';
-  return addr.split(',')[0]
+  return addr.split(/[,\-]/)[0]
     .toLowerCase()
     .replace(/[.#]/g, '')
     .replace(/\bstreet\b/g,    'st')
@@ -437,8 +437,15 @@ app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, r
       const fileBuffer   = fs.readFileSync(file.path);
       const fileBase64   = fileBuffer.toString('base64');
       const extractedArr = await extractPolicy(file.path);
+      console.log(`[${ts}] Extracted ${extractedArr.length} propert(ies) from ${file.originalname}: ${extractedArr.map(e => e.property_address).join(' | ')}`);
 
       for (const extracted of extractedArr) {
+        // Reject non-California addresses — they're the insurer's office, not the property
+        if (extracted.property_address && !/\bCA\b|California/i.test(extracted.property_address)) {
+          console.log(`[${ts}] Rejected non-CA address: ${extracted.property_address}`);
+          extracted.property_address = null;
+        }
+
         const cleanFilename = makeCleanFilename(extracted, ext);
         const matched = findBestPropertyMatch(
           extracted.property_address,
@@ -571,8 +578,12 @@ app.post('/api/insurance/batch-save', async (req, res) => {
       // Insert new property_insurance record
       const now        = new Date().toISOString();
       const covAmt     = (extracted && extracted.coverage_amount) || null;
+      const expDate    = (extracted && extracted.expiration_date) || null;
+      const isExpired  = expDate && new Date(expDate) < new Date();
       const belowMin   = covAmt != null && covAmt < 500000;
-      const recStatus  = belowMin ? 'insufficient_liability' : 'compliant';
+      const recStatus  = isExpired        ? 'expired'
+                       : belowMin         ? 'insufficient_liability'
+                       :                    'compliant';
 
       const { error: insErr } = await supabase.from('property_insurance').insert({
         property_id,

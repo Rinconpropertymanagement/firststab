@@ -1,0 +1,2230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Insurance Compliance — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 1400px; margin: 0 auto; padding: 0 16px 48px; }
+
+    /* ── Pod Banner ── */
+    .banner-pod {
+      background: #eff6ff;
+      border-bottom: 2px solid #3b82f6;
+      color: #1d4ed8;
+      text-align: center;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      display: none;
+    }
+    .banner-pod.visible { display: block; }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 20px 0 16px;
+    }
+    .header-left h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.2;
+    }
+    .header-left p {
+      font-size: 13px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .last-updated {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .btn-refresh {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: #374151;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-refresh:hover { background: #f3f4f6; }
+    .btn-refresh:active { background: #e5e7eb; }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex;
+      gap: 2px;
+      border-bottom: 2px solid #e5e7eb;
+      margin-bottom: 20px;
+    }
+    .tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      padding: 10px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #6b7280;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.tab-active {
+      color: #1d4ed8;
+      border-bottom-color: #1d4ed8;
+    }
+
+    /* ── Summary Tiles ── */
+    .tiles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .tile {
+      flex: 1 1 140px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 16px 18px;
+      min-width: 120px;
+    }
+    .tile-number {
+      font-size: 30px;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .tile-label {
+      font-size: 12px;
+      color: #6b7280;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .tile-blue   .tile-number { color: #2563eb; }
+    .tile-green  .tile-number { color: #16a34a; }
+    .tile-amber  .tile-number { color: #d97706; }
+    .tile-red    .tile-number { color: #dc2626; }
+    .tile-gray   .tile-number { color: #6b7280; }
+
+    /* ── Filter Row ── */
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .filter-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .filter-btn {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: #374151;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .filter-btn:hover { background: #f3f4f6; border-color: #9ca3af; }
+    .filter-btn.active {
+      background: #1f2937;
+      border-color: #1f2937;
+      color: #fff;
+    }
+
+    /* ── Table Wrapper ── */
+    .table-wrapper {
+      overflow-x: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 900px;
+    }
+
+    thead th {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+      position: sticky;
+      top: 0;
+    }
+    thead th:hover { color: #374151; }
+    thead th .sort-arrow { margin-left: 4px; opacity: 0.4; }
+    thead th.sort-asc .sort-arrow,
+    thead th.sort-desc .sort-arrow { opacity: 1; color: #374151; }
+
+    tbody tr {
+      border-bottom: 1px solid #f3f4f6;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+    tbody tr.expanded { background: #eff6ff; }
+
+    td {
+      padding: 10px 12px;
+      font-size: 13px;
+      color: #374151;
+      vertical-align: top;
+    }
+
+    td.property-name { font-weight: 600; color: #111827; }
+    td.pod-cell { color: #6b7280; }
+
+    .days-green  { color: #16a34a; font-weight: 600; }
+    .days-amber  { color: #d97706; font-weight: 600; }
+    .days-red    { color: #dc2626; font-weight: 600; }
+    .days-gray   { color: #9ca3af; }
+
+    /* ── Status Badge ── */
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .badge-compliant               { background: #16a34a; color: #fff; }
+    .badge-expiring_soon           { background: #d97706; color: #fff; }
+    .badge-expired                 { background: #dc2626; color: #fff; }
+    .badge-pending_review          { background: #6b7280; color: #fff; }
+    .badge-escalated               { background: #7c3aed; color: #fff; }
+    .badge-no_policy               { background: #e5e7eb; color: #374151; }
+    .badge-insufficient_liability  { background: #dc2626; color: #fff; font-weight: 700; letter-spacing: .3px; }
+    .badge-no_additional_insured   { background: #d97706; color: #fff; font-weight: 700; letter-spacing: .3px; }
+    .badge-unknown                 { background: #e5e7eb; color: #6b7280; }
+    tr.row-insufficient td         { background: #fff1f2; }
+    tr.row-insufficient td:first-child { border-left: 4px solid #dc2626; }
+    tr.row-no-addl td              { background: #fffbeb; }
+    tr.row-no-addl td:first-child  { border-left: 4px solid #d97706; }
+
+    /* ── Check / X ── */
+    .check { color: #16a34a; font-size: 15px; }
+    .cross { color: #dc2626; font-size: 15px; }
+    .dash  { color: #9ca3af; }
+
+    /* ── Detail Panel ── */
+    tr.detail-row td {
+      padding: 0;
+      border-bottom: 1px solid #bfdbfe;
+      cursor: default;
+    }
+    .detail-panel {
+      background: #f0f7ff;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px 24px;
+    }
+    .detail-panel dl dt {
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 2px;
+    }
+    .detail-panel dl dd {
+      font-size: 13px;
+      color: #111827;
+    }
+    .detail-panel dl dd.notes-text {
+      font-style: italic;
+      color: #4b5563;
+    }
+    .detail-link {
+      display: inline-block;
+      margin-top: 4px;
+      color: #2563eb;
+      font-size: 13px;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .detail-link:hover { text-decoration: underline; }
+
+    .btn-appfolio-dl {
+      display: inline-block;
+      margin-top: 4px;
+      background: #1d4ed8;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 5px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-appfolio-dl:hover { background: #1e40af; }
+
+    /* ── Notes ── */
+    .notes-section {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #e5e7eb;
+    }
+    .notes-header {
+      font-size: 12px;
+      font-weight: 700;
+      color: #374151;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+    .notes-list { margin-bottom: 10px; }
+    .note-item {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+    }
+    .note-meta {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-bottom: 3px;
+    }
+    .note-text { font-size: 13px; color: #111827; white-space: pre-wrap; }
+    .notes-add { display: flex; gap: 8px; align-items: flex-start; }
+    .notes-textarea {
+      flex: 1;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 13px;
+      font-family: inherit;
+      resize: vertical;
+    }
+    .notes-textarea:focus { outline: none; border-color: #2563eb; }
+    .btn-add-note {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-add-note:hover { background: #f3f4f6; }
+    .btn-add-note:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── Empty / Error States ── */
+    .state-message {
+      text-align: center;
+      padding: 48px 20px;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .state-message.error { color: #dc2626; }
+    .state-message strong { display: block; font-size: 16px; margin-bottom: 6px; color: #374151; }
+    .state-message.error strong { color: #dc2626; }
+
+    /* ── Loading spinner ── */
+    .spinner-wrap {
+      text-align: center;
+      padding: 48px 20px;
+      color: #9ca3af;
+    }
+    .spinner {
+      width: 28px; height: 28px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #6b7280;
+      border-radius: 50%;
+      display: inline-block;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      .header { padding: 14px 0 12px; }
+      .header-left h1 { font-size: 18px; }
+      .tile { flex: 1 1 calc(50% - 6px); }
+    }
+
+    /* ── Batch Upload Button ── */
+    .btn-batch {
+      background: #1d4ed8;
+      border: 1px solid #1d4ed8;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-batch:hover  { background: #1e40af; }
+    .btn-batch:active { background: #1e3a8a; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 24px 16px;
+      overflow-y: auto;
+    }
+    .modal {
+      background: #fff;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 1200px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 1;
+      border-radius: 12px 12px 0 0;
+    }
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 22px;
+      cursor: pointer;
+      color: #6b7280;
+      line-height: 1;
+      padding: 2px 6px;
+    }
+    .modal-close:hover { color: #111827; }
+    .modal-body { padding: 20px; }
+
+    /* ── Drop zone ── */
+    .batch-drop-zone {
+      border: 2px dashed #d1d5db;
+      border-radius: 10px;
+      padding: 40px 20px;
+      text-align: center;
+      color: #6b7280;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      margin-bottom: 16px;
+    }
+    .batch-drop-zone:hover,
+    .batch-drop-zone.drag-over {
+      border-color: #2563eb;
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+    .batch-drop-zone strong {
+      display: block;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: inherit;
+    }
+    .batch-file-hint { font-size: 12px; color: #9ca3af; margin-top: 6px; }
+    .batch-file-list { margin: 0 0 16px; padding: 0; font-size: 13px; }
+    .batch-file-list li { list-style: none; padding: 3px 0; color: #374151; }
+
+    /* ── Progress ── */
+    .batch-progress {
+      text-align: center;
+      padding: 24px;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .batch-progress-bar-wrap {
+      background: #e5e7eb;
+      border-radius: 9999px;
+      height: 8px;
+      margin: 12px auto;
+      max-width: 300px;
+    }
+    .batch-progress-bar {
+      background: #2563eb;
+      height: 8px;
+      border-radius: 9999px;
+      transition: width 0.3s;
+    }
+
+    /* ── Batch Review table ── */
+    .batch-table-wrap {
+      overflow-x: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      margin-bottom: 16px;
+    }
+    .batch-review-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      min-width: 1100px;
+    }
+    .batch-review-table thead th {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 10px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .batch-review-table tbody tr { border-bottom: 1px solid #f3f4f6; }
+    .batch-review-table tbody tr:last-child { border-bottom: none; }
+    .batch-review-table tbody tr.row-error { background: #fef2f2; }
+    .batch-review-table td { padding: 8px 10px; vertical-align: middle; }
+    .batch-review-table td.filename-cell {
+      font-size: 11px;
+      color: #4b5563;
+      max-width: 220px;
+      word-break: break-word;
+    }
+    .batch-review-table select {
+      font-size: 12px;
+      padding: 3px 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      min-width: 160px;
+      max-width: 200px;
+      background: #fff;
+      color: #111827;
+    }
+    .batch-review-table select.unmatched { border-color: #f59e0b; background: #fffbeb; }
+    .badge-dup {
+      background: #fef3c7;
+      color: #92400e;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-row-error {
+      background: #fee2e2;
+      color: #991b1b;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    /* ── Action bar ── */
+    .batch-action-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-top: 12px;
+    }
+    .btn-primary {
+      background: #1d4ed8;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 18px;
+      font-size: 13px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .batch-result-msg { font-size: 13px; color: #374151; }
+    .batch-result-msg.success { color: #16a34a; font-weight: 600; }
+    .batch-result-msg.error   { color: #dc2626; }
+
+    /* ── Review Queue action buttons ── */
+    .btn-sm-approve {
+      font-size: 12px; padding: 4px 10px;
+      background: #16a34a; color: #fff;
+      border: none; border-radius: 4px; cursor: pointer;
+      margin-right: 4px;
+    }
+    .btn-sm-approve:hover { background: #15803d; }
+    .btn-sm-reject {
+      font-size: 12px; padding: 4px 10px;
+      background: #fff; color: #dc2626;
+      border: 1px solid #dc2626; border-radius: 4px; cursor: pointer;
+    }
+    .btn-sm-reject:hover { background: #fef2f2; }
+    .btn-sm-confirm {
+      font-size: 12px; padding: 4px 10px;
+      background: #7c3aed; color: #fff;
+      border: none; border-radius: 4px; cursor: pointer;
+      margin-right: 4px;
+    }
+    .btn-sm-confirm:hover { background: #6d28d9; }
+
+    /* ── Help ── */
+    .help-section { max-width: 800px; }
+    .help-role-section { margin-bottom: 36px; }
+    .help-role-title {
+      font-size: 15px; font-weight: 700; color: #111827;
+      padding: 10px 0 8px;
+      border-bottom: 2px solid #e5e7eb;
+      margin-bottom: 16px;
+    }
+    .help-task { margin-bottom: 22px; }
+    .help-task-title {
+      font-size: 13px; font-weight: 700; color: #1d4ed8;
+      margin-bottom: 8px;
+    }
+    .help-task ol, .help-task ul {
+      padding-left: 20px; font-size: 13px;
+      color: #374151; line-height: 1.8;
+    }
+    .help-task p {
+      font-size: 13px; color: #374151;
+      line-height: 1.7; margin-bottom: 6px;
+    }
+    .video-placeholder {
+      background: #f3f4f6;
+      border: 2px dashed #d1d5db;
+      border-radius: 6px;
+      padding: 18px;
+      text-align: center;
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 10px;
+    }
+    .video-placeholder::before { content: "Video coming soon"; }
+  </style>
+</head>
+<body>
+
+<!-- ── Pod Banner ── -->
+<div class="banner-pod" id="podBanner"></div>
+
+<div class="page">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div class="header-left">
+      <h1>Insurance Compliance</h1>
+      <p>Rincon Management</p>
+    </div>
+    <div class="header-right">
+      <span id="userEmail" style="font-size:13px;color:#374151;font-weight:500"></span>
+      <span id="userRole" style="font-size:12px;color:#6b7280;margin-left:4px;margin-right:8px"></span>
+      <a href="/logout" style="font-size:12px;color:#6b7280;text-decoration:none;padding:6px 10px;border:1px solid #e5e7eb;border-radius:6px;margin-right:8px" title="Signs you out of the whole Rincon Hub, not just this section">Sign Out</a>
+      <button class="btn-batch" id="batchBtn">Batch Upload</button>
+      <span class="last-updated" id="lastUpdated">Loading&hellip;</span>
+      <button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>
+    </div>
+  </div>
+
+  <!-- ── Tab Bar ── -->
+  <div class="tab-bar">
+    <button class="tab-btn tab-active" id="tabDashboard" data-tab="dashboard">Dashboard</button>
+    <button class="tab-btn" id="tabReviewQueue" data-tab="review-queue">Review Queue</button>
+    <button class="tab-btn" id="tabUserMgmt" data-tab="user-management" style="display:none">Users</button>
+    <button class="tab-btn" id="tabHelp" data-tab="help">Help</button>
+  </div>
+
+  <!-- ── Dashboard Tab ── -->
+  <div id="tab-dashboard">
+
+    <!-- ── Summary Tiles ── -->
+    <div class="tiles">
+      <div class="tile tile-blue">
+        <div class="tile-number" id="tileTotal">&#8212;</div>
+        <div class="tile-label">Total Properties</div>
+      </div>
+      <div class="tile tile-green">
+        <div class="tile-number" id="tileCompliant">&#8212;</div>
+        <div class="tile-label">Compliant</div>
+      </div>
+      <div class="tile tile-amber">
+        <div class="tile-number" id="tileExpiring">&#8212;</div>
+        <div class="tile-label">Expiring &le;30 Days</div>
+      </div>
+      <div class="tile tile-red">
+        <div class="tile-number" id="tileExpired">&#8212;</div>
+        <div class="tile-label">Expired</div>
+      </div>
+      <div class="tile tile-gray">
+        <div class="tile-number" id="tilePending">&#8212;</div>
+        <div class="tile-label">No Policy / Pending</div>
+      </div>
+      <div class="tile tile-red" style="border: 2px solid #dc2626;">
+        <div class="tile-number" id="tileInsufficient" style="color:#dc2626">&#8212;</div>
+        <div class="tile-label" style="color:#dc2626;font-weight:700">&#9888; Low Liability</div>
+      </div>
+      <div class="tile tile-red" style="border: 2px solid #d97706;">
+        <div class="tile-number" id="tileNoAddl" style="color:#d97706">&#8212;</div>
+        <div class="tile-label" style="color:#d97706;font-weight:700">&#9888; No Add&apos;l Insured</div>
+      </div>
+    </div>
+
+    <!-- ── Search ── -->
+    <div style="margin-bottom:12px">
+      <input type="text" id="propertySearch" placeholder="Search by property, address, insurer, or owner&hellip;"
+        style="width:100%;max-width:480px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;outline:none">
+    </div>
+
+    <!-- ── Filters ── -->
+    <div class="filters">
+      <div class="filter-group">
+        <span class="filter-label">Pod</span>
+        <button class="filter-btn active" data-filter="pod" data-value="all">All</button>
+        <button class="filter-btn" data-filter="pod" data-value="Solimar">Solimar</button>
+        <button class="filter-btn" data-filter="pod" data-value="Faria">Faria</button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Status</span>
+        <button class="filter-btn active" data-filter="status" data-value="all">All</button>
+        <button class="filter-btn" data-filter="status" data-value="compliant">Compliant</button>
+        <button class="filter-btn" data-filter="status" data-value="expiring_soon">Expiring Soon</button>
+        <button class="filter-btn" data-filter="status" data-value="expired">Expired</button>
+        <button class="filter-btn" data-filter="status" data-value="pending_review">Pending Review</button>
+        <button class="filter-btn" data-filter="status" data-value="no_policy">No Policy</button>
+        <button class="filter-btn" data-filter="status" data-value="insufficient_liability" style="color:#dc2626;border-color:#dc2626;font-weight:700">&#9888; Low Liability</button>
+        <button class="filter-btn" data-filter="status" data-value="no_additional_insured" style="color:#d97706;border-color:#d97706;font-weight:700">&#9888; No Add&apos;l Insured</button>
+      </div>
+    </div>
+
+    <!-- ── Table ── -->
+    <div class="table-wrapper" id="tableWrapper">
+      <div class="spinner-wrap" id="loadingState">
+        <div class="spinner"></div><br>Loading insurance records&hellip;
+      </div>
+      <table id="mainTable" style="display:none">
+        <thead>
+          <tr>
+            <th data-col="property_name">Property <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="pod">Pod <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="policy_number">Policy # <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="insurer_name">Insurer <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="expiration_date">Expiry Date <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="days_left">Days Left <span class="sort-arrow">&#8593;</span></th>
+            <th data-col="coverage_amount">Premises Liability <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="additional_insured_verified">Add&apos;l Insured <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="coverage_amount_verified">Coverage OK <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="status">Status <span class="sort-arrow">&#8597;</span></th>
+            <th data-col="updated_at">Last Updated <span class="sort-arrow">&#8597;</span></th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+      <div id="emptyState" style="display:none"></div>
+      <div id="errorState" style="display:none"></div>
+    </div>
+
+  </div><!-- /tab-dashboard -->
+
+  <!-- ── Review Queue Tab ── -->
+  <div id="tab-review-queue" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h2 style="font-size:16px;font-weight:700">Review Queue</h2>
+      <button class="btn-refresh" id="queueRefreshBtn">&#8635; Refresh</button>
+    </div>
+    <div id="reviewQueueWrap">
+      <div class="spinner-wrap"><div class="spinner"></div><br>Loading&hellip;</div>
+    </div>
+  </div>
+
+  <!-- ── User Management Tab ── -->
+  <div id="tab-user-management" style="display:none">
+    <div style="max-width:700px">
+      <h2 style="font-size:16px;font-weight:700;margin-bottom:16px">User Access</h2>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:20px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px">Add a User</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="newUserEmail" type="email" placeholder="email@rinconmanagement.com"
+            style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+          <select id="newUserRole"
+            style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+            <option value="">Select role&hellip;</option>
+            <option value="inspection_coordinator">Inspection Coordinator</option>
+            <option value="property_manager">Property Manager</option>
+            <option value="director_of_operations">Director of Operations</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button id="addUserBtn" onclick="addUser()" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer">Add User</button>
+        </div>
+        <div id="addUserMsg" style="font-size:12px;margin-top:8px"></div>
+      </div>
+      <div id="usersTableWrap">
+        <div class="spinner-wrap"><div class="spinner"></div><br>Loading users&hellip;</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Help Tab ── -->
+  <div id="tab-help" style="display:none">
+    <div class="help-section">
+
+      <!-- Inspection Coordinator — always visible -->
+      <div class="help-role-section" id="help-inspection-coordinator">
+        <div class="help-role-title">Inspection Coordinator</div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to upload declaration pages</div>
+          <p>A declaration page is the first page of an insurance certificate. It shows the property address, the insurer, the policy number, and the expiration date. You upload these so the system can read and store them automatically.</p>
+          <ol>
+            <li>Click the blue <strong>Batch Upload</strong> button in the top-right corner of the page.</li>
+            <li>A window will appear. Click <strong>Click to select files</strong>, or drag your PDF or image files directly into the box. You can upload up to 50 files at once.</li>
+            <li>After selecting files, they will appear in a list below the box. You can remove any file by clicking the small X next to its name.</li>
+            <li>When your list is ready, click <strong>Upload &amp; Extract</strong>. The system will read each file and try to fill in the details automatically. This usually takes 10&ndash;30 seconds per file.</li>
+            <li>Once done, a review table appears. Check that each row shows the correct property. If the system guessed wrong, click the property name to search for the right one.</li>
+            <li>Check the <strong>Add&apos;l Insured</strong> checkbox if the insurance certificate shows Rincon Management as an Additional Insured.</li>
+            <li>When everything looks correct, click <strong>Save Selected</strong>. The records will go into the system with a status of &ldquo;Pending Review&rdquo; for your property manager to check.</li>
+          </ol>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to read the dashboard</div>
+          <p>The main dashboard shows all properties and their insurance status.</p>
+          <ul>
+            <li><strong>Green (Compliant)</strong> &mdash; the policy is current and meets all requirements.</li>
+            <li><strong>Orange (Expiring Soon)</strong> &mdash; the policy expires within 30 days. A renewal is needed.</li>
+            <li><strong>Red (Expired)</strong> &mdash; the policy has already expired.</li>
+            <li><strong>Gray (Pending Review)</strong> &mdash; the document was uploaded but has not been reviewed by a property manager yet.</li>
+            <li><strong>Red with border (Low Liability)</strong> &mdash; the coverage amount is below $500,000.</li>
+            <li><strong>Orange with border (No Add&apos;l Insured)</strong> &mdash; Rincon Management is not listed as an additional insured on the policy.</li>
+          </ul>
+          <p>Click on any row to see more details about that property&apos;s policy.</p>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">What to do when the system cannot find a property match</div>
+          <p>Sometimes the address on the insurance certificate is written differently from how it appears in our system. When this happens, the Property column will show a search box instead of a property name.</p>
+          <ol>
+            <li>Type the street number or a few words from the property address into the search box.</li>
+            <li>A dropdown list will appear with matching properties. Click the correct one.</li>
+            <li>If you are not sure which property it is, check the &ldquo;Address on Policy&rdquo; field shown in the extracted details column.</li>
+            <li>If you cannot find a match, leave that row unchecked and let your property manager know.</li>
+          </ol>
+          <div class="video-placeholder"></div>
+        </div>
+      </div>
+
+      <!-- Property Manager — visible for pm, director, admin -->
+      <div class="help-role-section" id="help-property-manager" style="display:none">
+        <div class="help-role-title">Property Manager</div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to review and approve a policy</div>
+          <p>After an inspection coordinator uploads a declaration page, it appears in the <strong>Review Queue</strong> tab with a status of &ldquo;Pending Review.&rdquo; Your job is to confirm that the policy is valid before it is marked as compliant.</p>
+          <ol>
+            <li>Click the <strong>Review Queue</strong> tab at the top of the page.</li>
+            <li>You will see a list of policies waiting for review. Each row shows the property, insurer, expiration date, and what the system thinks the status is.</li>
+            <li>If the policy looks correct and meets your requirements, click <strong>Approve</strong>. You can add a note if needed.</li>
+            <li>If the policy is compliant, it will be marked as such. If the system flagged it as non-compliant (expired, low liability, or missing additional insured), approving it will send the record to the Director of Operations for a second review.</li>
+            <li>If the document is wrong or was uploaded by mistake, click <strong>Reject</strong> and enter a brief reason.</li>
+          </ol>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to verify the Additional Insured and Coverage checkboxes</div>
+          <p>On the main dashboard, click any property row to expand it. You will see two checkboxes in the detail panel.</p>
+          <ul>
+            <li><strong>Additional Insured &mdash; Verified:</strong> Check this once you have confirmed that Rincon Management (or the correct entity) is listed as an additional insured on the policy document.</li>
+            <li><strong>Premises Liability &mdash; Verified:</strong> Check this once you have confirmed that the liability coverage amount meets the minimum requirement ($500,000).</li>
+          </ul>
+          <p>These checkboxes save automatically the moment you click them. No need to press a save button.</p>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">Understanding escalated policies</div>
+          <p>When a policy is flagged as non-compliant (expired, low liability, or no additional insured) and you approve it anyway, it becomes <strong>Escalated</strong>. This sends an email to the Director of Operations and places it in their review queue. You do not need to do anything further &mdash; the Director will take it from there.</p>
+          <div class="video-placeholder"></div>
+        </div>
+      </div>
+
+      <!-- Director of Operations — visible for director, admin -->
+      <div class="help-role-section" id="help-director-of-operations" style="display:none">
+        <div class="help-role-title">Director of Operations</div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to confirm a non-compliant policy</div>
+          <p>When a property manager approves a policy that the system flagged as non-compliant, it is escalated to you. You must review it and make a final decision.</p>
+          <ol>
+            <li>Click the <strong>Review Queue</strong> tab. Escalated records appear with a purple &ldquo;Escalated&rdquo; badge.</li>
+            <li>Review the property, insurer, expiration date, and coverage amount.</li>
+            <li>If you agree the policy is non-compliant and want to record it as such, click <strong>Confirm Non-Compliant</strong>. The record will be updated to its final status (Expired, Low Liability, or No Additional Insured).</li>
+            <li>If the document turns out to be a bad upload or duplicate, click <strong>Reject</strong> to remove it from the active records.</li>
+          </ol>
+          <p><strong>Note:</strong> Confirming non-compliant does not automatically contact the tenant. That is a separate step handled by the property manager or compliance team.</p>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">Understanding the escalation email</div>
+          <p>When a policy is escalated, you will receive an email at the DO email address on file. The email includes the property address, insurer, policy number, expiration date, coverage amount, and the AI-suggested status. You can then log in to the dashboard to take action.</p>
+          <div class="video-placeholder"></div>
+        </div>
+      </div>
+
+      <!-- Admin — admin only -->
+      <div class="help-role-section" id="help-admin" style="display:none">
+        <div class="help-role-title">Admin</div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to add a new user</div>
+          <p>Only people with a @rinconmanagement.com email can be added, and they need to have logged into the Rincon Hub at least once first (same shared email + password as every other hub tool &mdash; there is no separate sign-in for Insurance Compliance).</p>
+          <ol>
+            <li>Click the <strong>Users</strong> tab at the top of the page.</li>
+            <li>Type the person&apos;s full email address (must end in @rinconmanagement.com) into the email field.</li>
+            <li>Select their role from the dropdown:
+              <ul>
+                <li><strong>Inspection Coordinator</strong> &mdash; can upload documents and view the dashboard. Cannot approve or reject.</li>
+                <li><strong>Property Manager</strong> &mdash; can approve and reject policies in the review queue.</li>
+                <li><strong>Director of Operations</strong> &mdash; can confirm non-compliant policies after PM escalation.</li>
+                <li><strong>Admin</strong> &mdash; full access, including user management.</li>
+              </ul>
+            </li>
+            <li>Click <strong>Add User</strong>. The person can now open Insurance Compliance from the Rincon Hub home page &mdash; nothing else to set up.</li>
+          </ol>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to change someone&apos;s role</div>
+          <ol>
+            <li>Click the <strong>Users</strong> tab.</li>
+            <li>Find the person in the list. Their current role appears in a dropdown in the Role column.</li>
+            <li>Click the dropdown and select the new role. The change saves immediately.</li>
+          </ol>
+          <div class="video-placeholder"></div>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">How to remove a user</div>
+          <ol>
+            <li>Click the <strong>Users</strong> tab.</li>
+            <li>Find the person and click the red <strong>Remove</strong> button on their row.</li>
+            <li>Confirm the removal. They will no longer be able to open Insurance Compliance (they can still sign in to the Rincon Hub itself and use any other section they have access to).</li>
+          </ol>
+          <p>Note: You cannot remove your own account. If you need to remove yourself, ask another admin to do it.</p>
+          <div class="video-placeholder"></div>
+        </div>
+      </div>
+
+    </div>
+  </div><!-- /tab-help -->
+
+</div><!-- /page -->
+
+<!-- ── Batch Upload Modal ── -->
+<div class="modal-overlay" id="batchModal" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Batch Upload &mdash; Declaration Pages</span>
+      <button class="modal-close" id="batchModalClose" title="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <!-- Step 1: File picker -->
+      <div id="batchStep1">
+        <input type="file" id="batchFileInput" multiple accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+        <div class="batch-drop-zone" id="batchDropZone" tabindex="0" role="button" aria-label="Select files">
+          <strong>Click to select files</strong>
+          or drag and drop from Finder
+          <div class="batch-file-hint">PDF, JPG, PNG &mdash; up to 50 files, 20 MB each</div>
+          <div class="batch-file-hint" style="margin-top:4px">Hold <strong>&#8984; Cmd</strong> (Mac) or <strong>Ctrl</strong> (Windows) to select multiple files at once</div>
+        </div>
+        <ul class="batch-file-list" id="batchFileList" style="display:none"></ul>
+        <div class="batch-progress" id="batchProgress" style="display:none">
+          <div id="batchProgressMsg">Processing&hellip;</div>
+          <div class="batch-progress-bar-wrap">
+            <div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div>
+          </div>
+        </div>
+        <button class="btn-primary" id="batchUploadBtn" style="display:none">Upload &amp; Extract</button>
+      </div>
+      <!-- Step 2: Review table (injected by JS) -->
+      <div id="batchStep2" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const INSURANCE_API = '';
+
+  // The Rincon Hub's login gate (requireLogin) redirects an unauthenticated
+  // request to /login rather than returning a 401 — and fetch() follows
+  // redirects silently by default, so a session that expires mid-use would
+  // otherwise come back here as a plain 200 (the login page's HTML) instead
+  // of an error status. res.redirected catches that case so a
+  // still-open tab gets sent to sign in again instead of showing a
+  // confusing "could not load" message.
+  function sessionExpired(res) {
+    if (res.redirected) { window.location.href = '/login'; return true; }
+    return false;
+  }
+
+  // ── Auth ──────────────────────────────────────────────────────────────
+  // There is no more separate insurance-compliance sign-in. Reaching this
+  // page at all already means the Rincon Hub's shared login (email +
+  // password) approved you. The only question left to answer here is
+  // whether YOU specifically have a role in this particular tool — that's
+  // what /api/insurance/auth/me answers, and a 403 means "logged into the
+  // hub, but no role in Insurance Compliance yet."
+  let currentUser = null;
+
+  async function initAuth() {
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/auth/me', { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (res.status === 403) { showNoAccessMessage(); return; }
+      if (!res.ok) { window.location.href = '/login'; return; }
+      currentUser = await res.json();
+      document.getElementById('userEmail').textContent = currentUser.name || currentUser.email;
+      document.getElementById('userRole').textContent  = formatRole(currentUser.role);
+      applyRoleUI(currentUser.role);
+      setupPodFromUrl();
+      fetchData();
+      startAutoRefresh();
+    } catch (e) {
+      window.location.href = '/login';
+    }
+  }
+
+  function showNoAccessMessage() {
+    document.body.innerHTML =
+      '<div style="max-width:440px;margin:15vh auto;text-align:center;' +
+      'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;padding:0 20px">' +
+      '<h2 style="color:#111827;margin-bottom:8px">No access to Insurance Compliance</h2>' +
+      '<p style="color:#6b7280;font-size:14px;line-height:1.6">' +
+      'Your Rincon Hub account isn&rsquo;t set up for this section yet. Ask an admin to grant you access.</p>' +
+      '<p style="margin-top:16px"><a href="/" style="color:#2563eb;text-decoration:none;font-size:14px">&larr; Back to the Hub</a></p>' +
+      '</div>';
+  }
+
+  function formatRole(role) {
+    const map = {
+      admin: 'Admin',
+      director_of_operations: 'Director of Operations',
+      property_manager: 'Property Manager',
+      inspection_coordinator: 'Inspection Coordinator',
+    };
+    return map[role] || role;
+  }
+
+  function applyRoleUI(role) {
+    const queueTab = document.getElementById('tabReviewQueue');
+    if (queueTab && role === 'inspection_coordinator') queueTab.style.display = 'none';
+    const usersTab = document.getElementById('tabUserMgmt');
+    if (usersTab && role === 'admin') usersTab.style.display = '';
+    applyHelpSection(role);
+  }
+
+  function applyHelpSection(role) {
+    const order = ['inspection_coordinator', 'property_manager', 'director_of_operations', 'admin'];
+    const idx = order.indexOf(role);
+    order.forEach((r, i) => {
+      const el = document.getElementById('help-' + r.replace(/_/g, '-'));
+      if (el) el.style.display = i <= idx ? '' : 'none';
+    });
+  }
+
+  // ── State ────────────────────────────────────────────────────────────
+  let allRows = [];
+  let sortCol = 'days_left';
+  let sortDir = 'asc';
+  let filterPod    = 'all';
+  let filterStatus = 'all';
+  let filterSearch = '';
+  let expandedId = null;
+  let autoRefreshTimer = null;
+
+  // ── Init from URL params ─────────────────────────────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlPod = (urlParams.get('pod') || '').toLowerCase();
+  if (urlPod === 'solimar') filterPod = 'Solimar';
+  else if (urlPod === 'faria') filterPod = 'Faria';
+
+  // ── Helpers ──────────────────────────────────────────────────────────
+  function daysLeft(expirationDate) {
+    if (!expirationDate) return null;
+    const now = new Date();
+    const exp = new Date(expirationDate);
+    const diff = Math.floor((exp - now) / 86400000);
+    return diff;
+  }
+
+  function formatDate(dateStr) {
+    if (!dateStr) return '&#8212;';
+    const d = new Date(dateStr);
+    if (isNaN(d)) return '&#8212;';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function formatCurrency(amount) {
+    if (amount == null) return '&#8212;';
+    return '$' + Number(amount).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  }
+
+  function timeAgo(dateStr) {
+    if (!dateStr) return '&#8212;';
+    const d = new Date(dateStr);
+    if (isNaN(d)) return '&#8212;';
+    const secs = Math.floor((Date.now() - d) / 1000);
+    if (secs < 60) return 'Just now';
+    if (secs < 3600) return Math.floor(secs / 60) + ' min ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    const days = Math.floor(secs / 86400);
+    if (days === 1) return '1 day ago';
+    if (days < 30) return days + ' days ago';
+    if (days < 365) return Math.floor(days / 30) + ' mo ago';
+    return Math.floor(days / 365) + 'y ago';
+  }
+
+  function nowTimestamp() {
+    return new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  }
+
+  function boolCell(val) {
+    if (val === true) return '<span class="check">&#10003;</span>';
+    if (val === false) return '<span class="cross">&#10007;</span>';
+    return '<span class="dash">&#8212;</span>';
+  }
+
+  function daysCell(days) {
+    if (days === null) return '<span class="dash">&#8212;</span>';
+    if (days === 0) return '<span class="days-red">Today</span>';
+    if (days < 0) return '<span class="days-red">' + days + ' days</span>';
+    if (days <= 30) return '<span class="days-amber">' + days + ' days</span>';
+    return '<span class="days-green">' + days + ' days</span>';
+  }
+
+  function statusBadge(status) {
+    const map = {
+      compliant:               ['badge-compliant',              'Compliant'],
+      expiring_soon:           ['badge-expiring_soon',          'Expiring Soon'],
+      expired:                 ['badge-expired',                'Expired'],
+      pending_review:          ['badge-pending_review',         'Pending Review'],
+      escalated:               ['badge-escalated',              'Escalated'],
+      no_policy:               ['badge-no_policy',              'No Policy'],
+      insufficient_liability:  ['badge-insufficient_liability', '&#9888; Low Liability'],
+      no_additional_insured:   ['badge-no_additional_insured',  '&#9888; No Add\'l Insured'],
+    };
+    const [cls, label] = map[status] || ['badge-unknown', 'Unknown'];
+    return '<span class="badge ' + cls + '">' + label + '</span>';
+  }
+
+  // ── Escape HTML ────────────────────────────────────────────────────────
+  function esc(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Data fetch (via Express, not Supabase directly) ───────────────────
+  async function fetchData() {
+    showLoading();
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/records', { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (res.status === 401) { window.location.href = '/login'; return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const raw = await res.json();
+
+      if (!raw || raw.length === 0) {
+        allRows = [];
+        showError('No insurance records found. Upload a declaration page to get started.', false);
+        updateTiles([]);
+        document.getElementById('lastUpdated').textContent = 'Last updated: ' + nowTimestamp();
+        return;
+      }
+
+      allRows = raw.map(r => ({
+        ...r,
+        property_name:        r.properties ? r.properties.name    || '&#8212;' : '&#8212;',
+        pod:                  r.properties ? r.properties.pod     || '&#8212;' : '&#8212;',
+        property_address:     r.properties ? r.properties.address || '&#8212;' : '&#8212;',
+        appfolio_property_id: r.properties ? r.properties.appfolio_id || '&#8212;' : '&#8212;',
+        days_left: daysLeft(r.expiration_date),
+      }));
+
+      document.getElementById('lastUpdated').textContent = 'Last updated: ' + nowTimestamp();
+      updateTiles(allRows);
+      render();
+    } catch (err) {
+      console.error(err);
+      showError('Could not load data: ' + (err.message || 'Unknown error'), true);
+      document.getElementById('lastUpdated').textContent = 'Error loading data';
+    }
+  }
+
+  // ── Tiles ────────────────────────────────────────────────────────────
+  function updateTiles(rows) {
+    document.getElementById('tileTotal').textContent        = rows.length;
+    document.getElementById('tileCompliant').textContent    = rows.filter(r => r.status === 'compliant').length;
+    document.getElementById('tileInsufficient').textContent = rows.filter(r => r.status === 'insufficient_liability').length;
+    document.getElementById('tileNoAddl').textContent       = rows.filter(r => r.status === 'no_additional_insured').length;
+    document.getElementById('tileExpiring').textContent     = rows.filter(r => r.days_left !== null && r.days_left >= 0 && r.days_left <= 30).length;
+    document.getElementById('tileExpired').textContent      = rows.filter(r => r.status === 'expired' || (r.days_left !== null && r.days_left < 0)).length;
+    document.getElementById('tilePending').textContent      = rows.filter(r => r.status === 'no_policy' || r.status === 'pending_review').length;
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────
+  function render() {
+    hideAllStates();
+
+    let rows = [...allRows];
+
+    if (filterPod !== 'all') {
+      rows = rows.filter(r => (r.pod || '').toLowerCase() === filterPod.toLowerCase());
+    }
+
+    if (filterStatus !== 'all') {
+      rows = rows.filter(r => r.status === filterStatus);
+    }
+
+    if (filterSearch) {
+      const q = filterSearch.toLowerCase();
+      rows = rows.filter(r =>
+        (r.property_name        || '').toLowerCase().includes(q) ||
+        (r.property_address     || '').toLowerCase().includes(q) ||
+        (r.insurer_name         || '').toLowerCase().includes(q) ||
+        (r.named_insured        || '').toLowerCase().includes(q) ||
+        (r.policy_number        || '').toLowerCase().includes(q)
+      );
+    }
+
+    rows.sort((a, b) => {
+      let av = a[sortCol], bv = b[sortCol];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    document.querySelectorAll('thead th').forEach(th => {
+      const col = th.dataset.col;
+      th.classList.remove('sort-asc', 'sort-desc');
+      const arrow = th.querySelector('.sort-arrow');
+      if (col === sortCol) {
+        th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        if (arrow) arrow.textContent = sortDir === 'asc' ? '↑' : '↓';
+      } else {
+        if (arrow) arrow.textContent = '↕';
+      }
+    });
+
+    if (rows.length === 0) {
+      document.getElementById('mainTable').style.display = 'none';
+      const msg = allRows.length === 0
+        ? 'No insurance records found. Upload a declaration page to get started.'
+        : 'No properties match the current filters.';
+      showEmptyMsg(msg);
+      return;
+    }
+
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = '';
+
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = row.id;
+      if (expandedId === row.id) tr.classList.add('expanded');
+      if (row.status === 'insufficient_liability') tr.classList.add('row-insufficient');
+      if (row.status === 'no_additional_insured')  tr.classList.add('row-no-addl');
+
+      tr.innerHTML =
+        '<td class="property-name">' + esc(row.property_name) + '</td>' +
+        '<td class="pod-cell">' + esc(row.pod) + '</td>' +
+        '<td>' + esc(row.policy_number || '&#8212;') + '</td>' +
+        '<td>' + esc(row.insurer_name || '&#8212;') + '</td>' +
+        '<td>' + formatDate(row.expiration_date) + '</td>' +
+        '<td>' + daysCell(row.days_left) + '</td>' +
+        '<td>' + formatCurrency(row.coverage_amount) + '</td>' +
+        '<td style="text-align:center">' + boolCell(row.additional_insured_verified) + '</td>' +
+        '<td style="text-align:center">' + boolCell(row.coverage_amount_verified) + '</td>' +
+        '<td>' + statusBadge(row.status) + '</td>' +
+        '<td>' + timeAgo(row.updated_at) + '</td>';
+
+      tr.addEventListener('click', () => toggleDetail(row, tr));
+      tbody.appendChild(tr);
+
+      if (expandedId === row.id) {
+        injectDetailRow(row, tr);
+      }
+    });
+
+    document.getElementById('mainTable').style.display = '';
+  }
+
+  // ── Detail panel ─────────────────────────────────────────────────────
+  function toggleDetail(row, tr) {
+    expandedId = expandedId === row.id ? null : row.id;
+    render();
+  }
+
+  function injectDetailRow(row, afterTr) {
+    const detailTr = document.createElement('tr');
+    detailTr.className = 'detail-row';
+    const td = document.createElement('td');
+    td.colSpan = 11;
+
+    td.innerHTML =
+      '<div class="detail-panel">' +
+        '<dl><dt>Property Address</dt><dd>' + esc(row.property_address || '&#8212;') + '</dd></dl>' +
+        '<dl><dt>Named Insured</dt><dd>' + esc(row.named_insured || '&#8212;') + '</dd></dl>' +
+        '<dl><dt>Address on Policy</dt><dd>' + esc(row.property_address_on_policy || '&#8212;') + '</dd></dl>' +
+        '<dl><dt>Effective Date</dt><dd>' + formatDate(row.effective_date) + '</dd></dl>' +
+        '<dl><dt>Policy #</dt><dd>' + esc(row.policy_number || '&#8212;') + '</dd></dl>' +
+        '<dl><dt>Record Created</dt><dd>' + formatDate(row.created_at) + '</dd></dl>' +
+        '<dl><dt>Additional Insured</dt><dd><label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="additional_insured_verified"' + (row.additional_insured_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
+        '<dl><dt>Premises Liability</dt><dd>' + formatCurrency(row.coverage_amount) + ' &nbsp;<label style="cursor:pointer"><input type="checkbox" class="compliance-cb" data-id="' + esc(row.id) + '" data-field="coverage_amount_verified"' + (row.coverage_amount_verified ? ' checked' : '') + '> Verified</label></dd></dl>' +
+        (row.notes ? '<dl><dt>Notes</dt><dd class="notes-text">' + esc(row.notes) + '</dd></dl>' : '') +
+        '<dl><dt>Declaration Page</dt><dd>' + (row.document_id
+          ? '<a class="detail-link" href="' + INSURANCE_API + '/api/insurance/document/' + esc(row.document_id) + '" target="_blank">View ↗</a>' +
+            '&nbsp;&nbsp;<a class="btn-appfolio-dl" href="' + INSURANCE_API + '/api/insurance/document/' + esc(row.document_id) + '/download">&#8595; Download for AppFolio</a>'
+          : '<span style="color:#9ca3af">No document on file</span>') + '</dd></dl>' +
+        '<div class="notes-section">' +
+          '<div class="notes-header">Team Notes</div>' +
+          '<div class="notes-list" id="notes-list-' + esc(row.id) + '"><span style="color:#9ca3af;font-size:12px">Loading…</span></div>' +
+          '<div class="notes-add">' +
+            '<textarea class="notes-textarea" id="notes-input-' + esc(row.id) + '" placeholder="Add a note…" rows="2"></textarea>' +
+            '<button class="btn-add-note" data-id="' + esc(row.id) + '">Add Note</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    detailTr.appendChild(td);
+    afterTr.insertAdjacentElement('afterend', detailTr);
+
+    // Wire up Add Note button
+    var addNoteBtn = detailTr.querySelector('.btn-add-note');
+    if (addNoteBtn) {
+      addNoteBtn.addEventListener('click', function() { addNote(this.dataset.id); });
+    }
+    loadNotes(row.id);
+
+    detailTr.querySelectorAll('.compliance-cb').forEach(function(cb) {
+      cb.addEventListener('change', async function() {
+        var id    = this.dataset.id;
+        var field = this.dataset.field;
+        var value = this.checked;
+        var label = this.parentElement;
+        label.style.opacity = '0.5';
+        try {
+          var resp = await fetch(INSURANCE_API + '/api/insurance/policy/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ [field]: value }),
+          });
+          if (!resp.ok) throw new Error('Save failed');
+          label.style.opacity = '';
+        } catch (err) {
+          this.checked = !value;
+          label.style.opacity = '';
+          alert('Could not save — please try again.');
+        }
+      });
+    });
+  }
+
+  // ── UI states ─────────────────────────────────────────────────────────
+  function showLoading() {
+    document.getElementById('loadingState').style.display = '';
+    document.getElementById('mainTable').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+  }
+
+  function hideAllStates() {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('errorState').style.display = 'none';
+  }
+
+  function showEmptyMsg(msg) {
+    const el = document.getElementById('emptyState');
+    el.className = 'state-message';
+    el.innerHTML = '<strong>No results</strong>' + esc(msg);
+    el.style.display = '';
+  }
+
+  function showError(msg, isError) {
+    const el = document.getElementById('errorState');
+    el.className = 'state-message' + (isError ? ' error' : '');
+    el.innerHTML = '<strong>' + (isError ? 'Could not load data' : 'No data available') + '</strong>' + esc(msg);
+    el.style.display = '';
+    document.getElementById('mainTable').style.display = 'none';
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+  }
+
+  // ── Column sort ────────────────────────────────────────────────────────
+  document.querySelectorAll('thead th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (sortCol === col) {
+        sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortCol = col;
+        sortDir = 'asc';
+      }
+      expandedId = null;
+      render();
+    });
+  });
+
+  // ── Filter buttons ─────────────────────────────────────────────────────
+  document.getElementById('propertySearch').addEventListener('input', function() {
+    filterSearch = this.value.trim();
+    render();
+  });
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.filter;
+      const value = btn.dataset.value;
+      btn.closest('.filter-group').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (filter === 'pod') filterPod = value;
+      if (filter === 'status') filterStatus = value;
+      expandedId = null;
+      render();
+    });
+  });
+
+  // ── Refresh button ─────────────────────────────────────────────────────
+  document.getElementById('refreshBtn').addEventListener('click', () => {
+    expandedId = null;
+    fetchData();
+  });
+
+  // ── Pod banner & active pod filter button from URL ────────────────────
+  function setupPodFromUrl() {
+    if (filterPod === 'all') return;
+    const banner = document.getElementById('podBanner');
+    banner.textContent = 'Showing: ' + filterPod + ' Team';
+    banner.classList.add('visible');
+    document.querySelectorAll('[data-filter="pod"]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.value === filterPod);
+    });
+  }
+
+  // ── Auto-refresh every 5 minutes ──────────────────────────────────────
+  function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(() => {
+      expandedId = null;
+      fetchData();
+    }, 5 * 60 * 1000);
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────
+  function showTab(tabName) {
+    ['dashboard', 'review-queue', 'user-management', 'help'].forEach(t => {
+      document.getElementById('tab-' + t).style.display = t === tabName ? '' : 'none';
+    });
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.classList.toggle('tab-active', btn.dataset.tab === tabName);
+    });
+    if (tabName === 'review-queue') loadReviewQueue();
+    if (tabName === 'user-management') loadUserManagement();
+  }
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => showTab(btn.dataset.tab));
+  });
+
+  // ── Review Queue ─────────────────────────────────────────────────────
+  document.getElementById('queueRefreshBtn').addEventListener('click', loadReviewQueue);
+
+  async function loadReviewQueue() {
+    const wrap = document.getElementById('reviewQueueWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div><br>Loading review queue…</div>';
+
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/review-queue', { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (res.status === 401) { window.location.href = '/login'; return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const records = await res.json();
+
+      if (!records.length) {
+        wrap.innerHTML = '<div class="state-message"><strong>All clear</strong>No policies are waiting for review right now.</div>';
+        return;
+      }
+
+      const canApprove = currentUser && ['admin', 'director_of_operations', 'property_manager'].includes(currentUser.role);
+      const canConfirm = currentUser && ['admin', 'director_of_operations'].includes(currentUser.role);
+
+      let html = '<div class="table-wrapper"><table style="min-width:800px"><thead><tr>' +
+        '<th>Property</th><th>Policy #</th><th>Insurer</th><th>Expiry</th>' +
+        '<th>AI Status</th><th>Queue Status</th><th>Uploaded</th><th>Actions</th>' +
+        '</tr></thead><tbody>';
+
+      records.forEach(rec => {
+        const propName = (rec.properties && rec.properties.name) || rec.property_address_on_policy || '&#8212;';
+        html += '<tr>' +
+          '<td class="property-name">' + esc(propName) + '</td>' +
+          '<td>' + esc(rec.policy_number || '&#8212;') + '</td>' +
+          '<td>' + esc(rec.insurer_name || '&#8212;') + '</td>' +
+          '<td>' + formatDate(rec.expiration_date) + '</td>' +
+          '<td>' + statusBadge(rec.ai_suggested_status || 'unknown') + '</td>' +
+          '<td>' + statusBadge(rec.status) + '</td>' +
+          '<td>' + timeAgo(rec.created_at) + '</td>' +
+          '<td style="white-space:nowrap">';
+
+        if (canApprove && rec.status === 'pending_review') {
+          html += '<button class="btn-sm-approve" data-id="' + esc(rec.id) + '" data-action="approve">Approve</button>' +
+                  '<button class="btn-sm-reject"  data-id="' + esc(rec.id) + '" data-action="reject">Reject</button>';
+        }
+        if (canConfirm && rec.status === 'escalated') {
+          html += '<button class="btn-sm-confirm" data-id="' + esc(rec.id) + '" data-action="escalate-confirm">Confirm Non-Compliant</button>' +
+                  '<button class="btn-sm-reject"  data-id="' + esc(rec.id) + '" data-action="reject">Reject</button>';
+        }
+
+        html += '</td></tr>';
+      });
+
+      html += '</tbody></table></div>';
+      wrap.innerHTML = html;
+
+      wrap.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', () => doQueueAction(btn.dataset.action, btn.dataset.id));
+      });
+
+    } catch (err) {
+      wrap.innerHTML = '<div class="state-message error"><strong>Could not load review queue</strong>' + esc(err.message) + '</div>';
+    }
+  }
+
+  async function doQueueAction(action, id) {
+    const reviewer_name = currentUser ? (currentUser.name || currentUser.email) : 'Unknown';
+    let body = { reviewer_name };
+
+    if (action === 'reject') {
+      const reason = prompt('Reason for rejection (optional):');
+      if (reason === null) return; // cancelled
+      body.reason = reason || '';
+    } else {
+      const notes = prompt('Notes (optional):');
+      if (notes === null) return; // cancelled
+      body.reviewer_notes = notes || '';
+    }
+
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/' + action + '/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert('Error: ' + (data.error || 'Unknown error'));
+        return;
+      }
+      loadReviewQueue();
+    } catch (err) {
+      alert('Network error: ' + err.message);
+    }
+  }
+
+  // ── User Management ───────────────────────────────────────────────────
+  async function loadUserManagement() {
+    const wrap = document.getElementById('usersTableWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div><br>Loading users…</div>';
+
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/users', { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (res.status === 401) { window.location.href = '/login'; return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const users = await res.json();
+
+      if (!users.length) {
+        wrap.innerHTML = '<div class="state-message"><strong>No users</strong>No users found.</div>';
+        return;
+      }
+
+      const validRoles = ['inspection_coordinator', 'property_manager', 'director_of_operations', 'admin'];
+
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+        '<thead><tr style="border-bottom:1px solid #e5e7eb">' +
+        '<th style="text-align:left;padding:8px 12px;font-size:11px;color:#6b7280;text-transform:uppercase;font-weight:600">Email</th>' +
+        '<th style="text-align:left;padding:8px 12px;font-size:11px;color:#6b7280;text-transform:uppercase;font-weight:600">Role</th>' +
+        '<th style="text-align:left;padding:8px 12px;font-size:11px;color:#6b7280;text-transform:uppercase;font-weight:600">Access Granted</th>' +
+        '<th style="text-align:left;padding:8px 12px;font-size:11px;color:#6b7280;text-transform:uppercase;font-weight:600">Actions</th>' +
+        '</tr></thead><tbody>';
+
+      users.forEach(user => {
+        const isMe = currentUser && user.email === currentUser.email;
+        html += '<tr style="border-bottom:1px solid #f3f4f6">' +
+          '<td style="padding:10px 12px">' + esc(user.email) + (isMe ? ' <span style="font-size:11px;color:#6b7280">(you)</span>' : '') + '</td>' +
+          '<td style="padding:10px 12px">' +
+          '<select class="role-select" data-email="' + esc(user.email) + '" style="font-size:13px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px">' +
+          validRoles.map(r =>
+            '<option value="' + r + '"' + (r === user.role ? ' selected' : '') + '>' + formatRole(r) + '</option>'
+          ).join('') +
+          '</select></td>' +
+          '<td style="padding:10px 12px;color:#6b7280">' + (user.granted_at ? timeAgo(user.granted_at) : '—') + '</td>' +
+          '<td style="padding:10px 12px">' +
+          (!isMe
+            ? '<button class="btn-sm-reject btn-remove-user" data-email="' + esc(user.email) + '" style="font-size:12px">Remove</button>'
+            : '') +
+          '</td></tr>';
+      });
+
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+
+      wrap.querySelectorAll('.role-select').forEach(sel => {
+        sel.addEventListener('change', async function() {
+          const email = this.dataset.email;
+          const role = this.value;
+          try {
+            const res = await fetch(INSURANCE_API + '/api/insurance/users/' + encodeURIComponent(email), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ role }),
+            });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              alert('Error: ' + (data.error || 'Could not update role'));
+              loadUserManagement();
+            }
+          } catch (err) {
+            alert('Network error: ' + err.message);
+            loadUserManagement();
+          }
+        });
+      });
+
+      wrap.querySelectorAll('.btn-remove-user').forEach(btn => {
+        btn.addEventListener('click', async function() {
+          const email = this.dataset.email;
+          if (!confirm('Remove access for ' + email + '?')) return;
+          try {
+            const res = await fetch(INSURANCE_API + '/api/insurance/users/' + encodeURIComponent(email), {
+              method: 'DELETE',
+              credentials: 'include',
+            });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              alert('Error: ' + (data.error || 'Could not remove user'));
+            } else {
+              loadUserManagement();
+            }
+          } catch (err) {
+            alert('Network error: ' + err.message);
+          }
+        });
+      });
+
+    } catch (err) {
+      wrap.innerHTML = '<div class="state-message error"><strong>Could not load users</strong>' + esc(err.message) + '</div>';
+    }
+  }
+
+  async function addUser() {
+    const email = document.getElementById('newUserEmail').value.trim();
+    const role  = document.getElementById('newUserRole').value;
+    const msgEl = document.getElementById('addUserMsg');
+
+    if (!email || !role) {
+      msgEl.style.color = '#dc2626';
+      msgEl.textContent = 'Please enter an email and select a role.';
+      return;
+    }
+
+    msgEl.style.color = '#6b7280';
+    msgEl.textContent = 'Adding…';
+
+    try {
+      const res = await fetch(INSURANCE_API + '/api/insurance/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email, role }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        msgEl.style.color = '#16a34a';
+        msgEl.textContent = email + ' added successfully.';
+        document.getElementById('newUserEmail').value = '';
+        document.getElementById('newUserRole').value  = '';
+        loadUserManagement();
+      } else {
+        msgEl.style.color = '#dc2626';
+        msgEl.textContent = data.error || 'Could not add user.';
+      }
+    } catch (err) {
+      msgEl.style.color = '#dc2626';
+      msgEl.textContent = 'Network error: ' + err.message;
+    }
+  }
+
+  // ── Notes ─────────────────────────────────────────────────────────────
+  async function loadNotes(insuranceId) {
+    var el = document.getElementById('notes-list-' + insuranceId);
+    if (!el) return;
+    try {
+      var res = await fetch(INSURANCE_API + '/api/insurance/notes/' + insuranceId, { credentials: 'include' });
+      var notes = await res.json();
+      if (!notes.length) {
+        el.innerHTML = '<span style="color:#9ca3af;font-size:12px">No notes yet.</span>';
+        return;
+      }
+      el.innerHTML = notes.map(function(n) {
+        return '<div class="note-item">' +
+          '<div class="note-meta">' + esc(n.created_by) + ' &middot; ' + timeAgo(n.created_at) + '</div>' +
+          '<div class="note-text">' + esc(n.note) + '</div>' +
+        '</div>';
+      }).join('');
+    } catch(e) {
+      el.innerHTML = '<span style="color:#dc2626;font-size:12px">Could not load notes.</span>';
+    }
+  }
+
+  async function addNote(insuranceId) {
+    var input = document.getElementById('notes-input-' + insuranceId);
+    if (!input) return;
+    var note = input.value.trim();
+    if (!note) return;
+    var btn = document.querySelector('.btn-add-note[data-id="' + insuranceId + '"]');
+    if (btn) btn.disabled = true;
+    try {
+      var res = await fetch(INSURANCE_API + '/api/insurance/notes/' + insuranceId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ note: note }),
+      });
+      if (res.ok) {
+        input.value = '';
+        loadNotes(insuranceId);
+      } else {
+        alert('Could not save note — please try again.');
+      }
+    } catch(e) {
+      alert('Network error: ' + e.message);
+    }
+    if (btn) btn.disabled = false;
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  initAuth();
+
+  // ── Batch Upload ──────────────────────────────────────────────────────
+  let batchItems      = [];
+  let batchProperties = [];
+  let batchFiles      = [];
+
+  document.getElementById('batchBtn').addEventListener('click', openBatchModal);
+  document.getElementById('batchModalClose').addEventListener('click', closeBatchModal);
+
+  function openBatchModal() {
+    resetBatchModal();
+    document.getElementById('batchModal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    fetch(INSURANCE_API + '/api/insurance/properties', { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => { batchProperties = Array.isArray(data) ? data : []; })
+      .catch(() => { batchProperties = []; });
+  }
+
+  function closeBatchModal() {
+    document.getElementById('batchModal').style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  function resetBatchModal() {
+    batchItems = [];
+    batchFiles = [];
+    document.getElementById('batchStep1').style.display = '';
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchFileList').style.display = 'none';
+    document.getElementById('batchFileList').innerHTML = '';
+    document.getElementById('batchProgress').style.display = 'none';
+    document.getElementById('batchUploadBtn').style.display = 'none';
+    document.getElementById('batchUploadBtn').disabled = false;
+    var fi = document.getElementById('batchFileInput');
+    fi.value = '';
+  }
+
+  var dropZone  = document.getElementById('batchDropZone');
+  var fileInput = document.getElementById('batchFileInput');
+
+  dropZone.addEventListener('click', function() { fileInput.click(); });
+  dropZone.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') fileInput.click();
+  });
+  dropZone.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', function() {
+    dropZone.classList.remove('drag-over');
+  });
+  dropZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    onFilesSelected(Array.from(e.dataTransfer.files));
+  });
+  fileInput.addEventListener('change', function() {
+    onFilesSelected(Array.from(fileInput.files));
+  });
+
+  function onFilesSelected(files) {
+    var valid = files.filter(function(f) { return /\.(pdf|jpg|jpeg|png)$/i.test(f.name); });
+    if (!valid.length) return;
+    var existing = new Set(batchFiles.map(function(f) { return f.name; }));
+    valid.forEach(function(f) {
+      if (!existing.has(f.name) && batchFiles.length < 50) {
+        batchFiles.push(f);
+        existing.add(f.name);
+      }
+    });
+    var listEl = document.getElementById('batchFileList');
+    listEl.innerHTML = batchFiles.map(function(f, i) {
+      return '<li style="display:flex;align-items:center;gap:6px">&#128196; ' + esc(f.name) +
+        ' <span style="color:#9ca3af">(' + (f.size / 1048576).toFixed(1) + ' MB)</span>' +
+        ' <a href="#" style="color:#9ca3af;font-size:11px;margin-left:auto" data-remove="' + i + '">✕</a></li>';
+    }).join('');
+    listEl.querySelectorAll('[data-remove]').forEach(function(a) {
+      a.addEventListener('click', function(e) {
+        e.preventDefault();
+        batchFiles.splice(parseInt(this.dataset.remove, 10), 1);
+        onFilesSelected([]);
+      });
+    });
+    listEl.style.display = '';
+    document.getElementById('batchUploadBtn').style.display = batchFiles.length ? '' : 'none';
+  }
+
+  document.getElementById('batchUploadBtn').addEventListener('click', runBatchUpload);
+
+  function fileToBase64(file) {
+    return new Promise(function(resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function() {
+        var b64 = reader.result.split(',')[1];
+        resolve({ base64: b64, mimeType: file.type || 'application/octet-stream' });
+      };
+      reader.onerror = function() { reject(new Error('FileReader error')); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function runBatchUpload() {
+    document.getElementById('batchUploadBtn').disabled = true;
+    document.getElementById('batchProgress').style.display = '';
+    batchItems = [];
+    var total = batchFiles.length;
+
+    for (var i = 0; i < total; i++) {
+      var file = batchFiles[i];
+      document.getElementById('batchProgressMsg').textContent =
+        'Processing ' + (i + 1) + ' of ' + total + ' — ' + file.name + '…';
+      document.getElementById('batchProgressBar').style.width =
+        Math.round((i / total) * 100) + '%';
+
+      try {
+        var fd = new FormData();
+        fd.append('files', file);
+        var resp = await fetch(INSURANCE_API + '/api/insurance/batch-upload', {
+          method: 'POST',
+          credentials: 'include',
+          body: fd,
+        });
+        if (sessionExpired(resp)) return;
+        if (resp.status === 401) { window.location.href = '/login'; return; }
+        var data = await resp.json();
+        var results = (data.results && data.results.length) ? data.results : [{
+          original_filename:   file.name,
+          clean_filename:      null,
+          file_base64:         null,
+          file_mime_type:      null,
+          extracted:           null,
+          matched_property:    null,
+          has_existing_policy: false,
+          error:               'Server returned no result',
+        }];
+        results.forEach(function(result) {
+          batchItems.push(Object.assign({}, result, {
+            fileBase64:   result.file_base64   || null,
+            fileMimeType: result.file_mime_type || 'application/pdf',
+          }));
+        });
+      } catch(err) {
+        batchItems.push({
+          original_filename:   file.name,
+          clean_filename:      null,
+          extracted:           null,
+          matched_property:    null,
+          has_existing_policy: false,
+          error:               err.message || 'Upload failed',
+          fileBase64:          null,
+          fileMimeType:        'application/pdf',
+        });
+      }
+    }
+
+    document.getElementById('batchProgressBar').style.width = '100%';
+    document.getElementById('batchProgressMsg').textContent = 'Extraction complete. Review below.';
+    document.getElementById('batchStep1').style.display = 'none';
+    document.getElementById('batchStep2').style.display = '';
+    renderBatchReviewTable();
+  }
+
+  function renderBatchReviewTable() {
+    var step2 = document.getElementById('batchStep2');
+    var html = '<div class="batch-table-wrap"><table class="batch-review-table"><thead><tr>' +
+      '<th style="width:32px">Include</th>' +
+      '<th>File</th>' +
+      '<th>Property</th>' +
+      '<th>Insurer</th>' +
+      '<th>Effective</th>' +
+      '<th>Expiry</th>' +
+      '<th>Premises Liability</th>' +
+      '<th style="text-align:center">Add\'l Insured</th>' +
+      '<th style="text-align:center">Liability Met</th>' +
+      '<th>Status</th>' +
+      '</tr></thead><tbody>';
+
+    batchItems.forEach(function(item, i) {
+      var hasError = !!item.error;
+      var hasExtractionFailed = !hasError && !!item.extraction_failed;
+      html += '<tr' + (hasError || hasExtractionFailed ? ' class="row-error"' : '') + '>';
+
+      var cbDisabled = (hasError || !item.fileBase64) ? ' disabled' : '';
+      html += '<td style="text-align:center"><input type="checkbox" id="row-cb-' + i + '"' +
+        cbDisabled + (cbDisabled ? '' : ' checked') + '></td>';
+
+      html += '<td class="filename-cell">' + esc(item.clean_filename || item.original_filename || '&#8212;') +
+        (!hasError && item.fileBase64 ? ' <a href="#" class="detail-link batch-preview-link" data-idx="' + i + '" style="font-size:11px;white-space:nowrap">View ↗</a>' : '') +
+        '</td>';
+
+      if (!hasError && item.matched_property) {
+        var mp = item.matched_property;
+        html += '<td>' +
+          '<div id="row-prop-label-' + i + '" style="font-size:12px">' +
+            '<strong>' + esc(mp.name || mp.address) + '</strong>' +
+            ' <a href="#" class="detail-link prop-change-link" data-idx="' + i + '" style="font-size:11px">Change</a>' +
+          '</div>' +
+          '<input type="hidden" id="row-prop-' + i + '" value="' + esc(mp.id) + '" data-appfolio="' + esc(mp.appfolio_id || '') + '">' +
+          '<div id="row-prop-search-' + i + '" style="display:none;margin-top:4px">' +
+            '<input type="text" class="prop-search-input" data-idx="' + i + '" placeholder="Type to search…" style="width:160px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
+            '<div class="prop-search-results" id="row-prop-results-' + i + '" style="max-height:140px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;background:#fff;font-size:12px;position:absolute;z-index:99;width:200px"></div>' +
+          '</div>' +
+        '</td>';
+      } else {
+        html += '<td>' +
+          '<input type="hidden" id="row-prop-' + i + '" value="" data-appfolio="">' +
+          '<div id="row-prop-search-' + i + '" style="margin-top:0">' +
+            '<input type="text" class="prop-search-input" data-idx="' + i + '" placeholder="Type to search…"' + (hasError ? ' disabled' : '') + ' style="width:160px;font-size:12px;padding:3px 5px;border:1px solid #f59e0b;border-radius:4px">' +
+            '<div class="prop-search-results" id="row-prop-results-' + i + '" style="max-height:140px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;background:#fff;font-size:12px;position:absolute;z-index:99;width:200px"></div>' +
+          '</div>' +
+        '</td>';
+      }
+
+      var ex = item.extracted || {};
+      var dis = hasError ? ' disabled' : '';
+
+      html += '<td><input type="text" id="row-insurer-' + i + '" value="' + esc(ex.insurer_name || '') + '" placeholder="Insurer name"' + dis + ' style="width:140px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+      html += '<td><input type="date" id="row-eff-' + i + '" value="' + esc(ex.effective_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+      html += '<td><input type="date" id="row-exp-' + i + '" value="' + esc(ex.expiration_date || '') + '"' + dis + ' style="font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px"></td>';
+
+      var cov = ex.coverage_amount != null ? Number(ex.coverage_amount) : null;
+      var covColor = cov == null ? '#9ca3af' : cov >= 500000 ? '#16a34a' : '#dc2626';
+      var covLabel = cov == null ? 'Not found' : cov >= 1000000 ? '✓ $' + (cov/1000000).toFixed(cov%1000000===0?0:1) + 'M' : cov >= 500000 ? '✓ $' + (cov/1000).toFixed(0) + 'K' : '⚠ $' + cov.toLocaleString();
+      html += '<td><input type="number" id="row-cov-amt-' + i + '" value="' + (cov != null ? cov : '') + '" placeholder="Premises liability amt"' + dis + ' style="width:100px;font-size:12px;padding:3px 5px;border:1px solid #d1d5db;border-radius:4px">' +
+        '<div id="row-cov-lbl-' + i + '" style="font-size:11px;color:' + covColor + ';margin-top:2px">' + covLabel + '</div></td>';
+
+      html += '<td style="text-align:center"><input type="checkbox" id="row-ai-' + i + '"' + dis + '></td>';
+
+      var covMet = cov != null && cov >= 500000;
+      html += '<td style="text-align:center"><input type="checkbox" id="row-covmet-' + i + '"' + dis + (covMet ? ' checked' : '') + '>' +
+        (cov != null && cov < 500000 ? '<div style="font-size:10px;color:#dc2626;margin-top:2px">Below min</div>' : '') + '</td>';
+
+      var badges = '';
+      if (hasError)
+        badges = '<span class="badge-row-error">Error: ' + esc((item.error || '').substring(0, 60)) + '</span>';
+      else if (item.has_existing_policy)
+        badges = '<span class="badge-dup">Duplicate</span>';
+      else
+        badges = '<span style="color:#16a34a;font-weight:600;font-size:11px">Ready</span>';
+      html += '<td>' + badges + '</td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+    html += '<div class="batch-action-bar">' +
+      '<button class="btn-primary" id="batchSaveBtn">Save Selected</button>' +
+      '<span class="batch-result-msg" id="batchResultMsg"></span>' +
+      '</div>';
+
+    step2.innerHTML = html;
+
+    batchItems.forEach(function(item, i) {
+      var amtInput = document.getElementById('row-cov-amt-' + i);
+      var lbl      = document.getElementById('row-cov-lbl-' + i);
+      var covMet   = document.getElementById('row-covmet-'  + i);
+      if (!amtInput || !lbl || !covMet) return;
+      amtInput.addEventListener('input', function() {
+        var v = parseFloat(this.value);
+        if (isNaN(v) || !this.value) {
+          lbl.style.color = '#9ca3af'; lbl.textContent = 'Not found';
+          covMet.checked = false; return;
+        }
+        if (v >= 1000000) {
+          lbl.style.color = '#16a34a'; lbl.textContent = '✓ $' + (v/1000000).toFixed(v%1000000===0?0:1) + 'M';
+        } else if (v >= 500000) {
+          lbl.style.color = '#16a34a'; lbl.textContent = '✓ $' + (v/1000).toFixed(0) + 'K';
+        } else {
+          lbl.style.color = '#dc2626'; lbl.textContent = '⚠ $' + v.toLocaleString() + ' — Below min';
+        }
+        covMet.checked = v >= 500000;
+      });
+    });
+
+    document.querySelectorAll('.batch-preview-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var idx  = parseInt(this.dataset.idx, 10);
+        var item = batchItems[idx];
+        if (!item || !item.fileBase64) return;
+        var mime = item.fileMimeType || 'application/pdf';
+        var raw  = atob(item.fileBase64);
+        var buf  = new Uint8Array(raw.length);
+        for (var b = 0; b < raw.length; b++) buf[b] = raw.charCodeAt(b);
+        var blob = new Blob([buf], { type: mime });
+        var url  = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+      });
+    });
+
+    document.getElementById('batchSaveBtn').addEventListener('click', runBatchSave);
+
+    document.querySelectorAll('.prop-change-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var idx = parseInt(this.dataset.idx, 10);
+        document.getElementById('row-prop-label-'  + idx).style.display  = 'none';
+        document.getElementById('row-prop-search-' + idx).style.display  = '';
+        var inp = document.querySelector('#row-prop-search-' + idx + ' input[type=text]');
+        if (inp) inp.focus();
+      });
+    });
+
+    document.querySelectorAll('.prop-search-input').forEach(function(inp) {
+      inp.addEventListener('input', function() {
+        var idx   = parseInt(this.dataset.idx, 10);
+        var query = this.value.toLowerCase().trim();
+        var res   = document.getElementById('row-prop-results-' + idx);
+        if (!query) { res.innerHTML = ''; return; }
+        var matches = batchProperties.filter(function(p) {
+          return (p.name || '').toLowerCase().includes(query) ||
+                 (p.address || '').toLowerCase().includes(query);
+        }).slice(0, 8);
+        if (!matches.length) {
+          res.innerHTML = '<div style="padding:6px 8px;color:#9ca3af">No match</div>';
+          return;
+        }
+        res.innerHTML = matches.map(function(p) {
+          return '<div class="prop-result-item" data-id="' + esc(p.id) +
+                 '" data-appfolio="' + esc(p.appfolio_id || '') +
+                 '" data-name="' + esc(p.name || p.address) +
+                 '" data-idx="' + idx +
+                 '" style="padding:6px 8px;cursor:pointer">' +
+                 esc(p.name || p.address) + '</div>';
+        }).join('');
+        res.querySelectorAll('.prop-result-item').forEach(function(item) {
+          item.addEventListener('click', function() {
+            var i    = parseInt(this.dataset.idx, 10);
+            var name = this.dataset.name;
+            var hidden = document.getElementById('row-prop-' + i);
+            hidden.value               = this.dataset.id;
+            hidden.dataset.appfolio    = this.dataset.appfolio;
+            var labelDiv = document.getElementById('row-prop-label-' + i);
+            if (labelDiv) {
+              labelDiv.innerHTML = '<strong>' + esc(name) + '</strong>' +
+                ' <a href="#" class="detail-link prop-change-link" data-idx="' + i + '" style="font-size:11px">Change</a>';
+              labelDiv.style.display = '';
+              labelDiv.querySelector('.prop-change-link').addEventListener('click', function(e) {
+                e.preventDefault();
+                labelDiv.style.display = 'none';
+                document.getElementById('row-prop-search-' + i).style.display = '';
+                document.querySelector('#row-prop-search-' + i + ' input[type=text]').focus();
+              });
+            } else {
+              inp.value = name;
+            }
+            document.getElementById('row-prop-search-' + i).style.display = labelDiv ? 'none' : '';
+            res.innerHTML = '';
+          });
+          item.addEventListener('mouseenter', function() { this.style.background = '#f3f4f6'; });
+          item.addEventListener('mouseleave', function() { this.style.background = ''; });
+        });
+      });
+    });
+  }
+
+  async function runBatchSave() {
+    var btn   = document.getElementById('batchSaveBtn');
+    var msgEl = document.getElementById('batchResultMsg');
+    btn.disabled = true;
+    msgEl.className = 'batch-result-msg';
+    msgEl.textContent = 'Saving…';
+
+    var records = [];
+    batchItems.forEach(function(item, i) {
+      var cb  = document.getElementById('row-cb-'  + i);
+      var sel = document.getElementById('row-prop-' + i);
+      if (!cb || !cb.checked || !sel) return;
+
+      var aiCb    = document.getElementById('row-ai-'    + i);
+      var covMet  = document.getElementById('row-covmet-' + i);
+
+      var insurer  = (document.getElementById('row-insurer-' + i) || {}).value || null;
+      var effDate  = (document.getElementById('row-eff-'     + i) || {}).value || null;
+      var expDate  = (document.getElementById('row-exp-'     + i) || {}).value || null;
+      var covRaw   = (document.getElementById('row-cov-amt-' + i) || {}).value;
+      var covAmt   = covRaw ? parseFloat(covRaw) : null;
+
+      var extracted = Object.assign({}, item.extracted || {}, {
+        insurer_name:     insurer,
+        effective_date:   effDate,
+        expiration_date:  expDate,
+        coverage_amount:  covAmt,
+      });
+
+      records.push({
+        file_data:                   item.fileBase64,
+        file_mime_type:              item.fileMimeType,
+        clean_filename:              item.clean_filename,
+        extracted,
+        property_id:                 sel.value || null,
+        appfolio_property_id:        sel.dataset.appfolio || null,
+        additional_insured_verified: !!(aiCb   && aiCb.checked),
+        coverage_amount_verified:    !!(covMet && covMet.checked),
+      });
+    });
+
+    if (records.length === 0) {
+      msgEl.className = 'batch-result-msg error';
+      msgEl.textContent = 'No rows selected with a property chosen.';
+      btn.disabled = false;
+      return;
+    }
+
+    try {
+      var resp = await fetch(INSURANCE_API + '/api/insurance/batch-save', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:    JSON.stringify({ records: records }),
+      });
+      var result = await resp.json();
+      if (resp.ok) {
+        msgEl.className = 'batch-result-msg success';
+        msgEl.textContent = result.saved + ' saved' +
+          (result.failed > 0 ? ', ' + result.failed + ' failed' : '') + '.';
+        if (result.saved > 0) {
+          setTimeout(function() {
+            closeBatchModal();
+            expandedId = null;
+            fetchData();
+          }, 2000);
+        } else {
+          btn.disabled = false;
+        }
+      } else {
+        msgEl.className = 'batch-result-msg error';
+        msgEl.textContent = result.error || 'Save failed.';
+        btn.disabled = false;
+      }
+    } catch(err) {
+      msgEl.className = 'batch-result-msg error';
+      msgEl.textContent = 'Network error: ' + err.message;
+      btn.disabled = false;
+    }
+  }
+</script>
+</body>
+</html>

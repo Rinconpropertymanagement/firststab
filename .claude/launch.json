@@ -7,6 +7,20 @@
       "runtimeArgs": ["server.js"],
       "cwd": "projects/content-review",
       "port": 3300
+    },
+    {
+      "name": "rental-analysis",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "cwd": "projects/rental-analysis",
+      "port": 3457
+    },
+    {
+      "name": "hub",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "cwd": "projects/hub",
+      "port": 3500
     }
   ]
 }

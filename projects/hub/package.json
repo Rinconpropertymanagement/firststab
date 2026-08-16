@@ -1,0 +1,19 @@
+{
+  "name": "rincon-hub",
+  "version": "0.1.0",
+  "description": "Shared login hub for Rincon Management's internal tools. Single sign-in surface — insurance-compliance (and future tools) get mounted here as sections instead of each having its own separate login.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.5",
+    "pdf-parse": "^2.4.5"
+  }
+}

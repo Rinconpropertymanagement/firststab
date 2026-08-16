@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security Deposit — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 900px; margin: 0 auto; padding: 40px 16px; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    p.sub { color: #6b7280; margin-bottom: 24px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+    .placeholder-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 12px 14px; font-size: 13px; margin-bottom: 24px; }
+    #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 8px; border-bottom: 1px solid #f3f4f6; }
+    .days { font-weight: 700; }
+    .days.urgent { color: #b91c1c; }
+    .days.soon { color: #b45309; }
+    .empty { color: #9ca3af; padding: 20px; text-align: center; }
+    a.back { font-size: 13px; color: #374151; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Security Deposit</h1>
+    <p class="sub">Disposition packets for tenant move-outs — days remaining on the 21-day return deadline, matched move-in/move-out photos, deposit ledger figures, and the pod lead's compliance checklist.</p>
+
+    <div class="placeholder-note">
+      This is a placeholder screen — Tron is building the real dashboard against the API routes in <code>security-deposit/router.js</code>. This page exists so <code>GET /security-deposit</code> works end to end and the login/permission wiring can be verified before the real screens land.
+    </div>
+
+    <div id="access-denied">
+      Your Rincon Hub account does not have access to Security Deposit yet. Ask an admin to grant you access.
+    </div>
+
+    <div id="content" style="display:none;">
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Property</th><th>Unit</th><th>Tenant(s)</th><th>Move-out</th><th>Deadline</th><th>Days left</th><th>Status</th></tr>
+          </thead>
+          <tbody id="queue-body"></tbody>
+        </table>
+        <div id="empty-msg" class="empty" style="display:none;">No open dispositions right now.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function init() {
+      const meRes = await fetch('/api/security-deposit/auth/me');
+      if (meRes.status === 403) {
+        document.getElementById('access-denied').style.display = 'block';
+        return;
+      }
+      if (!meRes.ok) return;
+
+      document.getElementById('content').style.display = 'block';
+      const casesRes = await fetch('/api/security-deposit/cases');
+      if (!casesRes.ok) return;
+      const cases = await casesRes.json();
+
+      const tbody = document.getElementById('queue-body');
+      if (!cases.length) {
+        document.getElementById('empty-msg').style.display = 'block';
+        return;
+      }
+      cases.forEach(c => {
+        const tr = document.createElement('tr');
+        const dayClass = c.days_remaining <= 3 ? 'urgent' : c.days_remaining <= 7 ? 'soon' : '';
+        const tenantNames = (c.tenants || []).map(t => t.name).filter(Boolean).join(', ') || '—';
+        tr.innerHTML =
+          '<td>' + (c.property_name || c.property_address || '—') + '</td>' +
+          '<td>' + (c.unit_number || '—') + '</td>' +
+          '<td>' + tenantNames + '</td>' +
+          '<td>' + (c.move_out_date || '—') + '</td>' +
+          '<td>' + (c.disposition_deadline || '—') + '</td>' +
+          '<td class="days ' + dayClass + '">' + c.days_remaining + '</td>' +
+          '<td>' + c.status + '</td>';
+        tbody.appendChild(tr);
+      });
+    }
+    init();
+  </script>
+</body>
+</html>

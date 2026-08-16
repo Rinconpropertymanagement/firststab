@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Maintenance History — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
+
+    /* ── Tabs ── */
+    .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid #e5e7eb; margin-bottom: 18px; }
+    .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 9px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.tab-active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+    .tab-btn .badge { margin-left: 6px; }
+
+    /* ── Search ── */
+    .search-row { display: flex; gap: 8px; margin-bottom: 14px; }
+    .search-row input { flex: 1; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background: #f9fafb; }
+    .empty { color: #9ca3af; padding: 24px; text-align: center; }
+
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .badge-gray { background: #f3f4f6; color: #4b5563; }
+    .badge-amber { background: #fffbeb; color: #92400e; }
+    .badge-red { background: #fef2f2; color: #991b1b; }
+    .badge-green { background: #f0fdf4; color: #166534; }
+    .badge-blue { background: #eff6ff; color: #1d4ed8; }
+
+    /* ── Ticket detail ── */
+    .ticket-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+    .ticket-meta { color: #6b7280; font-size: 12.5px; margin-bottom: 18px; }
+    .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #374151; margin: 22px 0 8px; }
+    .section-title:first-of-type { margin-top: 0; }
+    .claim { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 14px; margin-bottom: 8px; }
+    .claim-text { font-size: 13.5px; color: #111827; margin-bottom: 6px; line-height: 1.4; }
+    .claim-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 11.5px; color: #6b7280; margin-bottom: 8px; }
+    .claim-source { font-style: italic; }
+    .claim-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; }
+    .btn:hover { background: #f3f4f6; }
+    .btn-confirm { border-color: #16a34a; color: #166534; }
+    .btn-reject { border-color: #dc2626; color: #991b1b; }
+    .btn-correct { border-color: #2563eb; color: #1d4ed8; }
+    .correct-form { margin-top: 8px; display: none; border-top: 1px dashed #e5e7eb; padding-top: 8px; }
+    .correct-form.visible { display: block; }
+    .correct-form textarea, .correct-form input { width: 100%; font-size: 12.5px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; margin-bottom: 6px; font-family: inherit; }
+    .correct-form textarea { min-height: 50px; }
+    .flagged-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
+
+    .prop-line { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Maintenance History</h1>
+    <p class="sub">Every extracted fact is AI-derived and unreviewed until a person confirms, corrects, or rejects it. Nothing here ever creates, edits, or sends anything in Latchel, AppFolio, or to a tenant or vendor — it only reads and displays.</p>
+
+    <div id="access-denied">
+      Your Rincon Hub account does not have access to Maintenance History yet. Ask an admin to grant you access.
+    </div>
+
+    <div id="content" style="display:none;">
+      <div class="tab-bar">
+        <button class="tab-btn tab-active" id="tab-tickets" onclick="showTab('tickets')">Tickets</button>
+        <button class="tab-btn" id="tab-flagged" style="display:none;" onclick="showTab('flagged')">Needs privacy review <span id="flagged-badge"></span></button>
+      </div>
+
+      <div id="view-tickets">
+        <div class="search-row">
+          <input type="text" id="search-input" placeholder="Search by property, address, ticket title, or AppFolio #" oninput="onSearch()">
+        </div>
+        <div class="card">
+          <table>
+            <thead>
+              <tr><th>Property</th><th>Unit</th><th>Ticket</th><th>AppFolio #</th><th>Unreviewed</th><th>Flagged</th><th>Last synced</th></tr>
+            </thead>
+            <tbody id="tickets-body"></tbody>
+          </table>
+          <div id="tickets-empty" class="empty" style="display:none;">No synced tickets yet. Run the nightly ingestion job to pull data from Latchel.</div>
+        </div>
+      </div>
+
+      <div id="view-ticket-detail" style="display:none;">
+        <a class="back" href="#" onclick="showTab('tickets'); return false;">&larr; All tickets</a>
+        <div id="ticket-detail-body"></div>
+      </div>
+
+      <div id="view-flagged" style="display:none;">
+        <div class="card">
+          <div id="flagged-list"></div>
+          <div id="flagged-empty" class="empty" style="display:none;">Nothing in the privacy review queue right now.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let myRole = null;
+    let allTickets = [];
+    let currentTicketId = null;
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function reviewBadge(status) {
+      const map = { unreviewed: 'badge-amber', confirmed: 'badge-green', corrected: 'badge-blue', rejected: 'badge-red' };
+      return '<span class="badge ' + (map[status] || 'badge-gray') + '">' + escapeHtml(status) + '</span>';
+    }
+
+    async function init() {
+      const meRes = await fetch('/api/maintenance-history/auth/me');
+      if (meRes.status === 403) {
+        document.getElementById('access-denied').style.display = 'block';
+        return;
+      }
+      if (!meRes.ok) return;
+      const me = await meRes.json();
+      myRole = me.role;
+
+      document.getElementById('content').style.display = 'block';
+      if (myRole === 'admin' || myRole === 'reviewer') {
+        document.getElementById('tab-flagged').style.display = 'inline-block';
+        loadFlaggedCount();
+      }
+      loadTickets();
+    }
+
+    async function loadFlaggedCount() {
+      const res = await fetch('/api/maintenance-history/flagged-queue');
+      if (!res.ok) return;
+      const rows = await res.json();
+      const needsReview = rows.filter(r => r.review_status === 'unreviewed').length;
+      document.getElementById('flagged-badge').innerHTML = needsReview ? '<span class="badge badge-red">' + needsReview + '</span>' : '';
+    }
+
+    function showTab(tab) {
+      document.getElementById('tab-tickets').classList.toggle('tab-active', tab === 'tickets');
+      document.getElementById('tab-flagged').classList.toggle('tab-active', tab === 'flagged');
+      document.getElementById('view-tickets').style.display = tab === 'tickets' ? 'block' : 'none';
+      document.getElementById('view-ticket-detail').style.display = 'none';
+      document.getElementById('view-flagged').style.display = tab === 'flagged' ? 'block' : 'none';
+      if (tab === 'flagged') loadFlagged();
+    }
+
+    // ── Ticket list ──────────────────────────────────────────────────────
+    async function loadTickets() {
+      const res = await fetch('/api/maintenance-history/tickets');
+      if (!res.ok) return;
+      allTickets = await res.json();
+      renderTickets(allTickets);
+    }
+
+    function onSearch() {
+      const q = document.getElementById('search-input').value.toLowerCase().trim();
+      if (!q) return renderTickets(allTickets);
+      const filtered = allTickets.filter(t =>
+        (t.title || '').toLowerCase().includes(q) ||
+        (t.property_name || '').toLowerCase().includes(q) ||
+        (t.property_address || '').toLowerCase().includes(q) ||
+        (t.appfolio_id || '').toLowerCase().includes(q)
+      );
+      renderTickets(filtered);
+    }
+
+    function renderTickets(rows) {
+      const tbody = document.getElementById('tickets-body');
+      tbody.innerHTML = '';
+      document.getElementById('tickets-empty').style.display = rows.length ? 'none' : 'block';
+      rows.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.className = 'clickable';
+        tr.onclick = () => openTicket(t.id);
+        tr.innerHTML =
+          '<td>' + escapeHtml(t.property_name || t.property_address || '—') + '</td>' +
+          '<td>' + escapeHtml(t.unit_number || '—') + '</td>' +
+          '<td>' + escapeHtml(t.title || '—') + '</td>' +
+          '<td>' + escapeHtml(t.appfolio_id || '—') + '</td>' +
+          '<td>' + (t.claim_counts.unreviewed ? '<span class="badge badge-amber">' + t.claim_counts.unreviewed + '</span>' : '—') + '</td>' +
+          '<td>' + (t.claim_counts.flagged ? '<span class="badge badge-red">' + t.claim_counts.flagged + '</span>' : '—') + '</td>' +
+          '<td>' + escapeHtml(t.latchel_claims_synced_at ? t.latchel_claims_synced_at.slice(0, 10) : '—') + '</td>';
+        tbody.appendChild(tr);
+      });
+    }
+
+    // ── Ticket detail (four sections) ──────────────────────────────────
+    const SECTION_LABELS = {
+      event: 'What Happened',
+      decision: 'Decisions',
+      outcome: 'Outcome',
+      recurrence: 'Related Tickets',
+    };
+    const OUTCOME_LABELS = {
+      1: 'Vendor says done', 2: 'Function restored', 3: 'Resident confirmed',
+      4: 'No recurrence in window', 5: 'Verified by later inspection',
+    };
+
+    async function openTicket(id) {
+      const res = await fetch('/api/maintenance-history/tickets/' + id);
+      if (!res.ok) return;
+      const t = await res.json();
+      currentTicketId = id;
+
+      document.getElementById('view-tickets').style.display = 'none';
+      document.getElementById('view-flagged').style.display = 'none';
+      document.getElementById('view-ticket-detail').style.display = 'block';
+      document.getElementById('tab-tickets').classList.remove('tab-active');
+      document.getElementById('tab-flagged').classList.remove('tab-active');
+
+      const propLine = t.property
+        ? escapeHtml(t.property.name || t.property.address) + (t.property.unit_number ? ', Unit ' + escapeHtml(t.property.unit_number) : '')
+        : '';
+
+      let html = '<div class="ticket-header"><h1 style="font-size:18px;">' + escapeHtml((t.title || '').split('\n')[0]) + '</h1></div>';
+      html += '<div class="ticket-meta">' + propLine + (propLine ? ' &middot; ' : '') + 'AppFolio #' + escapeHtml(t.appfolio_id || '—') +
+        ' &middot; Latchel job ' + escapeHtml(t.latchel_job_id || '—') +
+        (t.latchel_claims_synced_at ? ' &middot; synced ' + escapeHtml(t.latchel_claims_synced_at.slice(0, 10)) : '') + '</div>';
+
+      ['event', 'decision', 'outcome', 'recurrence'].forEach(type => {
+        const claims = t.claims[type] || [];
+        html += '<div class="section-title">' + SECTION_LABELS[type] + '</div>';
+        if (!claims.length) {
+          html += '<div class="claim" style="color:#9ca3af;font-style:italic;">Nothing extracted for this section yet.</div>';
+        } else {
+          claims.forEach(c => { html += renderClaim(c); });
+        }
+      });
+
+      document.getElementById('ticket-detail-body').innerHTML = html;
+    }
+
+    function renderClaim(c) {
+      const canReview = myRole === 'admin' || myRole === 'reviewer';
+      let meta = reviewBadge(c.review_status);
+      if (c.claim_date) meta += '<span>' + escapeHtml(c.claim_date) + '</span>';
+      if (c.claim_type === 'outcome' && c.outcome_level) meta += '<span class="badge badge-blue">Level ' + c.outcome_level + ' — ' + (OUTCOME_LABELS[c.outcome_level] || '') + '</span>';
+      if (c.confidence != null) meta += '<span>confidence ' + Math.round(c.confidence * 100) + '%</span>';
+      meta += '<span class="claim-source">source: ' + escapeHtml(c.source_reference) + '</span>';
+
+      let html = '<div class="claim" id="claim-' + c.id + '">';
+      html += '<div class="claim-text">' + escapeHtml(c.claim_text) + '</div>';
+      html += '<div class="claim-meta">' + meta + '</div>';
+      if (canReview) {
+        html += '<div class="claim-actions">';
+        html += '<button class="btn btn-confirm" onclick="reviewClaim(\'' + c.id + '\',\'confirm\')">Confirm</button>';
+        html += '<button class="btn btn-correct" onclick="toggleCorrectForm(\'' + c.id + '\')">Correct</button>';
+        html += '<button class="btn btn-reject" onclick="toggleRejectForm(\'' + c.id + '\')">Reject</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="correct-form-' + c.id + '">';
+        html += '<textarea id="correct-text-' + c.id + '">' + escapeHtml(c.claim_text) + '</textarea>';
+        html += '<input type="date" id="correct-date-' + c.id + '" value="' + escapeHtml(c.claim_date || '') + '">';
+        if (c.claim_type === 'outcome') {
+          html += '<input type="number" min="1" max="5" id="correct-outcome-' + c.id + '" placeholder="Outcome level 1-5" value="' + (c.outcome_level || '') + '">';
+        }
+        html += '<input type="text" id="correct-notes-' + c.id + '" placeholder="Reviewer notes (optional)">';
+        html += '<button class="btn btn-correct" onclick="reviewClaim(\'' + c.id + '\',\'correct\')">Save correction</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="reject-form-' + c.id + '">';
+        html += '<input type="text" id="reject-notes-' + c.id + '" placeholder="Reason for rejecting (optional)">';
+        html += '<button class="btn btn-reject" onclick="reviewClaim(\'' + c.id + '\',\'reject\')">Confirm reject</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function toggleCorrectForm(id) {
+      document.getElementById('correct-form-' + id).classList.toggle('visible');
+    }
+
+    function toggleRejectForm(id) {
+      document.getElementById('reject-form-' + id).classList.toggle('visible');
+    }
+
+    async function reviewClaim(id, action) {
+      const body = { action };
+      if (action === 'correct') {
+        body.claim_text = document.getElementById('correct-text-' + id).value;
+        body.claim_date = document.getElementById('correct-date-' + id).value || null;
+        const outcomeEl = document.getElementById('correct-outcome-' + id);
+        if (outcomeEl && outcomeEl.value) body.outcome_level = Number(outcomeEl.value);
+        body.reviewer_notes = document.getElementById('correct-notes-' + id).value || null;
+      } else if (action === 'reject') {
+        body.reviewer_notes = document.getElementById('reject-notes-' + id).value || null;
+      }
+
+      const res = await fetch('/api/maintenance-history/claims/' + id + '/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Could not save review.');
+        return;
+      }
+
+      // Re-render whichever view we're in — stay put instead of bouncing
+      // the reviewer back out, so reviewing several claims on one ticket
+      // (or in the flagged queue) doesn't lose their place each time.
+      if (document.getElementById('view-flagged').style.display !== 'none') {
+        loadFlagged();
+      } else if (currentTicketId) {
+        openTicket(currentTicketId);
+      } else {
+        loadTickets();
+        document.getElementById('view-ticket-detail').style.display = 'none';
+        document.getElementById('view-tickets').style.display = 'block';
+        document.getElementById('tab-tickets').classList.add('tab-active');
+      }
+    }
+
+    // ── Flagged / privacy review queue ──────────────────────────────────
+    async function loadFlagged() {
+      const res = await fetch('/api/maintenance-history/flagged-queue');
+      if (!res.ok) return;
+      const rows = await res.json();
+      const container = document.getElementById('flagged-list');
+      document.getElementById('flagged-empty').style.display = rows.length ? 'none' : 'block';
+      container.innerHTML = '';
+      rows.forEach(c => {
+        const wrap = document.createElement('div');
+        wrap.innerHTML =
+          '<div class="flagged-note">Flagged category: ' + escapeHtml(c.flagged_category || 'unspecified') +
+          ' &middot; Ticket: ' + escapeHtml(c.ticket_title || '—') +
+          (c.property_name ? ' (' + escapeHtml(c.property_name) + (c.unit_number ? ', Unit ' + escapeHtml(c.unit_number) : '') + ')' : '') +
+          '</div>' + renderClaim(c);
+        container.appendChild(wrap);
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

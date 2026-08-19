@@ -188,6 +188,7 @@ I use: none currently
 ```
 I use: Gmail (Google Workspace)
 I send emails to: tenants, owners, and vendors
+Shared pod inboxes (team inboxes staff read/reply from) live in: Missive — not Gmail
 ```
 
 ### Internal Communication

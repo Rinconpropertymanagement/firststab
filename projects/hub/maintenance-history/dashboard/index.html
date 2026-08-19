@@ -68,6 +68,21 @@
     .flagged-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
 
     .prop-line { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
+
+    /* ── Budget tab ── */
+    #budget-search-results .result-row { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 13px; }
+    #budget-search-results .result-row:last-child { border-bottom: none; }
+    #budget-search-results .result-row:hover { background: #f9fafb; }
+    #budget-search-results .result-addr { color: #6b7280; font-size: 12px; }
+    .budget-year-title { font-size: 15px; font-weight: 700; margin: 20px 0 4px; }
+    .budget-asof { color: #9ca3af; font-size: 12px; margin-bottom: 10px; }
+    .budget-subtotal-row { display: flex; gap: 18px; font-size: 13px; color: #374151; margin-bottom: 10px; }
+    .budget-subtotal-row b { color: #111827; }
+    .maint-row td { background: #fffbeb; }
+    .ticket-cost-note { color: #9ca3af; font-size: 12px; margin: 4px 0 10px; }
+    .actual-spend-note { color: #9ca3af; font-size: 12px; margin: -4px 0 10px; }
+    .actual-reimbursed-note { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
+    .actual-not-tracked { color: #9ca3af; font-style: italic; }
   </style>
 </head>
 <body>
@@ -83,7 +98,9 @@
     <div id="content" style="display:none;">
       <div class="tab-bar">
         <button class="tab-btn tab-active" id="tab-tickets" onclick="showTab('tickets')">Tickets</button>
+        <button class="tab-btn" id="tab-budget" onclick="showTab('budget')">Budget</button>
         <button class="tab-btn" id="tab-flagged" style="display:none;" onclick="showTab('flagged')">Needs privacy review <span id="flagged-badge"></span></button>
+        <button class="tab-btn" id="tab-users" style="display:none;" onclick="showTab('users')">Users</button>
       </div>
 
       <div id="view-tickets">
@@ -106,17 +123,45 @@
         <div id="ticket-detail-body"></div>
       </div>
 
+      <div id="view-budget" style="display:none;">
+        <p class="sub" style="margin-top:-8px;">AppFolio's own budgeted-vs-actual figures for a property, straight from AppFolio's books — nothing here is AI-derived or needs review. Maintenance ticket costs are shown underneath for context only; they will not match AppFolio's numbers exactly, and that's expected (a ticket's cost can post to AppFolio weeks after it closes, and AppFolio's books can include repair costs that never went through Latchel).</p>
+        <div class="search-row" style="position:relative;">
+          <input type="text" id="budget-search-input" placeholder="Search by property name or address" oninput="onBudgetSearch()" autocomplete="off">
+        </div>
+        <div id="budget-search-results" class="card" style="display:none; padding:0;"></div>
+        <div id="budget-content"></div>
+      </div>
+
       <div id="view-flagged" style="display:none;">
         <div class="card">
           <div id="flagged-list"></div>
           <div id="flagged-empty" class="empty" style="display:none;">Nothing in the privacy review queue right now.</div>
         </div>
       </div>
+
+      <div id="view-users" style="display:none;">
+        <div class="card">
+          <div style="font-weight:600;font-size:13px;margin-bottom:10px;">Add a User</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="new-user-email" type="email" placeholder="email@rinconmanagement.com"
+              style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+            <select id="new-user-role" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+              <option value="">Select role&hellip;</option>
+              <option value="reviewer">Reviewer</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button onclick="addUser()" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;">Add User</button>
+          </div>
+          <div id="add-user-msg" style="font-size:12px;margin-top:8px;"></div>
+        </div>
+        <div id="users-table-wrap"><div class="card empty">Loading users&hellip;</div></div>
+      </div>
     </div>
   </div>
 
   <script>
     let myRole = null;
+    let myEmail = null;
     let allTickets = [];
     let currentTicketId = null;
 
@@ -139,11 +184,15 @@
       if (!meRes.ok) return;
       const me = await meRes.json();
       myRole = me.role;
+      myEmail = me.email;
 
       document.getElementById('content').style.display = 'block';
       if (myRole === 'admin' || myRole === 'reviewer') {
         document.getElementById('tab-flagged').style.display = 'inline-block';
         loadFlaggedCount();
+      }
+      if (myRole === 'admin') {
+        document.getElementById('tab-users').style.display = 'inline-block';
       }
       loadTickets();
     }
@@ -158,11 +207,16 @@
 
     function showTab(tab) {
       document.getElementById('tab-tickets').classList.toggle('tab-active', tab === 'tickets');
+      document.getElementById('tab-budget').classList.toggle('tab-active', tab === 'budget');
       document.getElementById('tab-flagged').classList.toggle('tab-active', tab === 'flagged');
+      document.getElementById('tab-users').classList.toggle('tab-active', tab === 'users');
       document.getElementById('view-tickets').style.display = tab === 'tickets' ? 'block' : 'none';
       document.getElementById('view-ticket-detail').style.display = 'none';
+      document.getElementById('view-budget').style.display = tab === 'budget' ? 'block' : 'none';
       document.getElementById('view-flagged').style.display = tab === 'flagged' ? 'block' : 'none';
+      document.getElementById('view-users').style.display = tab === 'users' ? 'block' : 'none';
       if (tab === 'flagged') loadFlagged();
+      if (tab === 'users') loadUserManagement();
     }
 
     // ── Ticket list ──────────────────────────────────────────────────────
@@ -170,7 +224,18 @@
       const res = await fetch('/api/maintenance-history/tickets');
       if (!res.ok) return;
       allTickets = await res.json();
-      renderTickets(allTickets);
+
+      // Landed here from the hub-wide search box (?property=<name or
+      // address>) — pre-fill the existing search box and reuse its own
+      // filter (onSearch) so the list opens already narrowed to that
+      // property, instead of the unfiltered list.
+      const urlProperty = new URLSearchParams(window.location.search).get('property');
+      if (urlProperty) {
+        document.getElementById('search-input').value = urlProperty;
+        onSearch();
+      } else {
+        renderTickets(allTickets);
+      }
     }
 
     function onSearch() {
@@ -332,6 +397,178 @@
       }
     }
 
+    // ── Budget tab — reuses the existing hub-wide property search API
+    // (GET /api/hub/search-properties, the same one the floating search
+    // bar at the top of the page uses) rather than a new search endpoint,
+    // because this route needs a property's real internal id to call
+    // /budget with, and that endpoint is the one place in the Hub that
+    // already returns it alongside a name/address match. ────────────────
+    let budgetSearchDebounce = null;
+    let budgetSearchQuery = '';
+
+    function onBudgetSearch() {
+      const q = document.getElementById('budget-search-input').value.trim();
+      budgetSearchQuery = q;
+      clearTimeout(budgetSearchDebounce);
+      const results = document.getElementById('budget-search-results');
+      if (!q) { results.style.display = 'none'; results.innerHTML = ''; return; }
+      budgetSearchDebounce = setTimeout(async () => {
+        const res = await fetch('/api/hub/search-properties?q=' + encodeURIComponent(q));
+        if (!res.ok) return;
+        const matches = await res.json();
+        if (q !== budgetSearchQuery) return; // a newer keystroke already fired
+        renderBudgetSearchResults(matches);
+      }, 200);
+    }
+
+    function renderBudgetSearchResults(matches) {
+      const results = document.getElementById('budget-search-results');
+      if (!matches.length) {
+        results.innerHTML = '<div class="result-row" style="color:#9ca3af;cursor:default;">No properties match.</div>';
+        results.style.display = 'block';
+        return;
+      }
+      results.innerHTML = '';
+      matches.forEach(p => {
+        const row = document.createElement('div');
+        row.className = 'result-row';
+        row.innerHTML = '<div>' + escapeHtml(p.name || p.address || 'Unknown property') + '</div>' +
+          (p.address ? '<div class="result-addr">' + escapeHtml(p.address) + (p.city ? ', ' + escapeHtml(p.city) : '') + '</div>' : '');
+        row.onclick = () => {
+          document.getElementById('budget-search-input').value = p.name || p.address || '';
+          results.style.display = 'none';
+          loadBudget(p.id);
+        };
+        results.appendChild(row);
+      });
+      results.style.display = 'block';
+    }
+
+    function formatMoney(n) {
+      if (n == null) return '—';
+      const num = Number(n);
+      if (!Number.isFinite(num)) return '—';
+      const sign = num < 0 ? '-' : '';
+      return sign + '$' + Math.abs(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
+
+    async function loadBudget(propertyId) {
+      const content = document.getElementById('budget-content');
+      content.innerHTML = '<div class="empty">Loading…</div>';
+      const res = await fetch('/api/maintenance-history/property/' + propertyId + '/budget');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        content.innerHTML = '<div class="card empty">' + escapeHtml(err.error || 'Could not load budget data.') + '</div>';
+        return;
+      }
+      const data = await res.json();
+      renderBudgetContent(data);
+    }
+
+    function renderBudgetContent(data) {
+      const content = document.getElementById('budget-content');
+      let html = '<div class="card">';
+      html += '<div style="font-weight:700;font-size:15px;">' + escapeHtml(data.property.name || data.property.address || '—') + '</div>';
+      if (data.property.address) {
+        html += '<div class="prop-line">' + escapeHtml(data.property.address) + (data.property.city ? ', ' + escapeHtml(data.property.city) : '') + '</div>';
+      }
+      html += '</div>';
+
+      if (!data.has_appfolio_link) {
+        html += '<div class="card empty">This property isn\'t linked to an AppFolio property ID yet, so there\'s no AppFolio budget data to show.</div>';
+        content.innerHTML = html;
+        return;
+      }
+
+      if (!data.fiscal_years.length) {
+        html += '<div class="card empty">No AppFolio budget data found for this property yet. It may not have synced yet, or AppFolio may not have budget figures set for it.</div>';
+        content.innerHTML = html;
+        return;
+      }
+
+      html += '<div class="budget-asof">AppFolio budget data as of ' + (data.synced_at ? escapeHtml(data.synced_at.slice(0, 10)) : 'unknown') + ' — from AppFolio\'s own books, not AI-derived.</div>';
+
+      // actual-spend-SPEC.md "What You'll See": AppFolio's ledger report
+      // only ever exposes the current month, so this total accumulates
+      // from whenever this feature started syncing forward — never a full
+      // backfilled fiscal year. Shown once, always, right alongside the
+      // budget note above, so a real $0 tracked-so-far number never reads
+      // as a settled year-end total.
+      html += '<div class="actual-spend-note">"Actual (AppFolio)" reflects AppFolio ledger activity tracked since this feature started syncing — not necessarily the whole fiscal year. It will look low for a while after launch and build up correctly from there.</div>';
+
+      data.fiscal_years.forEach(year => {
+        const budget = data.budgets_by_year[year] || { categories: [], subtotals: [] };
+        const ticketInfo = data.ticket_costs_by_year[year] || { total_cost: 0, count: 0, tickets: [] };
+        const actualsForYear = (data.actual_spend_by_year && data.actual_spend_by_year[year]) || [];
+        const actualsByCategory = {};
+        actualsForYear.forEach(a => { actualsByCategory[a.category] = a; });
+
+        html += '<div class="budget-year-title">' + year + '</div>';
+
+        if (budget.subtotals && budget.subtotals.length) {
+          html += '<div class="budget-subtotal-row">';
+          budget.subtotals.forEach(s => {
+            html += '<span>' + escapeHtml(s.gl_account_name) + ': <b>' + formatMoney(s.budgeted_amount) + ' budgeted</b>' +
+              (s.actual_amount != null ? ', ' + formatMoney(s.actual_amount) + ' actual' : '') + '</span>';
+          });
+          html += '</div>';
+        }
+
+        html += '<div class="card">';
+        if (!budget.categories.length) {
+          html += '<div class="empty">No AppFolio budget line items for ' + year + '.</div>';
+        } else {
+          html += '<table><thead><tr><th>Category</th><th>Budgeted (AppFolio)</th><th>Actual (AppFolio)</th></tr></thead><tbody>';
+          budget.categories.forEach(c => {
+            const isMaint = MAINT_RELATED_ACCOUNTS.includes(c.gl_account_name);
+            let actualCell;
+            if (!data.has_actual_spend_data) {
+              // Not "$0.00" — no AppFolio ledger activity has synced for
+              // THIS PROPERTY at all yet under this feature, so a real
+              // zero and "hasn't started tracking" must not look the same
+              // (spec's "What Could Go Wrong").
+              actualCell = '<span class="actual-not-tracked" title="Actual-spend tracking hasn\'t started collecting AppFolio activity for this property yet">not tracked yet</span>';
+            } else {
+              const actual = actualsByCategory[c.gl_account_name];
+              const spent = actual ? actual.spent : 0;
+              actualCell = formatMoney(spent);
+              if (actual && actual.reimbursed > 0) {
+                // Breakout of the same total, never subtracted or added
+                // (spec Decision 3) — e.g. "$18,400 spent — $1,240
+                // reimbursed by tenants."
+                actualCell += '<div class="actual-reimbursed-note">' + formatMoney(actual.reimbursed) + ' reimbursed by tenants</div>';
+              }
+            }
+            html += '<tr' + (isMaint ? ' class="maint-row"' : '') + '>' +
+              '<td>' + escapeHtml(c.gl_account_name) + (isMaint ? ' <span class="badge badge-blue">maintenance-related</span>' : '') + '</td>' +
+              '<td>' + formatMoney(c.budgeted_amount) + '</td>' +
+              '<td>' + actualCell + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+
+        html += '<div class="section-title" style="margin-top:16px;">Maintenance tickets in ' + year + ' (for context — will not match AppFolio\'s numbers exactly)</div>';
+        html += '<div class="ticket-cost-note">' + ticketInfo.count + ' ticket' + (ticketInfo.count === 1 ? '' : 's') + ', ' + formatMoney(ticketInfo.total_cost) + ' in recorded ticket costs</div>';
+        html += '<div class="card">';
+        if (!ticketInfo.tickets.length) {
+          html += '<div class="empty">No maintenance tickets recorded for this property in ' + year + '.</div>';
+        } else {
+          html += '<table><thead><tr><th>Ticket</th><th>Status</th><th>Cost</th></tr></thead><tbody>';
+          ticketInfo.tickets.forEach(t => {
+            html += '<tr><td>' + escapeHtml(t.title || '—') + '</td><td>' + escapeHtml(t.status || '—') + '</td><td>' + formatMoney(t.cost) + '</td></tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+      });
+
+      content.innerHTML = html;
+    }
+
     // ── Flagged / privacy review queue ──────────────────────────────────
     async function loadFlagged() {
       const res = await fetch('/api/maintenance-history/flagged-queue');
@@ -349,6 +586,132 @@
           '</div>' + renderClaim(c);
         container.appendChild(wrap);
       });
+    }
+
+    // ── Users tab (admin only) ──────────────────────────────────────────
+    function formatRole(role) {
+      const map = { admin: 'Admin', reviewer: 'Reviewer' };
+      return map[role] || role;
+    }
+
+    function formatDateTime(dateStr) {
+      if (!dateStr) return '—';
+      const d = new Date(dateStr);
+      if (isNaN(d)) return '—';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' at ' +
+        d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+
+    async function loadUserManagement() {
+      const wrap = document.getElementById('users-table-wrap');
+      wrap.innerHTML = '<div class="card empty">Loading users&hellip;</div>';
+      try {
+        const res = await fetch('/api/maintenance-history/users');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const users = await res.json();
+
+        if (!users.length) {
+          wrap.innerHTML = '<div class="card empty">No users found.</div>';
+          return;
+        }
+
+        let html = '<div class="card" style="padding:0;"><table><thead><tr>' +
+          '<th style="padding:10px 12px;">Email</th><th style="padding:10px 12px;">Role</th>' +
+          '<th style="padding:10px 12px;">Access Granted</th><th style="padding:10px 12px;">Actions</th>' +
+          '</tr></thead><tbody>';
+
+        users.forEach(user => {
+          const isMe = myEmail && user.email === myEmail;
+          html += '<tr>' +
+            '<td style="padding:10px 12px;">' + escapeHtml(user.email) + (isMe ? ' <span style="color:#9ca3af;font-size:11px;">(you)</span>' : '') + '</td>' +
+            '<td style="padding:10px 12px;">' +
+            '<select class="role-select" data-email="' + escapeHtml(user.email) + '" style="font-size:13px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;">' +
+            ['admin', 'reviewer'].map(r => '<option value="' + r + '"' + (r === user.role ? ' selected' : '') + '>' + formatRole(r) + '</option>').join('') +
+            '</select></td>' +
+            '<td style="padding:10px 12px;color:#6b7280;">' + (user.granted_at ? formatDateTime(user.granted_at) : '—') + '</td>' +
+            '<td style="padding:10px 12px;">' +
+            (!isMe ? '<button class="btn btn-reject remove-user-btn" data-email="' + escapeHtml(user.email) + '">Remove</button>' : '') +
+            '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+        wrap.innerHTML = html;
+
+        wrap.querySelectorAll('.role-select').forEach(sel => {
+          sel.addEventListener('change', async function() {
+            const email = this.dataset.email;
+            const role = this.value;
+            try {
+              const res = await fetch('/api/maintenance-history/users/' + encodeURIComponent(email), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role }),
+              });
+              if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                alert('Error: ' + (d.error || 'Could not update role.'));
+                loadUserManagement();
+              }
+            } catch (err) {
+              alert('Network error: ' + err.message);
+              loadUserManagement();
+            }
+          });
+        });
+
+        wrap.querySelectorAll('.remove-user-btn').forEach(btn => {
+          btn.addEventListener('click', async function() {
+            const email = this.dataset.email;
+            if (!confirm('Remove access for ' + email + '?')) return;
+            try {
+              const res = await fetch('/api/maintenance-history/users/' + encodeURIComponent(email), { method: 'DELETE' });
+              if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                alert('Error: ' + (d.error || 'Could not remove user.'));
+              } else {
+                loadUserManagement();
+              }
+            } catch (err) {
+              alert('Network error: ' + err.message);
+            }
+          });
+        });
+      } catch (err) {
+        wrap.innerHTML = '<div class="card empty">Could not load users: ' + escapeHtml(err.message) + '</div>';
+      }
+    }
+
+    async function addUser() {
+      const email = document.getElementById('new-user-email').value.trim();
+      const role = document.getElementById('new-user-role').value;
+      const msgEl = document.getElementById('add-user-msg');
+      if (!email || !role) {
+        msgEl.style.color = '#dc2626';
+        msgEl.textContent = 'Please enter an email and select a role.';
+        return;
+      }
+      msgEl.style.color = '#6b7280';
+      msgEl.textContent = 'Adding…';
+      try {
+        const res = await fetch('/api/maintenance-history/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, role }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          msgEl.style.color = '#16a34a';
+          msgEl.textContent = email + ' added successfully.';
+          document.getElementById('new-user-email').value = '';
+          document.getElementById('new-user-role').value = '';
+          loadUserManagement();
+        } else {
+          msgEl.style.color = '#dc2626';
+          msgEl.textContent = data.error || 'Could not add user.';
+        }
+      } catch (err) {
+        msgEl.style.color = '#dc2626';
+        msgEl.textContent = 'Network error: ' + err.message;
+      }
     }
 
     init();

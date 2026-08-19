@@ -4,8 +4,17 @@
  * AppFolio → Supabase Nightly Sync
  * Rincon Management
  *
- * Fetches data from 10 AppFolio reports and upserts it into Supabase.
+ * Fetches data from 11 AppFolio reports and upserts it into Supabase.
  * Foreign-key joins (unit_id, tenant_id, property_id) are deferred to a future release.
+ *
+ * Also populates (security-deposit tool build, supabase/migrations/
+ * 20260813000000 through 20260813000004): leases.move_out_date/
+ * move_out_reason (tenant_tickler-owned), leases.deposit_held_total/
+ * deposit_synced_at (rent_roll-owned), properties.jurisdiction_county
+ * (property_directory-owned), and the lease_tenants join table
+ * (tenant_directory-sourced, see syncLeaseTenants() below — fixes the
+ * multi-tenant bug where leases.tenant_id could only ever hold one
+ * tenant per lease).
  *
  * Usage:
  *   node sync.js              Run the full sync — fetch all reports and write to Supabase
@@ -60,7 +69,7 @@ const REPORT_CONFIG = [
     table: 'properties',
 
     buildRow(row) {
-      return {
+      const built = {
         name:        row.property_name || row.property_street || row.property_address || null,
         address:     row.property_street || null,
         city:        row.property_city   || null,
@@ -69,6 +78,12 @@ const REPORT_CONFIG = [
         unit_count:  parseInt(row.units) || null,
         appfolio_id: String(row.property_id),
       };
+      // jurisdiction_county — sync-owned exclusively by property_directory
+      // (supabase/migrations/20260813000000_security_deposit_leases_
+      // extension.sql). Omit entirely when absent — never send null, which
+      // would clear a previously-synced value.
+      if (row.property_county) built.jurisdiction_county = row.property_county;
+      return built;
     },
   },
 
@@ -144,7 +159,7 @@ const REPORT_CONFIG = [
       let status = 'active';
       if (event.includes('move-out') || event.includes('notice')) status = 'terminated';
       else if (event.includes('move-in')) status = 'pending';
-      return {
+      const built = {
         lease_start:  row.lease_from || null,
         lease_end:    row.lease_to   || null,
         monthly_rent: parseFloat(row.rent) || null,
@@ -154,6 +169,15 @@ const REPORT_CONFIG = [
           : `Move-in: ${row.move_in_date || 'date unknown'}`,
         appfolio_id:  String(row.occupancy_id),
       };
+      // move_out_date / move_out_reason — sync-owned EXCLUSIVELY by this
+      // report (supabase/migrations/20260813000000). No other report's
+      // buildRow() may ever set these two columns — that's the entire fix
+      // for the clobbering bug the migration describes. Omit entirely
+      // (never send null) when this row has no move-out data, so an
+      // active/move-in row never clears a previously-recorded move-out.
+      if (moveOut) built.move_out_date = moveOut;
+      if (row.move_out_reason) built.move_out_reason = row.move_out_reason;
+      return built;
     },
   },
 
@@ -165,7 +189,7 @@ const REPORT_CONFIG = [
     buildRow(row) {
       return {
         lease_start:  row.move_in        || null,
-        lease_end:    row.lease_expires  || null, // AppFolio field is lease_expires here
+        lease_end:    row.lease_expires  || null,
         monthly_rent: parseFloat(row.rent) || null,
         status:       'active',
         notes:        `Expiring: ${row.lease_expires_month || row.lease_expires || 'soon'}`,
@@ -250,7 +274,7 @@ const REPORT_CONFIG = [
       let status = 'active';
       if (statusRaw.includes('notice')) status = 'terminated';
       else if (statusRaw.includes('past')) status = 'expired';
-      return {
+      const built = {
         lease_start:  row.lease_from || null,
         lease_end:    row.lease_to   || null,
         monthly_rent: parseFloat(row.rent || row.market_rent) || null,
@@ -258,6 +282,226 @@ const REPORT_CONFIG = [
         notes:        pastDueNote,
         appfolio_id:  String(row.occupancy_id),
       };
+      // deposit_held_total / deposit_synced_at — sync-owned EXCLUSIVELY by
+      // rent_roll (supabase/migrations/20260813000000). tenant_directory,
+      // lease_expiration_detail, and delinquency also carry a `deposit`
+      // value in their raw AppFolio response, but must NEVER write this
+      // column — that would recreate the exact single-field clobber bug
+      // the multi-tenant fix solves elsewhere on this same table. Set
+      // together, omit both when the row has no deposit field (never send
+      // null, which would clear a previously-synced value).
+      if (row.deposit != null && row.deposit !== '') {
+        const depositNum = parseFloat(String(row.deposit).replace(/[$,]/g, ''));
+        if (!isNaN(depositNum)) {
+          built.deposit_held_total = depositNum;
+          built.deposit_synced_at  = new Date().toISOString();
+        }
+      }
+      return built;
+    },
+  },
+
+  // ── 11. Property budgets (Maintenance Budget Cross-Check, Part 2) ──────────
+  // budget-crosscheck-SPEC.md's Open Items #1/#2 flagged the exact report
+  // name and field shape as unconfirmed. Confirmed LIVE against this
+  // account (2026-08-17) by probing candidate report names the same way
+  // --discover already works for every other entry here:
+  //   - 'annual_budget_comparative' and 'budget_comparative' BOTH exist and
+  //     return real numbers, but BOTH are portfolio-wide — 48 GL-account
+  //     rows total, no property_id/property_name field anywhere in the
+  //     response, and passing property_id/property_ids in the POST body
+  //     makes no difference at all (confirmed with a bogus property_id —
+  //     identical totals came back). Not usable for a per-property screen.
+  //   - 'annual_budget_forecast' is the one that actually breaks out by
+  //     property: property_id + property_name are present on every row,
+  //     one row per property x GL account (4207 rows across the whole
+  //     portfolio in one call — no need to loop per property). This is
+  //     the report this entry uses.
+  //   - This report also silently IGNORES year/fiscal_year/period/
+  //     from_date/to_date params — it always returns the current fiscal
+  //     year only, no matter what's passed. fiscal_year below is read out
+  //     of the data itself (the row's own month keys), never assumed from
+  //     this machine's clock. A second fiscal_year's rows will only start
+  //     appearing here after a real calendar-year rollover happens and the
+  //     nightly sync runs again — there is no way to backfill last year's
+  //     budget from this endpoint.
+  //   - NO PER-PROPERTY "ACTUAL SPEND" REPORT WAS FOUND. income_statement
+  //     and income_statement_comparative exist but are portfolio-wide,
+  //     same problem as the budget-comparative reports above. AppFolio's
+  //     general_ledger report DOES carry property_id on individual
+  //     transactions, so a real actual-spend figure could theoretically be
+  //     built by summing debits/credits per property per account per year
+  //     — but that's new aggregation logic (sign conventions per account
+  //     type, an unclear default date window on that report), a
+  //     materially bigger and riskier piece of work than a straight sync,
+  //     not something to guess at here. actual_amount is correctly never
+  //     set below — see the SYNC CONFLICT RULE above and the migration's
+  //     own comment on why that column is nullable. Flagged to Peter as a
+  //     separate decision, not built around a guess.
+  //   - gl_account_name is AppFolio's real chart-of-accounts text,
+  //     confirmed live — there is NO single "Repairs & Maintenance"
+  //     account in this account's chart of accounts. The closest matches
+  //     are "Repair", "Maintenance Labor", "Roof Repairs and Maintenance",
+  //     and "Maintenance Only-OBP" (54 categories returned in total, all
+  //     synced — the "sync broad, filter at display time" pattern this
+  //     file already uses elsewhere; the Budget tab decides what to
+  //     surface first, this table doesn't).
+  {
+    reportName: 'annual_budget_forecast',
+    table: 'appfolio_property_budgets',
+    conflictCols: ['appfolio_property_id', 'fiscal_year', 'gl_account_name'], // composite upsert key — matches the table's UNIQUE constraint
+    requiredField: 'appfolio_property_id', // this table has no single appfolio_id column (see the migration's "why no FK-resolution" note)
+
+    buildRow(row) {
+      const months = Array.isArray(row.months) ? row.months : [];
+      const firstMonthId = months.length && months[0] && months[0].id ? String(months[0].id) : null;
+      const fiscalYear = firstMonthId ? parseInt(firstMonthId.slice(0, 4), 10) : null;
+      const accountName = row.account_name ? String(row.account_name).trim() : null;
+      const propertyId = row.property_id != null ? String(row.property_id) : null;
+
+      // appfolio_property_id / fiscal_year / gl_account_name are all
+      // NOT NULL on the table and together make up the upsert conflict
+      // key. Supabase upserts write the whole batch as one request — one
+      // row missing any of these would fail the WHOLE night's budget
+      // upsert, not just that row. Drop it here instead of finding out
+      // the hard way.
+      if (!propertyId || !accountName || !Number.isInteger(fiscalYear)) return null;
+
+      const budgeted = parseFloat(row.total);
+      return {
+        appfolio_property_id: propertyId,
+        fiscal_year: fiscalYear,
+        gl_account_name: accountName,
+        budgeted_amount: Number.isFinite(budgeted) ? budgeted : null,
+        // actual_amount deliberately omitted — see the entry comment above.
+        // synced_at is set explicitly (not left to the column DEFAULT)
+        // because DEFAULT NOW() only fires on INSERT — an UPSERT that
+        // matches an existing row is an UPDATE, which needs this written
+        // every run for the Budget tab's "as of [date]" label to be true.
+        synced_at: new Date().toISOString(),
+      };
+    },
+  },
+
+  // ── 12. General ledger → actual spend (Maintenance Budget — Actual Spend,
+  //         Part 3, actual-spend-SPEC.md) ─────────────────────────────────
+  // Fills in the Budget tab's "Actual (AppFolio)" column, which has shown
+  // "not available from AppFolio" since launch (see the entry-11 comment
+  // above — this is the "materially bigger and riskier piece of work"
+  // flagged there, now built out per Oracle's spec and Neo's migration
+  // 20260817010000_appfolio_property_actuals.sql).
+  //
+  // Re-confirmed LIVE against this account (2026-08-18), one day after the
+  // spec's own live check, while building this entry:
+  //   - Response shape is actually { results: [...], next_page_url: null }
+  //     — not the bare array the spec's Decision 1 described. Doesn't
+  //     matter: fetchAllPages() below already handles both shapes and
+  //     already follows next_page_url if AppFolio ever returns a non-null
+  //     one, so no special-casing was needed here. 4,429 rows in one call
+  //     today, next_page_url explicitly null. Spec Open Item #3 (does a
+  //     FULL month's transactions ever paginate?) is still genuinely
+  //     unconfirmed — today's sample is a partial 17/18-day month, so this
+  //     only confirms the code follows pagination correctly IF AppFolio
+  //     ever sends it, not that AppFolio never will once volume is higher.
+  //   - row.month comes back as "Aug 2026" (human text), NOT the 'YYYY-MM'
+  //     ID shape entry 11's annual_budget_forecast rows use — confirmed
+  //     live, and a live correction to what the spec assumed. period below
+  //     is derived from row.post_date ("2026-08-18", ISO) instead, which
+  //     reliably slices to 'YYYY-MM' and satisfies the table's CHECK
+  //     constraint.
+  //   - account_id already arrives as a JS number, not a string.
+  //   - debit and credit are never both populated on the same row —
+  //     confirmed across all 4,429 live rows today (spec Finding B).
+  //   - party_type vocabulary confirmed live, exact match to spec Finding
+  //     E: null, "Occupancy", "Owner", "Vendor", "Management Company".
+  //   - Spec Open Item #1 (does AppFolio's "current month" window reset
+  //     exactly on the calendar month boundary, or something else?) is
+  //     STILL UNCONFIRMED — today's pull is again a mid-month snapshot,
+  //     not a boundary crossing. Flagged, not guessed past; worth Peter or
+  //     Scotty checking right around a month-end.
+  //
+  // This report needs real aggregation across MANY raw transaction rows
+  // into ONE row per property + gl_account_id + month — a fundamentally
+  // different shape than every buildRow() above, which maps one raw row to
+  // one upsert row. Sending one (unaggregated) row per raw transaction with
+  // a shared conflict key would make Postgres's ON CONFLICT clause fail
+  // ("cannot affect row a second time") on the very first duplicate within
+  // a group — so this entry defines aggregate(rows) instead of buildRow(row)
+  // (see the main() loop below for how that's dispatched). The raw rows
+  // (which carry a tenant's real name in party_name — spec Finding D) are
+  // summed here, in memory, and ONLY the six aggregate columns below are
+  // ever handed to Supabase — never party_name, party_id, description, or
+  // txn_id. See the migration's "WHY NOT RAW TRANSACTION LINES" block for
+  // why that boundary is load-bearing, not incidental.
+  {
+    reportName: 'general_ledger',
+    table: 'appfolio_property_actuals',
+    conflictCols: ['appfolio_property_id', 'period', 'gl_account_id'], // matches the table's UNIQUE constraint
+    requiredField: 'appfolio_property_id', // same reasoning as entry 11 — no single appfolio_id column here
+
+    aggregate(rows) {
+      const groups = new Map();
+      for (const row of rows) {
+        const propertyId = row.property_id != null ? String(row.property_id) : null;
+        const accountId = Number.isInteger(row.account_id) ? row.account_id : parseInt(row.account_id, 10);
+        // period comes from post_date, NOT row.month — see the entry
+        // comment above (row.month is "Aug 2026" text, not 'YYYY-MM').
+        const period = row.post_date ? String(row.post_date).slice(0, 7) : null;
+        // Can't place this row in any group safely without all three keys
+        // — drop it rather than guess where it belongs. A full year's
+        // worth of GL rows will always carry property_id/account_id/
+        // post_date in practice; this is a safety net, not an expected path.
+        if (!propertyId || !Number.isInteger(accountId) || !period) continue;
+
+        const key = `${propertyId}|${period}|${accountId}`;
+        let g = groups.get(key);
+        if (!g) {
+          // "NNNN - " prefix stripped so this matches
+          // appfolio_property_budgets.gl_account_name character-for-
+          // character (spec Finding A / the table's own column comment) —
+          // e.g. "6210 - Repair" becomes "Repair".
+          const rawName = row.account_name ? String(row.account_name) : '';
+          const glAccountName = rawName.replace(/^\d+\s*-\s*/, '').trim() || rawName || 'Unknown';
+          g = {
+            appfolio_property_id: propertyId,
+            period,
+            fiscal_year: parseInt(period.slice(0, 4), 10),
+            gl_account_id: accountId,
+            gl_account_name: glAccountName,
+            net_amount: 0,
+            reimbursable_amount: 0,
+          };
+          groups.set(key, g);
+        }
+
+        const debit = parseFloat(row.debit) || 0;
+        const credit = parseFloat(row.credit) || 0;
+        g.net_amount += debit - credit; // spec Finding B — every transaction, no counterparty filter
+
+        // spec Decision 3 / Finding E: only CREDIT-side dollars from a
+        // tenant counterparty count as "reimbursed." The DEBIT-side
+        // Occupancy rows (money paid TO a tenant — e.g. relocation/hotel
+        // costs during a repair) are ordinary spend and must stay inside
+        // net_amount only, never counted here.
+        if (row.party_type === 'Occupancy' && credit > 0) {
+          g.reimbursable_amount += credit;
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      return Array.from(groups.values()).map(g => ({
+        appfolio_property_id: g.appfolio_property_id,
+        period: g.period,
+        fiscal_year: g.fiscal_year,
+        gl_account_id: g.gl_account_id,
+        gl_account_name: g.gl_account_name,
+        net_amount: Math.round(g.net_amount * 100) / 100,
+        reimbursable_amount: Math.round(g.reimbursable_amount * 100) / 100,
+        // synced_at set explicitly, same reasoning as entry 11 — DEFAULT
+        // NOW() only fires on INSERT, and this row gets re-upserted every
+        // night while its month is still "current" in AppFolio's window.
+        synced_at: nowIso,
+      }));
     },
   },
 
@@ -307,12 +551,22 @@ async function afPost(reportName) {
   return result.body;
 }
 
-// AppFolio returns { results: [{...row...}, ...], next_page_url: "..." }
-// The results array contains plain objects — no field/data conversion needed.
+// Most AppFolio reports return { results: [{...row...}, ...], next_page_url:
+// "..." }. Confirmed live while building the annual_budget_forecast entry
+// above: the budget report family (annual_budget_forecast,
+// annual_budget_comparative, budget_comparative, budget_comparison,
+// income_statement, income_statement_comparative — every one tried) does
+// NOT use that wrapper at all. They return a bare JSON array directly,
+// with no next_page_url anywhere (and no pagination was observed on any
+// of them — annual_budget_forecast alone returned all 4207 rows in one
+// call). Handle both shapes here, once, rather than special-casing it
+// inside any one REPORT_CONFIG entry's buildRow — every other entry's
+// response is still an object with a .results array, so this is purely
+// additive, not a behavior change for the reports already working today.
 async function fetchAllPages(reportName) {
   const first    = await afPost(reportName);
-  let rows       = Array.isArray(first.results) ? first.results : [];
-  let nextUrl    = first.next_page_url || null;
+  let rows       = Array.isArray(first) ? first : (Array.isArray(first.results) ? first.results : []);
+  let nextUrl    = Array.isArray(first) ? null : (first.next_page_url || null);
 
   while (nextUrl) {
     const parsed = new URL(nextUrl);
@@ -357,6 +611,29 @@ async function supabaseUpsert(table, rows) {
   }
 }
 
+async function supabaseRpc(fnName) {
+  const sbHost = new URL(SB_URL).hostname;
+  const body   = JSON.stringify({});
+  const result = await httpsRequest({
+    hostname: sbHost,
+    path:     `/rest/v1/rpc/${fnName}`,
+    method:   'POST',
+    headers:  {
+      'apikey':         SB_KEY,
+      'Authorization':  `Bearer ${SB_KEY}`,
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    },
+  }, body);
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    const detail = typeof result.body === 'object'
+      ? JSON.stringify(result.body)
+      : String(result.body).substring(0, 300);
+    throw new Error(`Supabase RPC "${fnName}" returned HTTP ${result.statusCode}: ${detail}`);
+  }
+  return typeof result.body === 'object' ? result.body : JSON.parse(result.body);
+}
+
 // Like supabaseUpsert but takes an explicit list of conflict columns.
 // Used for tables whose unique key spans more than one column (e.g. property_owners).
 async function supabaseUpsertComposite(table, conflictCols, rows) {
@@ -386,6 +663,38 @@ async function supabaseUpsertComposite(table, conflictCols, rows) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// PostgREST's batch upsert requires every object in one request array to
+// have the EXACT same set of JSON keys — it builds a single INSERT
+// statement from the array, and a mismatched key set across rows fails
+// the whole batch with PGRST102 "All object keys must match" (confirmed
+// live, 2026-08-18, real-run: property_directory's 379/380-row split on
+// jurisdiction_county and tenant_tickler's 4/10-row split on
+// move_out_date both failed this way — rent_roll's deposit_held_total
+// happened to succeed only because it had 100% row coverage that day,
+// not because the underlying approach was safe).
+//
+// The "sync-owned field" convention (top of this file, and every
+// buildRow() that sets move_out_date/move_out_reason/deposit_held_total/
+// deposit_synced_at/jurisdiction_county) requires OMITTING an optional
+// field entirely when a row has no data for it — sending null would
+// clear a previously-synced real value. That's fundamentally at odds
+// with PostgREST's uniform-keys requirement whenever a batch mixes rows
+// that do and don't have the optional field. This groups rows by their
+// exact key signature and lets the caller send one upsert per group —
+// each group is internally uniform, so both rules hold at once. For any
+// report where every row already has identical keys (every report in
+// this file except the ones above), this returns exactly one group
+// containing all rows — functionally identical to not grouping at all.
+function groupByKeySignature(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const signature = Object.keys(row).sort().join('|');
+    if (!groups.has(signature)) groups.set(signature, []);
+    groups.get(signature).push(row);
+  }
+  return Array.from(groups.values());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -493,6 +802,156 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LEASE TENANTS — tenant_directory also populates this table
+// (supabase/migrations/20260813000001_lease_tenants.sql — fixes the
+// multi-tenant bug: leases.tenant_id can only ever hold one tenant per
+// lease, silently dropping every co-tenant).
+//
+// tenant_directory ALREADY runs through REPORT_CONFIG above for the
+// `tenants` table (entry 3) — that entry's buildRow() is left completely
+// untouched here. This is a second, independent fetch of the same
+// report, mirroring syncOwnerDirectory()'s proven "one report writes to
+// two tables" pattern above (owner_directory → owners + property_owners)
+// rather than restructuring tenant_directory's existing REPORT_CONFIG
+// entry. The extra fetch costs exactly one additional "initial request"
+// against AppFolio's rate limit — pagination requests are exempt (see
+// the rate-limit note at the top of this file) — not a multiplied cost,
+// and tenant_directory's `tenants`-populating behavior stays byte-for-
+// byte unchanged.
+//
+// Field mapping, per Neo's live discovery (20260813000001's comments):
+//   - occupancy_id      → appfolio_occupancy_id (raw field, confirmed present)
+//   - selected_tenant_id (or occupancy_import_uid as fallback) → appfolio_tenant_id
+//     — this MUST match tenant_directory's own REPORT_CONFIG entry's
+//     `const afId = row.selected_tenant_id || row.occupancy_import_uid`
+//     exactly, or resolve_lease_tenant_foreign_keys()'s join against
+//     tenants.appfolio_id below would silently fail to resolve.
+//   - primary_tenant ("Yes"/"No" text) → is_primary boolean
+//
+// ── DEPARTED-TENANT GAP (found live, 2026-08-19) ────────────────────────
+// tenant_directory only ever lists CURRENT occupants — confirmed live: 3
+// of 4 real move-out cases in the system today (occupancy 366, 1079, 988)
+// return ZERO tenant_directory rows, meaning a disposition packet for an
+// already-departed lease got no tenant name at all, not even the primary
+// one. Checked every other candidate report live against these exact
+// occupancies before picking a fix (live discovery pass, 2026-08-19):
+//   - lease_expiration_detail: 0 rows for all 5 test occupancies (366,
+//     1079, 988, 568, 1162) — not scoped to departed leases at all.
+//   - delinquency: 0 rows for 366/1079/988/568, 1 row for 1162 (only
+//     because that lease happens to carry a balance) — no reliable
+//     departed-tenant signal.
+//   - tenant_tickler DOES carry every one of the 3 real gaps — one row
+//     each, with a real tenant_id, tenant name, email, and phone,
+//     confirmed live. It's the report AppFolio uses for move-in/move-out/
+//     notice EVENTS, so it naturally retains identity right at the moment
+//     tenant_directory drops it. Only ONE tenant per row though — no
+//     rent_roll-style additional_tenant_ids field exists on it (confirmed
+//     against its full field list live) — so a co-tenant on an
+//     already-departed multi-tenant lease is still lost. Accepted for v1:
+//     the single tenant tenant_tickler names is always the one whose
+//     move-out actually triggered the event, which cross-checked exactly
+//     against legacy leases.tenant_id for all 3 real cases.
+//   - tenant_tickler is a small, rolling report (10 rows total the day
+//     this was checked, not "full history" like tenant_directory's 1149+)
+//     — it covers TODAY's real gap completely, but there's no guarantee
+//     an occupancy that moved out long before this fix shipped, and has
+//     since aged out of tenant_tickler's window, would still be caught.
+//     Only used as a supplement for occupancies tenant_directory has zero
+//     rows for — never overrides a tenant_directory row, so it can't
+//     demote a real co-tenant to "the only tenant."
+async function syncLeaseTenants(isDryRun, isDiscover, summary) {
+  const label = 'tenant_directory + tenant_tickler (lease_tenants)';
+
+  if (isDiscover) {
+    // Already discovered by these reports' own REPORT_CONFIG entries above
+    // — nothing new to fetch or print for this second pass.
+    return;
+  }
+
+  console.log(`[${label}] Fetching tenant_directory...`);
+  let tdRows;
+  try {
+    tdRows = await fetchAllPages('tenant_directory');
+  } catch (err) {
+    console.error(`[${label}] FETCH ERROR (tenant_directory): ${err.message}`);
+    summary.push({ reportName: label, status: 'FETCH_ERROR', error: err.message });
+    return;
+  }
+  console.log(`[${label}] Fetched ${tdRows.length} tenant_directory rows.`);
+
+  const leaseTenantRows = [];
+  const coveredOccupancies = new Set();
+  let skipped = 0;
+  for (const row of tdRows) {
+    const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
+    const afTenantId  = row.selected_tenant_id || row.occupancy_import_uid;
+    if (!occupancyId || !afTenantId) { skipped++; continue; }
+
+    leaseTenantRows.push({
+      appfolio_occupancy_id: occupancyId,
+      appfolio_tenant_id:    String(afTenantId),
+      is_primary:            String(row.primary_tenant || '').trim().toLowerCase() === 'yes',
+    });
+    coveredOccupancies.add(occupancyId);
+  }
+  const skipNote = skipped > 0 ? ` (${skipped} skipped — missing occupancy_id or tenant id)` : '';
+  console.log(`[${label}] Mapped ${leaseTenantRows.length} rows from tenant_directory${skipNote}.`);
+
+  // Departed-tenant fallback — see the DEPARTED-TENANT GAP comment above.
+  // Only fills occupancies tenant_directory returned nothing for; never
+  // touches one it already covered.
+  console.log(`[${label}] Fetching tenant_tickler (departed-tenant fallback)...`);
+  let ttRows;
+  try {
+    ttRows = await fetchAllPages('tenant_tickler');
+  } catch (err) {
+    console.error(`[${label}] FETCH ERROR (tenant_tickler): ${err.message} — continuing with tenant_directory rows only.`);
+    ttRows = [];
+  }
+  let fallbackAdded = 0;
+  const fallbackSeenOccupancies = new Set(); // dedupe within tenant_tickler itself before it ever reaches the upsert
+  for (const row of ttRows) {
+    const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
+    const afTenantId  = row.tenant_id != null ? String(row.tenant_id) : null;
+    if (!occupancyId || !afTenantId) continue;
+    if (coveredOccupancies.has(occupancyId)) continue; // tenant_directory already has this one — never override it
+    if (fallbackSeenOccupancies.has(occupancyId)) continue; // one row per occupancy from this fallback
+
+    leaseTenantRows.push({
+      appfolio_occupancy_id: occupancyId,
+      appfolio_tenant_id:    afTenantId,
+      is_primary:            true, // the only tenant this fallback knows about
+    });
+    fallbackSeenOccupancies.add(occupancyId);
+    fallbackAdded++;
+  }
+  console.log(`[${label}] Recovered ${fallbackAdded} additional occupancy(ies) from tenant_tickler that tenant_directory had zero rows for.`);
+
+  if (isDryRun) {
+    console.log(`[${label}] DRY RUN — would upsert ${leaseTenantRows.length} rows total.`);
+    // Explicit spot-check against known live examples: 568/1162 (active
+    // multi-tenant, from tenant_directory) and 366/1079/988 (departed,
+    // recovered via the tenant_tickler fallback above).
+    for (const testOcc of ['568', '1162', '366', '1079', '988']) {
+      const group = leaseTenantRows.filter(r => r.appfolio_occupancy_id === testOcc);
+      console.log(`[${label}] DRY RUN — occupancy ${testOcc}: ${group.length} tenant(s)${group.length ? ' → ' + group.map(g => g.appfolio_tenant_id + (g.is_primary ? ' (primary)' : '')).join(', ') : ' — NOT FOUND'}.`);
+    }
+    console.log('');
+    summary.push({ reportName: label, table: 'lease_tenants', status: 'DRY_RUN', rowsMapped: leaseTenantRows.length, fallbackAdded });
+    return;
+  }
+
+  try {
+    await supabaseUpsertComposite('lease_tenants', ['appfolio_occupancy_id', 'appfolio_tenant_id'], leaseTenantRows);
+    console.log(`[${label}] Upserted ${leaseTenantRows.length} rows to lease_tenants (${fallbackAdded} via tenant_tickler fallback).\n`);
+    summary.push({ reportName: label, table: 'lease_tenants', status: 'OK', rowsUpserted: leaseTenantRows.length, fallbackAdded });
+  } catch (err) {
+    console.error(`[${label}] UPSERT ERROR: ${err.message}\n`);
+    summary.push({ reportName: label, table: 'lease_tenants', status: 'UPSERT_ERROR', error: err.message });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -553,33 +1012,89 @@ async function main() {
       continue;
     }
 
+    // Most entries key off appfolio_id (a single-column upsert conflict
+    // key). appfolio_property_budgets has no such column (see its own
+    // entry's comment above) — its rows key off a composite of three
+    // columns instead, so a REPORT_CONFIG entry can override which field
+    // this presence check looks for via requiredField.
+    const idField = config.requiredField || 'appfolio_id';
+
+    // general_ledger (and anything else that needs to sum many raw rows
+    // into one upsert row per group — see its entry's comment above)
+    // defines aggregate(rows) instead of buildRow(row). Everything else
+    // keeps the original one-row-in/one-row-out path unchanged.
     let skipped = 0;
-    const mapped = [];
-    for (const row of rows) {
-      try {
-        const built = config.buildRow(row);
-        if (built && built.appfolio_id && built.appfolio_id !== 'null' && built.appfolio_id !== 'undefined') {
-          mapped.push(built);
-        } else {
+    let mapped;
+    if (typeof config.aggregate === 'function') {
+      mapped = config.aggregate(rows).filter(
+        r => r && r[idField] && r[idField] !== 'null' && r[idField] !== 'undefined'
+      );
+    } else {
+      mapped = [];
+      for (const row of rows) {
+        try {
+          const built = config.buildRow(row);
+          if (built && built[idField] && built[idField] !== 'null' && built[idField] !== 'undefined') {
+            mapped.push(built);
+          } else {
+            skipped++;
+          }
+        } catch (_) {
           skipped++;
         }
-      } catch (_) {
-        skipped++;
       }
     }
 
-    const skipNote = skipped > 0 ? ` (${skipped} skipped — no appfolio_id)` : '';
-    console.log(`[${reportName}] Mapped ${mapped.length} rows → ${table}${skipNote}.`);
+    const skipNote = skipped > 0 ? ` (${skipped} skipped — no ${idField})` : '';
+    const aggregateNote = typeof config.aggregate === 'function' ? ` (aggregated from ${rows.length} raw rows)` : '';
+    console.log(`[${reportName}] Mapped ${mapped.length} rows → ${table}${skipNote}${aggregateNote}.`);
 
     if (isDryRun) {
-      console.log(`[${reportName}] DRY RUN — would upsert ${mapped.length} rows.\n`);
+      console.log(`[${reportName}] DRY RUN — would upsert ${mapped.length} rows.`);
+      // Targeted, additive-only diagnostics for the three fields this
+      // build added — dry-run mode only, doesn't touch real-run behavior
+      // or any other report's logging.
+      if (reportName === 'tenant_tickler') {
+        const withMoveOut = mapped.filter(r => r.move_out_date);
+        console.log(`[${reportName}] DRY RUN — ${withMoveOut.length} of ${mapped.length} rows include a real move_out_date.`);
+        withMoveOut.slice(0, 3).forEach(r => console.log(`[${reportName}]   sample: occupancy ${r.appfolio_id} move_out_date=${r.move_out_date} move_out_reason=${r.move_out_reason || '(none)'}`));
+      }
+      if (reportName === 'rent_roll') {
+        const withDeposit = mapped.filter(r => r.deposit_held_total != null);
+        console.log(`[${reportName}] DRY RUN — ${withDeposit.length} of ${mapped.length} rows include a real deposit_held_total.`);
+        withDeposit.slice(0, 3).forEach(r => console.log(`[${reportName}]   sample: occupancy ${r.appfolio_id} deposit_held_total=${r.deposit_held_total} deposit_synced_at=${r.deposit_synced_at}`));
+      }
+      if (reportName === 'property_directory') {
+        const withCounty = mapped.filter(r => r.jurisdiction_county);
+        console.log(`[${reportName}] DRY RUN — ${withCounty.length} of ${mapped.length} rows include jurisdiction_county.`);
+      }
+      console.log('');
       summary.push({ reportName, table, status: 'DRY_RUN', rowsMapped: mapped.length });
       continue;
     }
 
     try {
-      await supabaseUpsert(table, mapped);
-      console.log(`[${reportName}] Upserted ${mapped.length} rows to ${table}.\n`);
+      // conflictCols (present only on appfolio_property_budgets today)
+      // routes through the same composite-key upsert helper owner_directory
+      // already uses for property_owners — everything else keeps using the
+      // plain single-column appfolio_id upsert as before.
+      //
+      // Grouped by key signature first (see groupByKeySignature() above) —
+      // required whenever an optional, sync-owned field is present on some
+      // rows and omitted on others within the same report's batch. A
+      // report where every row already has identical keys produces
+      // exactly one group here, so this is a no-op for every report that
+      // isn't affected.
+      const keyGroups = groupByKeySignature(mapped);
+      for (const group of keyGroups) {
+        if (config.conflictCols) {
+          await supabaseUpsertComposite(table, config.conflictCols, group);
+        } else {
+          await supabaseUpsert(table, group);
+        }
+      }
+      const batchNote = keyGroups.length > 1 ? ` (${keyGroups.length} batches — mixed optional fields)` : '';
+      console.log(`[${reportName}] Upserted ${mapped.length} rows to ${table}${batchNote}.\n`);
       summary.push({ reportName, table, status: 'OK', rowsUpserted: mapped.length });
     } catch (err) {
       console.error(`[${reportName}] UPSERT ERROR: ${err.message}\n`);
@@ -588,6 +1103,28 @@ async function main() {
   }
 
   await syncOwnerDirectory(isDryRun, isDiscover, summary);
+  await syncLeaseTenants(isDryRun, isDiscover, summary);
+
+  // ── lease_tenants FK resolution — run after all tables are populated ────
+  // lease_tenants.lease_id / .tenant_id — its own function
+  // (supabase/migrations/20260813000001_lease_tenants.sql), part of the
+  // security-deposit build's multi-tenant fix. This is the only FK
+  // resolution this sync calls — resolve_appfolio_foreign_keys()
+  // (20260803000001_resolve_fk_function.sql, the portfolio-wide
+  // units/leases/maintenance_requests resolver) exists in the database but
+  // is intentionally never invoked here; activating it is a separate,
+  // not-yet-approved decision (see this file's own top-of-file summary
+  // comment: "Foreign-key joins... are deferred to a future release").
+  if (!isDryRun && !isDiscover) {
+    try {
+      const ltFkResult = await supabaseRpc('resolve_lease_tenant_foreign_keys');
+      console.log(`[lease-tenant-fk-resolution] lease_tenants→leases: ${ltFkResult.lease_tenants_leases}, lease_tenants→tenants: ${ltFkResult.lease_tenants_tenants}\n`);
+      summary.push({ reportName: 'lease-tenant-fk-resolution', status: 'OK', ...ltFkResult });
+    } catch (err) {
+      console.error(`[lease-tenant-fk-resolution] ERROR: ${err.message}\n`);
+      summary.push({ reportName: 'lease-tenant-fk-resolution', status: 'ERROR', error: err.message });
+    }
+  }
 
   console.log('\n=== Summary ===');
   for (const r of summary) {

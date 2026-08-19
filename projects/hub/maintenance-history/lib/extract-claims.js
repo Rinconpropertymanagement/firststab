@@ -83,7 +83,7 @@ TWO HARD RULES (these are why the manual test scored 0% missed / 0% wrong-source
 
 Extract claims into exactly these four types, matching what the original manual test proved valuable:
 - "event" — something that happened, with a date if one is stated. Do NOT restate simple status changes (the status timeline is already recorded separately, given to you below for context only) — only add an event claim for something the timeline itself wouldn't show (a specific detail, a callback, a same-day event mentioned in the text).
-- "decision" — who decided what, and the stated reason if one is given. Include any dollar/scope limit attached. If no reason is stated, say so plainly in claim_text rather than inventing one (e.g. "Reason not stated in the material.").
+- "decision" — who decided what, and the stated reason if one is given. If a dollar or scope limit is attached (a spending cap, an estimate, an invoice amount — anything sourced from Latchel's own fields), state it as Latchel's own recorded figure, NOT as a confirmed budget, and end that part of claim_text with "(Latchel-reported — not yet checked against AppFolio)". Never use the word "budget" to describe a Latchel dollar figure as if it were settled — Rincon's real budget of record lives in AppFolio, not Latchel, and this tool has not checked the two against each other. If no reason is stated, say so plainly in claim_text rather than inventing one (e.g. "Reason not stated in the material.").
 - "outcome" — set outcome_level 1-5 using this ladder (use the LOWEST level you have solid evidence for; higher levels require their own evidence, do not assume they follow from a lower one):
   1 = vendor/contractor says the work is done
   2 = something objective confirms it (a photo, a reading, a passed inspection)
@@ -120,7 +120,7 @@ function buildJobFieldsText(job, stateHistory) {
     `Created: ${job.created_at}`,
     `Last updated: ${job.updated_at}`,
     `Scheduled: ${job.scheduled_start || '(none)'} - ${job.scheduled_end || '(none)'}`,
-    `Max cost (budget): ${job.max_cost != null ? job.max_cost : '(none)'}`,
+    `Latchel spending cap for this ticket (Latchel's own internal figure, NOT a confirmed AppFolio budget): ${job.max_cost != null ? job.max_cost : '(none)'}`,
     `Severity: ${job.severity || '(none)'}  Urgent: ${!!job.is_urgent}  Emergency: ${!!job.is_emergency}`,
   ];
 
@@ -159,13 +159,51 @@ async function extractAIClaims({ job, stateHistory, pdfFiles }) {
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 4096,
+    // Raised from 4096 (TARS, 2026-08-17): on complex, decision-heavy
+    // tickets the model was spending most of that budget on internal
+    // reasoning before it ever got to writing the JSON answer, so the
+    // response got cut off mid-answer and silently produced zero claims —
+    // confirmed on 3/3 complex tickets TARS spot-checked. This is a JSON
+    // array of short claims, not a large document, so this isn't blindly
+    // 4x'd — 8192 doubles the room (enough for a decision-heavy ticket's
+    // reasoning + a real-sized claims array) without being wasteful.
+    max_tokens: 8192,
+    // claude-sonnet-5 runs adaptive thinking by default (no `thinking` param
+    // needed to turn it on) at effort 'high' when effort is left unset —
+    // and thinking output counts against max_tokens same as the final
+    // answer. Verified live against this codebase's own most complex real
+    // ticket (17537-1, a 94-page compliance thread): at the default (unset)
+    // effort, thinking alone consumed all 8192 tokens, leaving ZERO room
+    // for the JSON answer — response.content had no text block at all, a
+    // different and worse failure than plain truncation. 'medium' is the
+    // documented lever for bounding thinking depth/token spend (not
+    // max_tokens, which only caps the total) — re-tested against the same
+    // 94-page ticket at 'medium' and it completed with a real answer. See
+    // claude-api skill's Thinking & Effort reference.
+    output_config: { effort: 'medium' },
     messages: [{ role: 'user', content }],
   });
+
+  // A response that's ALL thinking (the model spent the entire max_tokens
+  // budget on reasoning and never got to the answer) has NO text block at
+  // all — checking stop_reason here, before requiring a text block, is
+  // what catches that case. Checking after (the original ordering) let a
+  // fully-consumed-by-thinking response throw an uncaught, differently-
+  // worded error instead of landing in the loud, specific handling below.
+  if (response.stop_reason === 'max_tokens') {
+    console.error(
+      `[extract-claims] TRUNCATED response (stop_reason=max_tokens) for job ${job && job.job_id}. ` +
+      `Response content blocks: ${response.content.map(b => b.type).join(', ') || '(none)'}. ` +
+      `This ticket needs a retry (or a higher max_tokens if it keeps happening) — the model ran out ` +
+      `of room before finishing, this is not a parse failure.`
+    );
+    return { claims: [], modelVersion: response.model, filesRead, truncated: true };
+  }
 
   const textBlock = response.content.find(b => b.type === 'text');
   if (!textBlock) throw new Error('No text block in Claude response.');
   const raw = textBlock.text.trim();
+
   const jsonStart = raw.search(/[[{]/);
   const trimmed = jsonStart > 0 ? raw.slice(jsonStart) : raw;
   const cleaned = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();

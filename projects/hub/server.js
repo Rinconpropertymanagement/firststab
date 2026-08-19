@@ -131,6 +131,8 @@ const session = require('express-session');
 
 const { signInWithPassword, requestPasswordReset, updatePasswordWithToken } = require('./lib/auth');
 const { requireLogin } = require('./lib/middleware');
+const { router: propertySearchRouter } = require('./lib/property-search');
+const { GLOBAL_SEARCH_WIDGET_HTML } = require('./lib/global-search-widget');
 const { router: insuranceRouter, internalRouter: insuranceInternalRouter } = require('./insurance/router');
 const { router: securityDepositRouter, internalRouter: securityDepositInternalRouter } = require('./security-deposit/router');
 const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInternalRouter } = require('./maintenance-history/router');
@@ -148,6 +150,29 @@ if (missing.length > 0) {
   console.error('[ERROR] Set these in the shared .env at the project root (see .env.example).');
   process.exit(1);
 }
+
+// ─── Process-level safety net ──────────────────────────────────────────────
+// Real-world incident: the security-deposit B2 photo-indexing cron route
+// (security-deposit/router.js) took down the ENTIRE Hub process twice
+// during testing — not just that one request failing, but every tool
+// (Insurance Compliance, Security Deposit, Maintenance History) going
+// offline with it, confirmed via `lsof` showing nothing listening on
+// HUB_PORT afterward. Root cause in that route is now fixed directly
+// (see router.js's index-b2-photos comment), but this process was
+// running with zero top-level safety net — on Node's current default, a
+// single unhandled promise rejection ANYWHERE in the process (this
+// route, any other cron route, a future bug) terminates the whole
+// server, taking every logged-in user's session down with it. Log and
+// keep running instead: one bad request should never be able to do that
+// again. This does not replace fixing the actual bug where it happens —
+// see the try/catch inside index-b2-photos for that — it's the backstop
+// for whatever this doesn't catch.
+process.on('unhandledRejection', (reason) => {
+  console.error(`[${new Date().toISOString()}] [FATAL-AVOIDED] Unhandled promise rejection (process kept alive):`, reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error(`[${new Date().toISOString()}] [FATAL-AVOIDED] Uncaught exception (process kept alive):`, err);
+});
 
 // ─── App ──────────────────────────────────────────────────────────────────
 const app = express();
@@ -189,7 +214,12 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
-function page({ title, body }) {
+// search: true adds the hub-wide "search properties" box above the page's
+// own content — see lib/global-search-widget.js. Only pass this for pages
+// reached AFTER login (today: just the home page below); the login,
+// forgot-password, and reset-password pages call page() without it, since
+// there's no session yet for the search API to run against.
+function page({ title, body, search = false }) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -220,6 +250,7 @@ function page({ title, body }) {
   </style>
 </head>
 <body>
+  ${search ? GLOBAL_SEARCH_WIDGET_HTML : ''}
   <div class="wrap">${body}</div>
 </body>
 </html>`;
@@ -427,6 +458,7 @@ app.get('/healthz', (req, res) => {
   res.json({ ok: true, service: 'hub' });
 });
 
+
 // ─── Insurance Compliance — internal/cron route, no login required ────────
 // One endpoint (the nightly new-property check) authenticates with its own
 // shared secret header instead of a browser session — same as it did
@@ -453,12 +485,20 @@ app.use(maintenanceHistoryInternalRouter);
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);
 
+// ─── Hub-wide property search — GET /api/hub/search-properties?q=... ──────
+// Backs the global search box in every page's header (see page() below and
+// each tool's dashboard). Login-gated only, no tool-specific role check —
+// it returns existence flags only (does this property have data in each
+// tool), never the underlying records. See lib/property-search.js.
+app.use(propertySearchRouter);
+
 // ─── GET / — home page ──────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   const email = req.session.userEmail || req.user.email;
   res.send(
     page({
       title: 'Home',
+      search: true,
       body: `
         <div class="top-row">
           <h1>Rincon Hub</h1>

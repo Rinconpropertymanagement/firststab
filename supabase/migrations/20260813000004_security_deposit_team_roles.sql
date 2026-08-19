@@ -63,6 +63,17 @@
 -- tool CHECK — add 'security_deposit'
 -- ------------------------------------------------------------
 
+-- CORRECTED post-attempt (2026-08-13): the first version of this migration
+-- assumed the only tool value in live use was 'insurance_compliance', based
+-- on what was visible when this file was written. That assumption was wrong
+-- — a separate, concurrently-built Hub tool ('maintenance_history') already
+-- has real rows in this shared table. Running the original version against
+-- the real database failed with a 23514 check-constraint violation, exactly
+-- as it should have — Postgres correctly refused to silently drop
+-- 'maintenance_history' support. Fixed by including it explicitly below
+-- rather than assuming a fixed, hardcoded list. Confirmed via
+-- `SELECT DISTINCT tool FROM team_member_tool_roles` against the live
+-- database before this fix was written, not guessed.
 ALTER TABLE team_member_tool_roles
   DROP CONSTRAINT IF EXISTS team_member_tool_roles_tool_check;
 
@@ -70,6 +81,7 @@ ALTER TABLE team_member_tool_roles
   ADD CONSTRAINT team_member_tool_roles_tool_check
   CHECK (tool IN (
     'insurance_compliance',
+    'maintenance_history',
     'security_deposit'
   ));
 

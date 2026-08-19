@@ -5,7 +5,11 @@
  * (projects/hub/insurance/router.js): one router file, mounted into
  * projects/hub/server.js, reusing the Hub's existing login. No new
  * sign-in screen, no new tables beyond what Neo already migrated (see
- * supabase/migrations/20260813000000 through 20260813000004).
+ * supabase/migrations/20260813000000 through 20260813000004, plus
+ * 20260819000000 — additive columns on security_deposit_cases for the
+ * manually-reported Prepaid Rent balance, replacing the earlier live
+ * AppFolio pull; see the comment above GET /api/security-deposit/cases/:id
+ * below for the full history).
  *
  * Full spec: projects/hub/security-deposit/SPEC.md — treat it as
  * authoritative. This file follows its "Q — route sketch" and "Q —
@@ -43,9 +47,9 @@ const path = require('path');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 
-const appfolioConnector = require('./lib/appfolio-connector');
 const { listPhotoFolders } = require('./lib/b2-client');
 const { parseFolderName } = require('./lib/folder-parser');
+const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Nodemailer (reminder emails) — same setup pattern as insurance ───────
 let nodemailer = null;
@@ -140,6 +144,30 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// ─── Pagination helper — Supabase/PostgREST caps any single .select() at
+// 1000 rows by default, silently (no error) — see the B2-photo-folder
+// indexing bug this same file already hit once (fetchAllExistingB2FolderPaths
+// below, near the index-b2-photos route) for how that showed up in
+// practice. This generalizes that fix for every other query in this file
+// that reads a table with no narrow per-request filter, so it can't rely
+// on staying under 1000 rows just because it does today.
+const SUPABASE_PAGE_SIZE = 1000;
+async function fetchAllRows(buildPage) {
+  // buildPage(from, to) must return a FRESH Supabase query (with .range()
+  // already applied) each call — a query builder can't be re-awaited, so
+  // this always asks the caller for a brand new one per page.
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await buildPage(from, from + SUPABASE_PAGE_SIZE - 1);
+    if (error) throw error;
+    for (const row of data || []) rows.push(row);
+    if (!data || data.length < SUPABASE_PAGE_SIZE) break;
+    from += SUPABASE_PAGE_SIZE;
+  }
+  return rows;
+}
 
 // ─── Multer (inspection form uploads) — same pattern as insurance ─────────
 const upload = multer({
@@ -304,8 +332,13 @@ router.use(attachSecurityDepositRole);
 // on load and shows a friendly "no access" message on a 403. Tron owns
 // dashboard/index.html; this file currently serves a placeholder so the
 // route works end to end before Tron's screens land.
+// Same "read + inject the shared search widget, then send" approach as
+// insurance/router.js's GET /insurance — see that route's comment for why.
 router.get('/security-deposit', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dashboard', 'index.html'));
+  fs.readFile(path.join(__dirname, 'dashboard', 'index.html'), 'utf8', (err, html) => {
+    if (err) return res.status(500).send('Could not load page.');
+    res.send(html.replace('<body>', '<body>\n' + GLOBAL_SEARCH_WIDGET_HTML));
+  });
 });
 
 // ─── GET /api/security-deposit/auth/me ─────────────────────────────────────
@@ -322,39 +355,71 @@ router.get('/api/security-deposit/auth/me', requireSecurityDepositAccess, (req, 
 // to open cases (pending_review, escalated); ?status=all or ?status=X
 // lets Tron build a "reviewed" tab without a second endpoint.
 router.get('/api/security-deposit/cases', requireSecurityDepositAccess, async (req, res) => {
-  let query = supabase
-    .from('security_deposit_cases')
-    .select(`
-      id, lease_id, move_out_date, disposition_deadline, status,
-      tenancy_status, ai_suggested_tenancy_status, created_at,
-      leases (
-        id, appfolio_id, lease_start, lease_end,
-        units ( unit_number, properties ( name, address, city ) )
-      )
-    `)
-    .order('disposition_deadline', { ascending: true });
+  // ?status=all (used for the "reviewed" history tab) has no filter at
+  // all, and even the default open-cases view only narrows by status, not
+  // by time — this table only grows as more move-outs happen, so it can't
+  // rely on a single .select() staying under Supabase's 1000-row cap
+  // forever. Paginated with fetchAllRows the same way the B2 photo index
+  // had to be. Paged by `id` (the primary key, always unique) so pages
+  // can't skip or double up a row on a disposition_deadline tie; the
+  // actually-requested sort is applied in JS below, after every page is in.
+  let data;
+  try {
+    data = await fetchAllRows((from, to) => {
+      let query = supabase
+        .from('security_deposit_cases')
+        .select(`
+          id, lease_id, move_out_date, disposition_deadline, status,
+          tenancy_status, ai_suggested_tenancy_status, created_at,
+          leases (
+            id, appfolio_id, lease_start, lease_end,
+            units ( unit_number, properties ( name, address, city ) )
+          )
+        `)
+        .order('id', { ascending: true })
+        .range(from, to);
 
-  if (req.query.status === 'all') {
-    // no filter
-  } else if (req.query.status) {
-    query = query.eq('status', req.query.status);
-  } else {
-    query = query.in('status', ['pending_review', 'escalated']);
+      if (req.query.status === 'all') {
+        // no filter
+      } else if (req.query.status) {
+        query = query.eq('status', req.query.status);
+      } else {
+        query = query.in('status', ['pending_review', 'escalated']);
+      }
+      return query;
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+  // disposition_deadline ascending, nulls last — matches the original
+  // single-query .order('disposition_deadline', { ascending: true }).
+  data.sort((a, b) => {
+    if (a.disposition_deadline == null && b.disposition_deadline == null) return 0;
+    if (a.disposition_deadline == null) return 1;
+    if (b.disposition_deadline == null) return -1;
+    return a.disposition_deadline < b.disposition_deadline ? -1 : a.disposition_deadline > b.disposition_deadline ? 1 : 0;
+  });
 
   // Every leaseholder name for the cases in this page, in one query
   // instead of N+1 — the multi-tenant fix means a queue row can have more
-  // than one name.
+  // than one name. Also paginated: leaseIds grows with the cases list
+  // above (?status=all especially), and .in() doesn't exempt a query from
+  // the same 1000-row response cap.
   const leaseIds = (data || []).map(c => c.lease_id).filter(Boolean);
   const tenantsByLease = {};
   if (leaseIds.length) {
-    const { data: ltRows } = await supabase
-      .from('lease_tenants')
-      .select('lease_id, is_primary, tenants ( first_name, last_name )')
-      .in('lease_id', leaseIds);
+    let ltRows;
+    try {
+      ltRows = await fetchAllRows((from, to) => supabase
+        .from('lease_tenants')
+        .select('lease_id, is_primary, tenants ( first_name, last_name )')
+        .in('lease_id', leaseIds)
+        .order('id', { ascending: true })
+        .range(from, to));
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
     (ltRows || []).forEach(row => {
       if (!row.tenants) return;
       const name = `${row.tenants.first_name || ''} ${row.tenants.last_name || ''}`.trim();
@@ -389,6 +454,7 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
       id, lease_id, move_out_date, disposition_deadline, status,
       tenancy_status, ai_suggested_tenancy_status,
       checklist_notice_sent, checklist_inspection_conducted, checklist_photos_documented,
+      prepaid_rent_balance, prepaid_rent_reported_by, prepaid_rent_reported_at,
       reviewed_by, reviewed_at, escalated_by, escalated_at, reviewer_notes,
       created_at, updated_at,
       leases (
@@ -431,37 +497,43 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
 
   // Matched B2 photos — reads the already-built index only (never touches
   // B2 live on a case-open — that would be slow and re-spend AI-parsing
-  // cost on unchanged folders; see 20260813000003's design notes).
+  // cost on unchanged folders; see 20260813000003's design notes). This is
+  // the SAME b2_photo_folders table that already silently truncated past
+  // row 1,000 in the index-b2-photos job (see fetchAllExistingB2FolderPaths
+  // below) — this read has no filter narrower than "has a parsed address,"
+  // so every case-detail page load was exposed to the identical bug.
+  // Paginated the same way.
   let candidateFolders = [];
   if (property && property.address) {
-    const { data: folderRows, error: folderErr } = await supabase
-      .from('b2_photo_folders')
-      .select('id, b2_folder_path, parsed_address, parsed_unit, parsed_inspection_type, parsed_date, confidence_score, review_status')
-      .not('parsed_address', 'is', null);
-    if (folderErr) return res.status(500).json({ error: folderErr.message });
-    candidateFolders = folderRows || [];
+    try {
+      candidateFolders = await fetchAllRows((from, to) => supabase
+        .from('b2_photo_folders')
+        .select('id, b2_folder_path, parsed_address, parsed_unit, parsed_inspection_type, parsed_date, confidence_score, review_status')
+        .not('parsed_address', 'is', null)
+        .order('id', { ascending: true })
+        .range(from, to));
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
   }
 
   const moveInPhotos = findBestPhotoMatch(property && property.address, lease.lease_start, 'move_in', candidateFolders);
   const moveOutPhotos = findBestPhotoMatch(property && property.address, kase.move_out_date, 'move_out', candidateFolders);
 
-  // Prepaid Rent — pulled live, per case, NOT nightly-synced (SPEC.md Neo
-  // section #3, Mason's resolution: AB 12's deposit cap counts last
-  // month's rent collected upfront, but AppFolio books it in a genuinely
-  // separate account from the deposit itself, so it needs its own pull
-  // and its own labeled line — never folded into deposit.held_total
-  // above). Wrapped defensively: a live AppFolio call can fail (network,
-  // rate limit, credentials), and that shouldn't take down the whole case
-  // view — it becomes a flag instead, same as any other missing evidence.
-  let prepaidRent = { found: false };
-  if (lease.appfolio_id) {
-    try {
-      prepaidRent = await appfolioConnector.getPrepaidRentBalance(lease.appfolio_id);
-    } catch (err) {
-      console.error(`[security-deposit] getPrepaidRentBalance failed for case ${kase.id}:`, err.message);
-      prepaidRent = { found: false, error: err.message };
-    }
-  }
+  // Prepaid Rent — NOT a live AppFolio pull (superseded 2026-08-19).
+  // Automatic retrieval via appfolioConnector.getPrepaidRentBalance()
+  // (a general_ledger lookup) was confirmed a dead end for driving a
+  // hard review gate: it can return found:false or an outright error,
+  // and there's no way to force a human decision out of a live lookup
+  // that might just fail. Peter's decision, on Mason's recommendation:
+  // the pod lead looks up "2300 - Prepaid Rent" for this tenant in
+  // AppFolio themselves and enters the balance (or $0) via
+  // POST .../prepaid-rent below — same "human does what software can't
+  // guarantee" pattern as the checklist and the inspection-form upload.
+  // getPrepaidRentBalance() itself is untouched (see lib/appfolio-
+  // connector.js) — this route just stops calling it. See
+  // 20260819000000_add_prepaid_rent_reported_to_security_deposit_cases.sql
+  // for the schema and SPEC.md Neo section #3 for the full history.
 
   // Missing-evidence flags — computed HERE, at read time, from whatever
   // the assembly step actually found. Deliberately not a stored column —
@@ -476,8 +548,8 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   } else if (Number(lease.deposit_held_total) === 0) {
     flags.push({ code: 'zero_deposit', message: 'Deposit on file is $0 — confirm this is correct and not a data gap.' });
   }
-  if (prepaidRent.error) {
-    flags.push({ code: 'prepaid_rent_lookup_failed', message: 'Could not check for a Prepaid Rent balance right now — try again, or confirm manually in AppFolio.' });
+  if (kase.prepaid_rent_balance == null) {
+    flags.push({ code: 'prepaid_rent_not_reported', message: 'Prepaid Rent balance has not been entered yet. Look up "2300 - Prepaid Rent" for this tenant in AppFolio and enter the balance (or $0 if none exists) — required before this case can be marked reviewed.' });
   }
   if (!inspectionFormMoveIn) flags.push({ code: 'no_inspection_form_move_in', message: 'Move-in inspection form not uploaded yet.' });
   if (!inspectionFormMoveOut) flags.push({ code: 'no_inspection_form_move_out', message: 'Move-out inspection form not uploaded yet.' });
@@ -526,14 +598,17 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
     },
     // Its own separate labeled line, never folded into deposit.held_total
     // above — Mason's resolution (SPEC.md Neo section #3, "What You'll
-    // See"). Pulled live per case (see the flag above if that lookup
-    // failed) — always show this next to the deposit figure, not hidden
-    // behind a click, per SPEC.md's "What You'll See."
+    // See"). As of 2026-08-19, this is a required, manually-entered
+    // figure (POST .../prepaid-rent below), not a live AppFolio pull —
+    // see the comment above this block for why. reported=false means the
+    // pod lead hasn't entered it yet, which also blocks marking this case
+    // reviewed (see POST .../review).
     prepaid_rent: {
-      balance: prepaidRent.balance != null ? prepaidRent.balance : null,
-      found: !!prepaidRent.found,
-      verified_amount_field: prepaidRent.verified_amount_field === true,
-      source_label: "From AppFolio's Prepaid Rent ledger — a separate account from the Security Deposit total above, pulled live for this case (not nightly-synced). California's AB 12 deposit cap counts this toward the aggregate. Confirm this figure and account for it before finalizing the disposition.",
+      balance: kase.prepaid_rent_balance != null ? Number(kase.prepaid_rent_balance) : null,
+      reported: kase.prepaid_rent_balance != null,
+      reported_by: kase.prepaid_rent_reported_by || null,
+      reported_at: kase.prepaid_rent_reported_at || null,
+      source_label: "From AppFolio's \"2300 - Prepaid Rent\" account for this tenant — looked up and entered manually by a pod lead (not an automated pull), since AppFolio books it in a separate account from the Security Deposit total above. California's AB 12 deposit cap counts this toward the aggregate. Required before this case can be marked reviewed.",
     },
     inspection_forms: {
       move_in: inspectionFormMoveIn,
@@ -627,6 +702,52 @@ router.post('/api/security-deposit/cases/:id/checklist', requireSecurityDepositR
     entity_type: 'security_deposit_case',
     entity_id: req.params.id,
     details: { updated_fields: updates, answered_by: req.user.email },
+  });
+
+  return res.json({ success: true, case: updated });
+});
+
+// ─── POST /api/security-deposit/cases/:id/prepaid-rent ────────────────────
+// Saves the pod lead's manually-looked-up Prepaid Rent balance (AppFolio
+// account "2300 - Prepaid Rent" for this tenant) — replaces the live
+// AppFolio pull (see the comment in GET /cases/:id for why). `balance`
+// is required and must be a non-negative number; 0 is a valid, meaningful
+// answer ("looked it up, none exists"), distinct from never having
+// answered at all (NULL). This is the field POST .../review gates on
+// before allowing a case to be marked reviewed.
+router.post('/api/security-deposit/cases/:id/prepaid-rent', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+  const { balance } = req.body;
+  // Reject '' explicitly before the Number() coercion below — JS quirk:
+  // Number('') is 0, not NaN, which would otherwise let a blank form
+  // field silently save as a confirmed "$0 balance" instead of being
+  // rejected as missing.
+  const value = typeof balance === 'string' ? (balance.trim() === '' ? NaN : Number(balance)) : balance;
+  if (typeof value !== 'number' || !isFinite(value) || isNaN(value) || value < 0) {
+    return res.status(400).json({ error: 'balance is required and must be a non-negative number (0 is valid if no Prepaid Rent balance exists).' });
+  }
+
+  const reporterName = req.securityDepositMemberName || req.user.email;
+  const now = new Date().toISOString();
+  const rounded = Math.round(value * 100) / 100;
+
+  const { data: updated, error } = await supabase
+    .from('security_deposit_cases')
+    .update({
+      prepaid_rent_balance: rounded,
+      prepaid_rent_reported_by: reporterName,
+      prepaid_rent_reported_at: now,
+    })
+    .eq('id', req.params.id)
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!updated) return res.status(404).json({ error: 'Case not found.' });
+
+  await supabase.from('audit_log').insert({
+    action: 'security_deposit.prepaid_rent_reported',
+    entity_type: 'security_deposit_case',
+    entity_id: req.params.id,
+    details: { prepaid_rent_balance: rounded, reported_by: reporterName },
   });
 
   return res.json({ success: true, case: updated });
@@ -740,10 +861,75 @@ router.get('/api/security-deposit/document/:id/download', requireSecurityDeposit
 });
 
 // ─── POST /api/security-deposit/cases/:id/review ───────────────────────────
+// Hard gate (added 2026-08-19, Peter's decision on Mason's recommendation;
+// extended same day to cover the remaining unanswered-field gap flagged in
+// that build's report): a case cannot be marked reviewed while any of
+// these are still NULL/unanswered —
+//   prepaid_rent_balance             (0 counts as answered; NULL does not)
+//   checklist_notice_sent            (false counts as answered; NULL does not)
+//   checklist_inspection_conducted   (false counts as answered; NULL does not)
+//   checklist_photos_documented      (false counts as answered; NULL does not)
+//   tenancy_status                   (must be one of the two enum values)
+// Enforced here in application code, not as a database CHECK constraint —
+// see 20260819000000_add_prepaid_rent_reported_to_security_deposit_cases.sql
+// for why (same reasoning applies to the checklist/tenancy_status columns,
+// which predate that migration). Checked with its own SELECT (rather than
+// trusting the client's last-loaded copy of the case) so a stale page
+// can't bypass this by submitting a review for a case whose fields were
+// never actually saved. All missing fields are collected and named in one
+// response — not just the first one found — so a pod lead fixing this
+// doesn't have to resubmit repeatedly to discover each blocker in turn.
 router.post('/api/security-deposit/cases/:id/review', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
   const { reviewer_notes } = req.body;
   const reviewerName = req.securityDepositMemberName || req.user.email;
   const now = new Date().toISOString();
+
+  const { data: existing, error: existingErr } = await supabase
+    .from('security_deposit_cases')
+    .select('prepaid_rent_balance, checklist_notice_sent, checklist_inspection_conducted, checklist_photos_documented, tenancy_status')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (existingErr) return res.status(500).json({ error: existingErr.message });
+  if (!existing) return res.status(404).json({ error: 'Case not found.' });
+
+  const missing = [];
+  if (existing.prepaid_rent_balance == null) {
+    missing.push({
+      field: 'prepaid_rent_balance',
+      message: 'Prepaid Rent balance has not been entered. Look up "2300 - Prepaid Rent" for this tenant in AppFolio and enter the balance (or $0 if none exists).',
+    });
+  }
+  if (existing.checklist_notice_sent == null) {
+    missing.push({
+      field: 'checklist_notice_sent',
+      message: 'Whether the move-out notice was sent to the tenant has not been answered yet.',
+    });
+  }
+  if (existing.checklist_inspection_conducted == null) {
+    missing.push({
+      field: 'checklist_inspection_conducted',
+      message: 'Whether the move-out inspection was conducted has not been answered yet.',
+    });
+  }
+  if (existing.checklist_photos_documented == null) {
+    missing.push({
+      field: 'checklist_photos_documented',
+      message: 'Whether move-out photos were documented has not been answered yet.',
+    });
+  }
+  if (!existing.tenancy_status) {
+    missing.push({
+      field: 'tenancy_status',
+      message: 'Whether this is the whole tenancy ending, or one co-tenant moving out while the lease continues, has not been confirmed yet.',
+    });
+  }
+
+  if (missing.length) {
+    return res.status(400).json({
+      error: `This case cannot be marked reviewed until the following are answered: ${missing.map(m => m.message).join(' ')}`,
+      missing_fields: missing.map(m => m.field),
+    });
+  }
 
   const { data: updated, error } = await supabase
     .from('security_deposit_cases')
@@ -866,14 +1052,25 @@ router.post('/api/security-deposit/cases/:id/escalate-confirm', requireSecurityD
 });
 
 // ─── GET /api/security-deposit/photo-review-queue ──────────────────────────
+// Narrower than candidateFolders above (review_status='needs_review' only,
+// not every parsed folder) but still reads from b2_photo_folders with no
+// time bound — if the review backlog isn't kept current, it can grow the
+// same way the unfiltered read did. Paginated defensively for the same
+// reason. Paged by `id`; the real sort (indexed_at desc) is applied in JS.
 router.get('/api/security-deposit/photo-review-queue', requireSecurityDepositAccess, async (req, res) => {
-  const { data, error } = await supabase
-    .from('b2_photo_folders')
-    .select('id, b2_folder_path, parsed_address, parsed_unit, parsed_inspection_type, parsed_date, confidence_score, model_version, indexed_at')
-    .eq('review_status', 'needs_review')
-    .order('indexed_at', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  return res.json(data || []);
+  let data;
+  try {
+    data = await fetchAllRows((from, to) => supabase
+      .from('b2_photo_folders')
+      .select('id, b2_folder_path, parsed_address, parsed_unit, parsed_inspection_type, parsed_date, confidence_score, model_version, indexed_at')
+      .eq('review_status', 'needs_review')
+      .order('id', { ascending: true })
+      .range(from, to));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  data.sort((a, b) => (a.indexed_at < b.indexed_at ? 1 : a.indexed_at > b.indexed_at ? -1 : 0));
+  return res.json(data);
 });
 
 // ─── POST /api/security-deposit/photo-review-queue/:id/resolve ────────────
@@ -1119,11 +1316,22 @@ internalRouter.post('/api/security-deposit/internal/create-cases-from-sync', asy
   if (!checkCronSecret(req, res)) return;
   const ts = new Date().toISOString();
 
-  const { data: leaseRows, error } = await supabase
-    .from('leases')
-    .select('id, move_out_date')
-    .not('move_out_date', 'is', null);
-  if (error) {
+  // Every lease with a move_out_date EVER recorded, portfolio-wide, no
+  // time filter — this list only grows as more move-outs happen, and (per
+  // the idempotent upsert below) is re-fetched in full on every nightly
+  // run, not just "since yesterday." A silent 1,000-row truncation here
+  // wouldn't error — it would just mean move-outs past whatever row the
+  // cap landed on never get a security deposit case opened, with no
+  // warning to anyone. Paginated for that reason.
+  let leaseRows;
+  try {
+    leaseRows = await fetchAllRows((from, to) => supabase
+      .from('leases')
+      .select('id, move_out_date')
+      .not('move_out_date', 'is', null)
+      .order('id', { ascending: true })
+      .range(from, to));
+  } catch (error) {
     console.error(`[${ts}] create-cases-from-sync error:`, error.message);
     return res.status(500).json({ error: error.message });
   }
@@ -1132,14 +1340,24 @@ internalRouter.post('/api/security-deposit/internal/create-cases-from-sync', asy
     return res.json({ created: 0 });
   }
 
+  // The upsert's own response is subject to the same 1,000-row cap as a
+  // plain .select() — with thousands of leases now possible above, the
+  // write side needs to batch too, or "which rows actually got returned"
+  // would silently shrink along with it (breaking the tenancy_status
+  // best-effort loop right below, which only runs for rows it can see).
   const caseRows = leaseRows.map(l => ({ lease_id: l.id, move_out_date: l.move_out_date }));
-  const { data: inserted, error: insErr } = await supabase
-    .from('security_deposit_cases')
-    .upsert(caseRows, { onConflict: 'lease_id', ignoreDuplicates: true })
-    .select('id, lease_id');
-  if (insErr) {
-    console.error(`[${ts}] create-cases-from-sync upsert error:`, insErr.message);
-    return res.status(500).json({ error: insErr.message });
+  const inserted = [];
+  for (let i = 0; i < caseRows.length; i += SUPABASE_PAGE_SIZE) {
+    const batch = caseRows.slice(i, i + SUPABASE_PAGE_SIZE);
+    const { data: batchInserted, error: insErr } = await supabase
+      .from('security_deposit_cases')
+      .upsert(batch, { onConflict: 'lease_id', ignoreDuplicates: true })
+      .select('id, lease_id');
+    if (insErr) {
+      console.error(`[${ts}] create-cases-from-sync upsert error:`, insErr.message);
+      return res.status(500).json({ error: insErr.message });
+    }
+    inserted.push(...(batchInserted || []));
   }
 
   // Best-effort ai_suggested_tenancy_status for newly created cases only.
@@ -1177,14 +1395,25 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
   const ts = new Date().toISOString();
   const REMINDER_DAYS_LEFT = [14, 7, 3];
 
-  const { data: cases, error } = await supabase
-    .from('security_deposit_cases')
-    .select(`
-      id, disposition_deadline, status,
-      leases ( units ( unit_number, properties ( name, address ) ) )
-    `)
-    .in('status', ['pending_review', 'reviewed', 'escalated']);
-  if (error) {
+  // pending_review/reviewed/escalated covers nearly every case a
+  // disposition hasn't actually been mailed for yet, with no time bound —
+  // this keeps growing as more move-outs are processed. Missing a case
+  // here because of a silent 1,000-row cutoff means its reminder simply
+  // never fires, with the 21-day statutory deadline (and no one warned)
+  // — the same class of risk as the create-cases-from-sync fetch above,
+  // so it gets the same fix.
+  let cases;
+  try {
+    cases = await fetchAllRows((from, to) => supabase
+      .from('security_deposit_cases')
+      .select(`
+        id, disposition_deadline, status,
+        leases ( units ( unit_number, properties ( name, address ) ) )
+      `)
+      .in('status', ['pending_review', 'reviewed', 'escalated'])
+      .order('id', { ascending: true })
+      .range(from, to));
+  } catch (error) {
     console.error(`[${ts}] send-reminders error:`, error.message);
     return res.status(500).json({ error: error.message });
   }
@@ -1239,6 +1468,32 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
   return res.json({ sent: recipients.length, due: due.length });
 });
 
+// Supabase/PostgREST caps any single .select() at 1000 rows by default —
+// silent truncation, no error. b2_photo_folders passed that row count
+// during real testing, which was silently dropping everything past row
+// 1,000 from existingPaths below and causing this job to re-attempt
+// (and duplicate-key-fail on) folders it had already indexed. Same
+// incremental-fetch pattern as maintenance-history/lib/latchel-
+// connector.js's getAllPages fix for an equivalent "only got page 1" bug
+// — loop with .range() until a page comes back short, so this is correct
+// no matter how large the table grows.
+const B2_EXISTING_PATHS_PAGE_SIZE = 1000;
+async function fetchAllExistingB2FolderPaths() {
+  const paths = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('b2_photo_folders')
+      .select('b2_folder_path')
+      .range(from, from + B2_EXISTING_PATHS_PAGE_SIZE - 1);
+    if (error) throw error;
+    for (const row of data || []) paths.push(row.b2_folder_path);
+    if (!data || data.length < B2_EXISTING_PATHS_PAGE_SIZE) break; // short page = last page
+    from += B2_EXISTING_PATHS_PAGE_SIZE;
+  }
+  return paths;
+}
+
 // ─── POST /api/security-deposit/internal/index-b2-photos ──────────────────
 // Periodic, incremental (per SPEC.md — "only new/changed folders since
 // last run," never a live re-parse of the whole bucket on every case
@@ -1255,81 +1510,116 @@ internalRouter.post('/api/security-deposit/internal/index-b2-photos', async (req
 
   const ts = new Date().toISOString();
 
-  const { data: config, error: configErr } = await supabase
-    .from('b2_match_confidence_config')
-    .select('id, auto_index_threshold, version')
-    .eq('is_active', true)
-    .maybeSingle();
-  if (configErr) return res.status(500).json({ error: configErr.message });
-  if (!config) return res.status(500).json({ error: 'No active b2_match_confidence_config row — cannot decide auto-index vs. manual-review.' });
-
-  let allPaths;
+  // Whole-body try/catch — this job makes hundreds/thousands of
+  // sequential B2, Supabase, and Claude calls in one request. Express 4
+  // does not catch a rejected promise thrown out of an async route
+  // handler; left unguarded, one unexpected failure here would become an
+  // unhandled rejection that (on Node's current default) kills the
+  // entire Hub server process, not just this request — which is what
+  // happened during real testing. Every per-folder failure is already
+  // isolated below; this is the outer backstop for anything else.
   try {
-    allPaths = await listPhotoFolders();
-  } catch (err) {
-    console.error(`[${ts}] index-b2-photos B2 error:`, err.message);
-    return res.status(500).json({ error: 'Failed to list B2 folders.', detail: err.message });
-  }
+    const { data: config, error: configErr } = await supabase
+      .from('b2_match_confidence_config')
+      .select('id, auto_index_threshold, version')
+      .eq('is_active', true)
+      .maybeSingle();
+    if (configErr) return res.status(500).json({ error: configErr.message });
+    if (!config) return res.status(500).json({ error: 'No active b2_match_confidence_config row — cannot decide auto-index vs. manual-review.' });
 
-  const { data: existing, error: existingErr } = await supabase.from('b2_photo_folders').select('b2_folder_path');
-  if (existingErr) return res.status(500).json({ error: existingErr.message });
-  const existingPaths = new Set((existing || []).map(r => r.b2_folder_path));
-  const newPaths = allPaths.filter(p => !existingPaths.has(p));
-
-  let indexed = 0;
-  const errors = [];
-
-  for (const folderPath of newPaths) {
+    let allPaths;
     try {
-      const parsed = await parseFolderName(folderPath);
-      const reviewStatus = parsed.confidence_score >= Number(config.auto_index_threshold) ? 'auto_indexed' : 'needs_review';
-
-      const { data: row, error: insErr } = await supabase
-        .from('b2_photo_folders')
-        .insert({
-          b2_folder_path: folderPath,
-          parsed_address: parsed.parsed_address,
-          parsed_unit: parsed.parsed_unit,
-          parsed_inspection_type: parsed.parsed_inspection_type,
-          parsed_date: parsed.parsed_date,
-          confidence_score: parsed.confidence_score,
-          confidence_config_id: config.id,
-          review_status: reviewStatus,
-          model_version: parsed.model_version,
-        })
-        .select('id')
-        .single();
-      if (insErr) throw insErr;
-
-      // Hard requirement (Asimov) — every AI folder-name parse gets its
-      // own audit_log entry, exactly the fields SPEC.md's Q section lists.
-      await supabase.from('audit_log').insert({
-        action: 'security_deposit.b2_folder_parsed',
-        entity_type: 'b2_photo_folder',
-        entity_id: row.id,
-        details: {
-          raw_folder_name: folderPath,
-          parsed_address: parsed.parsed_address,
-          parsed_unit: parsed.parsed_unit,
-          parsed_date: parsed.parsed_date,
-          confidence_score: parsed.confidence_score,
-          model_version: parsed.model_version,
-        },
-      });
-      indexed++;
+      allPaths = await listPhotoFolders();
     } catch (err) {
-      console.error(`[${ts}] index-b2-photos error on "${folderPath}":`, err.message);
-      errors.push({ folderPath, error: err.message });
+      console.error(`[${ts}] index-b2-photos B2 error:`, err.message);
+      return res.status(500).json({ error: 'Failed to list B2 folders.', detail: err.message });
     }
-  }
 
-  console.log(`[${ts}] index-b2-photos: ${indexed} new folder(s) indexed, ${errors.length} error(s), ${allPaths.length - newPaths.length} already indexed.`);
-  return res.json({
-    indexed,
-    errors,
-    total_folders_seen: allPaths.length,
-    skipped_already_indexed: allPaths.length - newPaths.length,
-  });
+    let existingPathList;
+    try {
+      existingPathList = await fetchAllExistingB2FolderPaths();
+    } catch (err) {
+      console.error(`[${ts}] index-b2-photos existing-paths fetch error:`, err.message);
+      return res.status(500).json({ error: 'Failed to load already-indexed folders.', detail: err.message });
+    }
+    const existingPaths = new Set(existingPathList);
+    const newPaths = allPaths.filter(p => !existingPaths.has(p));
+
+    let indexed = 0;
+    let duplicateSkipped = 0;
+    const errors = [];
+
+    for (const folderPath of newPaths) {
+      try {
+        const parsed = await parseFolderName(folderPath);
+        const reviewStatus = parsed.confidence_score >= Number(config.auto_index_threshold) ? 'auto_indexed' : 'needs_review';
+
+        const { data: row, error: insErr } = await supabase
+          .from('b2_photo_folders')
+          .insert({
+            b2_folder_path: folderPath,
+            parsed_address: parsed.parsed_address,
+            parsed_unit: parsed.parsed_unit,
+            parsed_inspection_type: parsed.parsed_inspection_type,
+            parsed_date: parsed.parsed_date,
+            confidence_score: parsed.confidence_score,
+            confidence_config_id: config.id,
+            review_status: reviewStatus,
+            model_version: parsed.model_version,
+          })
+          .select('id')
+          .single();
+
+        if (insErr) {
+          if (insErr.code === '23505') {
+            // Duplicate on b2_folder_path means this folder actually was
+            // already indexed — we just didn't know it (e.g. indexed by
+            // a run that finished after this run's existingPaths
+            // snapshot was taken). Harmless: skip quietly. Not pushed
+            // into `errors` (that would wrongly flag it as needing
+            // attention) and not logged per-occurrence (would flood the
+            // log at scale) — just counted, with the total reported once
+            // below.
+            duplicateSkipped++;
+            continue;
+          }
+          throw insErr;
+        }
+
+        // Hard requirement (Asimov) — every AI folder-name parse gets its
+        // own audit_log entry, exactly the fields SPEC.md's Q section lists.
+        await supabase.from('audit_log').insert({
+          action: 'security_deposit.b2_folder_parsed',
+          entity_type: 'b2_photo_folder',
+          entity_id: row.id,
+          details: {
+            raw_folder_name: folderPath,
+            parsed_address: parsed.parsed_address,
+            parsed_unit: parsed.parsed_unit,
+            parsed_date: parsed.parsed_date,
+            confidence_score: parsed.confidence_score,
+            model_version: parsed.model_version,
+          },
+        });
+        indexed++;
+      } catch (err) {
+        console.error(`[${ts}] index-b2-photos error on "${folderPath}":`, err.message);
+        errors.push({ folderPath, error: err.message });
+      }
+    }
+
+    console.log(`[${ts}] index-b2-photos: ${indexed} new folder(s) indexed, ${duplicateSkipped} duplicate(s) skipped (already indexed), ${errors.length} real error(s), ${allPaths.length - newPaths.length} already indexed (pre-filtered).`);
+    return res.json({
+      indexed,
+      duplicate_skipped: duplicateSkipped,
+      errors,
+      total_folders_seen: allPaths.length,
+      skipped_already_indexed: allPaths.length - newPaths.length,
+    });
+  } catch (err) {
+    console.error(`[${ts}] index-b2-photos unexpected error:`, err.message);
+    return res.status(500).json({ error: 'Unexpected error during indexing.', detail: err.message });
+  }
 });
 
 module.exports = { router, internalRouter };

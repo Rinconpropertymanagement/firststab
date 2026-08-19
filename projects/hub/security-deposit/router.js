@@ -554,6 +554,15 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   if (!inspectionFormMoveIn) flags.push({ code: 'no_inspection_form_move_in', message: 'Move-in inspection form not uploaded yet.' });
   if (!inspectionFormMoveOut) flags.push({ code: 'no_inspection_form_move_out', message: 'Move-out inspection form not uploaded yet.' });
   if (!kase.tenancy_status) flags.push({ code: 'tenancy_status_unconfirmed', message: 'Whether this is the whole tenancy ending, or one co-tenant moving out while the lease continues, has not been confirmed yet.' });
+  if (kase.checklist_notice_sent == null) {
+    flags.push({ code: 'checklist_notice_sent_unconfirmed', message: 'Whether the move-out notice was sent to the tenant has not been answered yet.' });
+  }
+  if (kase.checklist_inspection_conducted == null) {
+    flags.push({ code: 'checklist_inspection_conducted_unconfirmed', message: 'Whether the move-out inspection was conducted has not been answered yet.' });
+  }
+  if (kase.checklist_photos_documented == null) {
+    flags.push({ code: 'checklist_photos_documented_unconfirmed', message: 'Whether move-out photos were documented has not been answered yet.' });
+  }
 
   return res.json({
     id: kase.id,

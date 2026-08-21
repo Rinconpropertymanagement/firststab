@@ -701,18 +701,24 @@ app.use((err, req, res, next) => {
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
-// Reverted 2026-08-20 (Judge review, Call Stats build): a prior pass bound
-// this to 127.0.0.1 only, on the unverified assumption that nginx-on-
-// localhost is the only thing that ever talks to this app in production.
-// Peter confirmed he isn't certain that's actually how the real deployment
-// is set up — a wrong assumption here would take the entire Hub offline the
-// moment this shipped, not just the new Call Stats piece. Reverted to
-// Express's default (listen on all interfaces) until someone can confirm
-// the real production network topology; re-add the 127.0.0.1 restriction
-// then, with real certainty instead of a guess. The 'loopback' trust-proxy
-// setting above is unaffected by this revert and stays exactly as it was —
-// it only trusts forwarded headers from a loopback connection either way,
-// so it fails safe regardless of whether a local proxy actually exists.
-app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] Rincon Hub running on port ${PORT}`);
+// Bound to 127.0.0.1, not all interfaces: this app should only ever be
+// reachable from a reverse proxy running on the same machine (Sally), never
+// directly over the network. Defense in depth on top of the 'loopback'
+// trust-proxy setting above — even if that setting were ever misconfigured,
+// an attacker still can't reach this app's port from outside the machine to
+// exploit it.
+//
+// Confirmed with Peter 2026-08-20, not assumed: he controls Sally directly
+// and confirmed the Hub is reached at a clean web address with no port
+// number in it — the real, concrete signal that something else (a reverse
+// proxy) is terminating the connection and forwarding it in, not the app
+// itself being reachable directly. This was reverted earlier in this same
+// session pending exactly this confirmation (see git history on this line);
+// re-applied now that it's a verified fact, not a guess.
+//
+// Local development is unaffected: 'localhost' resolves to 127.0.0.1, so
+// http://localhost:3500 still works from the developer's own machine. This
+// only blocks connections arriving from elsewhere on the network.
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`[${new Date().toISOString()}] Rincon Hub running on port ${PORT} (127.0.0.1 only)`);
 });

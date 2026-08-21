@@ -97,15 +97,15 @@
 
     <div id="content" style="display:none;">
       <div class="tab-bar">
-        <button class="tab-btn tab-active" id="tab-tickets" onclick="showTab('tickets')">Tickets</button>
-        <button class="tab-btn" id="tab-budget" onclick="showTab('budget')">Budget</button>
-        <button class="tab-btn" id="tab-flagged" style="display:none;" onclick="showTab('flagged')">Needs privacy review <span id="flagged-badge"></span></button>
-        <button class="tab-btn" id="tab-users" style="display:none;" onclick="showTab('users')">Users</button>
+        <button class="tab-btn tab-active" id="tab-tickets">Tickets</button>
+        <button class="tab-btn" id="tab-budget">Budget</button>
+        <button class="tab-btn" id="tab-flagged" style="display:none;">Needs privacy review <span id="flagged-badge"></span></button>
+        <button class="tab-btn" id="tab-users" style="display:none;">Users</button>
       </div>
 
       <div id="view-tickets">
         <div class="search-row">
-          <input type="text" id="search-input" placeholder="Search by property, address, ticket title, or AppFolio #" oninput="onSearch()">
+          <input type="text" id="search-input" placeholder="Search by property, address, ticket title, or AppFolio #">
         </div>
         <div class="card">
           <table>
@@ -119,14 +119,14 @@
       </div>
 
       <div id="view-ticket-detail" style="display:none;">
-        <a class="back" href="#" onclick="showTab('tickets'); return false;">&larr; All tickets</a>
+        <a class="back" href="#" id="ticket-detail-back">&larr; All tickets</a>
         <div id="ticket-detail-body"></div>
       </div>
 
       <div id="view-budget" style="display:none;">
         <p class="sub" style="margin-top:-8px;">AppFolio's own budgeted-vs-actual figures for a property, straight from AppFolio's books — nothing here is AI-derived or needs review. Maintenance ticket costs are shown underneath for context only; they will not match AppFolio's numbers exactly, and that's expected (a ticket's cost can post to AppFolio weeks after it closes, and AppFolio's books can include repair costs that never went through Latchel).</p>
         <div class="search-row" style="position:relative;">
-          <input type="text" id="budget-search-input" placeholder="Search by property name or address" oninput="onBudgetSearch()" autocomplete="off">
+          <input type="text" id="budget-search-input" placeholder="Search by property name or address" autocomplete="off">
         </div>
         <div id="budget-search-results" class="card" style="display:none; padding:0;"></div>
         <div id="budget-content"></div>
@@ -150,7 +150,7 @@
               <option value="reviewer">Reviewer</option>
               <option value="admin">Admin</option>
             </select>
-            <button onclick="addUser()" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;">Add User</button>
+            <button id="add-user-btn" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;">Add User</button>
           </div>
           <div id="add-user-msg" style="font-size:12px;margin-top:8px;"></div>
         </div>
@@ -329,9 +329,9 @@
       html += '<div class="claim-meta">' + meta + '</div>';
       if (canReview) {
         html += '<div class="claim-actions">';
-        html += '<button class="btn btn-confirm" onclick="reviewClaim(\'' + c.id + '\',\'confirm\')">Confirm</button>';
-        html += '<button class="btn btn-correct" onclick="toggleCorrectForm(\'' + c.id + '\')">Correct</button>';
-        html += '<button class="btn btn-reject" onclick="toggleRejectForm(\'' + c.id + '\')">Reject</button>';
+        html += '<button class="btn btn-confirm" data-action="confirm" data-claim-id="' + escapeHtml(c.id) + '">Confirm</button>';
+        html += '<button class="btn btn-correct" data-action="toggle-correct" data-claim-id="' + escapeHtml(c.id) + '">Correct</button>';
+        html += '<button class="btn btn-reject" data-action="toggle-reject" data-claim-id="' + escapeHtml(c.id) + '">Reject</button>';
         html += '</div>';
         html += '<div class="correct-form" id="correct-form-' + c.id + '">';
         html += '<textarea id="correct-text-' + c.id + '">' + escapeHtml(c.claim_text) + '</textarea>';
@@ -340,11 +340,11 @@
           html += '<input type="number" min="1" max="5" id="correct-outcome-' + c.id + '" placeholder="Outcome level 1-5" value="' + (c.outcome_level || '') + '">';
         }
         html += '<input type="text" id="correct-notes-' + c.id + '" placeholder="Reviewer notes (optional)">';
-        html += '<button class="btn btn-correct" onclick="reviewClaim(\'' + c.id + '\',\'correct\')">Save correction</button>';
+        html += '<button class="btn btn-correct" data-action="correct" data-claim-id="' + escapeHtml(c.id) + '">Save correction</button>';
         html += '</div>';
         html += '<div class="correct-form" id="reject-form-' + c.id + '">';
         html += '<input type="text" id="reject-notes-' + c.id + '" placeholder="Reason for rejecting (optional)">';
-        html += '<button class="btn btn-reject" onclick="reviewClaim(\'' + c.id + '\',\'reject\')">Confirm reject</button>';
+        html += '<button class="btn btn-reject" data-action="reject" data-claim-id="' + escapeHtml(c.id) + '">Confirm reject</button>';
         html += '</div>';
       }
       html += '</div>';
@@ -713,6 +713,40 @@
         msgEl.textContent = 'Network error: ' + err.message;
       }
     }
+
+    // ── Event wiring — addEventListener throughout, never inline
+    // onclick/oninput attributes. The Hub's helmet CSP (server.js) sets
+    // script-src-attr 'none', which silently blocks inline event handler
+    // attributes even though script-src itself allows this page's own
+    // <script> block to run. Static controls are wired directly below;
+    // the claim Confirm/Correct/Reject buttons are rebuilt on every
+    // openTicket()/loadFlagged() call, so they're wired via one delegated
+    // listener on #content (data-action + data-claim-id) instead of
+    // re-attaching listeners after every render.
+    document.getElementById('tab-tickets').addEventListener('click', () => showTab('tickets'));
+    document.getElementById('tab-budget').addEventListener('click', () => showTab('budget'));
+    document.getElementById('tab-flagged').addEventListener('click', () => showTab('flagged'));
+    document.getElementById('tab-users').addEventListener('click', () => showTab('users'));
+    document.getElementById('search-input').addEventListener('input', onSearch);
+    document.getElementById('budget-search-input').addEventListener('input', onBudgetSearch);
+    document.getElementById('add-user-btn').addEventListener('click', addUser);
+    document.getElementById('ticket-detail-back').addEventListener('click', (e) => {
+      e.preventDefault();
+      showTab('tickets');
+    });
+
+    document.getElementById('content').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const claimId = btn.dataset.claimId;
+      switch (btn.dataset.action) {
+        case 'confirm': reviewClaim(claimId, 'confirm'); break;
+        case 'toggle-correct': toggleCorrectForm(claimId); break;
+        case 'toggle-reject': toggleRejectForm(claimId); break;
+        case 'correct': reviewClaim(claimId, 'correct'); break;
+        case 'reject': reviewClaim(claimId, 'reject'); break;
+      }
+    });
 
     init();
   </script>

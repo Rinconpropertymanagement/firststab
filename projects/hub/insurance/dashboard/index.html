@@ -811,7 +811,7 @@
             <option value="director_of_operations">Director of Operations</option>
             <option value="admin">Admin</option>
           </select>
-          <button id="addUserBtn" onclick="addUser()" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer">Add User</button>
+          <button id="addUserBtn" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer">Add User</button>
         </div>
         <div id="addUserMsg" style="font-size:12px;margin-top:8px"></div>
       </div>
@@ -1108,6 +1108,16 @@
   const urlPod = (urlParams.get('pod') || '').toLowerCase();
   if (urlPod === 'solimar') filterPod = 'Solimar';
   else if (urlPod === 'faria') filterPod = 'Faria';
+
+  // Landed here from the hub-wide search box (?property=<name or address>)
+  // — pre-fill the existing property search filter so the table opens
+  // already narrowed to that property, instead of the unfiltered list.
+  const urlProperty = urlParams.get('property');
+  if (urlProperty) {
+    filterSearch = urlProperty;
+    const propertySearchEl = document.getElementById('propertySearch');
+    if (propertySearchEl) propertySearchEl.value = urlProperty;
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────
   function daysLeft(expirationDate) {
@@ -1788,6 +1798,11 @@
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────
+  // addUserBtn uses addEventListener rather than an inline onclick=
+  // attribute because the Hub's helmet CSP (server.js) sets
+  // script-src-attr 'none', which silently blocks inline event handler
+  // attributes.
+  document.getElementById('addUserBtn').addEventListener('click', addUser);
   initAuth();
 
   // ── Batch Upload ──────────────────────────────────────────────────────

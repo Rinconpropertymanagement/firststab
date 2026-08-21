@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Call Stats — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
+
+    /* ── Tabs (only shown at all when an admin also gets the Users tab) ── */
+    .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid #e5e7eb; margin-bottom: 18px; }
+    .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 9px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.tab-active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    .empty { color: #9ca3af; padding: 24px; text-align: center; }
+
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .badge-gray { background: #f3f4f6; color: #4b5563; }
+    .badge-amber { background: #fffbeb; color: #92400e; }
+
+    /* ── Date range picker ── */
+    .range-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .range-preset { font-size: 12.5px; padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #374151; cursor: pointer; }
+    .range-preset:hover { background: #f3f4f6; }
+    .range-preset.range-active { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+    .range-custom { display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: #6b7280; }
+    .range-custom input { padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12.5px; }
+    .as-of-note { color: #9ca3af; font-size: 12px; margin-bottom: 14px; }
+
+    /* ── Pod tables ── */
+    .pod-title { font-size: 15px; font-weight: 700; margin: 20px 0 4px; }
+    .pod-title:first-of-type { margin-top: 0; }
+    .num { text-align: right; }
+    .muted { color: #9ca3af; }
+    .missed-nonzero { color: #b45309; font-weight: 600; }
+
+    /* ── Users tab (admin only) ── */
+    .role-select { padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12.5px; }
+    .btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; }
+    .btn:hover { background: #f3f4f6; }
+    .btn-remove { border-color: #dc2626; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Call Stats</h1>
+    <p class="sub">Call counts, average length, missed calls, and speed to answer, pulled from Aircall every night. Statistics only — no recordings, transcripts, or call content of any kind are ever fetched, stored, or shown here.</p>
+
+    <div id="access-denied">
+      Your Rincon Hub account does not have access to Call Stats yet. Ask an admin to grant you access.
+    </div>
+
+    <div id="content" style="display:none;">
+      <div class="tab-bar" id="tab-bar" style="display:none;">
+        <button class="tab-btn tab-active" id="tab-stats" data-tab="stats">Stats</button>
+        <button class="tab-btn" id="tab-users" style="display:none;" data-tab="users">Users</button>
+      </div>
+
+      <div id="view-stats">
+        <div class="range-row">
+          <button class="range-preset" data-preset="week">This week</button>
+          <button class="range-preset" data-preset="last7">Last 7 days</button>
+          <button class="range-preset" data-preset="month">This month</button>
+          <button class="range-preset" data-preset="last30">Last 30 days</button>
+          <span class="range-custom">
+            <label for="from-input">From</label>
+            <input type="date" id="from-input">
+            <label for="to-input">to</label>
+            <input type="date" id="to-input">
+          </span>
+        </div>
+        <div id="as-of-note" class="as-of-note"></div>
+
+        <div id="pod-tables"></div>
+      </div>
+
+      <div id="view-users" style="display:none;">
+        <div class="card">
+          <div style="font-weight:600;font-size:13px;margin-bottom:10px;">Add a User</div>
+          <p class="sub" style="margin:0 0 10px;">"Admin" and "pod lead" both see every pod's numbers in v1 — there's no per-pod-only view yet.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="new-user-email" type="email" placeholder="email@rinconmanagement.com"
+              style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+            <select id="new-user-role" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+              <option value="">Select role&hellip;</option>
+              <option value="pod_lead">Pod Lead</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button id="add-user-btn" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;">Add User</button>
+          </div>
+          <div id="add-user-msg" style="font-size:12px;margin-top:8px;"></div>
+        </div>
+        <div id="users-table-wrap"><div class="card empty">Loading users&hellip;</div></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let myRole = null;
+    let myEmail = null;
+    let currentFrom = null;
+    let currentTo = null;
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // YYYY-MM-DD for a Date object, using the BROWSER's local date fields
+    // (not UTC) — every Rincon user is in Southern California, so the
+    // browser's local calendar day already matches the Pacific business
+    // day the backend buckets call_date by. No separate timezone
+    // conversion needed on this side, same assumption the rest of the Hub
+    // makes (e.g. the date pickers elsewhere in this codebase).
+    function toDateStr(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return y + '-' + m + '-' + day;
+    }
+
+    function addDays(d, n) {
+      const copy = new Date(d);
+      copy.setDate(copy.getDate() + n);
+      return copy;
+    }
+
+    function presetRange(preset) {
+      const today = new Date();
+      if (preset === 'week') {
+        // Monday-start week containing today.
+        const dow = today.getDay(); // 0=Sun..6=Sat
+        const diffToMonday = dow === 0 ? 6 : dow - 1;
+        const monday = addDays(today, -diffToMonday);
+        return { from: toDateStr(monday), to: toDateStr(today) };
+      }
+      if (preset === 'last7') return { from: toDateStr(addDays(today, -6)), to: toDateStr(today) };
+      if (preset === 'month') {
+        const first = new Date(today.getFullYear(), today.getMonth(), 1);
+        return { from: toDateStr(first), to: toDateStr(today) };
+      }
+      if (preset === 'last30') return { from: toDateStr(addDays(today, -29)), to: toDateStr(today) };
+      return { from: toDateStr(today), to: toDateStr(today) };
+    }
+
+    function selectPreset(preset) {
+      document.querySelectorAll('.range-preset').forEach(b => b.classList.toggle('range-active', b.dataset.preset === preset));
+      const { from, to } = presetRange(preset);
+      document.getElementById('from-input').value = from;
+      document.getElementById('to-input').value = to;
+      loadStats(from, to);
+    }
+
+    function selectCustomRange() {
+      document.querySelectorAll('.range-preset').forEach(b => b.classList.remove('range-active'));
+      const from = document.getElementById('from-input').value;
+      const to = document.getElementById('to-input').value;
+      if (from && to) loadStats(from, to);
+    }
+
+    async function init() {
+      const meRes = await fetch('/api/call-stats/auth/me');
+      if (meRes.status === 403) {
+        document.getElementById('access-denied').style.display = 'block';
+        return;
+      }
+      if (!meRes.ok) return;
+      const me = await meRes.json();
+      myRole = me.role;
+      myEmail = me.email;
+
+      document.getElementById('content').style.display = 'block';
+      if (myRole === 'admin') {
+        document.getElementById('tab-bar').style.display = 'flex';
+        document.getElementById('tab-users').style.display = 'inline-block';
+      }
+      selectPreset('week');
+    }
+
+    function showTab(tab) {
+      document.getElementById('tab-stats').classList.toggle('tab-active', tab === 'stats');
+      document.getElementById('tab-users').classList.toggle('tab-active', tab === 'users');
+      document.getElementById('view-stats').style.display = tab === 'stats' ? 'block' : 'none';
+      document.getElementById('view-users').style.display = tab === 'users' ? 'block' : 'none';
+      if (tab === 'users') loadUserManagement();
+    }
+
+    function formatDuration(seconds) {
+      if (seconds == null) return '<span class="muted">&mdash;</span>';
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return m + 'm ' + String(s).padStart(2, '0') + 's';
+    }
+
+    async function loadStats(from, to) {
+      currentFrom = from;
+      currentTo = to;
+      const podTables = document.getElementById('pod-tables');
+      podTables.innerHTML = '<div class="card empty">Loading&hellip;</div>';
+
+      const res = await fetch('/api/call-stats/stats?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to));
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        podTables.innerHTML = '<div class="card empty">' + escapeHtml(err.error || 'Could not load call stats.') + '</div>';
+        return;
+      }
+      const data = await res.json();
+      renderStats(data);
+    }
+
+    function renderStats(data) {
+      const asOf = document.getElementById('as-of-note');
+      asOf.textContent = data.synced_at
+        ? 'As of last sync: ' + new Date(data.synced_at).toLocaleString()
+        : 'No sync has run yet for this range — the nightly sync populates this automatically.';
+
+      const podTables = document.getElementById('pod-tables');
+      let html = '';
+      for (const podName of ['Solimar', 'Faria']) {
+        const rows = data.pods[podName] || [];
+        html += '<div class="pod-title">' + podName + '</div>';
+        html += '<div class="card" style="padding:0;">';
+        if (!rows.length) {
+          html += '<div class="empty">No staff assigned to ' + podName + ' yet.</div>';
+        } else {
+          html += '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th></tr></thead><tbody>';
+          rows.forEach(r => {
+            html += '<tr>' +
+              '<td>' + escapeHtml(r.name) + '</td>' +
+              '<td class="num">' + r.total_calls + '</td>' +
+              '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
+              '<td class="num ' + (r.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + r.inbound_missed_calls + '</td>' +
+              '<td class="num">' + formatDuration(r.avg_speed_to_answer_seconds) + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+      }
+      html += '<p class="sub" style="margin-top:8px;">"Missed" and "Avg. Speed to Answer" cover inbound calls only — a staff member calling a vendor who doesn\'t pick up isn\'t a missed call in the same sense, so outbound no-answers aren\'t counted here.</p>';
+      podTables.innerHTML = html;
+    }
+
+    // ── Users tab (admin only) ──────────────────────────────────────────
+    async function loadUserManagement() {
+      const wrap = document.getElementById('users-table-wrap');
+      const res = await fetch('/api/call-stats/users');
+      if (!res.ok) {
+        wrap.innerHTML = '<div class="card empty">Could not load users.</div>';
+        return;
+      }
+      const rows = await res.json();
+      if (!rows.length) {
+        wrap.innerHTML = '<div class="card empty">No one has Call Stats access yet.</div>';
+        return;
+      }
+      // data-email attributes + delegated listeners below, not inline
+      // onclick/onchange — the Hub's helmet CSP (server.js) sets
+      // script-src-attr 'none', which silently blocks inline event
+      // handler attributes even though script-src itself allows this
+      // page's own <script> block to run. Confirmed live: an earlier
+      // onclick-based version of this page loaded fine but every button
+      // was inert, with a CSP violation in the browser console pointing
+      // at exactly this. Every dynamic control on this page is wired via
+      // addEventListener instead, for the same reason.
+      let html = '<div class="card" style="padding:0;"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Granted</th><th></th></tr></thead><tbody>';
+      rows.forEach(u => {
+        html += '<tr>' +
+          '<td>' + escapeHtml(u.name || '&mdash;') + '</td>' +
+          '<td>' + escapeHtml(u.email) + '</td>' +
+          '<td><select class="role-select" data-email="' + escapeHtml(u.email) + '" data-action="change-role">' +
+            '<option value="pod_lead"' + (u.role === 'pod_lead' ? ' selected' : '') + '>Pod Lead</option>' +
+            '<option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>Admin</option>' +
+          '</select></td>' +
+          '<td>' + (u.granted_at ? new Date(u.granted_at).toLocaleDateString() : '&mdash;') + '</td>' +
+          '<td>' + (u.email === myEmail ? '' : '<button class="btn btn-remove" data-email="' + escapeHtml(u.email) + '" data-action="remove-user">Remove</button>') + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+      wrap.innerHTML = html;
+    }
+
+    async function addUser() {
+      const email = document.getElementById('new-user-email').value.trim();
+      const role = document.getElementById('new-user-role').value;
+      const msg = document.getElementById('add-user-msg');
+      msg.textContent = '';
+      if (!email || !role) { msg.textContent = 'Enter an email and pick a role.'; msg.style.color = '#991b1b'; return; }
+
+      const res = await fetch('/api/call-stats/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, role }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        msg.textContent = body.error || 'Could not add user.';
+        msg.style.color = '#991b1b';
+        return;
+      }
+      document.getElementById('new-user-email').value = '';
+      document.getElementById('new-user-role').value = '';
+      msg.textContent = 'Added.';
+      msg.style.color = '#166534';
+      loadUserManagement();
+    }
+
+    async function changeRole(email, role) {
+      await fetch('/api/call-stats/users/' + encodeURIComponent(email), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role }),
+      });
+      loadUserManagement();
+    }
+
+    async function removeUser(email) {
+      if (!confirm('Remove Call Stats access for ' + email + '?')) return;
+      await fetch('/api/call-stats/users/' + encodeURIComponent(email), { method: 'DELETE' });
+      loadUserManagement();
+    }
+
+    // ── Event wiring — addEventListener throughout, never inline
+    // onclick/onchange attributes (see the CSP note in loadUserManagement
+    // above for why).
+    document.getElementById('tab-stats').addEventListener('click', () => showTab('stats'));
+    document.getElementById('tab-users').addEventListener('click', () => showTab('users'));
+    document.querySelectorAll('.range-preset').forEach(btn => {
+      btn.addEventListener('click', () => selectPreset(btn.dataset.preset));
+    });
+    document.getElementById('from-input').addEventListener('change', selectCustomRange);
+    document.getElementById('to-input').addEventListener('change', selectCustomRange);
+    document.getElementById('add-user-btn').addEventListener('click', addUser);
+
+    // Delegated listeners for the Users table, which is rebuilt on every
+    // loadUserManagement() call — attaching once here (rather than
+    // re-attaching after every render) still works because the listener
+    // lives on the stable wrapper, not the rows themselves.
+    document.getElementById('users-table-wrap').addEventListener('change', (e) => {
+      if (e.target.dataset.action === 'change-role') {
+        changeRole(e.target.dataset.email, e.target.value);
+      }
+    });
+    document.getElementById('users-table-wrap').addEventListener('click', (e) => {
+      if (e.target.dataset.action === 'remove-user') {
+        removeUser(e.target.dataset.email);
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>

@@ -86,6 +86,9 @@ GET  /maintenance-history     Maintenance History dashboard (requires login
                               + a role in that tool — see
                               maintenance-history/router.js)
      /api/maintenance-history/*  Maintenance History API routes
+GET  /call-stats              Call Stats dashboard (requires login + a role
+                              in that tool — see call-stats/router.js)
+     /api/call-stats/*        Call Stats API routes
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -122,12 +125,27 @@ these two are missing, same as the other tools):
                               reconcile-properties) — same header/secret
                               already used by the other two tools' cron
                               routes.
+
+Required (Call Stats — the whole section exits at startup if this is
+missing, same as the other tools):
+  SUPABASE_SERVICE_ROLE_KEY    (shared with the other tools above — reads/
+                              writes call_stats)
+  AIRCALL_API_ID, AIRCALL_API_TOKEN  GET-only in this codebase's own code
+                              — see call-stats/lib/aircall-connector.js and
+                              .env.example. Checked lazily, only by the
+                              nightly sync route, so a missing key doesn't
+                              take down the rest of the Hub.
+  CRON_SECRET                   Same shared secret as the other tools'
+                              internal/cron routes — protects
+                              internal/sync (the nightly Aircall pull).
 `);
   process.exit(0);
 }
 
 const express = require('express');
 const session = require('express-session');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const { signInWithPassword, requestPasswordReset, updatePasswordWithToken } = require('./lib/auth');
 const { requireLogin } = require('./lib/middleware');
@@ -136,6 +154,7 @@ const { GLOBAL_SEARCH_WIDGET_HTML } = require('./lib/global-search-widget');
 const { router: insuranceRouter, internalRouter: insuranceInternalRouter } = require('./insurance/router');
 const { router: securityDepositRouter, internalRouter: securityDepositInternalRouter } = require('./security-deposit/router');
 const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInternalRouter } = require('./maintenance-history/router');
+const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = require('./call-stats/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -176,6 +195,72 @@ process.on('uncaughtException', (err) => {
 
 // ─── App ──────────────────────────────────────────────────────────────────
 const app = express();
+
+// In production (Sally), nginx terminates HTTPS and forwards plain HTTP to
+// this app on localhost:3500 — Express itself never sees a TLS connection.
+// Without this, Express has no way to know the original request was HTTPS,
+// so req.secure would always read false and the 'secure' cookie flag below
+// would never actually work (the browser would refuse to send the cookie
+// back, silently breaking login).
+//
+// 'loopback' (not `1`) matters here: `1` tells Express to trust
+// X-Forwarded-For/X-Forwarded-Proto on the first hop no matter WHERE that
+// hop is actually connecting from — so anyone who can reach this app at all
+// can forge those headers directly (fake IP defeats the per-IP rate
+// limiter below; fake `X-Forwarded-Proto: https` makes req.secure lie and
+// defeats the HTTPS-enforcement redirect right below this). Verified live:
+// both bypasses worked under `1`. 'loopback' instead trusts those headers
+// only when the actual TCP connection is from 127.0.0.1/::1 — i.e. only
+// from nginx, which is the only thing that talks to this app (see the
+// app.listen binding at the bottom of this file, which enforces that
+// nginx-on-localhost is in fact the only thing that CAN reach it). A
+// request from anywhere else has its forwarded headers ignored outright,
+// forged or not.
+app.set('trust proxy', 'loopback');
+
+// IS_PRODUCTION gates three things in this file: the HTTPS-enforcement
+// backstop and security headers below, the session cookie's `secure` flag
+// further down, and (implicitly, via Express's own default behavior) how
+// much detail a crashed route handler leaks to the browser. Scotty's Sally
+// deployment must set NODE_ENV=production (e.g. in the systemd/pm2 service
+// definition) for any of those to take effect — without it, this falls back
+// to the safer-for-local-dev, less-safe-for-prod default.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// Backstop only — nginx should also be configured to redirect plain HTTP to
+// HTTPS at the proxy level; this does not replace that. It exists in case
+// nginx is ever misconfigured (e.g. during initial setup, or a future config
+// change) or the app's port becomes reachable directly, so a request
+// carrying a password in its body (POST /login) is never silently accepted
+// over plain HTTP with no warning from the app itself. Skipped outside
+// production so plain http://localhost keeps working in local dev. Must run
+// before the session/body-parsing middleware below, so a request that's
+// about to be redirected never gets a session created for it.
+app.use((req, res, next) => {
+  if (IS_PRODUCTION && !req.secure) {
+    return res.redirect(301, 'https://' + req.headers.host + req.originalUrl);
+  }
+  next();
+});
+
+// Security headers (HSTS, X-Frame-Options, X-Content-Type-Options, a
+// baseline Content-Security-Policy, removal of X-Powered-By). CSP's
+// script-src needs 'unsafe-inline' added to helmet's default because all
+// three dashboards (and /reset-password below) embed their <script> tags
+// directly in the page rather than in external files — checked, there is no
+// external <script src=...> anywhere in the hub. Tightening this later means
+// moving those inline scripts to files and switching to a nonce instead.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': ["'self'", "'unsafe-inline'"],
+      },
+    },
+  })
+);
+
 app.use(express.urlencoded({ extended: true }));
 // limit: '100mb' — Insurance Compliance's batch-save route sends multiple
 // declaration-page files as base64 inside one JSON body. The default 100kb
@@ -190,6 +275,8 @@ app.use(express.json({ limit: '100mb' }));
 // (port 3300) both used the default name while running side by side in
 // local dev, they'd clobber each other's cookie in the browser. Giving each
 // app its own cookie name avoids that entirely.
+// IS_PRODUCTION (defined above, near `trust proxy`) also gates the cookie's
+// `secure` flag below.
 app.use(
   session({
     name: 'hub.sid',
@@ -197,7 +284,14 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false, // set true once the hub is served over HTTPS in production
+      // Conditional, not hardcoded true: a 'secure' cookie is only ever
+      // sent by the browser back over HTTPS. Hardcoding this to true would
+      // silently break login in local dev (plain http://localhost) — this
+      // stays false unless NODE_ENV=production is set, which should only
+      // be true on the real Sally deployment (running behind nginx +
+      // Certbot HTTPS, with `app.set('trust proxy', 'loopback')` above so
+      // Express correctly recognizes those requests as secure).
+      secure: IS_PRODUCTION,
       httpOnly: true,
       maxAge: 8 * 60 * 60 * 1000, // 8 hours
       sameSite: 'lax',
@@ -258,6 +352,21 @@ function page({ title, body, search = false }) {
 
 // ─── LOGIN / LOGOUT — no requireLogin on these ─────────────────────────────
 
+// Scoped to the two routes that check a password/account against Supabase
+// Auth (POST /login, POST /forgot-password) — nothing else on this app
+// takes an email/password guess, so nothing else needs it. Shared per-IP
+// bucket across both routes: 10 attempts per 15 minutes. Response is a
+// generic 429 with no indication of which email was tried or whether it
+// exists, matching the "same message either way" approach already used by
+// both routes' own success/failure paths.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many attempts. Please wait a while and try again.',
+});
+
 app.get('/login', (req, res) => {
   if (req.session && req.session.accessToken) {
     return res.redirect('/');
@@ -285,7 +394,7 @@ app.get('/login', (req, res) => {
   );
 });
 
-app.post('/login', async (req, res) => {
+app.post('/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.redirect('/login?error=' + encodeURIComponent('Enter your email and password.'));
@@ -341,7 +450,7 @@ app.get('/forgot-password', (req, res) => {
   );
 });
 
-app.post('/forgot-password', async (req, res) => {
+app.post('/forgot-password', authLimiter, async (req, res) => {
   const { email } = req.body;
   // Always show the same "check your email" message below, whether or not
   // this email belongs to a real account — see requestPasswordReset's
@@ -482,6 +591,12 @@ app.use(securityDepositInternalRouter);
 // tools' internal routers. Must also be registered before requireLogin.
 app.use(maintenanceHistoryInternalRouter);
 
+// ─── Call Stats — internal/cron route, no login required ──────────────────
+// One endpoint (internal/sync — the nightly Aircall pull) authenticates
+// with the same shared secret header as the other tools' internal routers.
+// Must also be registered before requireLogin, for the same reason.
+app.use(callStatsInternalRouter);
+
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);
 
@@ -519,6 +634,10 @@ app.get('/', (req, res) => {
             <strong>Maintenance History</strong>
             <span>Ticket timelines, decisions, and outcomes pulled from Latchel — every fact reviewed before it's trusted</span>
           </a>
+          <a class="section-link" href="/call-stats">
+            <strong>Call Stats</strong>
+            <span>Per-person call counts, average length, missed calls, and speed to answer, by pod — pulled from Aircall nightly</span>
+          </a>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
       `,
@@ -551,7 +670,49 @@ app.use(securityDepositRouter);
 // 'admin'). See maintenance-history/router.js and its SPEC.md.
 app.use(maintenanceHistoryRouter);
 
+// ─── Call Stats section ─────────────────────────────────────────────────
+// Same shape again: requireLogin already ran; call-stats/router.js does
+// its own additional check — does this specific person hold a role in
+// team_member_tool_roles for tool='call_stats' ('pod_lead' or 'admin').
+// See call-stats/router.js and its SPEC.md.
+app.use(callStatsRouter);
+
+// ─── Central error handler — must be registered last ──────────────────────
+// Catches errors a route handler throws synchronously (e.g. destructuring
+// something out of req.body that turns out to be missing, then calling a
+// method on it) and returns a generic message instead of Express's built-in
+// default handler, which — depending on NODE_ENV — can render the error's
+// full stack trace straight into the HTTP response. This makes that
+// protection unconditional rather than dependent on NODE_ENV=production
+// being set correctly at deploy time (which is still required regardless —
+// see the trust-proxy/cookie comment above — this is a second, independent
+// layer on top of it).
+// Caveat: this only catches synchronous throws (what Express 4 itself
+// forwards to error middleware automatically) — an async route handler that
+// rejects without its own try/catch is instead caught by the
+// unhandledRejection listener above, which logs it but can't send a
+// response to the client that's already waiting (the request just times
+// out). Fixing that fully means wrapping every async route or moving to
+// Express 5; out of scope for this pass.
+app.use((err, req, res, next) => {
+  console.error(`[${new Date().toISOString()}] [ERROR] ${req.method} ${req.originalUrl}:`, err);
+  if (res.headersSent) return next(err);
+  res.status(500).send('Something went wrong. Please try again.');
+});
+
 // ─── Start ──────────────────────────────────────────────────────────────────
+// Reverted 2026-08-20 (Judge review, Call Stats build): a prior pass bound
+// this to 127.0.0.1 only, on the unverified assumption that nginx-on-
+// localhost is the only thing that ever talks to this app in production.
+// Peter confirmed he isn't certain that's actually how the real deployment
+// is set up — a wrong assumption here would take the entire Hub offline the
+// moment this shipped, not just the new Call Stats piece. Reverted to
+// Express's default (listen on all interfaces) until someone can confirm
+// the real production network topology; re-add the 127.0.0.1 restriction
+// then, with real certainty instead of a guess. The 'loopback' trust-proxy
+// setting above is unaffected by this revert and stays exactly as it was —
+// it only trusts forwarded headers from a loopback connection either way,
+// so it fails safe regardless of whether a local proxy actually exists.
 app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] Rincon Hub running on port ${PORT}`);
 });

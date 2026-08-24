@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Content Engine — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    .card h2 { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+    .card p.desc { color: #6b7280; font-size: 12.5px; margin-bottom: 12px; }
+    #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
+
+    label { display: block; font-size: 12.5px; font-weight: 600; color: #374151; margin: 10px 0 4px; }
+    label:first-child { margin-top: 0; }
+    input[type=text], textarea, select {
+      width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 13px; font-family: inherit;
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    .helper-text { font-size: 11.5px; color: #9ca3af; margin-top: 2px; }
+    .checkbox-group { border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px 12px; max-height: 180px; overflow-y: auto; margin-top: 4px; }
+    .checkbox-group label { font-weight: 400; display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: #111827; }
+    .checkbox-group input[type=checkbox] { width: auto; }
+
+    .btn { font-size: 13px; padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+    .btn-primary { background: #1d4ed8; color: #fff; }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
+    .actions { margin-top: 12px; }
+    .status-msg { font-size: 12.5px; margin-top: 10px; }
+    .status-msg.ok { color: #166534; }
+    .status-msg.err { color: #991b1b; }
+    .status-msg.pending { color: #6b7280; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    .empty { color: #9ca3af; padding: 16px; text-align: center; font-size: 12.5px; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .badge-ok { background: #e6f4ea; color: #166534; }
+    .badge-fail { background: #fce8e6; color: #991b1b; }
+    .badge-gray { background: #f3f4f6; color: #4b5563; }
+    .activity-section h3 { font-size: 13px; margin: 14px 0 6px; }
+    .activity-section:first-child h3 { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Content Engine</h1>
+    <p class="sub">
+      Draft new posts and check for new legal updates or trending topics — the same actions available from the
+      command line, as buttons. Drafts land in <a href="/content-review">Content Review</a> for approval; nothing
+      here publishes, sends, or posts anything automatically.
+    </p>
+
+    <div id="access-denied">
+      Your Rincon Hub account does not have access to Content Engine yet. Ask an admin to grant you access.
+    </div>
+
+    <div id="content" style="display:none;">
+      <div class="card">
+        <h2>Draft a new post</h2>
+        <p class="desc">Grounded only in Rincon's verified legal knowledge base — any uncertain facts are flagged for human review. Creates a new draft in the Content Review queue; nothing is published automatically.</p>
+        <form id="draft-form">
+          <label for="draft-title">Working title</label>
+          <input type="text" id="draft-title" name="title" required placeholder="e.g. What Ventura County Landlords Need to Know About Security Deposits">
+
+          <label for="draft-brief">What should this cover?</label>
+          <textarea id="draft-brief" name="brief" required placeholder="The angle, audience, and key points this piece should cover."></textarea>
+
+          <label for="draft-content-type">Content type</label>
+          <select id="draft-content-type" name="content_type" required>
+            <option value="" disabled selected>Choose one&hellip;</option>
+          </select>
+
+          <label>Which legal topics does this touch on? (optional)</label>
+          <div class="helper-text">Leave blank for general content that isn't legal in nature — the draft will be written from the title and brief alone, with no legal citations.</div>
+          <div class="checkbox-group" id="draft-topics"><div class="empty">Loading topics&hellip;</div></div>
+
+          <label for="draft-inspiration">Inspiration piece (optional)</label>
+          <div class="helper-text">Paste an example article to match its style for this draft only — never saved, and no facts are pulled from it.</div>
+          <textarea id="draft-inspiration" placeholder="Paste a reference article here..."></textarea>
+
+          <div class="actions">
+            <button type="submit" class="btn btn-primary" id="draft-submit-btn">Generate Draft</button>
+          </div>
+          <div id="draft-status" class="status-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Check for legal updates</h2>
+        <p class="desc">Searches LegiScan for California bills relevant to Rincon's compliance topics that have been signed into law. Queues candidates for Mason/Peter to review — never creates a citable legal fact by itself.</p>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="scan-legal-btn">Check for Legal Updates</button>
+        </div>
+        <div id="scan-legal-status" class="status-msg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Check for trending topics</h2>
+        <p class="desc">Searches YouTube for recent, high-velocity videos about Rincon's compliance topics. Queues relevant candidates as topic suggestions to review — never drafts anything by itself.</p>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="scan-viral-btn">Check for Trending Topics</button>
+        </div>
+        <div id="scan-viral-status" class="status-msg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Recent activity</h2>
+        <p class="desc">What's run recently, and whether it succeeded.</p>
+        <div id="activity-wrap"><div class="empty">Loading&hellip;</div></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function setStatus(el, text, cls) {
+      el.textContent = text;
+      el.className = 'status-msg' + (cls ? ' ' + cls : '');
+    }
+
+    async function init() {
+      const meRes = await fetch('/api/content-engine/auth/me');
+      if (meRes.status === 403) {
+        document.getElementById('access-denied').style.display = 'block';
+        return;
+      }
+      if (!meRes.ok) return;
+      document.getElementById('content').style.display = 'block';
+
+      loadContentTypes();
+      loadTopics();
+      loadActivity();
+    }
+
+    async function loadContentTypes() {
+      const res = await fetch('/api/content-engine/content-types');
+      if (!res.ok) return;
+      const types = await res.json();
+      const select = document.getElementById('draft-content-type');
+      types.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t.replace(/_/g, ' ');
+        select.appendChild(opt);
+      });
+    }
+
+    async function loadTopics() {
+      const wrap = document.getElementById('draft-topics');
+      const res = await fetch('/api/content-engine/topics');
+      if (!res.ok) {
+        wrap.innerHTML = '<div class="empty">Could not load topics.</div>';
+        return;
+      }
+      const topics = await res.json();
+      if (!topics.length) {
+        wrap.innerHTML = '<div class="empty">No compliance topics found.</div>';
+        return;
+      }
+      wrap.innerHTML = topics.map(t =>
+        '<label><input type="checkbox" name="topics" value="' + escapeHtml(t.topic_key) + '"> ' +
+        escapeHtml(t.topic_key.replace(/-/g, ' ')) + '</label>'
+      ).join('');
+    }
+
+    document.getElementById('draft-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('draft-submit-btn');
+      const statusEl = document.getElementById('draft-status');
+      const title = document.getElementById('draft-title').value.trim();
+      const brief = document.getElementById('draft-brief').value.trim();
+      const contentType = document.getElementById('draft-content-type').value;
+      const inspiration = document.getElementById('draft-inspiration').value.trim();
+      const topics = Array.from(document.querySelectorAll('#draft-topics input:checked')).map(el => el.value);
+
+      if (!title || !brief || !contentType) {
+        setStatus(statusEl, 'Fill in a title, brief, and content type.', 'err');
+        return;
+      }
+
+      btn.disabled = true;
+      setStatus(statusEl, 'Generating draft — this usually takes 20-30 seconds. Please don’t close this tab.', 'pending');
+
+      try {
+        const res = await fetch('/api/content-engine/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title, brief, content_type: contentType, topics,
+            inspiration_piece: inspiration || null,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Draft generation failed.');
+
+        let msg = 'Draft generated: "' + data.title + '". ';
+        if (data.claimsFlaggedForReview > 0) {
+          msg += data.claimsFlaggedForReview + ' claim(s) flagged for review. ';
+        }
+        statusEl.innerHTML = '';
+        const link = document.createElement('a');
+        link.href = data.reviewUrl;
+        link.textContent = 'Review it in Content Review →';
+        statusEl.appendChild(document.createTextNode(msg));
+        statusEl.appendChild(link);
+        statusEl.className = 'status-msg ok';
+        document.getElementById('draft-form').reset();
+        loadActivity();
+      } catch (err) {
+        setStatus(statusEl, err.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('scan-legal-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('scan-legal-btn');
+      const statusEl = document.getElementById('scan-legal-status');
+      btn.disabled = true;
+      setStatus(statusEl, 'Scanning LegiScan for newly chaptered California bills…', 'pending');
+      try {
+        const res = await fetch('/api/content-engine/scan-legal-updates', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Scan failed.');
+        setStatus(statusEl, data.candidatesCreated + ' new candidate(s) added for review.' + (data.warning ? ' ' + data.warning : ''), 'ok');
+        loadActivity();
+      } catch (err) {
+        setStatus(statusEl, err.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('scan-viral-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('scan-viral-btn');
+      const statusEl = document.getElementById('scan-viral-status');
+      btn.disabled = true;
+      setStatus(statusEl, 'Scanning YouTube for trending landlord-tenant topics…', 'pending');
+      try {
+        const res = await fetch('/api/content-engine/scan-viral-topics', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Scan failed.');
+        setStatus(statusEl, data.suggestionsCreated + ' new suggestion(s) added for review.', 'ok');
+        loadActivity();
+      } catch (err) {
+        setStatus(statusEl, err.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    async function loadActivity() {
+      const wrap = document.getElementById('activity-wrap');
+      const res = await fetch('/api/content-engine/activity');
+      if (!res.ok) {
+        wrap.innerHTML = '<div class="empty">Could not load recent activity.</div>';
+        return;
+      }
+      const data = await res.json();
+      let html = '';
+
+      html += '<div class="activity-section"><h3>Draft posts</h3>';
+      if (!data.drafts.length) {
+        html += '<div class="empty">No drafts yet.</div>';
+      } else {
+        html += '<table><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Author</th><th>Created</th></tr></thead><tbody>';
+        data.drafts.forEach(d => {
+          html += '<tr><td>' + escapeHtml(d.title) + '</td><td>' + escapeHtml(d.content_type.replace(/_/g, ' ')) + '</td>' +
+            '<td><span class="badge badge-gray">' + escapeHtml(d.status.replace(/_/g, ' ')) + '</span></td>' +
+            '<td>' + escapeHtml(d.author_name || '—') + '</td>' +
+            '<td>' + new Date(d.created_at).toLocaleString() + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      }
+      html += '</div>';
+
+      html += '<div class="activity-section"><h3>Legal update scans</h3>';
+      if (!data.legalUpdateScans.length) {
+        html += '<div class="empty">No scans have run yet.</div>';
+      } else {
+        html += '<table><thead><tr><th>Ran</th><th>Result</th><th>Candidates created</th><th>Note</th></tr></thead><tbody>';
+        data.legalUpdateScans.forEach(r => {
+          html += '<tr><td>' + new Date(r.ran_at).toLocaleString() + '</td>' +
+            '<td><span class="badge ' + (r.succeeded ? 'badge-ok' : 'badge-fail') + '">' + (r.succeeded ? 'succeeded' : 'failed') + '</span></td>' +
+            '<td>' + r.candidates_created + '</td><td>' + escapeHtml(r.error_message || '') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      }
+      html += '</div>';
+
+      html += '<div class="activity-section"><h3>Trending topic scans</h3>';
+      if (!data.topicScans.length) {
+        html += '<div class="empty">No scans have run yet.</div>';
+      } else {
+        html += '<table><thead><tr><th>Ran</th><th>Feed</th><th>Result</th><th>Suggestions created</th><th>Note</th></tr></thead><tbody>';
+        data.topicScans.forEach(r => {
+          html += '<tr><td>' + new Date(r.ran_at).toLocaleString() + '</td><td>' + escapeHtml(r.feed_source.replace(/_/g, ' ')) + '</td>' +
+            '<td><span class="badge ' + (r.succeeded ? 'badge-ok' : 'badge-fail') + '">' + (r.succeeded ? 'succeeded' : 'failed') + '</span></td>' +
+            '<td>' + r.suggestions_created + '</td><td>' + escapeHtml(r.error_message || '') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      }
+      html += '</div>';
+
+      wrap.innerHTML = html;
+    }
+
+    init();
+  </script>
+</body>
+</html>

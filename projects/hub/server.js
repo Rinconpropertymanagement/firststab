@@ -89,6 +89,18 @@ GET  /maintenance-history     Maintenance History dashboard (requires login
 GET  /call-stats              Call Stats dashboard (requires login + a role
                               in that tool — see call-stats/router.js)
      /api/call-stats/*        Call Stats API routes
+GET  /content-engine           Content Engine dashboard — draft a post, check
+                              for legal updates, check for trending topics
+                              (requires login + a role in tool=
+                              'content_engine' — see content-engine/router.js)
+     /api/content-engine/*    Content Engine API routes
+GET  /content-review           Content Review — the draft queue, approve/
+                              reject/publish, legal-claim review, captions,
+                              brand voice guide (requires login + a role in
+                              tool='content_engine' — see
+                              content-review/router.js; approve/reject/
+                              publish/legal-claim-decisions/brand-guide-edits
+                              additionally require role='admin')
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -138,6 +150,21 @@ missing, same as the other tools):
   CRON_SECRET                   Same shared secret as the other tools'
                               internal/cron routes — protects
                               internal/sync (the nightly Aircall pull).
+
+Required (Content Engine + Content Review — content-engine/lib/anthropic.js
+throws a clear error the first time a draft/revision/chat/caption call
+actually needs it, same "checked lazily" pattern as the credentials above):
+  ANTHROPIC_API_KEY             Drafting, revision, chat, and caption
+                              generation (content-engine/lib/anthropic.js).
+
+Optional (Content Engine's two discovery-scan buttons only — degrade
+gracefully otherwise, see .env.example):
+  LEGISCAN_API_KEY               "Check for legal updates" button
+                              (content-engine/lib/legal-update-scan.js).
+  YOUTUBE_API_KEY                "Check for trending topics" button
+                              (content-engine/lib/viral-scan.js).
+  ENABLE_WEB_SEARCH_CITATIONS    Used by drafting/revision for non-legal
+                              source citations; defaults to enabled if unset.
 `);
   process.exit(0);
 }
@@ -155,6 +182,8 @@ const { router: insuranceRouter, internalRouter: insuranceInternalRouter } = req
 const { router: securityDepositRouter, internalRouter: securityDepositInternalRouter } = require('./security-deposit/router');
 const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInternalRouter } = require('./maintenance-history/router');
 const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = require('./call-stats/router');
+const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter } = require('./content-engine/router');
+const { router: contentReviewRouter } = require('./content-review/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -597,6 +626,13 @@ app.use(maintenanceHistoryInternalRouter);
 // Must also be registered before requireLogin, for the same reason.
 app.use(callStatsInternalRouter);
 
+// ─── Content Engine — internal/cron route, no login required ──────────────
+// Empty today (see content-engine/router.js's file header) — both
+// discovery scans are Peter-triggered from the dashboard, not yet on a
+// schedule. Registered here, before requireLogin, so a future cron route
+// added to this router doesn't require touching this mounting order again.
+app.use(contentEngineInternalRouter);
+
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);
 
@@ -638,6 +674,14 @@ app.get('/', (req, res) => {
             <strong>Call Stats</strong>
             <span>Per-person call counts, average length, missed calls, and speed to answer, by pod — pulled from Aircall nightly</span>
           </a>
+          <a class="section-link" href="/content-engine">
+            <strong>Content Engine</strong>
+            <span>Draft a new post, check for legal updates, or check for trending topics — with a recent-activity view</span>
+          </a>
+          <a class="section-link" href="/content-review">
+            <strong>Content Review</strong>
+            <span>Approve, reject, or request changes on drafts; review legal claims, captions, and the brand voice guide</span>
+          </a>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
       `,
@@ -676,6 +720,23 @@ app.use(maintenanceHistoryRouter);
 // team_member_tool_roles for tool='call_stats' ('pod_lead' or 'admin').
 // See call-stats/router.js and its SPEC.md.
 app.use(callStatsRouter);
+
+// ─── Content Engine section ────────────────────────────────────────────
+// Same shape again: requireLogin already ran; content-engine/router.js
+// does its own additional check — does this specific person hold a role
+// in team_member_tool_roles for tool='content_engine' ('admin' or
+// 'contributor' — both pass everything in this panel).
+app.use(contentEngineRouter);
+
+// ─── Content Review section ────────────────────────────────────────────
+// Migrated from projects/content-review (see content-review/router.js for
+// the full migration notes). Same shape again: requireLogin already ran;
+// content-review/router.js does its own additional check — tool=
+// 'content_engine' (shared with the section above — one access grant
+// covers both ends of the drafting -> review pipeline), and further
+// restricts approve/reject/publish/legal-claim-decisions/brand-guide-edits
+// to role='admin' specifically on top of that.
+app.use(contentReviewRouter);
 
 // ─── Central error handler — must be registered last ──────────────────────
 // Catches errors a route handler throws synchronously (e.g. destructuring

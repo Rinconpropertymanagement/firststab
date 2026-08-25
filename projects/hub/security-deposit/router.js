@@ -45,10 +45,13 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const { listPhotoFolders } = require('./lib/b2-client');
+const { listPhotoFolders, listFilesInFolder, listAllFilesInFolder, downloadFileBytes, MAX_CANDIDATE_SCAN_FILES } = require('./lib/b2-client');
 const { parseFolderName } = require('./lib/folder-parser');
+const { matchPhoto } = require('./lib/photo-matcher');
+const { resizeForMatching } = require('./lib/image-resize');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Nodemailer (reminder emails) — same setup pattern as insurance ───────
@@ -174,8 +177,15 @@ const upload = multer({
   storage: multer.diskStorage({
     destination: '/tmp',
     filename: (req, file, cb) => {
-      const ts = Date.now();
-      cb(null, `security-deposit-upload-${ts}-${file.originalname}`);
+      // Filename must NOT be derived from file.originalname — it's fully
+      // client-controlled, and a crafted value like '../../../etc/x.pdf'
+      // would traverse outside /tmp past the extension check below (which
+      // only inspects the extension, not the rest of the string). Generate
+      // the on-disk name randomly; if the original name is ever needed for
+      // display, store it separately in the database record instead.
+      const random = crypto.randomBytes(16).toString('hex');
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `security-deposit-upload-${Date.now()}-${random}${ext}`);
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB max
@@ -292,7 +302,19 @@ function addressWordScore(normA, normB) {
 // by normalized address + nearest date," per SPEC.md's own description
 // (20260813000003_b2_photo_folders.sql's design notes). Only ever reads
 // the already-built b2_photo_folders index — never touches B2 directly.
-function findBestPhotoMatch(propertyAddress, targetDateStr, inspectionType, folders) {
+//
+// SECURITY (Viper finding, 2026-08-19): a folder's review_status matters
+// as much as its address/date score. 'needs_review' means the AI was NOT
+// confident about its own parse AND no human has looked at it yet — the
+// exact same "nothing gets silently trusted" gate this build already
+// applies to checklist fields and tenancy_status. Without this filter,
+// anyone with write access to the B2 bucket could name a folder to match
+// a real property/unit/date and have it silently substituted as a real
+// case's move-in/move-out evidence. Pass excludeReviewStatuses to keep a
+// caller from ever matching those rows; the case route below never calls
+// this without it for the folder that becomes `photos.move_in`/`move_out`.
+function findBestPhotoMatch(propertyAddress, targetDateStr, inspectionType, folders, options = {}) {
+  const excludeReviewStatuses = options.excludeReviewStatuses || [];
   if (!propertyAddress || !targetDateStr || !folders || !folders.length) return null;
   const normTarget = normalizeAddress(propertyAddress);
   if (!normTarget) return null;
@@ -301,6 +323,7 @@ function findBestPhotoMatch(propertyAddress, targetDateStr, inspectionType, fold
   let best = null;
   let bestScore = -1;
   for (const folder of folders) {
+    if (excludeReviewStatuses.includes(folder.review_status)) continue;
     if (folder.parsed_inspection_type && folder.parsed_inspection_type !== inspectionType && folder.parsed_inspection_type !== 'other') continue;
     const addrScore = addressWordScore(normTarget, normalizeAddress(folder.parsed_address || ''));
     if (addrScore < 0.6) continue;
@@ -315,11 +338,347 @@ function findBestPhotoMatch(propertyAddress, targetDateStr, inspectionType, fold
   return best;
 }
 
+// ─── Targeted Photo Matching — shared helpers (addendum:
+// targeted-photo-matching-SPEC.md) ──────────────────────────────────────
+
+// Same portfolio-wide, paginated read of the indexed B2 folders GET
+// /cases/:id already runs inline for its own folder match (see that
+// route's own `candidateFolders` fetch). Factored out here so the new
+// address-search route and the new photo-matching routes below share one
+// implementation. GET /cases/:id itself is deliberately left untouched —
+// its own inline copy keeps working exactly as before; duplicating this
+// one query is lower-risk than refactoring an already-live route for
+// this addendum.
+async function fetchAllIndexedB2Folders() {
+  return fetchAllRows((from, to) => supabase
+    .from('b2_photo_folders')
+    .select('id, b2_folder_path, parsed_address, parsed_unit, parsed_inspection_type, parsed_date, confidence_score, review_status')
+    .not('parsed_address', 'is', null)
+    .order('id', { ascending: true })
+    .range(from, to));
+}
+
+// Same "only a folder a human has actively confirmed, or the AI
+// auto-indexed above threshold, may ever be presented as case evidence"
+// rule GET /cases/:id already applies (see that route's own
+// CONFIRMED_ONLY constant) — needs_review folders are excluded from ever
+// becoming a case's move_in/move_out evidence automatically.
+const CONFIRMED_FOLDER_STATUSES_EXCLUDED = { excludeReviewStatuses: ['needs_review'] };
+
+// Resolves a case's own currently-matched move-in and move-out B2 photo
+// folders — the exact same matching GET /cases/:id already computes for
+// its own response, recomputed independently here (rather than shared)
+// for the same "don't touch an already-live route" reasoning as
+// fetchAllIndexedB2Folders above. Every new route this addendum adds
+// needs this same answer — "which B2 folder, if any, is this case's
+// confirmed move-in/move-out evidence right now" — to know what a
+// coordinator/pod lead is even allowed to browse, submit, or stream bytes
+// from.
+async function getCaseMatchedFolders(caseId) {
+  const { data: kase, error } = await supabase
+    .from('security_deposit_cases')
+    .select(`
+      id, move_out_date,
+      leases ( lease_start, units ( properties ( address ) ) )
+    `)
+    .eq('id', caseId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!kase) return null;
+
+  const lease = kase.leases || {};
+  const property = (lease.units && lease.units.properties) || null;
+  const candidateFolders = (property && property.address) ? await fetchAllIndexedB2Folders() : [];
+
+  const moveIn = findBestPhotoMatch(property && property.address, lease.lease_start, 'move_in', candidateFolders, CONFIRMED_FOLDER_STATUSES_EXCLUDED);
+  const moveOut = findBestPhotoMatch(property && property.address, kase.move_out_date, 'move_out', candidateFolders, CONFIRMED_FOLDER_STATUSES_EXCLUDED);
+
+  return { caseId: kase.id, moveIn, moveOut };
+}
+
+// HARD REQUIREMENT (spec's own flagged security requirement, called out
+// explicitly for Viper/Sentinel review — targeted-photo-matching-SPEC.md's
+// GET .../photo-file route description): a photo path is only ever
+// servable, submittable for matching, or resolvable if it actually falls
+// under one of THIS case's own two matched folders, computed server-side
+// above — never trusted from the request as-is. Without this, an
+// authenticated user could swap in an arbitrary B2 path (e.g. a different
+// tenant's case) and read it straight through this tool's own login gate.
+// Prefix-bounded with a trailing slash so "123 Main St/..." can never
+// match a distinct folder "123 Main St 2/..." that merely shares a text
+// prefix, and rejects any path containing ".." as defense-in-depth even
+// though B2 paths carry no real filesystem meaning.
+//
+// SECURITY FIX (TARS, 2026-08-24, live-bucket repro): a plain
+// startsWith(folderPath + '/') check only bounds the LEFT edge of the
+// match — it says nothing about how many more '/' segments follow, so a
+// different case's photos sitting several folders deeper than this
+// case's matched folder (a real hand-filing mistake TARS found in the
+// live bucket, not a contrived test) still passed as "inside" it and were
+// servable cross-tenant through this case's own login gate. The
+// authoritative definition of "this file is in this folder" already
+// exists elsewhere in this codebase: listFilesInFolder (lib/b2-client.js)
+// asks B2 for delimiter='/' listings, which is B2's own native way of
+// saying "direct children only" — anything nested deeper than one level
+// comes back as a rolled-up "folder" common-prefix entry instead of a
+// file, and is never returned as a candidate file at all. Matching that
+// same definition here (not just prefix-bounding) means checking that,
+// after the folder-path prefix is stripped, nothing but a single path
+// segment remains — no further '/'. A file nested one or more folders
+// deeper than the matched folder starts with the same string prefix but
+// is NOT "inside" it by this definition, exactly the shape TARS's repro
+// needs rejected regardless of how deep the nesting goes.
+function pathBelongsToFolder(filePath, folderPath) {
+  if (!filePath || !folderPath || typeof filePath !== 'string') return false;
+  if (filePath.includes('..')) return false;
+  const boundary = folderPath.replace(/\/+$/, '') + '/';
+  if (!filePath.startsWith(boundary)) return false;
+  const remainder = filePath.slice(boundary.length);
+  return remainder.length > 0 && !remainder.includes('/');
+}
+
+function pathBelongsToCaseFolders(filePath, matchedFolders) {
+  const moveInPath = matchedFolders.moveIn && matchedFolders.moveIn.b2_folder_path;
+  const moveOutPath = matchedFolders.moveOut && matchedFolders.moveOut.b2_folder_path;
+  return pathBelongsToFolder(filePath, moveInPath) || pathBelongsToFolder(filePath, moveOutPath);
+}
+
+// ─── Targeted Photo Matching — constants ────────────────────────────────
+const PHOTO_LIST_DEFAULT_LIMIT = 60;    // gallery page size (Tron's lazy-loaded grid)
+const PHOTO_LIST_MAX_LIMIT = 200;       // hard cap regardless of what a client requests
+// FIX (TARS accuracy study, 2026-08-24, 23 real submissions across 8
+// properties): the AI only ever got to compare against 3-8 candidates out
+// of typical ~100-photo move-in folders, for two compounding reasons —
+// (1) candidates were the first CANDIDATE_BATCH_SIZE files ALPHABETICALLY,
+// and real folders sort in ways that cluster similar shots together (all
+// exterior shots first, a run of near-duplicate close-ups), so a fixed
+// alphabetical window was frequently unrepresentative of the folder as a
+// whole; (2) even that unrepresentative batch got truncated further by
+// the byte budget below, because full-resolution 2-5MB phone originals
+// ran the budget out after only a handful of downloads. Net effect: the
+// AI was answering "does this narrow, often-unlucky slice contain a
+// match" instead of "does this folder contain a match" — TARS traced 78%
+// of the no_match_found results in the sample to this, not to the model
+// failing to recognize a real match it was actually shown.
+//
+// The 2026-08-24 fix addressed this with lib/image-resize.js (shrinks
+// every photo to ~1280px/JPEG, ~150-350KB instead of 2-5MB) plus an
+// evenly-spaced 40-photo SAMPLE across the whole folder, instead of
+// always the same alphabetically-first slice. That was a real
+// improvement but still a sample — Peter reviewed it 2026-08-25 and
+// rejected sampling outright: "build it to check all photos. its
+// important." This block implements that instead: every real photo in
+// the move-in folder (from listAllFilesInFolder — already filtered to
+// real images, already draining the whole folder) is a candidate, no
+// exceptions below the folder's own MAX_CANDIDATE_SCAN_FILES safety cap
+// in lib/b2-client.js. The resize fix from 2026-08-24 is what makes this
+// affordable — see CANDIDATE_DOWNLOAD_CONCURRENCY and the batch-packing
+// logic below for how a folder's full candidate list is now split across
+// as many Claude calls as it actually needs, run a few at a time.
+const MAX_SINGLE_IMAGE_BYTES = 3 * 1024 * 1024;
+// Byte budget for ONE match call (one move-out photo + one batch of
+// candidates), measured AFTER resizing. Batches are packed to this
+// budget (see the packing loop in the photo-matches route below) — this
+// is a backstop, not the usual binding constraint: at ~150-350KB per
+// resized photo, MAX_CANDIDATES_PER_BATCH below (Anthropic's own
+// per-request image-count ceiling) fills up long before this many bytes
+// does for any realistic Rincon folder. Kept as its own check anyway in
+// case an unusual folder's photos resize larger than typical. Well under
+// Claude's real 32MB total-request ceiling either way.
+const MAX_TOTAL_MATCH_REQUEST_BYTES = 18 * 1024 * 1024;
+// Anthropic's Messages API caps a single request at 100 images for a
+// 200k-context model — claude-sonnet-5 (lib/photo-matcher.js's MODEL) is
+// one (confirmed against Anthropic's current API docs, 2026-08-25: "100
+// per request on the API, for models with a 200k-token context window").
+// One batch's request = 1 move-out photo + its candidates, so that alone
+// would allow up to 99 candidates per batch. This constant is NOT set
+// near that ceiling, though — see the reliability finding below for why.
+//
+// RELIABILITY FIX (TARS, 2026-08-25, two independent live test runs — 13
+// submissions, 6 properties, ~81 real batch requests): at the old value of
+// 95, roughly 25-30% of individual batch requests failed outright with
+// "no text block in Claude response." The ACTUAL root cause of that
+// specific failure — found live, via the diagnostic logging in
+// lib/photo-matcher.js — turned out to be a max_tokens/adaptive-thinking
+// interaction (claude-sonnet-5 runs internal "thinking" by default unless
+// a request explicitly disables it, and thinking tokens were eating the
+// whole max_tokens budget before the model ever reached its JSON answer)
+// and has been fixed AT THE SOURCE in lib/photo-matcher.js
+// (`thinking: { type: 'disabled' }`) — see that file's own, much longer
+// comment for the full story and the live before/after numbers (0
+// failures in 14 real batches after the fix, vs. 4 of the same 30 batches
+// failing on their first attempt before it, across two different real B2
+// folders). That fix alone may well have been enough on its own.
+//
+// This constant is still being lowered anyway, independent of that fix,
+// because any batch failing used to fail the WHOLE submission (see the
+// per-batch retry below, which now also protects against that) and
+// failure compounded with batch count — 4+ batch folders, which is most
+// real Rincon move-in folders (105-950+ photos = 5-11 batches at the old
+// size), failed most or all attempts before either fix. A batch at 95
+// candidates is also just genuinely huge on its own terms: at ~1610
+// visual tokens per resized 1280px photo (Anthropic's own documented
+// visual-token formula, ⌈width/28⌉ × ⌈height/28⌉ — platform.claude.com/
+// docs/en/build-with-claude/vision, confirmed 2026-08-25) that's roughly
+// 150,000+ input tokens and a ~20-25MB upload in a single non-streaming
+// request — more total latency, more bytes to move over the network, and
+// (plausibly, though not confirmed as the mechanism here) more room for
+// adaptive thinking to run longer on a harder/bigger comparison before
+// the disable-thinking fix existed. A smaller, faster, cheaper request
+// per batch is still the more robust design even with the specific bug
+// that motivated this investigation now fixed at its source.
+//
+// Lowered to 25 candidates (26 images including the move-out photo) —
+// roughly 42,000 input tokens and a ~6.5MB upload per request — while not
+// multiplying total batch count as extremely as going all the way down to
+// the ~20-image ceiling Anthropic separately documents for its stricter
+// per-image-size rule (moot for us either way — every photo is already
+// resized to <=1280px, under the 2000px that rule cares about). This does
+// mean more total batches for a big folder (a 950-photo folder goes from
+// ~10 batches to ~38) — more Claude calls, more total wall-clock time —
+// but combined with the per-batch retry below, a folder that reliably
+// finishes beats one that fails outright most of the time, and
+// full-folder coverage (no sampling) is the explicit, non-negotiable
+// requirement this feature exists to meet. If real data after this change
+// shows the total-batch-count cost is a bigger problem than the
+// reliability this bought, that's a signal to raise this number again —
+// now that the actual "no text block" bug is fixed, there's much less
+// reliability reason to keep it this low, so a future revisit purely for
+// cost/latency (e.g. back toward 50-95) would be reasonable to consider,
+// not something this fix ruled out.
+const MAX_CANDIDATES_PER_BATCH = 25;
+// Bounds simultaneous B2 downloads and simultaneous Anthropic API calls —
+// not a queueing system, just "never fire more than this many of the
+// same kind of request at once," so a large folder can't hammer either
+// service with dozens of parallel requests at submission time. "A handful
+// at a time," per spec. Left unchanged by the 2026-08-25 reliability fix
+// above — the batch-size cut already reduces concurrent token throughput
+// by roughly the same 95-to-25 ratio at this same concurrency (4 batches
+// in flight at ~42k tokens each vs. the old ~150k each), which is the
+// more direct lever on load than lowering this further. See the
+// ANTHROPIC_API_KEY-concurrency note above the photo-matches route below
+// for the one other concurrency question this fix looked at (the 401
+// TARS saw) and why it's flagged, not changed here.
+const CANDIDATE_DOWNLOAD_CONCURRENCY = 5;
+const MATCH_BATCH_CONCURRENCY = 4;
+const SEARCH_MIN_QUERY_LENGTH = 3;
+const SEARCH_MAX_RESULTS = 15;
+
+// Runs `fn` over `items`, at most `limit` calls in flight at once — the
+// one concurrency primitive this route needs for both the candidate
+// download/resize step and the per-batch matchPhoto() calls below.
+// Deliberately not a real queue/pool library: chunks `items` into groups
+// of `limit` and awaits each group (via Promise.all) before starting the
+// next, so results always come back in the same order as `items`
+// regardless of how any one call's timing shakes out. `fn` is expected to
+// catch its own errors and return a sentinel (both call sites below do
+// this) rather than reject, so one failure in a chunk never silently
+// drops its neighbors' results.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  for (let i = 0; i < items.length; i += limit) {
+    const chunk = items.slice(i, i + limit);
+    const chunkResults = await Promise.all(chunk.map((item, j) => fn(item, i + j)));
+    for (let j = 0; j < chunkResults.length; j++) results[i + j] = chunkResults[j];
+  }
+  return results;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ─── Per-batch retry (TARS reliability fix, 2026-08-25) ────────────────
+// Retries ONE failed batch in place, at the route level — the fix for the
+// half of the reliability problem that isn't about request size (see
+// MAX_CANDIDATES_PER_BATCH above for that half). Before this fix, ANY
+// batch failing (even after lib/photo-matcher.js's own internal retry for
+// the "no text block" case) failed the WHOLE submission — meaning a
+// resubmission redid every batch from scratch, including ones that had
+// already succeeded and cost a real AI call. That whole-submission-fails
+// behavior is still correct and unchanged as a LAST resort (see the
+// failedBatches check below, still present, still refusing to insert a
+// row built from an incomplete batch set) — this just makes reaching that
+// last resort far less likely, by giving the one batch that actually
+// failed a real, generous, independent shot at succeeding on its own
+// before giving up on it.
+//
+// Deliberately a SEPARATE retry layer from photo-matcher.js's internal
+// one, not a bigger number plugged into that same loop: photo-matcher.js
+// retries the narrow "no text block" case specifically; this retries
+// matchPhoto() as a whole, so it also covers a network error or an
+// HTTP-level failure that exhausted the Anthropic SDK's own default
+// retries before ever reaching photo-matcher's retry loop. Exponential
+// backoff with jitter, same reasoning as photo-matcher.js's own (more
+// recovery time between attempts, and concurrently-retrying batches
+// shouldn't all retry at the same instant).
+const BATCH_RETRY_ATTEMPTS = 4;
+const BATCH_RETRY_BASE_DELAY_MS = 1500;
+const BATCH_RETRY_MAX_DELAY_MS = 15000;
+
+function batchRetryDelay(attempt) {
+  const exp = Math.min(BATCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), BATCH_RETRY_MAX_DELAY_MS);
+  return exp + Math.floor(Math.random() * 500);
+}
+
 function daysRemaining(disposition_deadline) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const deadline = new Date(disposition_deadline + 'T00:00:00');
   return Math.round((deadline - today) / 86400000);
+}
+
+// ─── Optimistic-lock guard (Ralph finding) ─────────────────────────────
+// checklist / prepaid-rent / escalate / escalate-confirm all did a plain
+// `.update().eq('id', ...)` with no version check — two pod leads editing
+// the same case within moments of each other got silent last-write-wins,
+// with no signal to either of them that it happened. `security_deposit_
+// cases.updated_at` is already auto-bumped on every write by the
+// set_updated_at trigger (20260813000002_security_deposit_cases.sql), so
+// no schema change is needed — this is a lightweight guard, not a real
+// locking system: the client echoes back the `updated_at` it last loaded
+// (GET .../cases/:id now returns it — see that route below), and a write
+// is rejected with 409 if the case's real updated_at has since moved.
+//
+// Deliberately permissive when the client sends no updated_at at all
+// (undefined/null/''): this only starts protecting a given screen once
+// its caller is actually passing the value back. As of this build, the
+// dashboard (dashboard/index.html) does NOT yet send it on any of these
+// four routes — see the handoff note above internalRouter below. Until
+// Tron wires it through, these routes behave exactly as before.
+function isStaleUpdate(currentUpdatedAt, clientUpdatedAt) {
+  if (clientUpdatedAt == null || clientUpdatedAt === '') return false;
+  // Compared as parsed Date values (millisecond precision), not raw
+  // strings — tolerates any harmless formatting difference between two
+  // separate reads of the same TIMESTAMPTZ column. Verified against real
+  // Supabase output (2026-08-19): this does mean two genuinely different
+  // writes landing in the same millisecond would be treated as equal —
+  // acceptable for a lightweight guard against human-paced edits (seconds
+  // to minutes apart), not a serializable lock.
+  const currentMs = new Date(currentUpdatedAt).getTime();
+  const clientMs = new Date(clientUpdatedAt).getTime();
+  return !isFinite(clientMs) || currentMs !== clientMs;
+}
+
+const STALE_CASE_ERROR = 'This case was changed by someone else since you loaded it. Reload the case and try again.';
+
+// Fetch-then-compare version, for routes that don't already select the
+// case row for another reason. Routes that already fetch the row first
+// (escalate-confirm) call isStaleUpdate() directly against that row
+// instead of paying for a second SELECT.
+async function checkOptimisticLock(caseId, clientUpdatedAt) {
+  if (clientUpdatedAt == null || clientUpdatedAt === '') return { ok: true };
+  const { data: current, error } = await supabase
+    .from('security_deposit_cases')
+    .select('updated_at')
+    .eq('id', caseId)
+    .maybeSingle();
+  if (error) return { ok: false, status: 500, error: error.message };
+  if (!current) return { ok: false, status: 404, error: 'Case not found.' };
+  if (isStaleUpdate(current.updated_at, clientUpdatedAt)) {
+    return { ok: false, status: 409, error: STALE_CASE_ERROR };
+  }
+  return { ok: true };
 }
 
 // ─── Router: everyone reaching here is already hub-logged-in ──────────────
@@ -459,7 +818,7 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
       created_at, updated_at,
       leases (
         id, appfolio_id, lease_start, lease_end, monthly_rent, status,
-        move_out_reason, deposit_held_total, deposit_synced_at,
+        move_out_date, move_out_reason, deposit_held_total, deposit_synced_at,
         units ( id, unit_number, properties ( id, name, address, city, jurisdiction_county ) )
       )
     `)
@@ -517,8 +876,27 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
     }
   }
 
-  const moveInPhotos = findBestPhotoMatch(property && property.address, lease.lease_start, 'move_in', candidateFolders);
-  const moveOutPhotos = findBestPhotoMatch(property && property.address, kase.move_out_date, 'move_out', candidateFolders);
+  // Only a folder a human has actively confirmed (or that the AI indexed
+  // above the governed confidence threshold — 'auto_indexed') may ever be
+  // presented as this case's evidence. 'needs_review' is explicitly
+  // excluded — see findBestPhotoMatch's comment above.
+  const CONFIRMED_ONLY = { excludeReviewStatuses: ['needs_review'] };
+  const moveInPhotos = findBestPhotoMatch(property && property.address, lease.lease_start, 'move_in', candidateFolders, CONFIRMED_ONLY);
+  const moveOutPhotos = findBestPhotoMatch(property && property.address, kase.move_out_date, 'move_out', candidateFolders, CONFIRMED_ONLY);
+
+  // If nothing confirmed matched, check separately whether an unconfirmed
+  // (needs_review) folder WOULD have matched — never assigned to
+  // moveInPhotos/moveOutPhotos above, so it can never be returned in the
+  // `photos` object and can never render identically to a confirmed match
+  // on the case screen (Viper's finding). Surfaced only as a pointer, in
+  // the flags[] warning below, toward the existing manual-review queue
+  // (GET /api/security-deposit/photo-review-queue, resolved via POST
+  // .../photo-review-queue/:id/resolve) — a pod lead must actively
+  // confirm or correct it there before it can ever become this case's
+  // evidence. No new confirmation mechanism needed; that gate already
+  // existed, findBestPhotoMatch just wasn't respecting it.
+  const moveInUnconfirmed = moveInPhotos ? null : findBestPhotoMatch(property && property.address, lease.lease_start, 'move_in', candidateFolders);
+  const moveOutUnconfirmed = moveOutPhotos ? null : findBestPhotoMatch(property && property.address, kase.move_out_date, 'move_out', candidateFolders);
 
   // Prepaid Rent — NOT a live AppFolio pull (superseded 2026-08-19).
   // Automatic retrieval via appfolioConnector.getPrepaidRentBalance()
@@ -541,8 +919,26 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   // keep in sync, and storing it would create a second copy of the truth
   // that could drift from the real B2/AppFolio state between reads.
   const flags = [];
-  if (!moveInPhotos) flags.push({ code: 'no_move_in_photos', message: 'No move-in photos found.' });
-  if (!moveOutPhotos) flags.push({ code: 'no_move_out_photos', message: 'No move-out photos found.' });
+  if (!moveInPhotos) {
+    if (moveInUnconfirmed && moveInUnconfirmed.review_status === 'needs_review') {
+      flags.push({
+        code: 'move_in_photos_unconfirmed_match',
+        message: 'UNCONFIRMED MATCH, NOT SHOWN AS EVIDENCE: a possible move-in photo folder was found ("' + moveInUnconfirmed.b2_folder_path + '", AI confidence ' + Math.round((moveInUnconfirmed.confidence_score || 0) * 100) + '%) but no human has reviewed it yet — it is sitting in the B2 photo manual-review queue. It will NOT appear as this case’s move-in photos until a pod lead confirms or corrects it in that queue.',
+      });
+    } else {
+      flags.push({ code: 'no_move_in_photos', message: 'No move-in photos found.' });
+    }
+  }
+  if (!moveOutPhotos) {
+    if (moveOutUnconfirmed && moveOutUnconfirmed.review_status === 'needs_review') {
+      flags.push({
+        code: 'move_out_photos_unconfirmed_match',
+        message: 'UNCONFIRMED MATCH, NOT SHOWN AS EVIDENCE: a possible move-out photo folder was found ("' + moveOutUnconfirmed.b2_folder_path + '", AI confidence ' + Math.round((moveOutUnconfirmed.confidence_score || 0) * 100) + '%) but no human has reviewed it yet — it is sitting in the B2 photo manual-review queue. It will NOT appear as this case’s move-out photos until a pod lead confirms or corrects it in that queue.',
+      });
+    } else {
+      flags.push({ code: 'no_move_out_photos', message: 'No move-out photos found.' });
+    }
+  }
   if (lease.deposit_held_total == null) {
     flags.push({ code: 'no_deposit_on_file', message: 'No deposit amount on file for this lease.' });
   } else if (Number(lease.deposit_held_total) === 0) {
@@ -553,6 +949,9 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   }
   if (!inspectionFormMoveIn) flags.push({ code: 'no_inspection_form_move_in', message: 'Move-in inspection form not uploaded yet.' });
   if (!inspectionFormMoveOut) flags.push({ code: 'no_inspection_form_move_out', message: 'Move-out inspection form not uploaded yet.' });
+  if (!tenants.length) {
+    flags.push({ code: 'no_tenants_on_lease', message: 'No tenant(s) resolved for this lease — lease_tenants has no matching rows. A disposition packet with no known tenant is likely incomplete; check the lease record before proceeding.' });
+  }
   if (!kase.tenancy_status) flags.push({ code: 'tenancy_status_unconfirmed', message: 'Whether this is the whole tenancy ending, or one co-tenant moving out while the lease continues, has not been confirmed yet.' });
   if (kase.checklist_notice_sent == null) {
     flags.push({ code: 'checklist_notice_sent_unconfirmed', message: 'Whether the move-out notice was sent to the tenant has not been answered yet.' });
@@ -563,11 +962,25 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   if (kase.checklist_photos_documented == null) {
     flags.push({ code: 'checklist_photos_documented_unconfirmed', message: 'Whether move-out photos were documented has not been answered yet.' });
   }
+  // Defense-in-depth for the create-cases-from-sync deadline-correction
+  // fix below: that job re-syncs this case's move_out_date from
+  // leases.move_out_date whenever AppFolio's date changes, for every
+  // status. This flag only fires in the narrow window before that job
+  // next runs (or if a correction failed for some reason) — see that
+  // route's comment for the full reasoning, including why a 'reviewed'
+  // case still gets corrected rather than silently left stale.
+  if (lease.move_out_date && kase.move_out_date && String(lease.move_out_date) !== String(kase.move_out_date)) {
+    flags.push({
+      code: 'move_out_date_mismatch',
+      message: `This case's move-out date (${kase.move_out_date}) no longer matches the lease's current move-out date in AppFolio (${lease.move_out_date}) — the 21-day deadline above is computed from the case's date. This should self-correct the next time the nightly sync runs; contact an admin if it doesn't.`,
+    });
+  }
 
   return res.json({
     id: kase.id,
     status: kase.status,
     move_out_date: kase.move_out_date,
+    updated_at: kase.updated_at,
     move_out_reason: lease.move_out_reason || null,
     disposition_deadline: kase.disposition_deadline,
     days_remaining: daysRemaining(kase.disposition_deadline),
@@ -697,6 +1110,9 @@ router.post('/api/security-deposit/cases/:id/checklist', requireSecurityDepositR
   }
   if (!Object.keys(updates).length) return res.status(400).json({ error: 'No valid fields to update.' });
 
+  const lock = await checkOptimisticLock(req.params.id, req.body.updated_at);
+  if (!lock.ok) return res.status(lock.status).json({ error: lock.error });
+
   const { data: updated, error } = await supabase
     .from('security_deposit_cases')
     .update(updates)
@@ -731,9 +1147,16 @@ router.post('/api/security-deposit/cases/:id/prepaid-rent', requireSecurityDepos
   // field silently save as a confirmed "$0 balance" instead of being
   // rejected as missing.
   const value = typeof balance === 'string' ? (balance.trim() === '' ? NaN : Number(balance)) : balance;
-  if (typeof value !== 'number' || !isFinite(value) || isNaN(value) || value < 0) {
-    return res.status(400).json({ error: 'balance is required and must be a non-negative number (0 is valid if no Prepaid Rent balance exists).' });
+  // Upper bound matches the database's NUMERIC(10,2) column constraint —
+  // rejecting here gives a clean 400 instead of letting an absurd value
+  // fall through to a raw 500 when the DB constraint trips.
+  const MAX_PREPAID_RENT_BALANCE = 10000000;
+  if (typeof value !== 'number' || !isFinite(value) || isNaN(value) || value < 0 || value > MAX_PREPAID_RENT_BALANCE) {
+    return res.status(400).json({ error: `balance is required and must be a non-negative number no greater than $${MAX_PREPAID_RENT_BALANCE.toLocaleString()} (0 is valid if no Prepaid Rent balance exists).` });
   }
+
+  const lock = await checkOptimisticLock(req.params.id, req.body.updated_at);
+  if (!lock.ok) return res.status(lock.status).json({ error: lock.error });
 
   const reporterName = req.securityDepositMemberName || req.user.email;
   const now = new Date().toISOString();
@@ -971,6 +1394,9 @@ router.post('/api/security-deposit/cases/:id/escalate', requireSecurityDepositRo
   const { reason } = req.body;
   if (!reason || !reason.trim()) return res.status(400).json({ error: 'reason is required.' });
 
+  const lock = await checkOptimisticLock(req.params.id, req.body.updated_at);
+  if (!lock.ok) return res.status(lock.status).json({ error: lock.error });
+
   const escalatorName = req.securityDepositMemberName || req.user.email;
   const now = new Date().toISOString();
 
@@ -1027,11 +1453,16 @@ router.post('/api/security-deposit/cases/:id/escalate-confirm', requireSecurityD
 
   const { data: before, error: beforeErr } = await supabase
     .from('security_deposit_cases')
-    .select('status, escalated_by, escalated_at, reviewer_notes')
+    .select('status, escalated_by, escalated_at, reviewer_notes, updated_at')
     .eq('id', req.params.id)
     .maybeSingle();
   if (beforeErr) return res.status(500).json({ error: beforeErr.message });
   if (!before) return res.status(404).json({ error: 'Case not found.' });
+  // Already have the row from the fetch above — compare directly instead
+  // of paying for checkOptimisticLock()'s own SELECT.
+  if (isStaleUpdate(before.updated_at, req.body.updated_at)) {
+    return res.status(409).json({ error: STALE_CASE_ERROR });
+  }
 
   const { data: updated, error } = await supabase
     .from('security_deposit_cases')
@@ -1129,6 +1560,636 @@ router.post('/api/security-deposit/photo-review-queue/:id/resolve', requireSecur
   return res.json({ success: true, folder: updated });
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// TARGETED PHOTO MATCHING (addendum: targeted-photo-matching-SPEC.md)
+// Three pieces, all additive to the base tool above and to each other:
+// general photo browsing, AI-assisted move-out -> move-in photo matching,
+// and an in-context address search fallback. Governance-cleared by Asimov
+// (7 conditions) and Mason (1 condition) before this spec was written —
+// see that spec's "Compliance Grounding" section for the full list. Every
+// route below is scoped to a case the requester's role can already see;
+// the photo-file route additionally verifies the requested path actually
+// belongs to THAT case's own matched folders before streaming anything
+// (see pathBelongsToCaseFolders above and that route's own comment) —
+// flagged explicitly for Viper/Sentinel review, same as the spec itself
+// flags it.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── GET /api/security-deposit/cases/:id/photos ────────────────────────
+// Powers BOTH general browsing (folder=move_in or move_out, freely
+// scrollable the moment the case screen opens) AND the move-out matching
+// picker (folder=move_out only) — one route, not two UIs each with their
+// own listing logic (spec's own revision note). Paginated via B2's own
+// cursor, one page at a time — never drains a whole folder (see
+// lib/b2-client.js's listFilesInFolder comment).
+router.get('/api/security-deposit/cases/:id/photos', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+  const folderKind = req.query.folder;
+  if (!['move_in', 'move_out'].includes(folderKind)) {
+    return res.status(400).json({ error: 'folder must be "move_in" or "move_out".' });
+  }
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || PHOTO_LIST_DEFAULT_LIMIT, 1), PHOTO_LIST_MAX_LIMIT);
+
+  let matched;
+  try {
+    matched = await getCaseMatchedFolders(req.params.id);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  if (!matched) return res.status(404).json({ error: 'Case not found.' });
+
+  const folder = folderKind === 'move_in' ? matched.moveIn : matched.moveOut;
+  if (!folder) {
+    // Not an error — an unmatched folder is exactly the state the address
+    // search (below) exists to fix. The UI shows the search box front and
+    // center in this state (spec's Tron section).
+    return res.json({ files: [], next_cursor: null, folder_matched: false, folder_path: null });
+  }
+
+  try {
+    const page = await listFilesInFolder(folder.b2_folder_path, { startFileName: req.query.cursor || null, maxFileCount: limit });
+    return res.json({
+      files: page.files,
+      next_cursor: page.nextFileName,
+      folder_matched: true,
+      folder_path: folder.b2_folder_path,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to list photos from Backblaze B2.', detail: error.message });
+  }
+});
+
+// ─── GET /api/security-deposit/cases/:id/photo-file ────────────────────
+// Streams one photo's actual bytes — same endpoint for a gallery
+// thumbnail and the click-to-enlarge full view (B2 has no resized copy to
+// serve instead — spec's own performance note). HARD REQUIREMENT
+// (spec-flagged for Viper/Sentinel review): `path` is only ever served if
+// it actually falls under THIS case's own matched move-in or move-out
+// folder, computed server-side above — never trusted as-is. Without this
+// check, an authenticated user could swap in an arbitrary B2 path and
+// read a different tenant's case photos through this case's own login
+// gate.
+router.get('/api/security-deposit/cases/:id/photo-file', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || typeof filePath !== 'string') {
+    return res.status(400).json({ error: 'path is required.' });
+  }
+
+  let matched;
+  try {
+    matched = await getCaseMatchedFolders(req.params.id);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  if (!matched) return res.status(404).json({ error: 'Case not found.' });
+
+  if (!pathBelongsToCaseFolders(filePath, matched)) {
+    return res.status(403).json({ error: "This photo does not belong to this case's matched folders." });
+  }
+
+  try {
+    const file = await downloadFileBytes(filePath);
+    res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+    // Real caching headers from B2's own file metadata — a browser that's
+    // already loaded a photo shouldn't re-fetch it on scroll-back (spec's
+    // own "no waiting" requirement, extended to repeat views). `private`
+    // because this sits behind the Hub's own login, not a public asset.
+    if (file.etag) res.setHeader('ETag', file.etag);
+    if (file.lastModified) res.setHeader('Last-Modified', file.lastModified);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    return res.send(file.buffer);
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to fetch photo from Backblaze B2.', detail: error.message });
+  }
+});
+
+// Inserts a security_deposit_photo_matches row, falling back to fetching
+// the already-existing row on a UNIQUE(case_id, move_out_photo_path)
+// conflict (Postgres 23505) instead of erroring — the migration's own
+// design notes name the exact race this guards against: a coordinator
+// double-clicking submit, or a retried request after a slow response
+// that actually succeeded. The upfront existingRow check in the route
+// below already handles the common case; this is the race-condition
+// backstop for two near-simultaneous requests both passing that check
+// before either one's insert lands.
+async function insertPhotoMatchRow(fields) {
+  const { data: row, error } = await supabase
+    .from('security_deposit_photo_matches')
+    .insert(fields)
+    .select()
+    .single();
+  if (!error) return { row, alreadyExisted: false };
+  if (error.code === '23505') {
+    const { data: existing, error: fetchErr } = await supabase
+      .from('security_deposit_photo_matches')
+      .select('*')
+      .eq('case_id', fields.case_id)
+      .eq('move_out_photo_path', fields.move_out_photo_path)
+      .maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (existing) return { row: existing, alreadyExisted: true };
+  }
+  throw error;
+}
+
+// ─── POST /api/security-deposit/cases/:id/photo-matches ────────────────
+// THIS is the photo-selection/submission endpoint the coordinator
+// actually uses: runs the byte-fetch + AI match, stores the result,
+// returns it. Idempotent per (case, move-out photo) — see the migration's
+// own UNIQUE(case_id, move_out_photo_path); re-submitting the same photo
+// returns the already-computed row instead of re-spending an AI call.
+//
+// ANTHROPIC_API_KEY CONCURRENCY (TARS, 2026-08-25 — investigated, not
+// changed): one of the two 2026-08-25 test runs hit an HTTP 401 "API key
+// is invalid" on ALL batches of one submission simultaneously. Checked
+// Anthropic's published rate-limit model for this: limits (requests/min,
+// tokens/min) are enforced per-ORGANIZATION, shared across every API key
+// under that org, and exceeding them returns 429 ("Too Many Requests") —
+// there is no documented mechanism by which concurrent requests from a
+// valid key produce a 401 ("authentication is invalid," a completely
+// different failure class from rate limiting). A single Node process
+// calling `new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })`
+// fresh inside every matchPhoto() call (lib/photo-matcher.js) is also not
+// itself a documented source of auth failures — the SDK doesn't do
+// anything key-related beyond reading that one env var per client. That
+// combination — a real auth-layer error with no documented concurrency
+// trigger, seen only when two independent test processes were racing
+// against the same ANTHROPIC_API_KEY — points at a test-environment
+// artifact (e.g. one process's .env reload racing the other's, or a key
+// rotation mid-test) rather than a product bug this fix needs to change
+// code for. Flagged, not fixed: if a 401 (specifically 401, not 429)
+// shows up again during genuine single-operator use of this route — not
+// two test suites sharing a key — that would contradict this conclusion
+// and is worth a fresh look. MATCH_BATCH_CONCURRENCY (4 batches at once,
+// same key, same org) is exactly the kind of legitimate concurrent use
+// Anthropic's own rate-limit design (429, with retry-after) already
+// expects and the SDK's own default retry-on-429 already handles — that
+// part was not touched by this investigation because nothing pointed at
+// it as a problem.
+router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+  const caseId = req.params.id;
+  const moveOutPhotoPath = req.body.move_out_photo_path;
+  if (!moveOutPhotoPath || typeof moveOutPhotoPath !== 'string') {
+    return res.status(400).json({ error: 'move_out_photo_path is required.' });
+  }
+
+  let matched;
+  try {
+    matched = await getCaseMatchedFolders(caseId);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  if (!matched) return res.status(404).json({ error: 'Case not found.' });
+
+  // Same path-scope defense as photo-file — a submitted move-out photo
+  // must actually belong to this case's own matched move-out folder, not
+  // an arbitrary path the client supplied.
+  if (!pathBelongsToFolder(moveOutPhotoPath, matched.moveOut && matched.moveOut.b2_folder_path)) {
+    return res.status(403).json({ error: "This photo does not belong to this case's matched move-out folder." });
+  }
+
+  // Idempotent re-submission — return the existing row rather than
+  // re-spending an AI call or hitting the UNIQUE(case_id,
+  // move_out_photo_path) constraint (migration design note).
+  const { data: existingRow, error: existingErr } = await supabase
+    .from('security_deposit_photo_matches')
+    .select('*')
+    .eq('case_id', caseId)
+    .eq('move_out_photo_path', moveOutPhotoPath)
+    .maybeSingle();
+  if (existingErr) return res.status(500).json({ error: existingErr.message });
+  if (existingRow) return res.json({ success: true, match: existingRow, already_existed: true });
+
+  if (!matched.moveIn) {
+    return res.status(400).json({
+      error: 'No move-in photo folder is matched for this case yet. Use "Search by address" to find and confirm one before matching photos.',
+    });
+  }
+
+  const { data: config, error: configErr } = await supabase
+    .from('photo_match_confidence_config')
+    .select('id, auto_show_threshold')
+    .eq('is_active', true)
+    .maybeSingle();
+  if (configErr) return res.status(500).json({ error: configErr.message });
+  if (!config) return res.status(500).json({ error: 'No active photo_match_confidence_config row — cannot decide auto-show vs. needs-confirmation.' });
+
+  const selectorName = req.securityDepositMemberName || req.user.email;
+  const now = new Date().toISOString();
+
+  try {
+    // Full-folder coverage, no sampling — see the block comment above
+    // MAX_SINGLE_IMAGE_BYTES near the top of this file for why (Peter's
+    // 2026-08-25 decision: "build it to check all photos"). listAllFilesInFolder
+    // already excludes B2 folder markers, zero-byte placeholders, and
+    // non-image file types; `folderScanTruncated` is only true if this
+    // folder has more real photos than lib/b2-client.js's own
+    // MAX_CANDIDATE_SCAN_FILES safety cap scanned — a real, honestly-
+    // disclosed limit (see the notes[] block below), not the normal case.
+    const { files: allCandidateFiles, truncated: folderScanTruncated } = await listAllFilesInFolder(matched.moveIn.b2_folder_path);
+
+    if (!allCandidateFiles.length) {
+      // Nothing to compare against — a real, deterministic outcome, not a
+      // failure. No AI call spent, so no photo_matched entry either
+      // beyond this one still-logged selection + result.
+      let inserted;
+      try {
+        inserted = await insertPhotoMatchRow({
+          case_id: caseId,
+          move_out_photo_path: moveOutPhotoPath,
+          move_in_photo_path: null,
+          confidence_score: 0,
+          confidence_config_id: config.id,
+          model_version: null,
+          match_status: 'no_match_found',
+          selected_by: selectorName,
+          selected_at: now,
+        });
+      } catch (insErr) {
+        return res.status(500).json({ error: insErr.message });
+      }
+      if (inserted.alreadyExisted) return res.json({ success: true, match: inserted.row, already_existed: true });
+
+      await supabase.from('audit_log').insert({
+        action: 'security_deposit.photo_match_selected',
+        entity_type: 'security_deposit_case',
+        entity_id: caseId,
+        details: { move_out_photo_path: moveOutPhotoPath, selected_by: selectorName, case_id: caseId },
+      });
+      await supabase.from('audit_log').insert({
+        action: 'security_deposit.photo_matched',
+        entity_type: 'security_deposit_case',
+        entity_id: caseId,
+        details: { move_out_photo_path: moveOutPhotoPath, move_in_photo_path: null, confidence_score: 0, model_version: null, case_id: caseId },
+      });
+
+      return res.json({ success: true, match: inserted.row, note: 'The matched move-in folder has no photos to compare against.' });
+    }
+
+    const moveOutFileRaw = await downloadFileBytes(moveOutPhotoPath);
+    // Resize BEFORE the size check below — a full-resolution phone photo
+    // shrinks to a small fraction of its original bytes, so this 400 now
+    // only fires on a genuinely pathological input (or a resize failure
+    // that fell back to the original — see image-resize.js's own
+    // fallback behavior), not on an ordinary full-res camera original.
+    const moveOutFile = await resizeForMatching(moveOutFileRaw.buffer, moveOutFileRaw.contentType);
+    if (moveOutFile.buffer.length > MAX_SINGLE_IMAGE_BYTES) {
+      return res.status(400).json({ error: 'This photo is too large to match automatically. Browse the move-in gallery and match it manually instead.' });
+    }
+
+    // Download + resize EVERY candidate in the folder — a handful of B2
+    // downloads in flight at once (CANDIDATE_DOWNLOAD_CONCURRENCY), not
+    // one-at-a-time, since a full ~100-photo folder would otherwise pay
+    // for ~100 sequential B2 round trips before a single Claude call could
+    // even start. A candidate that fails to download is skipped (logged,
+    // not fatal — same as before this change); a candidate that's still
+    // oversized after resizing is counted in skippedForSize, same as
+    // before.
+    const downloadResults = await mapWithConcurrency(allCandidateFiles, CANDIDATE_DOWNLOAD_CONCURRENCY, async (f) => {
+      let bytesRaw;
+      try {
+        bytesRaw = await downloadFileBytes(f.filePath);
+      } catch (err) {
+        console.error(`[security-deposit photo-match] failed to download candidate "${f.filePath}":`, err.message);
+        return null;
+      }
+      const bytes = await resizeForMatching(bytesRaw.buffer, bytesRaw.contentType);
+      return { filePath: f.filePath, buffer: bytes.buffer, contentType: bytes.contentType };
+    });
+
+    const candidates = [];
+    let skippedForSize = 0;
+    for (const c of downloadResults) {
+      if (!c) continue; // download failed — already logged above
+      if (c.buffer.length > MAX_SINGLE_IMAGE_BYTES) { skippedForSize++; continue; }
+      candidates.push(c);
+    }
+
+    if (!candidates.length) {
+      return res.status(502).json({ error: 'Could not download any move-in candidate photos from Backblaze B2 to match against.' });
+    }
+
+    // Coordinator's selection is logged once we know a real match attempt
+    // is actually happening (past the "nothing to compare against" and
+    // download-failure early exits above) — Asimov condition 2 /
+    // audit-logging section.
+    await supabase.from('audit_log').insert({
+      action: 'security_deposit.photo_match_selected',
+      entity_type: 'security_deposit_case',
+      entity_id: caseId,
+      details: { move_out_photo_path: moveOutPhotoPath, selected_by: selectorName, case_id: caseId },
+    });
+
+    // Pack every downloaded candidate into batches sized to fit BOTH
+    // Claude's per-request image-count ceiling (MAX_CANDIDATES_PER_BATCH)
+    // and the byte budget (MAX_TOTAL_MATCH_REQUEST_BYTES) alongside the
+    // move-out photo, which is resent with every batch since each batch
+    // is an independent Claude request. Computed from the REAL resized
+    // sizes, not a hardcoded batch count, so this adapts correctly
+    // whether a folder has 50 photos or 300. For Rincon's typical
+    // ~100-photo folder at ~73KB per resized photo (last measured), the
+    // byte budget alone would fit every candidate in ONE batch (~7.3MB of
+    // ~18MB) — it's MAX_CANDIDATES_PER_BATCH (25, since the 2026-08-25
+    // reliability fix — see that constant's own comment), not bytes, that
+    // ends up splitting a 100-photo folder into ~4 batches in practice.
+    const perBatchByteBudget = MAX_TOTAL_MATCH_REQUEST_BYTES - moveOutFile.buffer.length;
+    const batches = [];
+    let current = [];
+    let currentBytes = 0;
+    for (const c of candidates) {
+      const wouldOverflow = current.length > 0 &&
+        (current.length >= MAX_CANDIDATES_PER_BATCH || currentBytes + c.buffer.length > perBatchByteBudget);
+      if (wouldOverflow) {
+        batches.push(current);
+        current = [];
+        currentBytes = 0;
+      }
+      current.push(c);
+      currentBytes += c.buffer.length;
+    }
+    if (current.length) batches.push(current);
+
+    // One matchPhoto() call per batch, a few batches in flight at once
+    // (MATCH_BATCH_CONCURRENCY) instead of strictly one after another —
+    // keeps total wait time closer to one batch's duration instead of
+    // every batch's duration added together. Most batches are expected to
+    // come back with matched_index: null — that's normal, not a bug,
+    // since only one batch (if any) actually contains the real match.
+    //
+    // RELIABILITY FIX (TARS, 2026-08-25 — see BATCH_RETRY_ATTEMPTS above
+    // for the full reasoning): each batch now gets its own generous retry
+    // loop, in place, before it's counted as failed. A batch that
+    // succeeds on attempt 1 behaves exactly as before; a batch that fails
+    // gets BATCH_RETRY_ATTEMPTS total tries (with backoff) — and every
+    // one of those tries ALSO gets lib/photo-matcher.js's own internal
+    // retry for the specific "no text block" case, so a genuinely
+    // stubborn batch gets a real, layered, generous retry effort before
+    // this loop gives up on it. A batch's ALREADY-SUCCEEDED result is
+    // never discarded because a DIFFERENT batch is still retrying —
+    // mapWithConcurrency awaits each batch independently.
+    const batchResults = await mapWithConcurrency(batches, MATCH_BATCH_CONCURRENCY, async (batchCandidates, batchIndex) => {
+      let lastError;
+      for (let attempt = 1; attempt <= BATCH_RETRY_ATTEMPTS; attempt++) {
+        try {
+          const result = await matchPhoto({
+            moveOutPhoto: { buffer: moveOutFile.buffer, contentType: moveOutFile.contentType },
+            candidates: batchCandidates.map(c => ({ buffer: c.buffer, contentType: c.contentType })),
+          });
+          return { batchIndex, result, candidates: batchCandidates, error: null };
+        } catch (error) {
+          lastError = error;
+          const willRetry = attempt < BATCH_RETRY_ATTEMPTS;
+          console.error(
+            `[security-deposit photo-match] batch ${batchIndex + 1}/${batches.length} failed on attempt ${attempt}/${BATCH_RETRY_ATTEMPTS}:`,
+            error.message,
+            willRetry ? '— retrying this batch.' : '— out of retries for this batch, giving up.'
+          );
+          if (willRetry) await sleep(batchRetryDelay(attempt));
+        }
+      }
+      return { batchIndex, result: null, candidates: batchCandidates, error: lastError };
+    });
+
+    // A batch that STILL failed after its full retry effort above (not
+    // just its first attempt) is NOT the same as "no match in that
+    // batch": that slice of the folder was never actually checked, and
+    // this route's whole job is checking every photo. Because this route
+    // is idempotent per (case, move-out photo) — a resubmission just
+    // returns whatever row already exists — quietly downgrading an
+    // unchecked batch to "no match" here risks permanently recording a
+    // wrong answer if the real match happened to live in the batch that
+    // failed. So instead, a batch that exhausts its retries still fails
+    // the WHOLE submission (no row is inserted below) — this safety
+    // property is unchanged from before the 2026-08-25 fix. What DID
+    // change: reaching this point now means a specific batch failed a
+    // real, generous, independent retry effort of its own, not just one
+    // unlucky attempt — so a resubmission after this point is much more
+    // likely to be hitting a genuinely persistent problem (folder-specific
+    // or otherwise) worth a human's attention, not routine flakiness. The
+    // existing manual recovery path (a pod lead confirming or correcting a
+    // match via POST .../photo-matches/:id/resolve) is unaffected either
+    // way.
+    const failedBatches = batchResults.filter(br => br.error);
+    if (failedBatches.length) {
+      throw new Error(`AI photo match failed on ${failedBatches.length} of ${batches.length} batch(es) after ${BATCH_RETRY_ATTEMPTS} attempts each: ${failedBatches[0].error.message}`);
+    }
+
+    // Overall best result across all batches: the highest-confidence
+    // non-null match wins. Only the one batch that actually contains the
+    // real match (if any) should ever return non-null with meaningful
+    // confidence; every other batch is expected to correctly return no
+    // match. In the unlikely event the AI returns a false-positive
+    // plausible-looking match in a batch that does NOT hold the real
+    // photo, highest confidence is still the reasonable tie-breaker — it's
+    // the only signal this route has for which candidate to trust, and a
+    // false positive confident enough to beat the real match still lands
+    // as 'needs_confirmation' below the auto-show threshold (or gets
+    // corrected by a pod lead via the resolve route) exactly like any
+    // other imperfect match already did before this change.
+    let best = null;
+    let overallModelVersion = null;
+    for (const br of batchResults) {
+      if (!br.result) continue;
+      if (overallModelVersion == null) overallModelVersion = br.result.model_version;
+      if (br.result.matched_index == null) continue;
+      if (!best || br.result.confidence > best.confidence) {
+        best = {
+          moveInPhotoPath: br.candidates[br.result.matched_index].filePath,
+          confidence: br.result.confidence,
+        };
+      }
+    }
+
+    const moveInPhotoPath = best ? best.moveInPhotoPath : null;
+    const confidence = best ? best.confidence : 0;
+    const matchStatus = moveInPhotoPath == null
+      ? 'no_match_found'
+      : (confidence >= Number(config.auto_show_threshold) ? 'auto_shown' : 'needs_confirmation');
+
+    const { data: row, error: insErr } = await supabase
+      .from('security_deposit_photo_matches')
+      .insert({
+        case_id: caseId,
+        move_out_photo_path: moveOutPhotoPath,
+        move_in_photo_path: moveInPhotoPath,
+        confidence_score: confidence,
+        confidence_config_id: config.id,
+        model_version: overallModelVersion,
+        match_status: matchStatus,
+        selected_by: selectorName,
+        selected_at: now,
+      })
+      .select()
+      .single();
+    if (insErr) return res.status(500).json({ error: insErr.message });
+
+    // Every AI photo match gets its own audit_log entry (Asimov condition
+    // 2) — metadata only, exactly the fields the spec lists, plus two new
+    // plain numbers (batches_run, total_candidates_compared) describing
+    // HOW the match was computed — still just numbers, never a
+    // description of either photo's content.
+    await supabase.from('audit_log').insert({
+      action: 'security_deposit.photo_matched',
+      entity_type: 'security_deposit_case',
+      entity_id: caseId,
+      details: {
+        move_out_photo_path: moveOutPhotoPath,
+        move_in_photo_path: moveInPhotoPath,
+        confidence_score: confidence,
+        model_version: overallModelVersion,
+        case_id: caseId,
+        batches_run: batches.length,
+        total_candidates_compared: candidates.length,
+      },
+    });
+
+    const notes = [];
+    if (batches.length > 1) {
+      notes.push(`This move-in folder has ${allCandidateFiles.length} photos — every one was compared against this move-out photo, split across ${batches.length} batches (a single AI request can only hold so many images at once).`);
+    }
+    if (skippedForSize) notes.push(`${skippedForSize} candidate photo(s) were too large to include in this match attempt.`);
+    if (folderScanTruncated) {
+      notes.push(`This move-in folder has more than ${MAX_CANDIDATE_SCAN_FILES} photos — only the first ${MAX_CANDIDATE_SCAN_FILES} were scanned (a safety limit on how large a folder this tool will read). Contact an admin if this folder is unusually large.`);
+    }
+
+    return res.json({ success: true, match: row, note: notes.length ? notes.join(' ') : undefined });
+  } catch (error) {
+    console.error('[security-deposit photo-match] error:', error.message);
+    return res.status(500).json({ error: 'Failed to run the photo match.', detail: error.message });
+  }
+});
+
+// ─── GET /api/security-deposit/cases/:id/photo-matches ─────────────────
+// Lists already-computed matches for this case, so re-opening it doesn't
+// re-spend an AI call.
+router.get('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+  const { data, error } = await supabase
+    .from('security_deposit_photo_matches')
+    .select('*')
+    .eq('case_id', req.params.id)
+    .order('selected_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
+// ─── POST /api/security-deposit/photo-matches/:id/resolve ──────────────
+// pod lead/admin ONLY — confirms or corrects a needs_confirmation (or
+// no_match_found) row. inspection_coordinator does NOT get this route —
+// separation of duties (spec's Q section): the coordinator submits and
+// browses, it doesn't decide.
+router.post('/api/security-deposit/photo-matches/:id/resolve', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+  const { confirmed, move_in_photo_path } = req.body;
+
+  const { data: before, error: beforeErr } = await supabase
+    .from('security_deposit_photo_matches')
+    .select('*')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
+  if (!before) return res.status(404).json({ error: 'Photo match not found.' });
+
+  const updates = { resolved_by: req.securityDepositMemberName || req.user.email, resolved_at: new Date().toISOString() };
+
+  if (confirmed) {
+    if (!before.move_in_photo_path) {
+      return res.status(400).json({ error: 'There is no matched move-in photo to confirm — correct this instead by supplying move_in_photo_path.' });
+    }
+    updates.match_status = 'manually_confirmed';
+  } else {
+    if (!move_in_photo_path || typeof move_in_photo_path !== 'string') {
+      return res.status(400).json({ error: 'move_in_photo_path is required to correct a match.' });
+    }
+    let matched;
+    try {
+      matched = await getCaseMatchedFolders(before.case_id);
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+    if (!matched || !pathBelongsToFolder(move_in_photo_path, matched.moveIn && matched.moveIn.b2_folder_path)) {
+      return res.status(403).json({ error: "This photo does not belong to this case's matched move-in folder." });
+    }
+    updates.match_status = 'manually_corrected';
+    updates.move_in_photo_path = move_in_photo_path;
+  }
+
+  const { data: updated, error } = await supabase
+    .from('security_deposit_photo_matches')
+    .update(updates)
+    .eq('id', req.params.id)
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Corrected action name — see spec's own naming-correction note: NOT
+  // 'security_deposit.photo_match_resolved' (that string is already used
+  // by the existing b2_photo_folders resolve route above, for a different
+  // table). This one is 'case_photo_match_resolved' so the two
+  // conceptually different resolutions stay distinguishable by action
+  // name, not just entity_type.
+  await supabase.from('audit_log').insert({
+    action: 'security_deposit.case_photo_match_resolved',
+    entity_type: 'security_deposit_photo_match',
+    entity_id: req.params.id,
+    details: {
+      case_id: before.case_id,
+      move_out_photo_path: before.move_out_photo_path,
+      move_in_photo_path: updates.move_in_photo_path || before.move_in_photo_path,
+      match_status: updates.match_status,
+      resolved_by: updates.resolved_by,
+    },
+  });
+
+  return res.json({ success: true, match: updated });
+});
+
+// ─── GET /api/security-deposit/cases/:id/photo-folder-search ───────────
+// Reuses findBestPhotoMatch's own scoring primitives (normalizeAddress /
+// addressWordScore) against user-typed text instead of the case's
+// recorded address, without the automatic matcher's 0.6 cutoff or its
+// needs_review exclusion — the whole point is to surface candidates the
+// automatic matcher rejected or never found. Read-only, not logged (this
+// tool's existing practice for reads).
+router.get('/api/security-deposit/cases/:id/photo-folder-search', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const inspectionType = req.query.inspection_type;
+  if (!['move_in', 'move_out'].includes(inspectionType)) {
+    return res.status(400).json({ error: 'inspection_type must be "move_in" or "move_out".' });
+  }
+  if (q.length < SEARCH_MIN_QUERY_LENGTH) {
+    return res.status(400).json({ error: `q must be at least ${SEARCH_MIN_QUERY_LENGTH} characters.` });
+  }
+
+  let folders;
+  try {
+    folders = await fetchAllIndexedB2Folders();
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Same inspection-type filter findBestPhotoMatch already applies
+  // (exclude only when the parse is confident AND disagrees AND isn't
+  // 'other') — but, unlike findBestPhotoMatch, no address-score cutoff
+  // and no needs_review exclusion. That's the entire point of this route.
+  const normQ = normalizeAddress(q);
+  const results = folders
+    .filter(f => !f.parsed_inspection_type || f.parsed_inspection_type === inspectionType || f.parsed_inspection_type === 'other')
+    .map(f => ({ folder: f, score: addressWordScore(normQ, normalizeAddress(f.parsed_address || '')) }))
+    .filter(r => r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, SEARCH_MAX_RESULTS)
+    .map(r => ({
+      id: r.folder.id,
+      b2_folder_path: r.folder.b2_folder_path,
+      parsed_address: r.folder.parsed_address,
+      parsed_unit: r.folder.parsed_unit,
+      parsed_date: r.folder.parsed_date,
+      parsed_inspection_type: r.folder.parsed_inspection_type,
+      review_status: r.folder.review_status,
+      score: r.score,
+    }));
+
+  return res.json({ results });
+});
+
 // ─── /api/security-deposit/users — admin-only role management ─────────────
 // Mirrors insurance/router.js's admin endpoints exactly, scoped to
 // tool='security_deposit', roles 'admin' and 'pod_lead' (the only two
@@ -1141,7 +2202,19 @@ router.post('/api/security-deposit/photo-review-queue/:id/resolve', requireSecur
 // was already a valid value shared from insurance_compliance's roles),
 // but this admin UI's own allow-list needed updating too, or there'd be
 // no way to actually grant it here.
-const VALID_ROLES = ['admin', 'pod_lead', 'director_of_operations'];
+// 'inspection_coordinator' added by the targeted-photo-matching addendum
+// (targeted-photo-matching-SPEC.md, Open Item #1 — RESOLVED). The value
+// itself is already legal in the shared team_member_tool_roles.role CHECK
+// and already granted/used by two other Hub tools (insurance_compliance,
+// maintenance_history) — nothing to migrate. What was missing was local
+// to this tool: this allow-list, so an admin can actually grant it
+// through this tool's own Users tab, and the new photo routes' own
+// requireSecurityDepositRole(...) calls below. Deliberately NOT added to
+// any existing pod-lead-only route (checklist, review, prepaid-rent,
+// escalate, escalate-confirm, inspection-form) — separation of duties,
+// see the new photo-matches/:id/resolve route below for the one place
+// this role is explicitly excluded.
+const VALID_ROLES = ['admin', 'pod_lead', 'director_of_operations', 'inspection_coordinator'];
 const ALLOWED_DOMAIN = 'rinconmanagement.com';
 
 router.get('/api/security-deposit/users', requireSecurityDepositRole('admin'), async (req, res) => {
@@ -1308,7 +2381,18 @@ const internalRouter = express.Router();
 
 function checkCronSecret(req, res) {
   const secret = req.headers['x-cron-secret'];
-  if (!secret || secret !== process.env.CRON_SECRET) {
+  const expected = process.env.CRON_SECRET;
+  // Constant-time comparison — a plain !== leaks timing information that
+  // could help an attacker guess the secret one byte at a time. Buffers
+  // must be equal length for timingSafeEqual, so mismatched lengths are
+  // rejected up front (that length check itself isn't constant-time, but
+  // it leaks only the length, not any byte of the secret).
+  const ok =
+    typeof secret === 'string' &&
+    typeof expected === 'string' &&
+    secret.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(secret), Buffer.from(expected));
+  if (!ok) {
     res.status(401).json({ error: 'Unauthorized' });
     return false;
   }
@@ -1321,6 +2405,45 @@ function checkCronSecret(req, res) {
 // see 20260813000000), this opens a case for it. Idempotent via
 // UNIQUE(lease_id) + upsert ignoreDuplicates, so re-running this never
 // creates a second case for the same move-out.
+//
+// DEADLINE-CORRECTION FIX (Ralph finding, 2026-08-19) — the blocker this
+// build exists to close: security_deposit_cases.move_out_date is copied
+// onto the case ONCE, at creation time, and disposition_deadline is
+// GENERATED ALWAYS AS (move_out_date + 21) STORED from that frozen copy
+// (20260813000002's own design note already anticipates this: "if
+// AppFolio's move_out_date is ever corrected... this case's copy should
+// be re-synced from there, not hand-edited"). Before this fix, the ONLY
+// thing that ran on every nightly sync was the upsert below with
+// ignoreDuplicates:true — so once a case existed, a later correction to
+// leases.move_out_date (AppFolio data entry fixed, a sync mapping bug
+// resolved, etc.) was silently discarded forever and the case kept
+// counting down from the wrong date. Exactly the "legal-exposure, not
+// cosmetic" class of bug SPEC.md calls out for the 21-day clock.
+//
+// DESIGN CALL — does a 'reviewed'/'escalated' case also get corrected,
+// or does it get left alone with just a signal that the dates disagree?
+// Chose: correct it too, unconditionally, regardless of status. Two
+// reasons: (1) 20260813000002's own comment above is unconditional — it
+// doesn't carve out an exception for a case a human has already acted
+// on, because the deadline is a fact about the real world, not a fact
+// about this tool's workflow state. (2) send-reminders fires for
+// pending_review, reviewed, AND escalated cases alike — deliberately,
+// because this tool has no way to verify the real disposition letter was
+// actually mailed (see that route's own comment). Leaving
+// disposition_deadline stale on a 'reviewed' case wouldn't just be an
+// inaccurate label — it would keep sending the 7/14/18-day reminders on
+// the WRONG day, which is the live compliance risk this build is meant
+// to close, not a cosmetic one. A case that already got marked reviewed
+// under the old date does get an extra, distinctly-flagged audit_log
+// entry (requires_attention: true) rather than being corrected silently
+// like an open case — a human should know their prior review was done
+// against a date that has since moved, even though this job isn't going
+// to decide FOR them whether that review needs redoing (that's a
+// judgment call, not something a sync job should do by reopening the
+// case on its own). GET /cases/:id also carries a live move_out_date_
+// mismatch flag (see that route) as a defense-in-depth signal for the
+// narrow window before this job's next run, or if a correction below
+// ever fails.
 internalRouter.post('/api/security-deposit/internal/create-cases-from-sync', async (req, res) => {
   if (!checkCronSecret(req, res)) return;
   const ts = new Date().toISOString();
@@ -1347,6 +2470,72 @@ internalRouter.post('/api/security-deposit/internal/create-cases-from-sync', asy
   if (!leaseRows || !leaseRows.length) {
     console.log(`[${ts}] create-cases-from-sync: no leases with a move_out_date`);
     return res.json({ created: 0 });
+  }
+
+  // Every existing case, portfolio-wide — needed to detect a
+  // move_out_date correction (see the design-call comment above). Read
+  // as a full-table page-through rather than filtering by a dynamic
+  // .in(lease_id list) — same reasoning as leaseRows above (this table
+  // can't be time-bounded either), and it avoids ever building an .in()
+  // clause sized to a portfolio's entire lease count.
+  let existingCases;
+  try {
+    existingCases = await fetchAllRows((from, to) => supabase
+      .from('security_deposit_cases')
+      .select('id, lease_id, move_out_date, status')
+      .order('id', { ascending: true })
+      .range(from, to));
+  } catch (error) {
+    console.error(`[${ts}] create-cases-from-sync existing-cases fetch error:`, error.message);
+    return res.status(500).json({ error: error.message });
+  }
+  const existingCaseByLeaseId = new Map();
+  for (const c of existingCases || []) existingCaseByLeaseId.set(c.lease_id, c);
+
+  // Any lease whose current move_out_date no longer matches its case's
+  // stored copy — the correction this fix exists for. String compare is
+  // safe here: both sides are Postgres DATE columns serialized the same
+  // way (YYYY-MM-DD) by PostgREST.
+  const correctionCandidates = [];
+  for (const l of leaseRows) {
+    const existing = existingCaseByLeaseId.get(l.id);
+    if (existing && String(existing.move_out_date) !== String(l.move_out_date)) {
+      correctionCandidates.push({ existing, newMoveOutDate: l.move_out_date });
+    }
+  }
+
+  let corrected = 0;
+  for (const { existing, newMoveOutDate } of correctionCandidates) {
+    const oldMoveOutDate = existing.move_out_date;
+    // Update only move_out_date — disposition_deadline recomputes on its
+    // own (GENERATED column). One bad correction is isolated so it can't
+    // abort the rest of this job or the case-creation pass below.
+    const { error: correctErr } = await supabase
+      .from('security_deposit_cases')
+      .update({ move_out_date: newMoveOutDate })
+      .eq('id', existing.id);
+    if (correctErr) {
+      console.error(`[${ts}] create-cases-from-sync move_out_date correction error (case ${existing.id}):`, correctErr.message);
+      continue;
+    }
+    corrected++;
+    const wasReviewed = existing.status === 'reviewed';
+    await supabase.from('audit_log').insert({
+      action: 'security_deposit.move_out_date_corrected',
+      entity_type: 'security_deposit_case',
+      entity_id: existing.id,
+      details: {
+        old_move_out_date: oldMoveOutDate,
+        new_move_out_date: newMoveOutDate,
+        case_status_at_correction: existing.status,
+        source: 'sync_correction', // not a human edit — AppFolio's leases.move_out_date changed after this case already existed
+        requires_attention: wasReviewed,
+        note: wasReviewed
+          ? 'This case was already marked reviewed under the old move-out date. The underlying AppFolio move-out date has since changed — confirm whether the disposition needs a second look.'
+          : null,
+      },
+    });
+    console.log(`[${ts}] create-cases-from-sync: corrected move_out_date for case ${existing.id} (lease ${existing.lease_id}) ${oldMoveOutDate} -> ${newMoveOutDate} (status was ${existing.status}${wasReviewed ? ' — flagged for attention' : ''})`);
   }
 
   // The upsert's own response is subject to the same 1,000-row cap as a
@@ -1389,8 +2578,8 @@ internalRouter.post('/api/security-deposit/internal/create-cases-from-sync', asy
   }
 
   const createdCount = inserted ? inserted.length : 0;
-  console.log(`[${ts}] create-cases-from-sync: ${createdCount} new case(s)`);
-  return res.json({ created: createdCount });
+  console.log(`[${ts}] create-cases-from-sync: ${createdCount} new case(s), ${corrected} move_out_date correction(s)`);
+  return res.json({ created: createdCount, corrected });
 });
 
 // ─── POST /api/security-deposit/internal/send-reminders ───────────────────

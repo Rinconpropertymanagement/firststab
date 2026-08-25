@@ -215,6 +215,44 @@
       padding: 8px 12px; margin-top: 10px; line-height: 1.5;
     }
 
+    /* ── Photo galleries (targeted-photo-matching addendum) ── */
+    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding: 4px 2px; margin-top: 8px; border-top: 1px solid #f3f4f6; }
+    .photo-thumb { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+    .photo-thumb img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 6px; border: 1px solid #e5e7eb; cursor: zoom-in; background: #f3f4f6; }
+    .photo-thumb img:hover { border-color: #9ca3af; }
+    .photo-match-btn { font-size: 10.5px; padding: 3px 4px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    .photo-match-btn:hover { background: #dbeafe; }
+    .photo-match-btn:disabled { opacity: 0.6; cursor: default; }
+    .photo-grid-loading { font-size: 12px; color: #9ca3af; padding: 6px 0; }
+    .photo-load-more { margin-top: 6px; }
+    .photo-grid-picking img { cursor: pointer; outline: 2px dashed #1d4ed8; outline-offset: 2px; }
+    .photo-grid-empty { font-size: 12.5px; color: #9ca3af; }
+
+    /* ── Address search-assist (available on both galleries) ── */
+    .photo-search-box { margin-top: 10px; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; }
+    .photo-search-box.photo-search-prominent { border-color: #1d4ed8; background: #eff6ff; }
+    .photo-search-input { width: 100%; padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 5px; font-size: 13px; font-family: inherit; }
+    .photo-search-results { margin-top: 6px; max-height: 220px; overflow-y: auto; }
+    .photo-search-result-row { padding: 6px 2px; border-bottom: 1px solid #e5e7eb; }
+    .photo-search-result-row:last-child { border-bottom: none; }
+    .photo-search-result-row .btn-sm-approve { margin-left: 8px; }
+
+    .photo-correction-banner { font-size: 12px; color: #1e3a8a; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 6px 10px; margin: 8px 0; }
+
+    /* ── AI photo match results ── */
+    .photo-match-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+    .photo-match-pair { display: flex; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }
+    .photo-match-thumb { width: 110px; height: 110px; object-fit: cover; border-radius: 6px; border: 1px solid #e5e7eb; cursor: zoom-in; background: #f3f4f6; }
+    .photo-match-thumb-empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 11px; text-align: center; }
+    .photo-match-thumb-label { font-size: 10.5px; color: #6b7280; text-align: center; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .photo-match-note { font-size: 12px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin-top: 8px; }
+
+    /* ── Lightbox (click-to-enlarge, same behavior for both galleries) ── */
+    .lightbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.82); z-index: 1100; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+    .lightbox-close { align-self: flex-end; background: #fff; border: none; border-radius: 6px; font-size: 20px; padding: 4px 10px; cursor: pointer; margin-bottom: 8px; color: #111827; }
+    .lightbox-img { max-width: 92vw; max-height: 80vh; border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); }
+    .lightbox-caption { color: #fff; font-size: 13px; margin-top: 10px; text-align: center; word-break: break-all; }
+
     .upload-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
     .upload-row input[type=file] { font-size: 12px; max-width: 100%; }
     .btn-sm-upload {
@@ -398,9 +436,10 @@
             <option value="">Select role&hellip;</option>
             <option value="pod_lead">Pod Lead</option>
             <option value="director_of_operations">Director of Operations</option>
+            <option value="inspection_coordinator">Inspection Coordinator</option>
             <option value="admin">Admin</option>
           </select>
-          <button id="addUserBtn" onclick="addUser()" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer">Add User</button>
+          <button id="addUserBtn" style="padding:7px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer">Add User</button>
         </div>
         <div id="addUserMsg" style="font-size:12px;margin-top:8px"></div>
       </div>
@@ -468,8 +507,33 @@
           <ul>
             <li><strong>Pod Lead</strong> &mdash; reviews cases, answers the checklist, uploads inspection forms, escalates.</li>
             <li><strong>Director of Operations</strong> &mdash; resolves escalated cases.</li>
+            <li><strong>Inspection Coordinator</strong> &mdash; browses move-in/move-out photos and submits move-out photos for AI matching. Cannot confirm matches or take any Pod Lead action.</li>
             <li><strong>Admin</strong> &mdash; full access, including user management.</li>
           </ul>
+        </div>
+      </div>
+
+      <div class="help-role-section" id="help-inspection-coordinator" style="display:none">
+        <div class="help-role-title">Inspection Coordinator</div>
+
+        <div class="help-task">
+          <div class="help-task-title">Browsing move-in and move-out photos</div>
+          <p>Open any case to see its full move-in and move-out photo galleries, side by side, as soon as the case loads &mdash; no separate step to reach them. Click any photo to see it full-size. Both galleries load more photos as you scroll, so a folder with hundreds of photos still opens instantly.</p>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">Submitting a move-out photo for matching</div>
+          <p>In the move-out gallery, click <strong>Find move-in match</strong> on any photo that might show damage. The tool finds the move-in photo of that same spot and shows a confidence score next to it &mdash; or says it isn&rsquo;t confident enough, in which case a pod lead confirms or corrects it. You never see or write a description of what&rsquo;s in a photo &mdash; only the images themselves and a confidence number.</p>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">Searching by address</div>
+          <p>If a gallery is empty or a match came back unconfident, use the <strong>Search by address</strong> box to find the right photo folder by typing the property address. You can see the same ranked results a pod lead sees, but confirming a result as the case&rsquo;s official match is a Pod Lead / Admin step &mdash; not something this role does.</p>
+        </div>
+
+        <div class="help-task">
+          <div class="help-task-title">What this role cannot do</div>
+          <p>Inspection Coordinator cannot confirm or correct a photo match, cannot touch the compliance checklist, cannot mark a case reviewed or escalate it, and cannot upload inspection forms or enter the Prepaid Rent balance. All of that stays with Pod Lead and Admin.</p>
         </div>
       </div>
 
@@ -491,6 +555,13 @@
   </div>
 </div>
 
+<!-- ── Photo Lightbox (click-to-enlarge — same for both galleries and the AI match cards) ── -->
+<div class="lightbox-overlay" id="photoLightbox" style="display:none" role="dialog" aria-modal="true">
+  <button type="button" class="lightbox-close" id="photoLightboxClose" title="Close">&times;</button>
+  <img class="lightbox-img" id="photoLightboxImg" alt="">
+  <div class="lightbox-caption" id="photoLightboxCaption"></div>
+</div>
+
 <script>
   const SD_API = '';
 
@@ -506,6 +577,20 @@
   function esc(str) {
     if (str == null) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // A 409 from the checklist / prepaid-rent / escalate / escalate-confirm
+  // routes means someone else saved a change to this case after the copy
+  // in this modal was loaded (see router.js's checkOptimisticLock — it
+  // compares the updated_at this modal sent back against the row's real
+  // one). Retrying the same click won't help; it would still be racing
+  // against whatever they saved. The fix is always to reload and look at
+  // the current state first. Centralized here so every call site shows
+  // the same message and the same one-click way out.
+  function handleStaleCaseConflict(caseId) {
+    if (confirm('This case was updated by someone else — reload to see the latest before saving your change.\n\nReload now?')) {
+      openCaseDetail(caseId);
+    }
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────
@@ -540,7 +625,7 @@
   }
 
   function formatRole(role) {
-    const map = { admin: 'Admin', pod_lead: 'Pod Lead', director_of_operations: 'Director of Operations' };
+    const map = { admin: 'Admin', pod_lead: 'Pod Lead', director_of_operations: 'Director of Operations', inspection_coordinator: 'Inspection Coordinator' };
     return map[role] || role;
   }
 
@@ -553,8 +638,15 @@
   function applyHelpSection(role) {
     document.querySelectorAll('.help-role-section').forEach(el => { el.style.display = 'none'; });
     const show = id => { const el = document.getElementById(id); if (el) el.style.display = ''; };
-    // Every role sees the Pod Lead section (it's the primary workflow);
-    // DO and Admin sections layer on top for the roles that need them.
+    // Inspection Coordinator gets its OWN section instead of the Pod Lead
+    // one — that role can't do most of what the Pod Lead section
+    // describes (no checklist, no review/escalate), so showing it would
+    // be misleading. Every other role still sees the Pod Lead section
+    // (it's the primary workflow); DO and Admin sections layer on top.
+    if (role === 'inspection_coordinator') {
+      show('help-inspection-coordinator');
+      return;
+    }
     show('help-pod-lead');
     if (role === 'director_of_operations' || role === 'admin') show('help-director-of-operations');
     if (role === 'admin') show('help-admin');
@@ -562,6 +654,17 @@
 
   function canReview()   { return currentUser && ['admin', 'pod_lead'].includes(currentUser.role); }
   function canResolveEscalation() { return currentUser && ['admin', 'director_of_operations'].includes(currentUser.role); }
+  // A new, separate visibility check — deliberately NOT folded into
+  // canReview() (spec's Tron section, explicit about this). canReview()
+  // gates every approval-type control (checklist, Mark Reviewed,
+  // Escalate, Prepaid Rent). Adding inspection_coordinator to it would
+  // hand that role every one of those approval actions — exactly the
+  // separation of duties the base tool's roles are built to prevent.
+  // canSelectPhotos() instead gates only: both photo galleries (browsing
+  // + the matching picker), the submit-for-matching action, and the
+  // address search box/results list. The .../resolve-backed confirm/
+  // correct controls stay behind canReview() unchanged.
+  function canSelectPhotos() { return currentUser && ['admin', 'pod_lead', 'inspection_coordinator'].includes(currentUser.role); }
 
   // ── Date / format helpers ────────────────────────────────────────────
   function formatDate(dateStr) {
@@ -731,7 +834,7 @@
     tbody.innerHTML = '';
     rows.forEach(row => {
       const tr = document.createElement('tr');
-      const tenantNames = (row.tenants || []).map(t => t.name).filter(Boolean).join(', ') || '&#8212;';
+      const tenantNames = (row.tenants || []).map(t => esc(t.name)).filter(Boolean).join(', ') || '&#8212;';
       tr.innerHTML =
         '<td class="days-cell">' + daysCell(row.days_remaining) + '</td>' +
         '<td class="property-name">' + esc(row.property_name || row.property_address || '—') + '</td>' +
@@ -803,6 +906,12 @@
 
   document.getElementById('refreshBtn').addEventListener('click', fetchCases);
 
+  // addUserBtn uses addEventListener rather than an inline onclick=
+  // attribute because the Hub's helmet CSP (server.js) sets
+  // script-src-attr 'none', which silently blocks inline event handler
+  // attributes.
+  document.getElementById('addUserBtn').addEventListener('click', addUser);
+
   function startAutoRefresh() {
     if (autoRefreshTimer) clearInterval(autoRefreshTimer);
     autoRefreshTimer = setInterval(fetchCases, 5 * 60 * 1000);
@@ -834,6 +943,8 @@
 
   function closeCaseModal() {
     document.getElementById('caseModal').style.display = 'none';
+    closeLightbox();
+    pickingCorrectionForMatchId = null;
   }
 
   async function openCaseDetail(id) {
@@ -1016,11 +1127,20 @@
   }
 
   // ── Photos + Inspection Forms ────────────────────────────────────────
+  // Photo galleries, the move-out matching picker, and the address
+  // search box are all part of the targeted-photo-matching addendum —
+  // built on top of the base tool's existing folder-level match (still
+  // shown here as the "AI match confidence" line, same requirement the
+  // base spec already placed on it). Gated by canSelectPhotos(), NOT
+  // canReview() — this tool's roster of new photo routes deliberately
+  // excludes director_of_operations (spec's own route table), so a role
+  // without gallery access falls back to the old folder-metadata-only
+  // card instead of a gallery it can't actually load.
   function renderEvidenceSection(kase) {
     const photos = kase.photos || {};
     const forms = kase.inspection_forms || {};
 
-    function photoCard(label, match) {
+    function folderMetaOnlyCard(label, match) {
       if (!match) {
         return '<div class="evidence-card missing">' +
           '<div class="evidence-card-title">' + label + '</div>' +
@@ -1042,6 +1162,59 @@
         '</div>' +
       '</div>';
     }
+
+    function gallerySearchBox(kind, prominent) {
+      // Always available on both galleries (spec's Tron section) — just
+      // styled more insistently when there's nothing else to fall back
+      // on (no matched folder, or — the caller decides "prominent" per
+      // call site).
+      return '<div class="photo-search-box' + (prominent ? ' photo-search-prominent' : '') + '">' +
+        '<input type="text" class="photo-search-input" data-kind="' + kind + '" placeholder="Search by address&hellip;">' +
+        '<div class="photo-search-results" data-kind="' + kind + '"></div>' +
+      '</div>';
+    }
+
+    function galleryBlock(label, kind, match) {
+      const missing = !match;
+      const meta = missing
+        ? '<div class="evidence-missing-text">&#9888; No confirmed ' + label.toLowerCase() + ' folder matched yet.</div>'
+        : (function () {
+            const pct = match.confidence_score != null ? Math.round(Number(match.confidence_score) * 100) + '%' : '&#8212;';
+            const pctColor = match.review_status === 'needs_review' ? '#b45309' : (match.review_status === 'manually_confirmed' ? '#166534' : '#374151');
+            return '<div class="folder-path">' + esc(match.b2_folder_path || '—') + '</div>' +
+              '<div class="confidence-row">' +
+                '<span class="confidence-pct" style="color:' + pctColor + '">Folder match confidence: ' + pct + '</span>' +
+                reviewStatusBadge(match.review_status) +
+              '</div>';
+          })();
+
+      return '<div class="evidence-card' + (missing ? ' missing' : '') + '">' +
+        '<div class="evidence-card-title">' + label + '</div>' +
+        meta +
+        (kind === 'move_in'
+          ? '<div class="photo-correction-banner" id="photoCorrectionBanner" style="display:none">Click a photo below to use it as the corrected move-in match. <button type="button" class="btn-link-edit" id="btnCancelCorrection">Cancel</button></div>'
+          : '') +
+        gallerySearchBox(kind, missing) +
+        '<div class="photo-grid" id="photoGrid_' + kind + '" data-kind="' + kind + '"></div>' +
+        '<div class="photo-grid-loading" id="photoGridLoading_' + kind + '" style="display:none">Loading&hellip;</div>' +
+        '<button type="button" class="btn-link-edit photo-load-more" id="photoLoadMore_' + kind + '" data-kind="' + kind + '" style="display:none">Load more</button>' +
+      '</div>';
+    }
+
+    const canBrowse = canSelectPhotos();
+    const photosHtml = '<div class="section">' +
+      '<div class="section-title">Move-In / Move-Out Photos</div>' +
+      '<div class="two-col">' +
+        (canBrowse ? galleryBlock('Move-In Photos', 'move_in', photos.move_in) : folderMetaOnlyCard('Move-In Photos', photos.move_in)) +
+        (canBrowse ? galleryBlock('Move-Out Photos', 'move_out', photos.move_out) : folderMetaOnlyCard('Move-Out Photos', photos.move_out)) +
+      '</div>' +
+      '<div class="accessibility-note">If any photos or inspection forms show tenant-made accessibility modifications (grab bars, ramps, and similar), those are not damage and should not be treated as a deduction candidate by default &mdash; a tenant generally can&rsquo;t be charged to remove a disability-related modification they were entitled to make.</div>' +
+      (canBrowse
+        ? '<div class="section-title" style="margin-top:18px">AI Photo Matches</div>' +
+          '<p style="font-size:12.5px;color:#6b7280;margin-bottom:8px">Click <strong>Find move-in match</strong> on any move-out photo above to compare it side by side with its move-in counterpart.</p>' +
+          '<div id="photoMatchesList"><span style="color:#9ca3af;font-size:13px">Loading&hellip;</span></div>'
+        : '') +
+    '</div>';
 
     function formCard(label, kind, doc) {
       if (doc) {
@@ -1067,14 +1240,7 @@
       '</div>';
     }
 
-    return '<div class="section">' +
-      '<div class="section-title">Move-In / Move-Out Photos</div>' +
-      '<div class="two-col">' +
-        photoCard('Move-In Photos', photos.move_in) +
-        photoCard('Move-Out Photos', photos.move_out) +
-      '</div>' +
-      '<div class="accessibility-note">If any photos or inspection forms show tenant-made accessibility modifications (grab bars, ramps, and similar), those are not damage and should not be treated as a deduction candidate by default &mdash; a tenant generally can&rsquo;t be charged to remove a disability-related modification they were entitled to make.</div>' +
-      '</div>' +
+    return photosHtml +
       '<div class="section">' +
       '<div class="section-title">Inspection Forms</div>' +
       '<div class="two-col">' +
@@ -1159,9 +1325,376 @@
     return html;
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // PHOTO GALLERIES, AI MATCHING, ADDRESS SEARCH
+  // (targeted-photo-matching-SPEC.md addendum)
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Per-case-detail-open state — reset every time openCaseDetail() runs
+  // (see wireCaseDetailHandlers below). Not persisted across case opens;
+  // there is nothing to preserve once the modal is closed or a different
+  // case is opened.
+  let galleryState = {};
+  let pickingCorrectionForMatchId = null;
+
+  // ── Lightbox: click-to-enlarge, identical behavior for both galleries
+  // and the AI-match thumbnails — no separate code path (spec's Tron
+  // section). ──
+  function openLightbox(src, caption) {
+    document.getElementById('photoLightboxImg').src = src;
+    document.getElementById('photoLightboxCaption').textContent = caption || '';
+    document.getElementById('photoLightbox').style.display = 'flex';
+  }
+  function closeLightbox() {
+    document.getElementById('photoLightbox').style.display = 'none';
+    document.getElementById('photoLightboxImg').src = '';
+  }
+  document.getElementById('photoLightboxClose').addEventListener('click', closeLightbox);
+  document.getElementById('photoLightbox').addEventListener('click', (e) => {
+    if (e.target.id === 'photoLightbox') closeLightbox();
+  });
+
+  // ── General photo browsing: paginated, lazy-loaded (Peter's "no
+  // waiting" requirement — spec's What Could Go Wrong / Tron sections).
+  // Fetches the file LIST one page at a time via the route's own cursor;
+  // each <img> uses loading="lazy" so the actual photo bytes behind a
+  // thumbnail aren't requested until it's about to scroll into view. ──
+  function photoFileUrl(caseId, filePath) {
+    return SD_API + '/api/security-deposit/cases/' + caseId + '/photo-file?path=' + encodeURIComponent(filePath);
+  }
+
+  function photoThumbEl(caseId, kind, file) {
+    const wrap = document.createElement('div');
+    wrap.className = 'photo-thumb';
+    const src = photoFileUrl(caseId, file.filePath);
+
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.src = src;
+    img.alt = file.fileName || '';
+    img.addEventListener('click', () => {
+      // Move-in gallery doubles as the correction picker while a
+      // "Correct…" action is in progress — clicking a photo there
+      // resolves the correction instead of opening the lightbox (spec:
+      // "the full move-in gallery is already right there for
+      // browsing/picking by hand").
+      if (kind === 'move_in' && pickingCorrectionForMatchId) {
+        resolvePhotoMatchCorrection(caseId, pickingCorrectionForMatchId, file.filePath);
+      } else {
+        openLightbox(src, file.fileName);
+      }
+    });
+    wrap.appendChild(img);
+
+    // The move-out gallery is also the matching picker — one view, not
+    // two (spec's Tron section). Only rendered for roles that can submit
+    // (canSelectPhotos() already gates whether this whole gallery renders
+    // at all, so no extra check needed here).
+    if (kind === 'move_out') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'photo-match-btn';
+      btn.textContent = 'Find move-in match';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        submitPhotoMatch(caseId, file.filePath, btn);
+      });
+      wrap.appendChild(btn);
+    }
+    return wrap;
+  }
+
+  async function loadGalleryPage(caseId, kind, append) {
+    const grid = document.getElementById('photoGrid_' + kind);
+    if (!grid) return;
+    const loadingEl = document.getElementById('photoGridLoading_' + kind);
+    const loadMoreBtn = document.getElementById('photoLoadMore_' + kind);
+    const state = galleryState[kind] || (galleryState[kind] = { cursor: null, done: false, loading: false });
+    if (state.loading || state.done) return;
+    state.loading = true;
+    if (loadingEl) loadingEl.style.display = '';
+    if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+
+    try {
+      const qs = new URLSearchParams({ folder: kind, limit: '40' });
+      if (state.cursor) qs.set('cursor', state.cursor);
+      const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/photos?' + qs.toString(), { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      if (!append) grid.innerHTML = '';
+      if (!data.folder_matched) {
+        state.done = true;
+        if (!grid.children.length) grid.innerHTML = '<span class="photo-grid-empty">No matched folder to browse yet &mdash; use Search by address above.</span>';
+        return;
+      }
+      if (!data.files.length && !append && !grid.children.length) {
+        grid.innerHTML = '<span class="photo-grid-empty">This folder has no photos.</span>';
+      }
+      data.files.forEach(f => grid.appendChild(photoThumbEl(caseId, kind, f)));
+
+      state.cursor = data.next_cursor;
+      state.done = !data.next_cursor;
+      if (loadMoreBtn) loadMoreBtn.style.display = state.done ? 'none' : '';
+    } catch (err) {
+      if (!append) grid.innerHTML = '<span style="color:#dc2626;font-size:12.5px">Could not load photos: ' + esc(err.message) + '</span>';
+    } finally {
+      state.loading = false;
+      if (loadingEl) loadingEl.style.display = 'none';
+    }
+  }
+
+  // ── AI photo matching: submit a move-out photo, show the result ─────
+  async function submitPhotoMatch(caseId, moveOutPhotoPath, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Finding match…'; }
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/photo-matches', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ move_out_photo_path: moveOutPhotoPath }),
+      });
+      if (sessionExpired(res)) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert('Error: ' + (data.error || 'Could not run the match.')); return; }
+      await loadPhotoMatches(caseId, data.note);
+      const list = document.getElementById('photoMatchesList');
+      if (list) list.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (err) {
+      alert('Network error: ' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Find move-in match'; }
+    }
+  }
+
+  const PHOTO_MATCH_STATUS_LABEL = {
+    auto_shown:          ['badge-manually_confirmed', 'Matched'],
+    needs_confirmation:  ['badge-needs_review', 'Needs Confirmation'],
+    manually_confirmed:  ['badge-manually_confirmed', 'Confirmed'],
+    manually_corrected:  ['badge-manually_corrected', 'Corrected'],
+    no_match_found:      ['badge-needs_review', 'No Match Found'],
+  };
+  function photoMatchStatusBadge(status) {
+    const [cls, label] = PHOTO_MATCH_STATUS_LABEL[status] || ['badge-needs_review', status || '&#8212;'];
+    return '<span class="badge ' + cls + '">' + label + '</span>';
+  }
+
+  // Nothing on this card may ever render a caption, description, or any
+  // generated text about either photo's content (spec's hard UI
+  // constraint, mirroring the AI output contract itself) — two images,
+  // two file names, and a number. Nothing else about the photos is ever
+  // shown here.
+  function photoMatchCardHtml(caseId, r) {
+    const pct = Math.round(Number(r.confidence_score || 0) * 100) + '%';
+    const moveOutSrc = photoFileUrl(caseId, r.move_out_photo_path);
+    const moveInSrc = r.move_in_photo_path ? photoFileUrl(caseId, r.move_in_photo_path) : null;
+    const needsAction = canReview() && (r.match_status === 'needs_confirmation' || r.match_status === 'no_match_found');
+    return '<div class="photo-match-card">' +
+      '<div class="photo-match-pair">' +
+        '<div><img class="photo-match-thumb photo-match-thumb-clickable" src="' + moveOutSrc + '" loading="lazy" alt="Move-out photo"><div class="photo-match-thumb-label">Move-Out</div></div>' +
+        '<div>' + (moveInSrc
+          ? '<img class="photo-match-thumb photo-match-thumb-clickable" src="' + moveInSrc + '" loading="lazy" alt="Move-in photo">'
+          : '<div class="photo-match-thumb photo-match-thumb-empty">No match</div>') +
+          '<div class="photo-match-thumb-label">Move-In</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="confidence-row">' +
+        '<span class="confidence-pct">AI confidence: ' + pct + '</span>' +
+        photoMatchStatusBadge(r.match_status) +
+      '</div>' +
+      (r.resolved_by ? '<div class="reviewer-meta">Resolved by ' + esc(r.resolved_by) + ' on ' + formatDateTime(r.resolved_at) + '</div>' : '') +
+      (needsAction
+        ? '<div class="action-bar">' +
+            (r.move_in_photo_path ? '<button type="button" class="btn-sm-approve photo-match-confirm" data-id="' + esc(r.id) + '">Confirm</button>' : '') +
+            '<button type="button" class="btn-sm-reject photo-match-correct" data-id="' + esc(r.id) + '">Correct&hellip;</button>' +
+          '</div>'
+        : '') +
+    '</div>';
+  }
+
+  async function loadPhotoMatches(caseId, note) {
+    const list = document.getElementById('photoMatchesList');
+    if (!list) return;
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/photo-matches', { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const rows = await res.json();
+      const noteHtml = note ? '<div class="photo-match-note">' + esc(note) + '</div>' : '';
+      if (!rows.length) {
+        list.innerHTML = noteHtml + '<span style="color:#9ca3af;font-size:13px">No photos submitted for matching yet. Click &ldquo;Find move-in match&rdquo; on a move-out photo above.</span>';
+        return;
+      }
+      list.innerHTML = noteHtml + rows.map(r => photoMatchCardHtml(caseId, r)).join('');
+      list.querySelectorAll('.photo-match-thumb-clickable').forEach(img => {
+        img.addEventListener('click', () => openLightbox(img.src, img.alt));
+      });
+      list.querySelectorAll('.photo-match-confirm').forEach(btn => {
+        btn.addEventListener('click', () => confirmPhotoMatch(caseId, btn.dataset.id));
+      });
+      list.querySelectorAll('.photo-match-correct').forEach(btn => {
+        btn.addEventListener('click', () => startCorrection(btn.dataset.id));
+      });
+    } catch (err) {
+      list.innerHTML = '<span style="color:#dc2626;font-size:13px">Could not load photo matches: ' + esc(err.message) + '</span>';
+    }
+  }
+
+  async function confirmPhotoMatch(caseId, matchId) {
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/photo-matches/' + matchId + '/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ confirmed: true }),
+      });
+      if (sessionExpired(res)) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert('Error: ' + (data.error || 'Could not confirm match.')); return; }
+      loadPhotoMatches(caseId);
+    } catch (err) {
+      alert('Network error: ' + err.message);
+    }
+  }
+
+  function startCorrection(matchId) {
+    pickingCorrectionForMatchId = matchId;
+    const grid = document.getElementById('photoGrid_move_in');
+    if (grid) grid.classList.add('photo-grid-picking');
+    const banner = document.getElementById('photoCorrectionBanner');
+    if (banner) banner.style.display = '';
+  }
+  function cancelCorrection() {
+    pickingCorrectionForMatchId = null;
+    const grid = document.getElementById('photoGrid_move_in');
+    if (grid) grid.classList.remove('photo-grid-picking');
+    const banner = document.getElementById('photoCorrectionBanner');
+    if (banner) banner.style.display = 'none';
+  }
+  async function resolvePhotoMatchCorrection(caseId, matchId, moveInPhotoPath) {
+    cancelCorrection();
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/photo-matches/' + matchId + '/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ confirmed: false, move_in_photo_path: moveInPhotoPath }),
+      });
+      if (sessionExpired(res)) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert('Error: ' + (data.error || 'Could not save the correction.')); return; }
+      loadPhotoMatches(caseId);
+    } catch (err) {
+      alert('Network error: ' + err.message);
+    }
+  }
+
+  // ── Address search-assist — reuses the base tool's own scoring
+  // (normalizeAddress/addressWordScore via the server route), just
+  // without the automatic matcher's confidence cutoff. Available on both
+  // galleries. Debounced so this doesn't fire on every keystroke. ──
+  const photoSearchDebounceTimers = {};
+  function wirePhotoSearchInputs(caseId, kase) {
+    document.querySelectorAll('.photo-search-input').forEach(input => {
+      const kind = input.dataset.kind;
+      input.addEventListener('input', () => {
+        clearTimeout(photoSearchDebounceTimers[kind]);
+        const q = input.value.trim();
+        photoSearchDebounceTimers[kind] = setTimeout(() => runPhotoSearch(caseId, kase, kind, q), 300);
+      });
+    });
+  }
+
+  function searchResultRowHtml(r) {
+    return '<div class="photo-search-result-row">' +
+      '<div class="folder-path" style="margin:2px 0">' + esc(r.b2_folder_path) + '</div>' +
+      '<div style="font-size:12px;color:#6b7280">' + esc(r.parsed_address || '&#8212;') +
+        (r.parsed_unit ? ' &middot; Unit ' + esc(r.parsed_unit) : '') +
+        (r.parsed_date ? ' &middot; ' + formatDate(r.parsed_date) : '') +
+      '</div>' +
+      '<div class="confidence-row">' + reviewStatusBadge(r.review_status) +
+        (canReview() ? '<button type="button" class="btn-sm-approve photo-search-use-btn" data-id="' + esc(r.id) + '">Use this folder</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  async function runPhotoSearch(caseId, kase, kind, q) {
+    const resultsEl = document.querySelector('.photo-search-results[data-kind="' + kind + '"]');
+    if (!resultsEl) return;
+    if (q.length < 3) { resultsEl.innerHTML = ''; return; }
+    resultsEl.innerHTML = '<span style="color:#9ca3af;font-size:12px">Searching&hellip;</span>';
+    try {
+      const qs = new URLSearchParams({ q, inspection_type: kind });
+      const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/photo-folder-search?' + qs.toString(), { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.results.length) { resultsEl.innerHTML = '<span style="color:#9ca3af;font-size:12px">No matching folders found.</span>'; return; }
+      resultsEl.innerHTML = data.results.map(searchResultRowHtml).join('');
+      resultsEl.querySelectorAll('.photo-search-use-btn').forEach(btn => {
+        btn.addEventListener('click', () => confirmSearchResult(caseId, kase, kind, btn.dataset.id, btn));
+      });
+    } catch (err) {
+      resultsEl.innerHTML = '<span style="color:#dc2626;font-size:12px">Search failed: ' + esc(err.message) + '</span>';
+    }
+  }
+
+  // Confirming a result reuses the existing photo-review-queue resolve
+  // endpoint UNCHANGED — no new write path (spec's explicit instruction).
+  // Fields sent are this case's own known property address/unit and the
+  // relevant date (move-in date for a move_in search, move-out date for
+  // a move_out search) — values already on the case, never the raw
+  // typed search text.
+  async function confirmSearchResult(caseId, kase, kind, folderId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Confirming…'; }
+    const prop = kase.property || {};
+    const body = {
+      confirmed: false,
+      address: prop.address || null,
+      unit: prop.unit_number || null,
+      date: kind === 'move_in' ? (kase.lease && kase.lease.lease_start) : kase.move_out_date,
+    };
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/photo-review-queue/' + folderId + '/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify(body),
+      });
+      if (sessionExpired(res)) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert('Error: ' + (data.error || 'Could not confirm this folder.')); if (btn) { btn.disabled = false; btn.textContent = 'Use this folder'; } return; }
+      // Immediate feedback — reload just this case so the matched gallery
+      // updates right away, no full page reload needed (spec's Tron
+      // section).
+      openCaseDetail(caseId);
+    } catch (err) {
+      alert('Network error: ' + err.message);
+      if (btn) { btn.disabled = false; btn.textContent = 'Use this folder'; }
+    }
+  }
+
   // ── Wire up all the interactive controls inside the modal ───────────
   function wireCaseDetailHandlers(kase) {
     const caseId = kase.id;
+
+    // Photo galleries / AI matching / address search (targeted-photo-
+    // matching addendum) — only wired for roles the new photo routes
+    // actually allow (canSelectPhotos() mirrors the backend's own role
+    // list exactly; director_of_operations, for example, gets the
+    // folder-metadata-only fallback instead and none of this).
+    if (canSelectPhotos()) {
+      galleryState = {
+        move_in: { cursor: null, done: false, loading: false },
+        move_out: { cursor: null, done: false, loading: false },
+      };
+      pickingCorrectionForMatchId = null;
+      loadGalleryPage(caseId, 'move_in', false);
+      loadGalleryPage(caseId, 'move_out', false);
+      loadPhotoMatches(caseId);
+      wirePhotoSearchInputs(caseId, kase);
+
+      const loadMoreMoveIn = document.getElementById('photoLoadMore_move_in');
+      if (loadMoreMoveIn) loadMoreMoveIn.addEventListener('click', () => loadGalleryPage(caseId, 'move_in', true));
+      const loadMoreMoveOut = document.getElementById('photoLoadMore_move_out');
+      if (loadMoreMoveOut) loadMoreMoveOut.addEventListener('click', () => loadGalleryPage(caseId, 'move_out', true));
+
+      const btnCancelCorrection = document.getElementById('btnCancelCorrection');
+      if (btnCancelCorrection) btnCancelCorrection.addEventListener('click', cancelCorrection);
+    }
 
     // Tenancy status buttons
     document.querySelectorAll('.btn-tenancy').forEach(btn => {
@@ -1171,8 +1704,9 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/checklist', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ tenancy_status: value }),
+            body: JSON.stringify({ tenancy_status: value, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) { btn.disabled = false; handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not save.')); btn.disabled = false; return; }
           openCaseDetail(caseId);
           fetchCases();
@@ -1190,8 +1724,9 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/checklist', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ [key]: value }),
+            body: JSON.stringify({ [key]: value, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) { handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not save.')); }
           openCaseDetail(caseId);
         } catch (err) { alert('Network error: ' + err.message); }
@@ -1230,8 +1765,14 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/prepaid-rent', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ balance: numeric }),
+            body: JSON.stringify({ balance: numeric, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) {
+            btnSavePrepaidRent.disabled = false;
+            btnSavePrepaidRent.textContent = 'Save';
+            handleStaleCaseConflict(caseId);
+            return;
+          }
           if (!res.ok) {
             const d = await res.json().catch(() => ({}));
             showError(d.error || 'Could not save the Prepaid Rent balance.');
@@ -1330,8 +1871,9 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/escalate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ reason }),
+            body: JSON.stringify({ reason, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) { btnEscalate.disabled = false; handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not escalate.')); btnEscalate.disabled = false; return; }
           openCaseDetail(caseId);
           fetchCases();
@@ -1349,8 +1891,9 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/escalate-confirm', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ reviewer_notes: notes }),
+            body: JSON.stringify({ reviewer_notes: notes, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) { btnResolve.disabled = false; handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not resolve escalation.')); btnResolve.disabled = false; return; }
           openCaseDetail(caseId);
           fetchCases();
@@ -1464,7 +2007,7 @@
         return;
       }
 
-      const validRoles = ['pod_lead', 'director_of_operations', 'admin'];
+      const validRoles = ['pod_lead', 'director_of_operations', 'inspection_coordinator', 'admin'];
       let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
         '<thead><tr style="border-bottom:1px solid #e5e7eb">' +
         '<th style="text-align:left;padding:8px 12px;font-size:11px;color:#6b7280;text-transform:uppercase;font-weight:600">Email</th>' +

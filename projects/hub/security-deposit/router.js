@@ -1054,7 +1054,7 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
 // route writing to it would break that ownership rule. The date supplied
 // here is stored directly as this case's own copy, same as the automatic
 // path does.
-router.post('/api/security-deposit/cases', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/cases', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { lease_id, move_out_date } = req.body;
   if (!lease_id) return res.status(400).json({ error: 'lease_id is required.' });
   if (!move_out_date || isNaN(Date.parse(move_out_date))) {
@@ -1096,7 +1096,7 @@ router.post('/api/security-deposit/cases', requireSecurityDepositRole('admin', '
 // endpoint for that field, and this is the natural "pod lead actively
 // confirms something about the case" route for it to live on. All fields
 // optional per-request; only supplied fields are updated.
-router.post('/api/security-deposit/cases/:id/checklist', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/checklist', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { notice_sent, inspection_conducted, photos_documented, tenancy_status } = req.body;
   const updates = {};
   if (typeof notice_sent === 'boolean') updates.checklist_notice_sent = notice_sent;
@@ -1140,7 +1140,7 @@ router.post('/api/security-deposit/cases/:id/checklist', requireSecurityDepositR
 // answer ("looked it up, none exists"), distinct from never having
 // answered at all (NULL). This is the field POST .../review gates on
 // before allowing a case to be marked reviewed.
-router.post('/api/security-deposit/cases/:id/prepaid-rent', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/prepaid-rent', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { balance } = req.body;
   // Reject '' explicitly before the Number() coercion below — JS quirk:
   // Number('') is 0, not NaN, which would otherwise let a blank form
@@ -1191,7 +1191,7 @@ router.post('/api/security-deposit/cases/:id/prepaid-rent', requireSecurityDepos
 // for entity_type='property'. `kind` in the body distinguishes move_in
 // from move_out (mirrors insurance's file_type='insurance_certificate'
 // convention).
-router.post('/api/security-deposit/cases/:id/inspection-form', requireSecurityDepositRole('admin', 'pod_lead'), upload.single('file'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/inspection-form', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), upload.single('file'), async (req, res) => {
   const caseId = req.params.id;
   const kind = req.body.kind;
   if (!['move_in', 'move_out'].includes(kind)) {
@@ -1311,7 +1311,7 @@ router.get('/api/security-deposit/document/:id/download', requireSecurityDeposit
 // never actually saved. All missing fields are collected and named in one
 // response — not just the first one found — so a pod lead fixing this
 // doesn't have to resubmit repeatedly to discover each blocker in turn.
-router.post('/api/security-deposit/cases/:id/review', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/review', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { reviewer_notes } = req.body;
   const reviewerName = req.securityDepositMemberName || req.user.email;
   const now = new Date().toISOString();
@@ -1390,7 +1390,7 @@ router.post('/api/security-deposit/cases/:id/review', requireSecurityDepositRole
 // A pod lead escalates on their own judgment — a complicated dispute, an
 // unusually large deduction, evidence they're unsure how to weigh,
 // anything like that — and must say why.
-router.post('/api/security-deposit/cases/:id/escalate', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/escalate', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { reason } = req.body;
   if (!reason || !reason.trim()) return res.status(400).json({ error: 'reason is required.' });
 
@@ -1516,7 +1516,7 @@ router.get('/api/security-deposit/photo-review-queue', requireSecurityDepositAcc
 // ─── POST /api/security-deposit/photo-review-queue/:id/resolve ────────────
 // Body: { confirmed: true } to accept the AI's parse as-is, or
 // { confirmed: false, address, unit, inspection_type, date } to correct it.
-router.post('/api/security-deposit/photo-review-queue/:id/resolve', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/photo-review-queue/:id/resolve', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { address, unit, inspection_type, date, confirmed } = req.body;
 
   const { data: before, error: beforeErr } = await supabase
@@ -1582,7 +1582,7 @@ router.post('/api/security-deposit/photo-review-queue/:id/resolve', requireSecur
 // own listing logic (spec's own revision note). Paginated via B2's own
 // cursor, one page at a time — never drains a whole folder (see
 // lib/b2-client.js's listFilesInFolder comment).
-router.get('/api/security-deposit/cases/:id/photos', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+router.get('/api/security-deposit/cases/:id/photos', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator', 'director_of_operations'), async (req, res) => {
   const folderKind = req.query.folder;
   if (!['move_in', 'move_out'].includes(folderKind)) {
     return res.status(400).json({ error: 'folder must be "move_in" or "move_out".' });
@@ -1628,7 +1628,7 @@ router.get('/api/security-deposit/cases/:id/photos', requireSecurityDepositRole(
 // check, an authenticated user could swap in an arbitrary B2 path and
 // read a different tenant's case photos through this case's own login
 // gate.
-router.get('/api/security-deposit/cases/:id/photo-file', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+router.get('/api/security-deposit/cases/:id/photo-file', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator', 'director_of_operations'), async (req, res) => {
   const filePath = req.query.path;
   if (!filePath || typeof filePath !== 'string') {
     return res.status(400).json({ error: 'path is required.' });
@@ -1725,7 +1725,7 @@ async function insertPhotoMatchRow(fields) {
 // expects and the SDK's own default retry-on-429 already handles — that
 // part was not touched by this investigation because nothing pointed at
 // it as a problem.
-router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator', 'director_of_operations'), async (req, res) => {
   const caseId = req.params.id;
   const moveOutPhotoPath = req.body.move_out_photo_path;
   if (!moveOutPhotoPath || typeof moveOutPhotoPath !== 'string') {
@@ -2076,7 +2076,7 @@ router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepo
 // ─── GET /api/security-deposit/cases/:id/photo-matches ─────────────────
 // Lists already-computed matches for this case, so re-opening it doesn't
 // re-spend an AI call.
-router.get('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+router.get('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator', 'director_of_operations'), async (req, res) => {
   const { data, error } = await supabase
     .from('security_deposit_photo_matches')
     .select('*')
@@ -2091,7 +2091,7 @@ router.get('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepos
 // no_match_found) row. inspection_coordinator does NOT get this route —
 // separation of duties (spec's Q section): the coordinator submits and
 // browses, it doesn't decide.
-router.post('/api/security-deposit/photo-matches/:id/resolve', requireSecurityDepositRole('admin', 'pod_lead'), async (req, res) => {
+router.post('/api/security-deposit/photo-matches/:id/resolve', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
   const { confirmed, move_in_photo_path } = req.body;
 
   const { data: before, error: beforeErr } = await supabase
@@ -2163,7 +2163,7 @@ router.post('/api/security-deposit/photo-matches/:id/resolve', requireSecurityDe
 // needs_review exclusion — the whole point is to surface candidates the
 // automatic matcher rejected or never found. Read-only, not logged (this
 // tool's existing practice for reads).
-router.get('/api/security-deposit/cases/:id/photo-folder-search', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator'), async (req, res) => {
+router.get('/api/security-deposit/cases/:id/photo-folder-search', requireSecurityDepositRole('admin', 'pod_lead', 'inspection_coordinator', 'director_of_operations'), async (req, res) => {
   const q = String(req.query.q || '').trim();
   const inspectionType = req.query.inspection_type;
   if (!['move_in', 'move_out'].includes(inspectionType)) {

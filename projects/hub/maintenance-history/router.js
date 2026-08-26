@@ -328,7 +328,7 @@ function isValidUuid(str) {
 // as an unflagged one — a reviewer/admin can (and must) be able to read a
 // flagged claim's real text to judge it; that's what human review means
 // here. Only the audit_log entry below is barred from carrying the text.
-router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHistoryRole('admin', 'reviewer'), async (req, res) => {
+router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
   const { action, claim_text, claim_date, outcome_level, reviewer_notes } = req.body;
   if (!['confirm', 'correct', 'reject'].includes(action)) {
     return res.status(400).json({ error: 'action must be "confirm", "correct", or "reject".' });
@@ -428,7 +428,7 @@ router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHist
 // "Needs privacy review" — reviewer/admin only, per SPEC.md. Shows the
 // real claim text (a reviewer has to be able to read it to judge it) —
 // never logged, only displayed to an authorized human.
-router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole('admin', 'reviewer'), async (req, res) => {
+router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
   // No time bound and no review_status filter — every claim ever flagged
   // as touching a protected class stays visible here forever (by design:
   // this is the Fair Housing / privacy review queue). A silent 1,000-row
@@ -656,13 +656,20 @@ router.get('/api/maintenance-history/property/:property_id/budget', requireMaint
 
 // ─── /api/maintenance-history/users — admin-only role management ────────
 // Mirrors insurance/router.js's and security-deposit/router.js's admin
-// endpoints exactly, scoped to tool='maintenance_history'. Only two role
-// values exist for this tool anywhere else in this file
-// (requireMaintenanceHistoryRole('admin', 'reviewer') on the claim-review
-// and flagged-queue routes above), so that's the allow-list here too —
-// both values are already live in team_member_tool_roles_role_check (see
-// supabase/migrations/20260818000000_fix_role_check_regression.sql).
-const VALID_ROLES = ['admin', 'reviewer'];
+// endpoints exactly, scoped to tool='maintenance_history'. Allow-list
+// matches the role values this file's own requireMaintenanceHistoryRole(...)
+// gates actually check for above — 'admin' and 'reviewer' originally, plus
+// 'director_of_operations' (added so the Director of Operations role can
+// reach claim-review and the flagged-queue the same way 'reviewer' can —
+// see those two routes above). All three are already live in
+// team_member_tool_roles_role_check (see
+// supabase/migrations/20260818000000_fix_role_check_regression.sql and
+// 20260825000000_leadsimple_property_brain_phase1.sql) — no schema change
+// needed, this is purely the application-side allow-list catching up.
+// Deliberately still admin-only on the four routes directly below
+// (granting/changing/removing someone else's role in this tool) — see the
+// build notes for why director_of_operations wasn't added there too.
+const VALID_ROLES = ['admin', 'reviewer', 'director_of_operations'];
 const ALLOWED_DOMAIN = 'rinconmanagement.com';
 
 router.get('/api/maintenance-history/users', requireMaintenanceHistoryRole('admin'), async (req, res) => {

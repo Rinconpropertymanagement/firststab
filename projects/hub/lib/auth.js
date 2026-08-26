@@ -9,9 +9,16 @@
  * their email/password can log into the hub with the same credentials —
  * nothing new to create.
  *
- * Only the anon key is used here (safe to use client-side in any Supabase
- * app — it can only do what a logged-out visitor is allowed to do, i.e.
- * attempt a login). Nothing in this file uses the service role key.
+ * Only the anon key is used here — nothing in this file uses the service
+ * role key. Note: "the anon key is safe to expose client-side" is only
+ * true when the key Supabase actually issued is the real, correctly-scoped
+ * anon/public key (prefixed sb_publishable_...). Confirmed 2026-08-26 via a
+ * live RLS test (a real request using only SUPABASE_ANON_KEY against
+ * team_members/team_member_tool_roles came back empty, as it should) — an
+ * earlier incident had a secret-tier key (sb_secret_...) mistakenly saved
+ * under this env var name, which would have made this comment's safety
+ * claim false. Re-verify with that same test after any future key
+ * rotation before trusting this assumption again.
  */
 
 const { createClient } = require('@supabase/supabase-js');

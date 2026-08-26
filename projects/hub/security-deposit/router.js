@@ -429,7 +429,7 @@ async function getCaseMatchedFolders(caseId) {
 // is NOT "inside" it by this definition, exactly the shape TARS's repro
 // needs rejected regardless of how deep the nesting goes.
 function pathBelongsToFolder(filePath, folderPath) {
-  if (!filePath || !folderPath || typeof filePath !== 'string') return false;
+  if (!filePath || !folderPath || typeof filePath !== 'string' || typeof folderPath !== 'string') return false;
   if (filePath.includes('..')) return false;
   const boundary = folderPath.replace(/\/+$/, '') + '/';
   if (!filePath.startsWith(boundary)) return false;
@@ -2005,9 +2005,14 @@ router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepo
       ? 'no_match_found'
       : (confidence >= Number(config.auto_show_threshold) ? 'auto_shown' : 'needs_confirmation');
 
-    const { data: row, error: insErr } = await supabase
-      .from('security_deposit_photo_matches')
-      .insert({
+    // Routed through insertPhotoMatchRow (not a raw .insert()) so a losing
+    // race here — two near-simultaneous submissions for the same (case,
+    // move-out photo) both past the existingRow check above — hits the
+    // same 23505 conflict backstop as the zero-candidate branch above,
+    // instead of surfacing a raw Postgres duplicate-key error to the user.
+    let inserted;
+    try {
+      inserted = await insertPhotoMatchRow({
         case_id: caseId,
         move_out_photo_path: moveOutPhotoPath,
         move_in_photo_path: moveInPhotoPath,
@@ -2017,10 +2022,20 @@ router.post('/api/security-deposit/cases/:id/photo-matches', requireSecurityDepo
         match_status: matchStatus,
         selected_by: selectorName,
         selected_at: now,
-      })
-      .select()
-      .single();
-    if (insErr) return res.status(500).json({ error: insErr.message });
+      });
+    } catch (insErr) {
+      return res.status(500).json({ error: insErr.message });
+    }
+    const row = inserted.row;
+
+    if (inserted.alreadyExisted) {
+      // Lost the race — another request already inserted (and already
+      // audit-logged) this exact (case, move-out photo) match. Return its
+      // row gracefully; logging photo_matched again here would create a
+      // duplicate audit entry for a match this request didn't actually
+      // record.
+      return res.json({ success: true, match: row, already_existed: true });
+    }
 
     // Every AI photo match gets its own audit_log entry (Asimov condition
     // 2) — metadata only, exactly the fields the spec lists, plus two new

@@ -177,6 +177,20 @@ const REPORT_CONFIG = [
       // active/move-in row never clears a previously-recorded move-out.
       if (moveOut) built.move_out_date = moveOut;
       if (row.move_out_reason) built.move_out_reason = row.move_out_reason;
+      // appfolio_unit_id / appfolio_tenant_id — 20260803000000_fk_join_
+      // columns.sql added these specifically so "occupancy reports" like
+      // this one would populate them, feeding resolve_appfolio_foreign_
+      // keys()'s leases.unit_id/tenant_id resolution. That wiring was
+      // never actually done in any buildRow() until now (confirmed live,
+      // 2026-08-27 — real leases exist with both columns permanently
+      // null). rent_roll also sets these (shared ownership, like
+      // deposit_held_total's "most complete report" precedent) since it's
+      // the more complete source for currently-occupied leases — but
+      // rent_roll never sees an already-departed occupancy, so this
+      // report is the only path for a lease whose tenant is gone before
+      // the lease row is ever touched again. Same omit-don't-null rule.
+      if (row.unit_id != null) built.appfolio_unit_id = String(row.unit_id);
+      if (row.tenant_id != null) built.appfolio_tenant_id = String(row.tenant_id);
       return built;
     },
   },
@@ -297,6 +311,14 @@ const REPORT_CONFIG = [
           built.deposit_synced_at  = new Date().toISOString();
         }
       }
+      // appfolio_unit_id / appfolio_tenant_id — see tenant_tickler's entry
+      // above for the full explanation. rent_roll is the primary owner for
+      // any lease it can see (it's the most complete report and already
+      // wins on conflict for every other shared leases field); tenant_
+      // tickler is the only fallback that still catches a lease after the
+      // tenant has fully departed and rent_roll no longer lists them.
+      if (row.unit_id != null) built.appfolio_unit_id = String(row.unit_id);
+      if (row.tenant_id != null) built.appfolio_tenant_id = String(row.tenant_id);
       return built;
     },
   },
@@ -697,6 +719,40 @@ function groupByKeySignature(rows) {
   return Array.from(groups.values());
 }
 
+// Upserts one key-signature group. Tries the whole group in a single
+// request first — the normal, fast path, unchanged for every report that
+// never hits this. If THAT fails for any reason (found live, 2026-08-27:
+// two real security-deposit move-outs — and, it turned out, five more —
+// went silently missing for weeks because one bad/duplicate row in a
+// shared batch request took the whole request down with it, including
+// every OTHER row's real, correct data), falls back to one request per
+// row in the group, so a single bad row can never cost every other row
+// its update. Returns which rows actually saved and which didn't, with
+// the real per-row error, instead of an all-or-nothing exception that
+// hides which specific row was the problem.
+async function upsertGroupWithRowFallback(table, group, conflictCols) {
+  const doUpsert = conflictCols
+    ? (rows) => supabaseUpsertComposite(table, conflictCols, rows)
+    : (rows) => supabaseUpsert(table, rows);
+
+  try {
+    await doUpsert(group);
+    return { succeeded: group.length, failed: [] };
+  } catch (groupErr) {
+    const failed = [];
+    let succeeded = 0;
+    for (const row of group) {
+      try {
+        await doUpsert([row]);
+        succeeded++;
+      } catch (rowErr) {
+        failed.push({ row, error: rowErr.message });
+      }
+    }
+    return { succeeded, failed, groupError: groupErr.message };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OWNER DIRECTORY — special case: one report writes to two tables
 // ─────────────────────────────────────────────────────────────────────────────
@@ -775,29 +831,52 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
     return;
   }
 
+  // Same per-row isolation as the main REPORT_CONFIG loop above — one bad
+  // owner or property-link row can no longer take its batch-mates down
+  // with it (see upsertGroupWithRowFallback()'s comment for the full
+  // "one bad row killed the whole batch" history).
+  const failures = [];
+
+  let ownersUpserted = 0;
   try {
-    await supabaseUpsert('owners', ownerRows);
-    console.log(`[${reportName}] Upserted ${ownerRows.length} rows to owners.`);
+    const result = await upsertGroupWithRowFallback('owners', ownerRows, null);
+    ownersUpserted = result.succeeded;
+    if (result.failed.length) {
+      failures.push(...result.failed.map(f => ({ idField: 'appfolio_id', idValue: f.row.appfolio_id, error: f.error })));
+    }
+    console.log(`[${reportName}] Upserted ${ownersUpserted} rows to owners${result.failed.length ? ` (${result.failed.length} FAILED)` : ''}.`);
   } catch (err) {
     console.error(`[${reportName}] UPSERT ERROR (owners): ${err.message}\n`);
     summary.push({ reportName, table: 'owners', status: 'UPSERT_ERROR', error: err.message });
     return;
   }
 
+  let propertyOwnersUpserted = 0;
   try {
-    await supabaseUpsertComposite(
+    const result = await upsertGroupWithRowFallback(
       'property_owners',
-      ['appfolio_property_id', 'appfolio_owner_id'],
       propertyOwnerRows,
+      ['appfolio_property_id', 'appfolio_owner_id'],
     );
-    console.log(`[${reportName}] Upserted ${propertyOwnerRows.length} rows to property_owners.\n`);
-    summary.push({
-      reportName, table: 'owners + property_owners', status: 'OK',
-      rowsUpserted: ownerRows.length + propertyOwnerRows.length,
-    });
+    propertyOwnersUpserted = result.succeeded;
+    if (result.failed.length) {
+      failures.push(...result.failed.map(f => ({ idField: 'appfolio_property_id', idValue: f.row.appfolio_property_id, error: f.error })));
+    }
+    console.log(`[${reportName}] Upserted ${propertyOwnersUpserted} rows to property_owners${result.failed.length ? ` (${result.failed.length} FAILED)` : ''}.\n`);
   } catch (err) {
     console.error(`[${reportName}] UPSERT ERROR (property_owners): ${err.message}\n`);
     summary.push({ reportName, table: 'property_owners', status: 'UPSERT_ERROR', error: err.message });
+    return;
+  }
+
+  const rowsUpserted = ownersUpserted + propertyOwnersUpserted;
+  if (failures.length === 0) {
+    summary.push({ reportName, table: 'owners + property_owners', status: 'OK', rowsUpserted });
+  } else {
+    console.error(`[${reportName}] PARTIAL FAILURE: ${rowsUpserted} row(s) upserted, ${failures.length} row(s) FAILED and were NOT saved:`);
+    failures.forEach(f => console.error(`[${reportName}]   ${f.idField} ${f.idValue}: ${f.error}`));
+    console.error('');
+    summary.push({ reportName, table: 'owners + property_owners', status: 'PARTIAL_ERROR', rowsUpserted, failures });
   }
 }
 
@@ -882,20 +961,34 @@ async function syncLeaseTenants(isDryRun, isDiscover, summary) {
   const leaseTenantRows = [];
   const coveredOccupancies = new Set();
   let skipped = 0;
+  let rowErrors = 0;
   for (const row of tdRows) {
-    const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
-    const afTenantId  = row.selected_tenant_id || row.occupancy_import_uid;
-    if (!occupancyId || !afTenantId) { skipped++; continue; }
+    // Per-row isolation — same pattern as the main REPORT_CONFIG loop's
+    // buildRow() try/catch (above, in the loop over REPORT_CONFIG). Before
+    // this fix, one malformed tenant_directory row threw straight out of
+    // syncLeaseTenants(), which main() calls with no try/catch of its own
+    // — and main()'s top-level `.catch()` treats ANY uncaught error as
+    // FATAL, emails a failure alert, and exits 1, aborting the entire
+    // nightly sync (every other report, the lease-tenant FK resolution,
+    // everything) over one bad row, not just this step.
+    try {
+      const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
+      const afTenantId  = row.selected_tenant_id || row.occupancy_import_uid;
+      if (!occupancyId || !afTenantId) { skipped++; continue; }
 
-    leaseTenantRows.push({
-      appfolio_occupancy_id: occupancyId,
-      appfolio_tenant_id:    String(afTenantId),
-      is_primary:            String(row.primary_tenant || '').trim().toLowerCase() === 'yes',
-    });
-    coveredOccupancies.add(occupancyId);
+      leaseTenantRows.push({
+        appfolio_occupancy_id: occupancyId,
+        appfolio_tenant_id:    String(afTenantId),
+        is_primary:            String(row.primary_tenant || '').trim().toLowerCase() === 'yes',
+      });
+      coveredOccupancies.add(occupancyId);
+    } catch (err) {
+      rowErrors++;
+    }
   }
   const skipNote = skipped > 0 ? ` (${skipped} skipped — missing occupancy_id or tenant id)` : '';
-  console.log(`[${label}] Mapped ${leaseTenantRows.length} rows from tenant_directory${skipNote}.`);
+  const errorNote = rowErrors > 0 ? ` (${rowErrors} row error(s) skipped)` : '';
+  console.log(`[${label}] Mapped ${leaseTenantRows.length} rows from tenant_directory${skipNote}${errorNote}.`);
 
   // Departed-tenant fallback — see the DEPARTED-TENANT GAP comment above.
   // Only fills occupancies tenant_directory returned nothing for; never
@@ -909,23 +1002,30 @@ async function syncLeaseTenants(isDryRun, isDiscover, summary) {
     ttRows = [];
   }
   let fallbackAdded = 0;
+  let fallbackRowErrors = 0;
   const fallbackSeenOccupancies = new Set(); // dedupe within tenant_tickler itself before it ever reaches the upsert
   for (const row of ttRows) {
-    const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
-    const afTenantId  = row.tenant_id != null ? String(row.tenant_id) : null;
-    if (!occupancyId || !afTenantId) continue;
-    if (coveredOccupancies.has(occupancyId)) continue; // tenant_directory already has this one — never override it
-    if (fallbackSeenOccupancies.has(occupancyId)) continue; // one row per occupancy from this fallback
+    // Same per-row isolation as the tenant_directory loop above.
+    try {
+      const occupancyId = row.occupancy_id != null ? String(row.occupancy_id) : null;
+      const afTenantId  = row.tenant_id != null ? String(row.tenant_id) : null;
+      if (!occupancyId || !afTenantId) continue;
+      if (coveredOccupancies.has(occupancyId)) continue; // tenant_directory already has this one — never override it
+      if (fallbackSeenOccupancies.has(occupancyId)) continue; // one row per occupancy from this fallback
 
-    leaseTenantRows.push({
-      appfolio_occupancy_id: occupancyId,
-      appfolio_tenant_id:    afTenantId,
-      is_primary:            true, // the only tenant this fallback knows about
-    });
-    fallbackSeenOccupancies.add(occupancyId);
-    fallbackAdded++;
+      leaseTenantRows.push({
+        appfolio_occupancy_id: occupancyId,
+        appfolio_tenant_id:    afTenantId,
+        is_primary:            true, // the only tenant this fallback knows about
+      });
+      fallbackSeenOccupancies.add(occupancyId);
+      fallbackAdded++;
+    } catch (err) {
+      fallbackRowErrors++;
+    }
   }
-  console.log(`[${label}] Recovered ${fallbackAdded} additional occupancy(ies) from tenant_tickler that tenant_directory had zero rows for.`);
+  const fallbackErrorNote = fallbackRowErrors > 0 ? ` (${fallbackRowErrors} row error(s) skipped)` : '';
+  console.log(`[${label}] Recovered ${fallbackAdded} additional occupancy(ies) from tenant_tickler that tenant_directory had zero rows for${fallbackErrorNote}.`);
 
   if (isDryRun) {
     console.log(`[${label}] DRY RUN — would upsert ${leaseTenantRows.length} rows total.`);
@@ -942,9 +1042,23 @@ async function syncLeaseTenants(isDryRun, isDiscover, summary) {
   }
 
   try {
-    await supabaseUpsertComposite('lease_tenants', ['appfolio_occupancy_id', 'appfolio_tenant_id'], leaseTenantRows);
-    console.log(`[${label}] Upserted ${leaseTenantRows.length} rows to lease_tenants (${fallbackAdded} via tenant_tickler fallback).\n`);
-    summary.push({ reportName: label, table: 'lease_tenants', status: 'OK', rowsUpserted: leaseTenantRows.length, fallbackAdded });
+    // Same per-row isolation as the main REPORT_CONFIG loop above — one bad
+    // lease-tenant link row can no longer take its batch-mates down with it.
+    const result = await upsertGroupWithRowFallback(
+      'lease_tenants',
+      leaseTenantRows,
+      ['appfolio_occupancy_id', 'appfolio_tenant_id'],
+    );
+    if (result.failed.length === 0) {
+      console.log(`[${label}] Upserted ${result.succeeded} rows to lease_tenants (${fallbackAdded} via tenant_tickler fallback).\n`);
+      summary.push({ reportName: label, table: 'lease_tenants', status: 'OK', rowsUpserted: result.succeeded, fallbackAdded });
+    } else {
+      const failures = result.failed.map(f => ({ idField: 'appfolio_occupancy_id', idValue: f.row.appfolio_occupancy_id, error: f.error }));
+      console.error(`[${label}] PARTIAL FAILURE: ${result.succeeded} row(s) upserted to lease_tenants, ${failures.length} row(s) FAILED and were NOT saved:`);
+      failures.forEach(f => console.error(`[${label}]   ${f.idField} ${f.idValue}: ${f.error}`));
+      console.error('');
+      summary.push({ reportName: label, table: 'lease_tenants', status: 'PARTIAL_ERROR', rowsUpserted: result.succeeded, fallbackAdded, failures });
+    }
   } catch (err) {
     console.error(`[${label}] UPSERT ERROR: ${err.message}\n`);
     summary.push({ reportName: label, table: 'lease_tenants', status: 'UPSERT_ERROR', error: err.message });
@@ -1085,18 +1199,38 @@ async function main() {
       // report where every row already has identical keys produces
       // exactly one group here, so this is a no-op for every report that
       // isn't affected.
+      //
+      // Each group goes through upsertGroupWithRowFallback() (above) —
+      // NOT a plain upsert — so one bad row within a group can no longer
+      // take every other row in that group down with it silently.
       const keyGroups = groupByKeySignature(mapped);
+      let rowsUpserted = 0;
+      const failures = [];
       for (const group of keyGroups) {
-        if (config.conflictCols) {
-          await supabaseUpsertComposite(table, config.conflictCols, group);
-        } else {
-          await supabaseUpsert(table, group);
+        const result = await upsertGroupWithRowFallback(table, group, config.conflictCols);
+        rowsUpserted += result.succeeded;
+        if (result.failed.length) {
+          // idField travels with the value so the label is always the real
+          // id column for this table (appfolio_property_id for composite-
+          // key tables, appfolio_id otherwise) — never a hardcoded guess.
+          failures.push(...result.failed.map(f => ({ idField, idValue: f.row[idField], error: f.error })));
         }
       }
       const batchNote = keyGroups.length > 1 ? ` (${keyGroups.length} batches — mixed optional fields)` : '';
-      console.log(`[${reportName}] Upserted ${mapped.length} rows to ${table}${batchNote}.\n`);
-      summary.push({ reportName, table, status: 'OK', rowsUpserted: mapped.length });
+      if (failures.length === 0) {
+        console.log(`[${reportName}] Upserted ${rowsUpserted} rows to ${table}${batchNote}.\n`);
+        summary.push({ reportName, table, status: 'OK', rowsUpserted });
+      } else {
+        console.error(`[${reportName}] PARTIAL FAILURE: ${rowsUpserted} row(s) upserted to ${table}${batchNote}, ${failures.length} row(s) FAILED and were NOT saved:`);
+        failures.forEach(f => console.error(`[${reportName}]   ${f.idField} ${f.idValue}: ${f.error}`));
+        console.error('');
+        summary.push({ reportName, table, status: 'PARTIAL_ERROR', rowsUpserted, failures });
+      }
     } catch (err) {
+      // Only reachable for a failure outside the per-row fallback itself
+      // (e.g. a bug in this loop, or groupByKeySignature throwing) — still
+      // caught per-report so one report's failure can never abort the
+      // rest of the night's sync.
       console.error(`[${reportName}] UPSERT ERROR: ${err.message}\n`);
       summary.push({ reportName, table, status: 'UPSERT_ERROR', error: err.message });
     }
@@ -1141,34 +1275,78 @@ async function main() {
   if (errorCount > 0) {
     console.log(`\nWARNING: ${errorCount} report(s) had errors.`);
     process.exitCode = 1;
+    // Found live, 2026-08-27: this used to be the ONLY signal a per-report
+    // failure produced — a console line and an exit code, neither of
+    // which anyone was watching. Real move-out dates went missing for up
+    // to seven weeks with no alert anywhere. main()'s top-level .catch()
+    // below already emails on a FATAL error; this is the same alert for
+    // the non-fatal case, where the run finishes but didn't actually save
+    // everything it should have.
+    await sendSyncWarningAlert(summary);
   }
 
   console.log(`\nFinished: ${new Date().toISOString()}\n`);
 }
 
-async function sendSyncFailureAlert(err) {
+async function sendAlertEmail(subject, body) {
   const recipients = ['peter@rinconmanagement.com', 'stephen@rinconmanagement.com'].filter(Boolean);
-  const timestamp  = new Date().toISOString();
-  const subject    = `[ALERT] AppFolio sync failed — ${timestamp}`;
-  const body       = `The AppFolio → Supabase nightly sync failed at ${timestamp}.\n\nError: ${err.message}\n\n${err.stack || ''}`;
-
   try {
+    // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN — same
+    // three env var names (and the same OAuth2 + gmail.users.messages.send
+    // pattern below) as projects/calendar-assistant/send-morning-email.js,
+    // which already sends real Gmail mail in production (cron on Sally,
+    // see deploy-to-sally.sh). Reusing those exact names so the working
+    // values can be copied in verbatim — no separate credential set to
+    // set up. These get loaded from the repo ROOT .env (see this file's
+    // `require('dotenv').config(...)` call near the top, path
+    // '../../.env'), not from a .env inside this project folder.
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GMAIL_CLIENT_ID,
-      process.env.GMAIL_CLIENT_SECRET
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET
     );
-    oauth2Client.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     for (const to of recipients) {
       const message = [`To: ${to}`, `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].join('\n');
       const encoded = Buffer.from(message).toString('base64url');
       await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encoded } });
-      console.error(`[alert] Failure alert sent to ${to}`);
+      console.error(`[alert] Alert sent to ${to}`);
     }
   } catch (alertErr) {
-    console.error(`[alert] Could not send failure alert email: ${alertErr.message}`);
+    console.error(`[alert] Could not send alert email: ${alertErr.message}`);
   }
+}
+
+async function sendSyncFailureAlert(err) {
+  const timestamp = new Date().toISOString();
+  await sendAlertEmail(
+    `[ALERT] AppFolio sync failed — ${timestamp}`,
+    `The AppFolio → Supabase nightly sync failed at ${timestamp}.\n\nError: ${err.message}\n\n${err.stack || ''}`
+  );
+}
+
+// The non-fatal counterpart to sendSyncFailureAlert() — the run completed,
+// but one or more reports didn't fully save. Lists every failing report
+// and, for a PARTIAL_ERROR (see upsertGroupWithRowFallback() above), the
+// exact row(s) that failed and why, so this is actionable from the email
+// alone rather than requiring someone to go find and re-run the sync log.
+async function sendSyncWarningAlert(summary) {
+  const timestamp = new Date().toISOString();
+  const failingReports = summary.filter(r => r.status.includes('ERROR'));
+  const lines = failingReports.map(r => {
+    if (r.status === 'PARTIAL_ERROR') {
+      const rowLines = (r.failures || [])
+        .map(f => `    - ${f.idField} ${f.idValue}: ${f.error}`)
+        .join('\n');
+      return `- ${r.reportName} (${r.table}): ${r.rowsUpserted} row(s) saved, ${r.failures.length} row(s) FAILED and were NOT saved:\n${rowLines}`;
+    }
+    return `- ${r.reportName}${r.table ? ` (${r.table})` : ''}: ${r.error}`;
+  });
+  await sendAlertEmail(
+    `[WARNING] AppFolio sync had ${failingReports.length} failing report(s) — ${timestamp}`,
+    `The AppFolio → Supabase nightly sync finished, but ${failingReports.length} report(s) did not fully save. Some real AppFolio data may now be missing or stale in Supabase until this is investigated:\n\n${lines.join('\n\n')}\n\nRun "node sync.js" manually for full logs.`
+  );
 }
 
 main().catch(async (err) => {

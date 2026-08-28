@@ -112,6 +112,17 @@ async function getJobFiles(jobId) {
   return getAllPages(`/jobs/${jobId}/files`);
 }
 
+/**
+ * Jobs currently sitting in state 27 ("Needs Approval") — the hourly
+ * reconciliation poll's backstop query for the Approval Briefing feature
+ * (approval-briefing-SPEC.md Section 3.5). Webhook delivery isn't
+ * guaranteed (no retry/backoff documented anywhere in Latchel's docs), so
+ * this is the fast path's real safety net, not a fallback-only check.
+ */
+async function listJobsNeedingApproval() {
+  return getAllPages('/jobs?in_states=27');
+}
+
 /** Reference data — used only by the periodic property-reconciliation step, not nightly. */
 async function listProperties() {
   return getAllPages('/properties');
@@ -153,6 +164,7 @@ module.exports = {
   getJob,
   getJobStateHistory,
   getJobFiles,
+  listJobsNeedingApproval,
   listProperties,
   downloadFile,
 };

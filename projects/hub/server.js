@@ -184,6 +184,7 @@ const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInte
 const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = require('./call-stats/router');
 const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter } = require('./content-engine/router');
 const { router: contentReviewRouter } = require('./content-review/router');
+const { router: approvalBriefingRouter, internalRouter: approvalBriefingInternalRouter } = require('./approval-briefing/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -633,6 +634,14 @@ app.use(callStatsInternalRouter);
 // added to this router doesn't require touching this mounting order again.
 app.use(contentEngineInternalRouter);
 
+// ─── Approval Briefing — internal routes, no login required ───────────────
+// Two endpoints: the Latchel webhook receiver (its own shared-secret check,
+// not CRON_SECRET — see approval-briefing/router.js's checkWebhookSecret)
+// and the hourly reconciliation poll (CRON_SECRET, same as every other
+// tool's internal router). Must also be registered before requireLogin —
+// Latchel's webhook has no browser session to redirect.
+app.use(approvalBriefingInternalRouter);
+
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);
 
@@ -737,6 +746,15 @@ app.use(contentEngineRouter);
 // restricts approve/reject/publish/legal-claim-decisions/brand-guide-edits
 // to role='admin' specifically on top of that.
 app.use(contentReviewRouter);
+
+// ─── Approval Briefing section ─────────────────────────────────────────
+// Empty today — Phase 2 (approval-briefing/router.js) only builds the
+// trigger layer (webhook + reconciliation poll, both internal-only). The
+// dashboard/access-control surface (spec Section 11) is a later phase.
+// Mounted now so a future route added to this router doesn't require
+// touching this mounting order again, same reasoning as Content Engine's
+// internal router above.
+app.use(approvalBriefingRouter);
 
 // ─── Central error handler — must be registered last ──────────────────────
 // Catches errors a route handler throws synchronously (e.g. destructuring

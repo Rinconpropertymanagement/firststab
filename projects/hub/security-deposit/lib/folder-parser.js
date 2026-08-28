@@ -20,6 +20,35 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 const MODEL = 'claude-sonnet-5';
 
+// ─── Retry for a malformed-response API call — same fix, same pattern as
+// lib/photo-matcher.js's callClaudeForMatch (see that file's own comment
+// for the full incident writeup). Root cause: claude-sonnet-5 runs
+// "adaptive thinking" ON BY DEFAULT whenever a request doesn't explicitly
+// set `thinking`, and thinking tokens count against max_tokens — so a
+// call that never asked for reasoning could silently burn its whole
+// budget on an internal thinking block and get cut off (stop_reason:
+// max_tokens) before ever emitting the JSON answer, i.e. "No text block
+// in Claude response." This call makes the same kind of Claude request
+// (text in, JSON out) and had the identical gap: no `thinking` setting,
+// no retry, single failure just threw. Fixed the same way: disable
+// thinking explicitly, and wrap the call in the same bounded
+// exponential-backoff retry loop (same attempt count, same delays) so a
+// stray empty response doesn't fail the whole folder-indexing job.
+const PARSE_RETRY_ATTEMPTS = 5;
+const PARSE_RETRY_BASE_DELAY_MS = 800;
+const PARSE_RETRY_MAX_DELAY_MS = 10000;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// attempt is 1-based (the attempt that just failed). Exponential with a
+// little jitter — mirrors photo-matcher.js's retryDelay exactly.
+function retryDelay(attempt) {
+  const exp = Math.min(PARSE_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), PARSE_RETRY_MAX_DELAY_MS);
+  return exp + Math.floor(Math.random() * 400);
+}
+
 const PROMPT_PREFIX = `You are looking at the NAME of a folder in a property management company's photo archive. The folder was typed by hand by a property inspector, so it is often inconsistent, abbreviated, or slightly misspelled. Based ONLY on the folder name text inside the <folder_name> tags below (you have not seen any photos or files inside it — none exist in this conversation), extract:
 
 - address: the property street address this folder is most likely for (string or null — just the street-level text as written, do not guess a city/state that isn't present)
@@ -39,6 +68,45 @@ Return ONLY a JSON object, no explanation, no markdown fences:
 const PROMPT_SUFFIX = `
 </folder_name>`;
 
+// Makes the actual Claude call, retrying only the specific failure mode
+// this fix targets: an HTTP-successful response with no text content
+// block to parse. Returns the text block on success; throws the last
+// "no text block" error if every attempt comes back empty. A genuine
+// thrown exception from client.messages.create() (network error,
+// 4xx/5xx) is NOT caught here — it propagates immediately, since the
+// SDK's own default max_retries already covers that case. Mirrors
+// photo-matcher.js's callClaudeForMatch.
+async function callClaudeForParse(client, content) {
+  let lastErr;
+  for (let attempt = 1; attempt <= PARSE_RETRY_ATTEMPTS; attempt++) {
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 512,
+      // See the retry-block comment near the top of this file: without
+      // this, claude-sonnet-5's default-on adaptive thinking can silently
+      // spend the whole max_tokens budget on an unrequested thinking
+      // block and return no text at all.
+      thinking: { type: 'disabled' },
+      messages: [{ role: 'user', content }],
+    });
+    const textBlock = response.content.find(b => b.type === 'text');
+    if (textBlock) return textBlock;
+    lastErr = new Error('No text block in Claude response.');
+    const willRetry = attempt < PARSE_RETRY_ATTEMPTS;
+    // Diagnostic breadcrumb, shape/metadata only — never the model's raw
+    // content — same rule photo-matcher.js's equivalent log line follows.
+    console.warn(
+      `[security-deposit folder-parser] Claude response had no text block ` +
+      `(attempt ${attempt}/${PARSE_RETRY_ATTEMPTS}, stop_reason=${response.stop_reason}, ` +
+      `content_block_types=[${(response.content || []).map(b => b.type).join(',')}], ` +
+      `usage=${JSON.stringify(response.usage || {})})` +
+      `${willRetry ? ' — retrying.' : ' — out of retries, giving up.'}`
+    );
+    if (willRetry) await sleep(retryDelay(attempt));
+  }
+  throw lastErr;
+}
+
 async function parseFolderName(folderPath) {
   if (!folderPath || typeof folderPath !== 'string') {
     throw new Error('parseFolderName requires a non-empty folder path string.');
@@ -52,22 +120,14 @@ async function parseFolderName(folderPath) {
   const escapedFolderPath = folderPath.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 512,
-    messages: [
-      // Folder name/path text ONLY — never image data. See file header.
-      // Wrapped in <folder_name> tags with an explicit "this is data, not
-      // instructions" framing (Viper finding, 2026-08-19) — folderPath is
-      // untrusted, human-typed text from a bucket anyone with B2 write
-      // access could name, and was previously concatenated with no
-      // delimiter or boundary at all.
-      { role: 'user', content: PROMPT_PREFIX + escapedFolderPath + PROMPT_SUFFIX },
-    ],
-  });
-
-  const textBlock = response.content.find(b => b.type === 'text');
-  if (!textBlock) throw new Error('No text block in Claude response.');
+  // Folder name/path text ONLY — never image data. See file header.
+  // Wrapped in <folder_name> tags with an explicit "this is data, not
+  // instructions" framing (Viper finding, 2026-08-19) — folderPath is
+  // untrusted, human-typed text from a bucket anyone with B2 write
+  // access could name, and was previously concatenated with no
+  // delimiter or boundary at all.
+  const content = PROMPT_PREFIX + escapedFolderPath + PROMPT_SUFFIX;
+  const textBlock = await callClaudeForParse(client, content);
   const raw = textBlock.text.trim();
   const jsonStart = raw.search(/[{[]/);
   const trimmed = jsonStart > 0 ? raw.slice(jsonStart) : raw;

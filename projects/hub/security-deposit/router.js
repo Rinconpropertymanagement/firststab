@@ -324,7 +324,13 @@ function findBestPhotoMatch(propertyAddress, targetDateStr, inspectionType, fold
   let bestScore = -1;
   for (const folder of folders) {
     if (excludeReviewStatuses.includes(folder.review_status)) continue;
-    if (folder.parsed_inspection_type && folder.parsed_inspection_type !== inspectionType && folder.parsed_inspection_type !== 'other') continue;
+    // 'other' is a CONFIRMED classification (the AI folder-parser explicitly
+    // ruled out move_in/move_out — see lib/folder-parser.js's prompt), not
+    // "type unknown yet." It must never satisfy a move_in or move_out
+    // search. NULL means the parse genuinely produced no type (parse
+    // failure or invalid enum value from the model) and is still eligible,
+    // same as before this fix.
+    if (folder.parsed_inspection_type && folder.parsed_inspection_type !== inspectionType) continue;
     const addrScore = addressWordScore(normTarget, normalizeAddress(folder.parsed_address || ''));
     if (addrScore < 0.6) continue;
     let dateScore = 0;

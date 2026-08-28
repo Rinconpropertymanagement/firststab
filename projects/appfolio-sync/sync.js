@@ -591,13 +591,37 @@ async function fetchAllPages(reportName) {
   let nextUrl    = Array.isArray(first) ? null : (first.next_page_url || null);
 
   while (nextUrl) {
-    const parsed = new URL(nextUrl);
+    // AppFolio isn't consistent about this across reports: some return an
+    // absolute next_page_url, others (confirmed live 2026-08-28 on
+    // general_ledger, only once it started paginating at full-month
+    // volume — see actual-spend-SPEC.md's own flagged-but-unconfirmed
+    // Open Item 3) return a host-relative path instead, e.g.
+    // "/api/v2/reports/general_ledger.json?...&page=1". `new URL()` throws
+    // "Invalid URL" on a bare relative path with no base — passing AF_HOST
+    // as the base handles both shapes: it's used only when nextUrl isn't
+    // already absolute.
+    const parsed = new URL(nextUrl, `https://${AF_HOST}`);
+    // Also confirmed live 2026-08-28, same investigation: this endpoint's
+    // continuation link is POST-only — a GET to the exact same resolved
+    // URL returns a bare 404, while a POST with the same empty '{}' body
+    // as the very first request returns the next page correctly. No other
+    // report in this file has ever been observed exercising this
+    // pagination loop at all (general_ledger, at ~5,040 rows for a full
+    // month, is the first to cross AppFolio's ~5,000-row single-page
+    // limit), so there's no confirmed-working GET behavior here to
+    // preserve — POST matches how every other request in this file
+    // already talks to AppFolio's report endpoints.
+    const pageBody = '{}';
     const page   = await httpsRequest({
       hostname: parsed.hostname,
       path:     parsed.pathname + parsed.search,
-      method:   'GET',
-      headers:  { 'Authorization': afAuthHeader() },
-    });
+      method:   'POST',
+      headers:  {
+        'Authorization':  afAuthHeader(),
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(pageBody),
+      },
+    }, pageBody);
     if (page.statusCode < 200 || page.statusCode >= 300) {
       throw new Error(`AppFolio pagination returned HTTP ${page.statusCode}`);
     }

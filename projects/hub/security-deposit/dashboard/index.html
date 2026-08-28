@@ -384,9 +384,16 @@
       </div>
     </div>
 
-    <div style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <input type="text" id="propertySearch" placeholder="Search by property, address, or tenant&hellip;"
-        style="width:100%;max-width:480px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;outline:none">
+        style="flex:1;min-width:220px;max-width:480px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;outline:none">
+      <!-- Safety valve for the automatic sync's gap (SPEC.md's own "manual/
+           backfill creation" route comment) — e.g. a move-out that never
+           got a move-out date from tenant_tickler, so no case was queued
+           automatically. Hidden by default; shown only for roles that can
+           actually submit the form (applyRoleUI below), same gate as the
+           checklist/prepaid-rent actions (canReview()). -->
+      <button class="btn-primary" id="createCaseBtn" style="display:none;white-space:nowrap">+ Create Case</button>
     </div>
 
     <div class="filters">
@@ -565,6 +572,40 @@
   </div>
 </div>
 
+<!-- ── Create Case Modal (manual/backfill safety valve) ── -->
+<div class="modal-overlay" id="createCaseModal" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <span class="modal-title">Create Case</span>
+      <button class="modal-close" id="createCaseModalClose" title="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:12.5px;color:#6b7280;margin-bottom:14px;line-height:1.5">
+        For a move-out that didn&rsquo;t get a case automatically &mdash; most often a lease whose move-out date never came through the nightly sync. Search for the lease, then enter its move-out date.
+      </p>
+
+      <div id="createCaseStepSearch">
+        <input type="text" id="createCaseSearchInput" class="photo-search-input" placeholder="Search by property, address, or tenant name&hellip;">
+        <div class="photo-search-results" id="createCaseSearchResults"></div>
+      </div>
+
+      <div id="createCaseStepConfirm" style="display:none">
+        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin-bottom:14px">
+          <div id="createCaseSelectedSummary" style="font-size:13px;color:#111827;line-height:1.6"></div>
+          <button type="button" class="btn-link-edit" id="createCaseChangeLeaseBtn" style="margin-top:4px">Change lease&hellip;</button>
+        </div>
+        <label style="display:block;font-size:12px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px">Move-Out Date</label>
+        <input type="date" id="createCaseMoveOutDate" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:inherit">
+        <div class="field-hint" style="margin-top:6px">Required &mdash; this becomes the case&rsquo;s 21-day disposition deadline.</div>
+        <div class="action-bar">
+          <button class="btn-primary" id="createCaseSubmitBtn">Create Case</button>
+        </div>
+        <div id="createCaseMsg" style="font-size:12.5px;margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── Photo Lightbox (click-to-enlarge — same for both galleries and the AI match cards) ── -->
 <div class="lightbox-overlay" id="photoLightbox" style="display:none" role="dialog" aria-modal="true">
   <button type="button" class="lightbox-close" id="photoLightboxClose" title="Close">&times;</button>
@@ -642,6 +683,11 @@
   function applyRoleUI(role) {
     const usersTab = document.getElementById('tabUserMgmt');
     if (usersTab && role === 'admin') usersTab.style.display = '';
+    // canReview() isn't defined yet at this point in the file (declared
+    // further down) — applyRoleUI only runs after initAuth's fetch
+    // resolves, well after the whole script has parsed, so this is safe.
+    const createCaseBtn = document.getElementById('createCaseBtn');
+    if (createCaseBtn && canReview()) createCaseBtn.style.display = '';
     applyHelpSection(role);
   }
 
@@ -948,6 +994,143 @@
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => showTab(btn.dataset.tab));
   });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // CREATE CASE MODAL (manual/backfill safety valve — POST /cases, the
+  // route SPEC.md documents as "for a move-out that predates this tool,
+  // a correction, or a move-out that doesn't flow cleanly through
+  // tenant_tickler"). Two steps: search for the lease (GET
+  // /lease-search, debounced the same way the address search-assist
+  // above does), then confirm it and enter the move-out date.
+  // ═══════════════════════════════════════════════════════════════════
+
+  let createCaseSelectedLease = null;
+  let createCaseSearchDebounce = null;
+
+  document.getElementById('createCaseBtn').addEventListener('click', openCreateCaseModal);
+  document.getElementById('createCaseModalClose').addEventListener('click', closeCreateCaseModal);
+  document.getElementById('createCaseModal').addEventListener('click', (e) => {
+    if (e.target.id === 'createCaseModal') closeCreateCaseModal();
+  });
+  document.getElementById('createCaseChangeLeaseBtn').addEventListener('click', showCreateCaseSearchStep);
+  document.getElementById('createCaseSearchInput').addEventListener('input', function() {
+    clearTimeout(createCaseSearchDebounce);
+    const q = this.value.trim();
+    createCaseSearchDebounce = setTimeout(() => runCreateCaseSearch(q), 300);
+  });
+  document.getElementById('createCaseSubmitBtn').addEventListener('click', submitCreateCase);
+
+  function openCreateCaseModal() {
+    document.getElementById('createCaseSearchInput').value = '';
+    document.getElementById('createCaseSearchResults').innerHTML = '';
+    document.getElementById('createCaseMoveOutDate').value = '';
+    document.getElementById('createCaseMsg').textContent = '';
+    showCreateCaseSearchStep();
+    document.getElementById('createCaseModal').style.display = 'flex';
+    document.getElementById('createCaseSearchInput').focus();
+  }
+
+  function closeCreateCaseModal() {
+    document.getElementById('createCaseModal').style.display = 'none';
+  }
+
+  function showCreateCaseSearchStep() {
+    createCaseSelectedLease = null;
+    document.getElementById('createCaseStepSearch').style.display = '';
+    document.getElementById('createCaseStepConfirm').style.display = 'none';
+  }
+
+  function createCaseResultRowHtml(l) {
+    const addr = esc(l.property_address || l.property_name || 'Unknown property');
+    const unit = l.unit_number ? (' &middot; Unit ' + esc(l.unit_number)) : '';
+    const tenantNames = (l.tenants || []).map(t => esc(t.name)).filter(Boolean).join(', ') || 'No tenant on file';
+    const dateNote = l.move_out_date ? ('Move-out on file: ' + esc(formatDate(l.move_out_date))) : 'No move-out date on file';
+    return '<div class="photo-search-result-row">' +
+      '<div style="font-weight:600;color:#111827">' + addr + unit + '</div>' +
+      '<div style="font-size:12px;color:#6b7280">' + tenantNames + '</div>' +
+      '<div class="confidence-row">' +
+        '<span style="font-size:11.5px;color:#9ca3af">' + dateNote + '</span>' +
+        '<button type="button" class="btn-sm-approve create-case-select-btn" data-id="' + esc(l.lease_id) + '">Select</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  async function runCreateCaseSearch(q) {
+    const resultsEl = document.getElementById('createCaseSearchResults');
+    if (q.length < 3) { resultsEl.innerHTML = ''; return; }
+    resultsEl.innerHTML = '<span style="color:#9ca3af;font-size:12px">Searching&hellip;</span>';
+    try {
+      const qs = new URLSearchParams({ q });
+      const res = await fetch(SD_API + '/api/security-deposit/lease-search?' + qs.toString(), { credentials: 'include' });
+      if (sessionExpired(res)) return;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const results = data.results || [];
+      if (!results.length) { resultsEl.innerHTML = '<span style="color:#9ca3af;font-size:12px">No matching leases without an existing case found.</span>'; return; }
+      resultsEl.innerHTML = results.map(createCaseResultRowHtml).join('');
+      resultsEl.querySelectorAll('.create-case-select-btn').forEach(btn => {
+        btn.addEventListener('click', () => selectCreateCaseLease(btn.dataset.id, results));
+      });
+    } catch (err) {
+      resultsEl.innerHTML = '<span style="color:#dc2626;font-size:12px">Search failed: ' + esc(err.message) + '</span>';
+    }
+  }
+
+  function selectCreateCaseLease(leaseId, results) {
+    const lease = results.find(r => r.lease_id === leaseId);
+    if (!lease) return;
+    createCaseSelectedLease = lease;
+
+    const addr = esc(lease.property_address || lease.property_name || 'Unknown property');
+    const unit = lease.unit_number ? (' &middot; Unit ' + esc(lease.unit_number)) : '';
+    const tenantsHtml = (lease.tenants || []).length
+      ? '<ul class="tenants-list">' + lease.tenants.map(t =>
+          '<li>' + esc(t.name || 'Unnamed tenant') + (t.is_primary ? '<span class="primary-tag">Primary</span>' : '') + '</li>'
+        ).join('') + '</ul>'
+      : '<span style="color:#9ca3af">No leaseholders on file.</span>';
+
+    document.getElementById('createCaseSelectedSummary').innerHTML =
+      '<strong>' + addr + '</strong>' + unit +
+      '<div style="margin-top:4px;font-size:12px;color:#6b7280">Lease status: ' + esc(lease.status || '&#8212;') + '</div>' +
+      tenantsHtml;
+
+    // Prefill with whatever move_out_date is already on the lease (may be
+    // blank — that's exactly the gap this form exists for), so a pod lead
+    // confirming a date that already synced correctly doesn't have to
+    // retype it.
+    document.getElementById('createCaseMoveOutDate').value = lease.move_out_date || '';
+    document.getElementById('createCaseMsg').textContent = '';
+    document.getElementById('createCaseStepSearch').style.display = 'none';
+    document.getElementById('createCaseStepConfirm').style.display = '';
+  }
+
+  async function submitCreateCase() {
+    const msgEl = document.getElementById('createCaseMsg');
+    if (!createCaseSelectedLease) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Select a lease first.'; return; }
+    const moveOutDate = document.getElementById('createCaseMoveOutDate').value;
+    if (!moveOutDate) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Enter a move-out date.'; return; }
+
+    const btn = document.getElementById('createCaseSubmitBtn');
+    btn.disabled = true;
+    msgEl.style.color = '#6b7280'; msgEl.textContent = 'Creating&hellip;';
+    try {
+      const res = await fetch(SD_API + '/api/security-deposit/cases', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ lease_id: createCaseSelectedLease.lease_id, move_out_date: moveOutDate }),
+      });
+      if (sessionExpired(res)) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { msgEl.style.color = '#dc2626'; msgEl.textContent = data.error || 'Could not create case.'; btn.disabled = false; return; }
+      btn.disabled = false;
+      closeCreateCaseModal();
+      fetchCases();
+      // Immediately show the new case, same "jump straight to what you
+      // just did" pattern as confirmSearchResult() above.
+      openCaseDetail(data.case.id);
+    } catch (err) {
+      msgEl.style.color = '#dc2626'; msgEl.textContent = 'Network error: ' + err.message; btn.disabled = false;
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   // CASE DETAIL MODAL

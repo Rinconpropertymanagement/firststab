@@ -83,10 +83,21 @@ function createMailer() {
 // escalation (no AI-suggested-status to trigger off of, unlike
 // insurance's approve route), so there's exactly one call site: the
 // escalate route below.
+//
+// Returns true only when the email actually went out — false for every
+// other case (no mailer configured, no active recipients, send threw).
+// The escalate route below reports this back to the caller instead of
+// assuming success, and fires sendFailureAlertEmail() when it's false —
+// found live via code audit, 2026-08-28: this used to swallow every
+// failure into a console.error nobody watches, so a broken mail send
+// looked identical to a successful one from the outside.
 async function sendEscalationEmail(kase, escalatedBy, reason) {
   try {
     const mailer = createMailer();
-    if (!mailer) return;
+    if (!mailer) {
+      console.error('[security-deposit email] Escalation email NOT sent — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured).');
+      return false;
+    }
 
     const { data: roleRows } = await supabase
       .from('team_member_tool_roles')
@@ -99,14 +110,14 @@ async function sendEscalationEmail(kase, escalatedBy, reason) {
 
     if (!recipients.length) {
       console.warn('[security-deposit email] Case escalated but no active director_of_operations recipients found for tool=security_deposit.');
-      return;
+      return false;
     }
 
     const props = kase.leases && kase.leases.units && kase.leases.units.properties;
     const addr = (props && (props.address || props.name)) || 'Unknown property';
     const unit = kase.leases && kase.leases.units && kase.leases.units.unit_number;
 
-    await mailer.sendMail({
+    const info = await mailer.sendMail({
       from: process.env.GMAIL_USER,
       to: recipients.join(', '),
       subject: `Security Deposit Escalation: ${addr}${unit ? ' Unit ' + unit : ''}`,
@@ -121,9 +132,65 @@ async function sendEscalationEmail(kase, escalatedBy, reason) {
         'Please log in to the Rincon Hub and open Security Deposit to review.',
       ].join('\n'),
     });
+    // Nodemailer can resolve successfully while still rejecting individual
+    // addresses (bad address, full mailbox, etc.) — info.rejected lists
+    // those, same signal send-reminders below uses. Only truly clean if
+    // every recipient landed in .accepted and nothing came back rejected.
+    const rejected = info.rejected || [];
+    if (rejected.length) {
+      console.error(`[security-deposit email] Escalation email: ${rejected.length} of ${recipients.length} recipient(s) rejected: ${rejected.join(', ')}`);
+      return false;
+    }
     console.log(`[security-deposit email] Escalation email sent to ${recipients.length} director(s) of operations`);
+    return true;
   } catch (err) {
     console.error('[security-deposit email] Failed to send escalation email:', err.message);
+    return false;
+  }
+}
+
+// ─── Failure alert — "something failed, tell a human" ─────────────────────
+// Same shape/purpose as appfolio-sync/sync.js's sendSyncWarningAlert (found
+// live 2026-08-27 there: a silent failure with only a console.error nobody
+// watched let real data go missing for seven weeks with no one warned).
+// This tool's whole point is not missing the statutory 21-day disposition
+// deadline, so a reminder or escalation email that silently fails to send
+// is the same class of risk.
+//
+// Deliberately reuses THIS file's own createMailer() (nodemailer +
+// GMAIL_USER/GMAIL_APP_PASSWORD) rather than appfolio-sync's separate
+// OAuth2/googleapis setup (GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN) — that
+// credential set and the googleapis package aren't part of the Hub's stack
+// (see projects/hub/package.json), and pulling them in here would be a new
+// integration, not a reliability fix. This does mean that if the failure
+// IS "GMAIL_USER/GMAIL_APP_PASSWORD is wrong," this alert can't send
+// either — that's a real gap, not hidden: it's why the JSON responses
+// below are fixed to honestly report failure too, so a broken mailer is
+// still visible (to a person checking the tool, or a health check hitting
+// these endpoints) even on the one night this alert can't get out.
+//
+// Sent straight to Peter's own inbox — not looked up from
+// team_member_tool_roles — so an empty or broken roles table can't also
+// take out the alert that something's broken.
+const FAILURE_ALERT_RECIPIENT = 'peter@rinconmanagement.com';
+async function sendFailureAlertEmail(subject, body) {
+  try {
+    const mailer = createMailer();
+    if (!mailer) {
+      console.error(`[security-deposit ALERT] Could not send failure alert — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured). Subject would have been: ${subject}`);
+      return false;
+    }
+    await mailer.sendMail({
+      from: process.env.GMAIL_USER,
+      to: FAILURE_ALERT_RECIPIENT,
+      subject: `[ALERT] ${subject}`,
+      text: body,
+    });
+    console.error(`[security-deposit ALERT] Failure alert sent to ${FAILURE_ALERT_RECIPIENT}: ${subject}`);
+    return true;
+  } catch (err) {
+    console.error(`[security-deposit ALERT] Failure alert itself failed to send: ${err.message} — original subject: ${subject}`);
+    return false;
   }
 }
 
@@ -296,6 +363,20 @@ function addressWordScore(normA, normB) {
   const wb = new Set(normB.split(' ').filter(w => w.length > 1));
   if (!wa.length || !wb.size) return 0;
   return wa.filter(w => wb.has(w)).length / Math.max(wa.length, wb.size);
+}
+
+// Small, tool-scoped duplicate of ../lib/property-search.js's own
+// buildIlikeValue — same "no second consumer, don't force a shared
+// module yet" reasoning as normalizeAddress above. PostgREST's .or()
+// filter syntax treats "," "." ":" "(" ")" as reserved (comma separates
+// conditions, parens group them); wrapping the value in double quotes is
+// its documented escape hatch, so a typed search containing any of those
+// characters (e.g. "708 B Calle Pensamiento") is treated as literal text
+// instead of being parsed as filter syntax.
+function buildIlikeValue(rawQuery) {
+  const withWildcards = `%${rawQuery}%`;
+  const escaped = withWildcards.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 // Finds the best-matching indexed B2 photo folder for a property address,
@@ -1075,6 +1156,130 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   });
 });
 
+// ─── GET /api/security-deposit/lease-search — find a lease for the manual
+// "Create Case" form ─────────────────────────────────────────────────────
+// Backs the Queue tab's "Create Case" button (Tron) — the safety valve for
+// a move-out that never flowed through tenant_tickler, so no automatic
+// case was ever queued for it (confirmed live, 2026-08-28: 9 terminated
+// leases have a NULL move_out_date and therefore no case). A pod lead
+// rarely knows a lease's UUID, so this lets them type a property
+// name/address or a tenant's name and get back candidate LEASES — never
+// exposing the raw lease_id as something to type. Same role gate as the
+// POST route right below, since finding a lease is only useful to someone
+// who can also submit it.
+//
+// Leases that already have a security_deposit_case are left out — the
+// POST route below would just reject them with a 409, so surfacing them
+// here would only invite a confusing failed submission.
+//
+// TWO SEPARATE QUERIES, merged in JS, not one combined query — same
+// reasoning as ../lib/property-search.js's own "WHY TWO SEPARATE
+// QUERIES" note: PostgREST's embedded-resource filter syntax can't
+// cleanly OR a condition on the embedded properties table together with
+// a condition on the embedded tenants table. Each leg here instead
+// mirrors an already-proven shape in this codebase: the properties ilike
+// search is lib/property-search.js's own query verbatim, and the
+// lease_tenants join is the exact one GET /cases above already uses
+// (~line 847) to build tenantsByLease.
+router.get('/api/security-deposit/lease-search', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations'), async (req, res) => {
+  const q = (req.query.q || '').toString().trim();
+  if (q.length < 3) return res.json({ results: [] });
+
+  const ilikeValue = buildIlikeValue(q);
+  const LEG_LIMIT = 8;     // candidate properties/tenants fetched per leg
+  const RESULT_LIMIT = 15; // total leases returned after merging both legs
+  const LEASE_COLUMNS = `
+    id, status, lease_start, lease_end, move_out_date,
+    units ( unit_number, properties ( name, address, city ) ),
+    security_deposit_cases ( id ),
+    lease_tenants ( is_primary, tenants ( first_name, last_name ) )
+  `;
+
+  const leasesById = new Map();
+  // security_deposit_cases.lease_id carries its own UNIQUE constraint
+  // (20260813000002_security_deposit_cases.sql), so PostgREST embeds it
+  // from the leases side as a to-one relation — a plain object (or null),
+  // never an array — unlike every other embed in this file. Confirmed
+  // live, 2026-08-28: an Array.isArray() check here silently let a lease
+  // that already has a case back into the results.
+  function hasExistingCase(l) {
+    const sdc = l.security_deposit_cases;
+    if (!sdc) return false;
+    return Array.isArray(sdc) ? sdc.length > 0 : true;
+  }
+  function addLease(l) {
+    if (!l || leasesById.has(l.id)) return;
+    if (hasExistingCase(l)) return;
+    const property = l.units && l.units.properties ? l.units.properties : null;
+    leasesById.set(l.id, {
+      lease_id: l.id,
+      status: l.status,
+      lease_start: l.lease_start,
+      lease_end: l.lease_end,
+      move_out_date: l.move_out_date,
+      property_name: property ? property.name : null,
+      property_address: property ? property.address : null,
+      unit_number: l.units ? l.units.unit_number : null,
+      tenants: (l.lease_tenants || [])
+        .filter(lt => lt.tenants)
+        .map(lt => ({
+          name: `${lt.tenants.first_name || ''} ${lt.tenants.last_name || ''}`.trim(),
+          is_primary: !!lt.is_primary,
+        })),
+    });
+  }
+
+  // Leg 1 — property name/address match.
+  try {
+    const { data: props, error: propErr } = await supabase
+      .from('properties')
+      .select('id')
+      .or(`name.ilike.${ilikeValue},address.ilike.${ilikeValue}`)
+      .limit(LEG_LIMIT);
+    if (propErr) throw propErr;
+    const propertyIds = (props || []).map(p => p.id);
+    if (propertyIds.length) {
+      const { data: units, error: unitErr } = await supabase
+        .from('units')
+        .select(`leases ( ${LEASE_COLUMNS} )`)
+        .in('property_id', propertyIds);
+      if (unitErr) throw unitErr;
+      (units || []).forEach(u => (u.leases || []).forEach(addLease));
+    }
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Leg 2 — tenant first/last name match.
+  try {
+    const { data: tenantRows, error: tenantErr } = await supabase
+      .from('tenants')
+      .select('id')
+      .or(`first_name.ilike.${ilikeValue},last_name.ilike.${ilikeValue}`)
+      .limit(LEG_LIMIT);
+    if (tenantErr) throw tenantErr;
+    const tenantIds = (tenantRows || []).map(t => t.id);
+    if (tenantIds.length) {
+      const { data: lts, error: ltErr } = await supabase
+        .from('lease_tenants')
+        .select(`leases ( ${LEASE_COLUMNS} )`)
+        .in('tenant_id', tenantIds);
+      if (ltErr) throw ltErr;
+      (lts || []).forEach(row => addLease(row.leases));
+    }
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Most recently ended lease first (nulls last) — leases without a case
+  // yet skew toward being the ones someone actually needs to find here.
+  const results = Array.from(leasesById.values())
+    .sort((a, b) => (a.lease_end < b.lease_end ? 1 : a.lease_end > b.lease_end ? -1 : 0))
+    .slice(0, RESULT_LIMIT);
+
+  return res.json({ results });
+});
+
 // ─── POST /api/security-deposit/cases — manual/backfill creation ──────────
 // Deliberate fallback, not the primary path (SPEC.md route sketch) — for
 // a move-out that predates this tool, a correction, or a move-out that
@@ -1561,9 +1766,22 @@ router.post('/api/security-deposit/cases/:id/escalate', requireSecurityDepositRo
     details: { escalated_by: escalatorName, reason: reason.trim() },
   });
 
-  await sendEscalationEmail(updated, escalatorName, reason.trim());
+  // The case update above is the real, already-committed action — its
+  // success doesn't depend on this email. But a health check or a person
+  // reading this response has no other way to know the director-of-
+  // operations notification actually went out, so that gets reported
+  // honestly as its own field instead of folded into the overall
+  // "success: true" (which used to imply the email sent too, even when it
+  // silently didn't — found via code audit, 2026-08-28).
+  const escalationEmailSent = await sendEscalationEmail(updated, escalatorName, reason.trim());
+  if (!escalationEmailSent) {
+    await sendFailureAlertEmail(
+      'Security Deposit: escalation notification email failed to send',
+      `Case ${req.params.id} was escalated by ${escalatorName}, but the director-of-operations notification email did not send. The escalation itself was saved — this is only the email notification.\n\nReason for escalation: ${reason.trim()}\n\nCheck the server logs and GMAIL_USER/GMAIL_APP_PASSWORD.`
+    );
+  }
 
-  return res.json({ success: true, case: updated });
+  return res.json({ success: true, case: updated, escalation_email_sent: escalationEmailSent });
 });
 
 // ─── POST /api/security-deposit/cases/:id/escalate-confirm ────────────────
@@ -2786,11 +3004,6 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
     .filter(r => r.team_members && r.team_members.is_active)
     .map(r => r.team_members.email);
 
-  if (!recipients.length) {
-    console.warn(`[${ts}] send-reminders: ${due.length} case(s) due but no active pod_lead recipients found.`);
-    return res.json({ sent: 0, due: due.length, warning: 'No active pod_lead recipients.' });
-  }
-
   const list = due.map(c => {
     const addrProps = c.leases && c.leases.units && c.leases.units.properties;
     const addr = (addrProps && (addrProps.address || addrProps.name)) || 'Unknown property';
@@ -2798,24 +3011,70 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
     return `- ${addr}${unit ? ' Unit ' + unit : ''}: ${daysRemaining(c.disposition_deadline)} days left`;
   }).join('\n');
 
+  if (!recipients.length) {
+    console.warn(`[${ts}] send-reminders: ${due.length} case(s) due but no active pod_lead recipients found.`);
+    await sendFailureAlertEmail(
+      `Security Deposit: ${due.length} disposition(s) approaching deadline, but no recipient configured`,
+      `The nightly security-deposit deadline-reminder job found ${due.length} case(s) approaching their 21-day deadline, but there is no active pod_lead configured to receive the reminder — nobody was notified:\n\n${list}\n\nAdd an active pod_lead under Security Deposit team roles.`
+    );
+    return res.json({ due: due.length, recipients_attempted: 0, sent: 0, failed: 0, warning: 'No active pod_lead recipients.' });
+  }
+
+  // sent/failed below are real per-recipient outcomes, not just "we
+  // attempted N recipients" — found via code audit, 2026-08-28: this
+  // route used to always report sent: recipients.length regardless of
+  // whether the send actually succeeded, so a completely broken mailer
+  // (missing credentials or a thrown error) still looked like a clean
+  // "sent" response to anything checking this endpoint. Nodemailer's
+  // sendMail can also resolve successfully while rejecting individual
+  // addresses (bad address, full mailbox) — info.rejected/.accepted is
+  // the real per-recipient signal, same one sendEscalationEmail uses.
+  let sent = 0;
+  let failed = recipients.length;
+  let emailError = null;
+  let rejectedAddrs = [];
   try {
     const mailer = createMailer();
     if (mailer) {
-      await mailer.sendMail({
+      const info = await mailer.sendMail({
         from: process.env.GMAIL_USER,
         to: recipients.join(', '),
         subject: `Security Deposit: ${due.length} disposition${due.length === 1 ? '' : 's'} approaching the 21-day deadline`,
         text: `The following security deposit dispositions are approaching their 21-day deadline:\n\n${list}\n\nLog in to the Rincon Hub and open Security Deposit to review.`,
       });
-      console.log(`[${ts}] send-reminders: notified ${recipients.length} pod lead(s) about ${due.length} case(s)`);
+      rejectedAddrs = info.rejected || [];
+      sent = (info.accepted || []).length;
+      failed = rejectedAddrs.length;
+      if (failed) {
+        console.error(`[${ts}] send-reminders: ${failed} of ${recipients.length} recipient(s) rejected: ${rejectedAddrs.join(', ')}`);
+      } else {
+        console.log(`[${ts}] send-reminders: notified ${sent} pod lead(s) about ${due.length} case(s)`);
+      }
     } else {
+      emailError = 'Email not configured (GMAIL_USER/GMAIL_APP_PASSWORD missing).';
       console.warn(`[${ts}] send-reminders: ${due.length} case(s) due but email is not configured (GMAIL_USER/GMAIL_APP_PASSWORD).`);
     }
   } catch (emailErr) {
+    emailError = emailErr.message;
     console.error(`[${ts}] send-reminders email error:`, emailErr.message);
   }
 
-  return res.json({ sent: recipients.length, due: due.length });
+  if (sent === 0 || failed > 0) {
+    await sendFailureAlertEmail(
+      `Security Deposit: reminder email ${sent === 0 ? 'FAILED to send' : 'partially failed'} — ${due.length} case(s) approaching deadline`,
+      [
+        'The nightly security-deposit deadline-reminder job ran, but the notification email did not fully send.',
+        '',
+        `Cases due (${due.length}):`,
+        list,
+        '',
+        `Recipients attempted: ${recipients.join(', ')}`,
+        emailError ? `Error: ${emailError}` : `Rejected: ${rejectedAddrs.join(', ')}`,
+      ].join('\n')
+    );
+  }
+
+  return res.json({ due: due.length, recipients_attempted: recipients.length, sent, failed, email_error: emailError });
 });
 
 // Supabase/PostgREST caps any single .select() at 1000 rows by default —

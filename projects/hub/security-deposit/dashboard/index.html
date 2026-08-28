@@ -265,6 +265,16 @@
     .doc-on-file a { color: #2563eb; text-decoration: none; font-weight: 500; margin-right: 10px; }
     .doc-on-file a:hover { text-decoration: underline; }
 
+    /* ── Damage Photos ── */
+    .field-hint { font-size: 11.5px; color: #6b7280; line-height: 1.4; }
+    .damage-photo-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px; background: #fff; }
+    .damage-photo-caption { font-size: 12px; color: #111827; word-break: break-word; }
+    .damage-photo-meta { font-size: 10.5px; color: #9ca3af; }
+    .damage-photo-late-flag {
+      font-size: 11px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px;
+      padding: 3px 6px; margin-top: 2px; font-weight: 600;
+    }
+
     /* ── Checklist ── */
     .checklist-item { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
     .checklist-q { font-size: 13.5px; color: #111827; line-height: 1.5; margin-bottom: 4px; }
@@ -665,6 +675,13 @@
   // address search box/results list. The .../resolve-backed confirm/
   // correct controls stay behind canReview() unchanged.
   function canSelectPhotos() { return currentUser && ['admin', 'pod_lead', 'inspection_coordinator'].includes(currentUser.role); }
+  // Damage Photos — its own gate again, not folded into canReview() or
+  // canSelectPhotos() above (Peter's decision, "Add a Damage Photo to a
+  // Case" spec). Unlike those two, every role with any access to this
+  // tool may add a damage photo — written out explicitly rather than as
+  // "return !!currentUser" so a future role added to this tool without
+  // upload rights doesn't silently gain them.
+  function canUploadDamagePhoto() { return currentUser && ['admin', 'pod_lead', 'director_of_operations', 'inspection_coordinator'].includes(currentUser.role); }
 
   // ── Date / format helpers ────────────────────────────────────────────
   function formatDate(dateStr) {
@@ -980,6 +997,7 @@
       renderLeaseSection(kase) +
       renderMoneySection(kase) +
       renderEvidenceSection(kase) +
+      renderDamagePhotosSection(kase) +
       renderChecklistSection(kase) +
       renderReviewerSection(kase);
 
@@ -1247,6 +1265,60 @@
         formCard('Move-In Inspection Form', 'move_in', forms.move_in) +
         formCard('Move-Out Inspection Form', 'move_out', forms.move_out) +
       '</div>' +
+    '</div>';
+  }
+
+  // ── Damage Photos ────────────────────────────────────────────────────
+  // Separate from Move-In/Move-Out Photos (matched from the B2 photo
+  // archive above) and from Inspection Forms — a coordinator adds these
+  // directly to the case as standalone evidence, one at a time, with a
+  // required caption. No edit/delete in this version: every photo added
+  // here stays visible on the case forever (spec's explicit decision).
+  function renderDamagePhotosSection(kase) {
+    const photos = kase.damage_photos || [];
+
+    const uploadForm = canUploadDamagePhoto()
+      ? '<div class="upload-row" style="flex-direction:column;align-items:stretch">' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+            '<input type="file" accept=".jpg,.jpeg,.png" id="damagePhotoFileInput">' +
+            '<button type="button" class="btn-sm-upload" id="btnUploadDamagePhoto">Upload</button>' +
+          '</div>' +
+          '<input type="text" id="damagePhotoCaptionInput" class="photo-search-input" placeholder="Describe what this photo shows (required)">' +
+          // Governance requirement (Asimov + Mason): keep the tenant and
+          // their belongings out of the caption, and never caption a
+          // disability-related accessibility modification as damage.
+          '<div class="field-hint">Describe the damage and its location &mdash; not the tenant or their belongings. Grab bars, ramps, and similar accessibility modifications are not damage and should never be captioned as such.</div>' +
+          '<div class="prepaid-field-error" id="damagePhotoError" style="display:none"></div>' +
+        '</div>'
+      : '';
+
+    const grid = photos.length
+      ? '<div class="photo-grid" style="grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));max-height:none">' +
+          photos.map(p => {
+            const src = SD_API + '/api/security-deposit/document/' + esc(p.id);
+            let metaLine = 'Added ' + formatDateTime(p.created_at);
+            if (p.captured_at) metaLine += ' &middot; Taken ' + formatDateTime(p.captured_at);
+            return '<div class="damage-photo-card" data-photo-id="' + esc(p.id) + '">' +
+              '<div class="photo-thumb">' +
+                '<img src="' + src + '" alt="' + esc(p.description || '') + '" loading="lazy" class="damage-photo-img" data-src="' + src + '" data-caption="' + esc(p.description || '') + '">' +
+              '</div>' +
+              '<div class="damage-photo-caption">' + esc(p.description || '') + '</div>' +
+              '<div class="damage-photo-meta">' + metaLine + '</div>' +
+              // Mason requirement: flag evidence added after the case's
+              // own 21-day disposition deadline instead of showing it
+              // identically to timely evidence. Computed by the API
+              // (upload timestamp vs. this case's disposition_deadline),
+              // not recomputed here.
+              (p.uploaded_after_deadline ? '<div class="damage-photo-late-flag">&#9888; Added after the 21-day disposition deadline</div>' : '') +
+            '</div>';
+          }).join('') +
+        '</div>'
+      : '<div class="photo-grid-empty">No damage photos added yet.</div>';
+
+    return '<div class="section">' +
+      '<div class="section-title">Damage Photos</div>' +
+      uploadForm +
+      grid +
     '</div>';
   }
 
@@ -1838,6 +1910,54 @@
         }
       });
     });
+
+    // Damage photo thumbnails — click to enlarge, same lightbox every
+    // other gallery on this page already uses.
+    document.querySelectorAll('.damage-photo-img').forEach(img => {
+      img.addEventListener('click', () => openLightbox(img.dataset.src, img.dataset.caption));
+    });
+
+    // Damage Photos upload — caption is required client-side (matches
+    // the server's own hard requirement; see router.js POST
+    // .../damage-photo) so a coordinator gets an immediate, specific
+    // error instead of a round trip for something the API will reject
+    // anyway.
+    const btnUploadDamagePhoto = document.getElementById('btnUploadDamagePhoto');
+    if (btnUploadDamagePhoto) {
+      btnUploadDamagePhoto.addEventListener('click', async () => {
+        const fileInput = document.getElementById('damagePhotoFileInput');
+        const captionInput = document.getElementById('damagePhotoCaptionInput');
+        const errorBox = document.getElementById('damagePhotoError');
+        const showError = msg => { if (errorBox) { errorBox.textContent = msg; errorBox.style.display = ''; } else { alert(msg); } };
+        if (errorBox) errorBox.style.display = 'none';
+
+        if (!fileInput || !fileInput.files || !fileInput.files.length) { showError('Choose a photo first.'); return; }
+        const caption = (captionInput && captionInput.value || '').trim();
+        if (!caption) { showError('Add a caption describing what this photo shows.'); return; }
+
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('description', caption);
+        btnUploadDamagePhoto.disabled = true;
+        btnUploadDamagePhoto.textContent = 'Uploading…';
+        try {
+          const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/damage-photo', {
+            method: 'POST', credentials: 'include', body: fd,
+          });
+          if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            showError(d.error || 'Upload failed.');
+            btnUploadDamagePhoto.disabled = false; btnUploadDamagePhoto.textContent = 'Upload';
+            return;
+          }
+          openCaseDetail(caseId);
+          fetchCases();
+        } catch (err) {
+          showError('Network error: ' + err.message);
+          btnUploadDamagePhoto.disabled = false; btnUploadDamagePhoto.textContent = 'Upload';
+        }
+      });
+    }
 
     // Mark Reviewed
     const btnReview = document.getElementById('btnMarkReviewed');

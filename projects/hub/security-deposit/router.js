@@ -52,6 +52,7 @@ const { listPhotoFolders, listFilesInFolder, listAllFilesInFolder, downloadFileB
 const { parseFolderName } = require('./lib/folder-parser');
 const { matchPhoto } = require('./lib/photo-matcher');
 const { resizeForMatching } = require('./lib/image-resize');
+const { readExifCaptureDate } = require('./lib/exif-date');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Nodemailer (reminder emails) — same setup pattern as insurance ───────
@@ -848,17 +849,40 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
     .filter(r => r.tenants)
     .map(r => Object.assign({}, r.tenants, { is_primary: !!r.is_primary }));
 
-  // Inspection form uploads — reuses `documents`, entity_type =
-  // 'security_deposit_case' (SPEC.md Neo section #4).
+  // Inspection form uploads AND damage photos — both reuse `documents`,
+  // entity_type = 'security_deposit_case' (SPEC.md Neo section #4;
+  // damage_photo is the "Add a Damage Photo to a Case" addendum's
+  // file_type, added here rather than with a second query). description
+  // and captured_at are only ever populated on damage_photo rows today
+  // (captured_at added by 20260827010000_add_captured_at_to_documents.sql)
+  // but are harmless, always-null columns on the inspection-form rows.
   const { data: docs, error: docErr } = await supabase
     .from('documents')
-    .select('id, file_name, file_type, mime_type, created_at')
+    .select('id, file_name, file_type, mime_type, description, captured_at, created_at')
     .eq('entity_type', 'security_deposit_case')
     .eq('entity_id', kase.id)
     .order('created_at', { ascending: false });
   if (docErr) return res.status(500).json({ error: docErr.message });
   const inspectionFormMoveIn = (docs || []).find(d => d.file_type === 'inspection_form_move_in') || null;
   const inspectionFormMoveOut = (docs || []).find(d => d.file_type === 'inspection_form_move_out') || null;
+  // Mason requirement — flag any photo uploaded after this case's own
+  // 21-day disposition deadline instead of showing it identically to
+  // timely evidence. Compares the DOCUMENT ROW'S created_at (upload
+  // time) against disposition_deadline, deliberately NOT captured_at
+  // (the EXIF date, when present) — CC 1950.5's 21-day clock governs
+  // when Rincon must act on the evidence it has, not when the photo was
+  // physically taken, and captured_at is best-effort/frequently absent
+  // so it can't be the thing this flag depends on.
+  const damagePhotos = (docs || [])
+    .filter(d => d.file_type === 'damage_photo')
+    .map(d => ({
+      id: d.id,
+      description: d.description,
+      captured_at: d.captured_at,
+      created_at: d.created_at,
+      uploaded_after_deadline: !!(kase.disposition_deadline &&
+        new Date(d.created_at) > new Date(kase.disposition_deadline + 'T23:59:59')),
+    }));
 
   // Matched B2 photos — reads the already-built index only (never touches
   // B2 live on a case-open — that would be slow and re-spend AI-parsing
@@ -1042,6 +1066,7 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
       move_in: inspectionFormMoveIn,
       move_out: inspectionFormMoveOut,
     },
+    damage_photos: damagePhotos,
     photos: {
       move_in: moveInPhotos,
       move_out: moveOutPhotos,
@@ -1251,6 +1276,112 @@ router.post('/api/security-deposit/cases/:id/inspection-form', requireSecurityDe
     entity_type: 'security_deposit_case',
     entity_id: caseId,
     details: { document_id: docRow.id, file_type: kind, uploaded_by: req.user.email },
+  });
+
+  return res.json({ success: true, document_id: docRow.id });
+});
+
+// ─── POST /api/security-deposit/cases/:id/damage-photo ────────────────────
+// "Add a Damage Photo to a Case" addendum. Same plain file-attach shape as
+// the inspection-form route above (reuses `documents`, entity_type =
+// 'security_deposit_case', the same multer instance, storage bucket, and
+// audit-log pattern) but with three differences the spec calls out:
+//   - file_type='damage_photo', JPG/PNG only (no PDF)
+//   - storage path gets a random suffix, not a fixed kind — a case can
+//     have many damage photos, unlike the one-per-slot inspection form
+//   - a required caption (documents.description) instead of an optional
+//     one, and it's an evidence photo, not a form
+// No edit/delete route exists for these in this version (spec, "Not in
+// this version") — once added, a damage photo has no route that can
+// change or remove it.
+//
+// PERMISSIONS — deliberately its own inline role list, not shared with
+// the stricter /review gate (admin/pod_lead/director_of_operations,
+// used by requireSecurityDepositRole above at line ~1320) or reused from
+// the photo-viewing routes' list (which happens to be the same four
+// roles today, near line ~1591) — Peter's decision, SPEC.md: every role
+// with any access to this tool may add a damage photo. Declared
+// independently so a future change to either of those other gates can't
+// silently change who can add evidence here, and vice versa.
+router.post('/api/security-deposit/cases/:id/damage-photo', requireSecurityDepositRole('admin', 'pod_lead', 'director_of_operations', 'inspection_coordinator'), upload.single('file'), async (req, res) => {
+  const caseId = req.params.id;
+  const description = (req.body.description || '').trim();
+
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+  if (!description) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'Add a caption describing what this photo shows.' });
+  }
+
+  // The shared `upload` multer instance also accepts .pdf (for inspection
+  // forms) — narrow to photos only here, same plain-rejection UX as the
+  // inspection-form route's own kind check.
+  const ext = path.extname(req.file.originalname).toLowerCase();
+  if (!['.jpg', '.jpeg', '.png'].includes(ext)) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: `Unsupported file type: ${ext}. Damage photos must be JPG or PNG.` });
+  }
+
+  const { data: kase, error: caseErr } = await supabase
+    .from('security_deposit_cases').select('id').eq('id', caseId).maybeSingle();
+  if (caseErr) return res.status(500).json({ error: caseErr.message });
+  if (!kase) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(404).json({ error: 'Case not found.' });
+  }
+
+  const MIME_MAP = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
+  const mimeType = MIME_MAP[ext];
+
+  await ensureStorageBucket();
+  const fileBuffer = fs.readFileSync(req.file.path);
+
+  // Mason requirement #2 — capture when the photo was actually taken,
+  // not just uploaded. Best-effort only (see lib/exif-date.js): most
+  // phone/camera photos carry an EXIF DateTimeOriginal tag, plenty
+  // don't, and this must never block the upload either way.
+  const capturedAt = readExifCaptureDate(fileBuffer);
+
+  // Random suffix (not a fixed kind-based name like the inspection-form
+  // route uses) — a case can have many damage photos.
+  const randomSuffix = crypto.randomBytes(6).toString('hex');
+  const storageKey = `${caseId}/damage-${Date.now()}-${randomSuffix}${ext}`;
+  const { error: uploadErr } = await supabase.storage
+    .from('security-deposit-documents')
+    .upload(storageKey, fileBuffer, { contentType: mimeType, upsert: true });
+  fs.unlink(req.file.path, () => {});
+  if (uploadErr) return res.status(500).json({ error: 'Failed to store file.', detail: uploadErr.message });
+
+  // documents.uploaded_by references the legacy `users` table, not
+  // team_members — left NULL here, the same known workaround the
+  // inspection-form upload above already uses. The uploader's real
+  // identity goes into the audit_log entry below instead.
+  const { data: docRow, error: docErr } = await supabase
+    .from('documents')
+    .insert({
+      file_name: storageKey,
+      file_path: storageKey,
+      file_type: 'damage_photo',
+      entity_type: 'security_deposit_case',
+      entity_id: caseId,
+      mime_type: mimeType,
+      description,
+      captured_at: capturedAt,
+      uploaded_by: null,
+    })
+    .select('id, created_at')
+    .single();
+  if (docErr) return res.status(500).json({ error: 'Failed to save document record.', detail: docErr.message });
+
+  await supabase.from('audit_log').insert({
+    action: 'security_deposit.damage_photo_uploaded',
+    entity_type: 'security_deposit_case',
+    entity_id: caseId,
+    details: {
+      document_id: docRow.id,
+      uploaded_by: req.user.email,
+      captured_at: capturedAt,
+    },
   });
 
   return res.json({ success: true, document_id: docRow.id });

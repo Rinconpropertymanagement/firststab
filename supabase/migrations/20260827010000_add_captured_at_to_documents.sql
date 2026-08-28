@@ -1,0 +1,89 @@
+-- ============================================================
+-- Migration: 20260827010000_add_captured_at_to_documents
+-- Created:   2026-08-27
+-- Author:    Q (builder), per Neo's migration conventions
+--
+-- Part of the Security Deposit "Add a Damage Photo to a Case" build
+-- (projects/hub/security-deposit/ — approved spec, Mason requirement #2:
+-- "Capture when the photo was actually taken, not just when it was
+-- uploaded"). Q's router.js reads the EXIF DateTimeOriginal tag off the
+-- uploaded JPEG (lib/exif-date.js, best-effort — most phone/camera
+-- photos have it, plenty don't) and needs somewhere to put it.
+--
+-- ============================================================
+-- Why a new column, not an existing one
+-- ============================================================
+--
+-- The spec explicitly asked to check for a free column before adding
+-- one. Checked every column on `documents`
+-- (20260720000003_foundation.sql):
+--   - description       TEXT, nullable — already claimed by this same
+--     build for the required caption. Can't hold two different pieces
+--     of information in one field.
+--   - file_size_bytes    INTEGER — wrong type for a timestamp, and
+--     already declared as byte-size; repurposing it to carry a packed
+--     date would silently break for any future caller (including a
+--     future feature on THIS table) that reasonably assumes it means
+--     what its name says.
+--   - appfolio_id        TEXT, but carries a real UNIQUE constraint
+--     (idx_documents_appfolio_id partial index AND the table-level
+--     documents_appfolio_id_unique constraint) tied to AppFolio's own
+--     document IDs for sync dedup. Damage photos have no AppFolio ID,
+--     and worse, EXIF capture timestamps collide constantly in
+--     practice — a coordinator's phone shooting several photos in the
+--     same room takes more than one in the same second, so this would
+--     throw a unique-constraint error on an ordinary multi-photo upload.
+-- No existing column fits. Per the spec's own fallback ("a minimal
+-- single-column migration is acceptable"), adding one nullable column.
+--
+-- ============================================================
+-- Column shape
+-- ============================================================
+--
+--   - captured_at TIMESTAMPTZ, nullable, no default. NULL means "no
+--     EXIF capture date found" (screenshot, re-saved/forwarded image,
+--     stripped metadata, or a non-photo document) — a normal, expected
+--     outcome per the spec ("does not need to block upload if EXIF data
+--     is unavailable"), not an error state. Deliberately generic on
+--     `documents` rather than named damage_photo_captured_at or scoped
+--     to file_type — this is a property of "when was the underlying
+--     image actually taken," which is meaningful for any photo this
+--     table might ever hold (this build's damage_photo rows today; any
+--     future photo file_type this table or another tool adds later, at
+--     no further schema cost).
+--
+-- ============================================================
+-- Rule 4 (GOVERNANCE.md) — no new data inventory block needed
+-- ============================================================
+--
+-- Same precedent as 20260819000000 (prepaid_rent columns on
+-- security_deposit_cases): this is an additive nullable column on an
+-- already-existing, already-governed table, not a new table — Rule 4's
+-- registration requirement is for new tables storing personal data.
+-- captured_at is a timestamp derived from image file metadata, not a
+-- new category of personal data beyond what `documents` already holds
+-- (file_name, description, entity linkage) for every row in this table
+-- across every tool that uses it.
+--
+-- Gate check (must pass before applying to any real database):
+--   [x] Rollback exists — see bottom of this file
+--   [x] No existing data is deleted or overwritten — ADD COLUMN only
+--   [x] Touches `documents`, already RLS-enabled (foundation.sql)
+--   [x] Purely additive (new nullable column, no constraint tightening)
+--   [x] Should be tested on a copy of Supabase before production apply
+-- ============================================================
+
+ALTER TABLE documents
+  ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ;
+
+COMMENT ON COLUMN documents.captured_at IS
+  'When the underlying photo was actually taken, read from the file''s EXIF DateTimeOriginal/CreateDate tag at upload time (see projects/hub/security-deposit/lib/exif-date.js). NULL = no EXIF capture date was present in the file (common — screenshots, re-saved/forwarded images, stripped metadata, or non-photo documents) or the file has no EXIF-bearing format; this is expected and does not indicate an error. Distinct from created_at, which is when the row was inserted (i.e. upload time).';
+
+
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE documents DROP COLUMN IF EXISTS captured_at;
+--
+-- ============================================================

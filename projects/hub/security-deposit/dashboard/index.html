@@ -630,14 +630,15 @@
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // A 409 from the checklist / prepaid-rent / escalate / escalate-confirm
-  // routes means someone else saved a change to this case after the copy
-  // in this modal was loaded (see router.js's checkOptimisticLock — it
-  // compares the updated_at this modal sent back against the row's real
-  // one). Retrying the same click won't help; it would still be racing
-  // against whatever they saved. The fix is always to reload and look at
-  // the current state first. Centralized here so every call site shows
-  // the same message and the same one-click way out.
+  // A 409 from the checklist / prepaid-rent / review / escalate /
+  // escalate-confirm routes means someone else saved a change to this case
+  // after the copy in this modal was loaded (see router.js's
+  // checkOptimisticLock / isStaleUpdate — it compares the updated_at this
+  // modal sent back against the row's real one). Retrying the same click
+  // won't help; it would still be racing against whatever they saved. The
+  // fix is always to reload and look at the current state first.
+  // Centralized here so every call site shows the same message and the
+  // same one-click way out.
   function handleStaleCaseConflict(caseId) {
     if (confirm('This case was updated by someone else — reload to see the latest before saving your change.\n\nReload now?')) {
       openCaseDetail(caseId);
@@ -708,7 +709,7 @@
     if (role === 'admin') show('help-admin');
   }
 
-  function canReview()   { return currentUser && ['admin', 'pod_lead'].includes(currentUser.role); }
+  function canReview()   { return currentUser && ['admin', 'pod_lead', 'director_of_operations'].includes(currentUser.role); }
   function canResolveEscalation() { return currentUser && ['admin', 'director_of_operations'].includes(currentUser.role); }
   // A new, separate visibility check — deliberately NOT folded into
   // canReview() (spec's Tron section, explicit about this). canReview()
@@ -2151,8 +2152,9 @@
         try {
           const res = await fetch(SD_API + '/api/security-deposit/cases/' + caseId + '/review', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ reviewer_notes: notes }),
+            body: JSON.stringify({ reviewer_notes: notes, updated_at: kase.updated_at }),
           });
+          if (res.status === 409) { btnReview.disabled = false; handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not mark reviewed.')); btnReview.disabled = false; return; }
           openCaseDetail(caseId);
           fetchCases();

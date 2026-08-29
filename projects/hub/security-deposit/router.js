@@ -1660,11 +1660,17 @@ router.post('/api/security-deposit/cases/:id/review', requireSecurityDepositRole
 
   const { data: existing, error: existingErr } = await supabase
     .from('security_deposit_cases')
-    .select('prepaid_rent_balance, checklist_notice_sent, checklist_inspection_conducted, checklist_photos_documented, tenancy_status')
+    .select('prepaid_rent_balance, checklist_notice_sent, checklist_inspection_conducted, checklist_photos_documented, tenancy_status, updated_at')
     .eq('id', req.params.id)
     .maybeSingle();
   if (existingErr) return res.status(500).json({ error: existingErr.message });
   if (!existing) return res.status(404).json({ error: 'Case not found.' });
+  // Already have the row from the fetch above — compare directly instead
+  // of paying for checkOptimisticLock()'s own SELECT (same approach as
+  // escalate-confirm).
+  if (isStaleUpdate(existing.updated_at, req.body.updated_at)) {
+    return res.status(409).json({ error: STALE_CASE_ERROR });
+  }
 
   const missing = [];
   if (existing.prepaid_rent_balance == null) {

@@ -1,0 +1,106 @@
+-- ============================================================
+-- Migration: 20260829000000_security_deposit_retention_policy
+-- Created:   2026-08-29
+-- Author:    Mason (legal recommendation), approved by Peter 2026-08-29
+--
+-- Resolves the "retention_policy: PLACEHOLDER — pending Mason" open
+-- item that has sat on security_deposit_cases, b2_photo_folders, and
+-- security_deposit_photo_matches since their original migrations
+-- (20260813000002, 20260813000003, 20260820000000) — all three, plus
+-- the security_deposit-related rows in the shared `documents` table,
+-- carried this identical unresolved note. Per GOVERNANCE.md Rule 4,
+-- this documents the real policy now that it's been decided; the
+-- original migrations are left as-is (historical record of what the
+-- placeholder said at the time), not edited retroactively.
+--
+-- Purely additive/documentation — no column added, no data changed,
+-- no existing row touched. Nothing here is enforced automatically yet
+-- (no purge job exists) — this records the POLICY; a scheduled
+-- enforcement job is separate, later work for Scotty/Neo once Peter
+-- wants it built.
+-- ============================================================
+-- Decision
+-- ============================================================
+--
+-- RETENTION: 7 years, anchored to move_out_date (not created_at —
+-- move_out_date is the one date on a case that's correct by
+-- construction and immune to sync timing, the same reasoning already
+-- used for disposition_deadline itself).
+--
+-- Applies to:
+--   - security_deposit_cases      (the disposition case record)
+--   - b2_photo_folders            (parsed folder metadata — paths only,
+--                                  never the photo bytes; the bytes
+--                                  live in Backblaze B2 and are outside
+--                                  this policy's reach either way, per
+--                                  the existing read-only-credential
+--                                  limitation)
+--   - security_deposit_photo_matches (AI match records — paths and
+--                                  confidence scores, never photo bytes)
+--   - documents WHERE entity_type = 'security_deposit_case'
+--                                  (the one table here that holds
+--                                  actual bytes: uploaded inspection
+--                                  forms and damage_photo uploads —
+--                                  see 20260827010000, 20260827000000)
+--
+-- Reasoning (Mason, 2026-08-29):
+--   - Statutory floor: a wrongfully-withheld-deposit claim is
+--     fundamentally a contract claim; California's general statute of
+--     limitations on a written contract is 4 years (Code Civ. Proc.
+--     § 337). 7 years clears that with real margin, accounting for
+--     CA's delayed-discovery rules.
+--   - Consistency, not invention: matches Rincon's existing
+--     company-wide 7-year records policy (set with prior attorney
+--     input, 2026-08-24/25, applied identically to approval_briefings)
+--     rather than inventing a fourth bespoke number for this tool.
+--   - CCPA basis: a bounded 7-year figure (not "indefinite," which is
+--     reserved for audit_log's legal-obligation exception, Cal. Civ.
+--     Code § 1798.105(d)(9)) fits CCPA's data-minimization expectation
+--     for records tied to a closed transaction, while still sitting
+--     inside that same (d)(9) exception during the window.
+--   - Litigation hold overrides this on a per-case basis if a
+--     dispute or attorney instruction is active — standard override,
+--     not automated here.
+--
+-- b2_photo_folders specifically: not linked to a case by design (see
+-- its own migration), so no move_out_date to anchor to directly —
+-- anchor to parsed_date where present, else first-indexed date
+-- (created_at). Lowest-priority of the four to get exactly right,
+-- since the underlying B2 photo bytes are already outside this tool's
+-- reach regardless of this table's own retention.
+--
+-- CCPA deletion mechanics during the 7-year window: redact-in-place
+-- (structural fields — dates, status, paths — survive; free-text or
+-- incidental PII gets [REDACTED]), matching the approach already
+-- drafted in security_deposit_cases' and security_deposit_photo_matches'
+-- own migration comments, rather than row deletion.
+--
+-- Not yet resolved by this migration: the exact Civil Code § 1950.5
+-- subsection for the landlord's own record-keeping duty (the
+-- deposit-03 citation gap SPEC.md already flags, possibly off by a
+-- letter after AB 2801's renumbering). Doesn't change the 7-year
+-- figure — 7 years clears any statutory floor either way — but should
+-- get a primary-source or attorney check before the specific
+-- subsection is ever cited to a tenant or in a dispute.
+-- ============================================================
+
+COMMENT ON TABLE security_deposit_cases IS
+  'Security deposit disposition case records. Retention: 7 years from move_out_date, then CCPA-style redact-in-place (structural fields survive; free-text/incidental PII redacted) unless under litigation hold. Approved by Peter 2026-08-29 per Mason''s recommendation — see migration 20260829000000_security_deposit_retention_policy.sql.';
+
+COMMENT ON TABLE b2_photo_folders IS
+  'Indexed Backblaze B2 photo-folder metadata (paths and parsed fields only — never photo bytes). Retention: 7 years from parsed_date where present, else from created_at, then redact-in-place unless under litigation hold. Approved by Peter 2026-08-29 per Mason''s recommendation — see migration 20260829000000_security_deposit_retention_policy.sql.';
+
+COMMENT ON TABLE security_deposit_photo_matches IS
+  'AI-computed move-in/move-out photo match records (paths and confidence scores only — never photo bytes). Retention: 7 years from the parent case''s move_out_date, then redact-in-place unless under litigation hold. Approved by Peter 2026-08-29 per Mason''s recommendation — see migration 20260829000000_security_deposit_retention_policy.sql.';
+
+-- `documents` is a shared table used by multiple tools (Insurance
+-- Compliance, Security Deposit, etc.) — a table-level COMMENT would
+-- incorrectly imply this policy covers every row, not just this
+-- tool's. Documented here instead: rows where entity_type =
+-- 'security_deposit_case' (inspection forms and damage_photo uploads,
+-- see file_type IN ('inspection_form_move_in', 'inspection_form_move_out',
+-- 'damage_photo')) follow the same 7-year-from-move_out_date policy as
+-- security_deposit_cases above. No column-level or partial comment
+-- mechanism exists in Postgres for "some rows of this table" — this
+-- migration file is the authoritative record for that scope until a
+-- real enforcement job reads it.

@@ -5,7 +5,9 @@
  * Rincon Management
  *
  * Fetches data from 11 AppFolio reports and upserts it into Supabase.
- * Foreign-key joins (unit_id, tenant_id, property_id) are deferred to a future release.
+ * Foreign-key joins (unit_id, tenant_id, property_id) are resolved at the end
+ * of every run via resolve_appfolio_foreign_keys() — see the call site below
+ * for why (turned on 2026-09-01, previously written but never invoked).
  *
  * Also populates (security-deposit tool build, supabase/migrations/
  * 20260813000000 through 20260813000004): leases.move_out_date/
@@ -83,6 +85,31 @@ const REPORT_CONFIG = [
       // extension.sql). Omit entirely when absent — never send null, which
       // would clear a previously-synced value.
       if (row.property_county) built.jurisdiction_county = row.property_county;
+
+      // year_built / maintenance_limit — sync-owned exclusively by
+      // property_directory (supabase/migrations/20260828000000_add_
+      // year_built_and_maintenance_limit_to_properties.sql), for the
+      // Approval Briefing feature (approval-briefing-SPEC.md Section
+      // 4.1/4.2). Confirmed live field names via --discover: "year_built"
+      // and "maintenance_limit" (both present on the real property_directory
+      // response, alongside maintenance_notes). Same omit-when-absent rule
+      // as jurisdiction_county above — never send null for either, which
+      // would clear a previously-synced value.
+      if (row.year_built) built.year_built = parseInt(row.year_built, 10) || null;
+      // CRITICAL (see the migration's own column comment, verbatim): AppFolio
+      // returns maintenance_limit as a formatted string ("500.00" or "0.00").
+      // parseFloat(x) || null — the idiom used elsewhere in this file — would
+      // silently turn a genuine $0.00 limit into NULL, because 0 is falsy in
+      // JS, erasing a real "zero PM authority without the owner" value and
+      // making it indistinguishable from "never configured." Number.isFinite()
+      // on the parsed result is required here instead. row.maintenance_limit
+      // itself can be "0.00" (a real value, truthy as a non-empty string) or
+      // absent/undefined (never configured) — checking the raw field first,
+      // not the parsed number, is what keeps those two cases apart.
+      if (row.maintenance_limit != null && row.maintenance_limit !== '') {
+        const parsedLimit = parseFloat(row.maintenance_limit);
+        if (Number.isFinite(parsedLimit)) built.maintenance_limit = parsedLimit;
+      }
       return built;
     },
   },
@@ -99,7 +126,20 @@ const REPORT_CONFIG = [
         bathrooms:    parseFloat(row.bathrooms)        || null,
         sqft:         parseInt(row.sqft)               || null,
         monthly_rent: parseFloat(row.market_rent)      || null,
-        status:       'vacant', // unit_vacancy will override occupied units
+        // Every unit in the portfolio (all ~455) comes through this report,
+        // so it's the full-portfolio baseline for status. Was 'vacant' —
+        // confirmed live 2026-09-01 this left EVERY unit stuck at 'vacant'
+        // forever, because nothing else in this file ever wrote 'occupied':
+        // unit_vacancy (below) also wrote 'vacant', to the very same value,
+        // for the subset of units it returns. The two reports were meant to
+        // divide the work (this one marks everyone occupied, unit_vacancy
+        // flips just the actually-vacant ones), but both wrote the same
+        // literal. unit_vacancy runs strictly after this report in
+        // REPORT_CONFIG and only touches the units it returns (merge-
+        // duplicates upsert — see the SYNC CONFLICT RULE note above), so
+        // 'occupied' here is safe: it's a baseline every later, more
+        // specific report is free to override.
+        status:       'occupied',
         appfolio_id:  String(row.unit_id),
       };
     },
@@ -212,7 +252,7 @@ const REPORT_CONFIG = [
     },
   },
 
-  // ── 7. Vacant units (sets status = vacant for units in this report) ───────
+  // ── 7. Vacant units (overrides status = vacant for units in this report) ──
   {
     reportName: 'unit_vacancy',
     table: 'units',
@@ -222,6 +262,13 @@ const REPORT_CONFIG = [
         unit_number:  row.unit    || null,
         sqft:         parseInt(row.sqft)           || null,
         monthly_rent: parseFloat(row.new_rent || row.schd_rent) || null,
+        // Unchanged — this was already correct. AppFolio's own "currently
+        // vacant units" report, so 'vacant' here is right for every row it
+        // returns. Runs after unit_directory (#2 above) in REPORT_CONFIG,
+        // so it overrides that report's 'occupied' baseline for just this
+        // subset; units this report doesn't return are left at 'occupied'
+        // untouched (merge-duplicates upsert only sets columns present in
+        // the JSON body — see the SYNC CONFLICT RULE note above).
         status:       'vacant',
         appfolio_id:  String(row.unit_id),
       };
@@ -261,7 +308,7 @@ const REPORT_CONFIG = [
         if (!isNaN(d.getTime())) completedAt = d.toISOString();
       }
 
-      return {
+      const built = {
         title:        desc ? String(desc).substring(0, 100) : `Work order ${row.work_order_number || ''}`,
         description:  desc || null,
         status:       STATUS_MAP[rawStatus]   || 'open',
@@ -271,6 +318,21 @@ const REPORT_CONFIG = [
         completed_at: completedAt,
         appfolio_id:  String(row.work_order_id || row.work_order_number),
       };
+      // appfolio_unit_id feeds resolve_appfolio_foreign_keys()'s
+      // maintenance_requests.unit_id resolution (20260803000000/000001).
+      // This was never wired up here — confirmed live 2026-09-01: the
+      // work_order report does return row.unit_id (present on ~80% of
+      // rows; the rest are property-level work orders with no unit),
+      // but this buildRow silently dropped it, so unit_id has stayed
+      // permanently NULL for every work order ever synced, portfolio-
+      // wide (229 of 529 existing rows) — invisible to any property- or
+      // unit-scoped view, including Property Overview's per-property
+      // ticket list. Same omit-don't-null rule as tenant_tickler's
+      // appfolio_unit_id above: a work order legitimately can have no
+      // unit (property-level), so absence must stay absence, not become
+      // a stored null that looks the same as "not yet checked."
+      if (row.unit_id != null) built.appfolio_unit_id = String(row.unit_id);
+      return built;
     },
   },
 
@@ -1205,6 +1267,16 @@ async function main() {
       if (reportName === 'property_directory') {
         const withCounty = mapped.filter(r => r.jurisdiction_county);
         console.log(`[${reportName}] DRY RUN — ${withCounty.length} of ${mapped.length} rows include jurisdiction_county.`);
+        // Approval Briefing (approval-briefing-SPEC.md Section 4.1/4.2):
+        // confirm year_built/maintenance_limit mapped correctly, and
+        // specifically that a genuine $0.00 maintenance_limit survived as
+        // 0, not null (the gotcha the schema migration's own column
+        // comment warns about — see this entry's buildRow() above).
+        const withYearBuilt = mapped.filter(r => r.year_built != null);
+        const withLimit = mapped.filter(r => r.maintenance_limit != null);
+        const zeroLimit = mapped.filter(r => r.maintenance_limit === 0);
+        console.log(`[${reportName}] DRY RUN — ${withYearBuilt.length} of ${mapped.length} rows include year_built.`);
+        console.log(`[${reportName}] DRY RUN — ${withLimit.length} of ${mapped.length} rows include maintenance_limit (${zeroLimit.length} of those are a genuine $0.00, preserved as 0, not null).`);
       }
       console.log('');
       summary.push({ reportName, table, status: 'DRY_RUN', rowsMapped: mapped.length });
@@ -1263,16 +1335,33 @@ async function main() {
   await syncOwnerDirectory(isDryRun, isDiscover, summary);
   await syncLeaseTenants(isDryRun, isDiscover, summary);
 
-  // ── lease_tenants FK resolution — run after all tables are populated ────
+  // ── Portfolio-wide FK resolution — run after all tables are populated ───
+  // resolve_appfolio_foreign_keys() (20260803000001_resolve_fk_function.sql)
+  // matches units.property_id, leases.unit_id/tenant_id, and
+  // maintenance_requests.unit_id from the raw appfolio_*_id columns each
+  // report writes. Existed in the database but was never called from this
+  // regular sync — approved by Peter 2026-09-01 to turn on, after tracing
+  // 229 of 529 maintenance_requests rows (43%) sitting permanently
+  // unlinked to any unit/property because nothing ever ran this for them.
+  // Purely corrective (UPDATE ... WHERE ... IS DISTINCT FROM — matches
+  // existing appfolio_*_id values to real rows, changes nothing else,
+  // never deletes), so safe to run every sync alongside the lease_tenants
+  // resolution below, which already worked the same way.
+  if (!isDryRun && !isDiscover) {
+    try {
+      const fkResult = await supabaseRpc('resolve_appfolio_foreign_keys');
+      console.log(`[appfolio-fk-resolution] units→properties: ${fkResult.units_linked}, leases→units: ${fkResult.leases_units}, leases→tenants: ${fkResult.leases_tenants}, maintenance_requests→units: ${fkResult.mr_units}\n`);
+      summary.push({ reportName: 'appfolio-fk-resolution', status: 'OK', ...fkResult });
+    } catch (err) {
+      console.error(`[appfolio-fk-resolution] ERROR: ${err.message}\n`);
+      summary.push({ reportName: 'appfolio-fk-resolution', status: 'ERROR', error: err.message });
+    }
+  }
+
+  // ── lease_tenants FK resolution ──────────────────────────────────────
   // lease_tenants.lease_id / .tenant_id — its own function
   // (supabase/migrations/20260813000001_lease_tenants.sql), part of the
-  // security-deposit build's multi-tenant fix. This is the only FK
-  // resolution this sync calls — resolve_appfolio_foreign_keys()
-  // (20260803000001_resolve_fk_function.sql, the portfolio-wide
-  // units/leases/maintenance_requests resolver) exists in the database but
-  // is intentionally never invoked here; activating it is a separate,
-  // not-yet-approved decision (see this file's own top-of-file summary
-  // comment: "Foreign-key joins... are deferred to a future release").
+  // security-deposit build's multi-tenant fix.
   if (!isDryRun && !isDiscover) {
     try {
       const ltFkResult = await supabaseRpc('resolve_lease_tenant_foreign_keys');

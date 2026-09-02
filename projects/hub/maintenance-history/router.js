@@ -40,12 +40,15 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 const latchel = require('./lib/latchel-connector');
 const extractClaims = require('./lib/extract-claims');
 const contentCheck = require('./lib/content-check');
-const { TERMS_VERSION } = require('./lib/protected-class-terms');
+const { scanText, TERMS_VERSION } = require('./lib/protected-class-terms');
+const componentCategories = require('./lib/component-categories');
+const { synthesizeComponent } = require('./lib/synthesize-component');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Config ─────────────────────────────────────────────────────────────
@@ -142,6 +145,64 @@ function requireMaintenanceHistoryRole(...roles) {
   };
 }
 
+// Roles that can see flagged-claim content for the "Needs privacy review"
+// surface — shared-property-context-SPEC.md Part 2. One constant, reused
+// below for both the flagged-queue route's own gate and the
+// flagged_review_count field on Property Overview, so the two checks can't
+// be retyped separately and drift apart.
+//
+// director_of_operations included as of this build. History: the prior
+// build (this constant was admin/reviewer only) deliberately held this role
+// back — Peter decided 2026-09-01 to include it, but Asimov required a
+// separate Mason Fair Housing review before it actually shipped here (POST
+// /claims/:id/review below already granted this role starting with commit
+// 79c43cf and was untouched by that narrowing — see its own comment).
+// Mason has since reviewed and given a conditional yes: director_of_operations
+// back in, ON CONDITION that (1) a one-time acknowledgment gate stands
+// between this role and any flagged claim text or Confirm/Correct/Reject
+// action, and (2) the audit log captures the acting role, not just email —
+// both implemented below (see PRIVACY_QUEUE_ACK_ACTION / PRIVACY_QUEUE_ACK_ROLE
+// and the review route's audit_log write). Full decision trail:
+// compliance/director-of-operations-privacy-review-access.md.
+const PRIVACY_REVIEW_ROLES = ['admin', 'reviewer', 'director_of_operations'];
+
+// ─── One-time privacy-queue acknowledgment gate — Mason's condition 1
+// (see PRIVACY_REVIEW_ROLES comment above). admin/reviewer are NOT subject
+// to this — they had this access before this build and their experience is
+// unchanged. It exists specifically because director_of_operations is
+// newly gaining exposure to flagged (protected-class-adjacent) claim
+// content it never had a working path to before. Tracked as an audit_log
+// row (action = PRIVACY_QUEUE_ACK_ACTION, actor_id = the person's email),
+// not a new table/column — reusing audit_log matches this codebase's
+// existing "don't build schema ahead of a proven need" pattern (see
+// property-overview-SPEC.md's own reasoning for skipping a cache table),
+// and audit_log already has both the indexes this lookup needs
+// (idx_audit_log_action on action, idx_audit_log_actor on
+// (actor_type, actor_id) — 20260720000003_foundation.sql /
+// 20260815000000_audit_log_rule1_compliance.sql), so a targeted
+// action+actor_id filter is a cheap indexed lookup, not a table scan.
+const PRIVACY_QUEUE_ACK_ACTION = 'maintenance_claims.privacy_queue_acknowledged';
+const PRIVACY_QUEUE_ACK_ROLE = 'director_of_operations';
+
+// count:'exact'+head:true — same established pattern as the
+// flagged_review_count check below (and security-deposit/router.js's
+// lease_tenants count check) rather than fetching and comparing rows.
+async function hasAcknowledgedPrivacyQueue(email) {
+  const { count, error } = await supabase
+    .from('audit_log')
+    .select('id', { count: 'exact', head: true })
+    .eq('action', PRIVACY_QUEUE_ACK_ACTION)
+    .eq('actor_id', email);
+  if (error) throw error;
+  return (count || 0) > 0;
+}
+
+const PRIVACY_QUEUE_ACK_MESSAGE =
+  'This queue contains real tenant claims touching Fair Housing-protected characteristics ' +
+  '(race, disability, immigration status, health, familial status, and similar). Treat everything ' +
+  "here as confidential, and use it only for legitimate review — not for any other purpose. " +
+  "You'll only see this notice once.";
+
 // ─── Router: everyone reaching here is already hub-logged-in ───────────
 const router = express.Router();
 router.use(attachMaintenanceHistoryRole);
@@ -178,7 +239,7 @@ router.get('/api/maintenance-history/tickets', requireMaintenanceHistoryAccess, 
       .from('maintenance_requests')
       .select(`
         id, title, status, appfolio_id, latchel_job_id, latchel_claims_synced_at,
-        units ( unit_number, properties ( name, address ) )
+        units ( unit_number, properties ( id, name, address ) )
       `)
       .not('latchel_job_id', 'is', null)
       .order('id', { ascending: true })
@@ -226,6 +287,7 @@ router.get('/api/maintenance-history/tickets', requireMaintenanceHistoryAccess, 
     appfolio_id: r.appfolio_id,
     latchel_job_id: r.latchel_job_id,
     latchel_claims_synced_at: r.latchel_claims_synced_at,
+    property_id: r.units && r.units.properties ? r.units.properties.id : null,
     property_name: r.units && r.units.properties ? r.units.properties.name : null,
     property_address: r.units && r.units.properties ? r.units.properties.address : null,
     unit_number: r.units ? r.units.unit_number : null,
@@ -291,6 +353,461 @@ router.get('/api/maintenance-history/tickets/:id', requireMaintenanceHistoryAcce
   });
 });
 
+// ─── Property Overview — property-overview-SPEC.md, Steps 1-5 ──────────
+// Request-time aggregation + synthesis, no caching table (spec's
+// "Deliberately not built for v1" — this is a first-day/decision-support
+// lookup tool, not a high-traffic dashboard). Reads
+// maintenance_claims_decision_safe exactly as the spec directs — flagged
+// and rejected claims are already structurally excluded upstream; this
+// route does not invent a second exclusion path for claims.
+//
+// Step 4's recency cutoff — a plain constant, not a researched number
+// (SPEC.md Open Item #3), matching the RESULT_LIMIT pattern already used
+// in lib/property-search.js. Easy to change here since it lives in code,
+// not a database value.
+const RECENT_MONTHS = 12;
+
+function monthsAgo(n) {
+  const d = new Date();
+  d.setUTCMonth(d.getUTCMonth() - n);
+  return d;
+}
+
+// Asimov governance review, 2026-08-31, condition 2: when a synthesized
+// sentence cites claims with mixed review_status, the displayed marker
+// must show the LEAST-confirmed status of the set — any 'unreviewed'
+// citation makes the whole sentence read 'unreviewed', never
+// 'confirmed'/'corrected' just because another cited claim happens to be
+// reviewed. Rejected claims never reach here (excluded by
+// maintenance_claims_decision_safe), so only these three ever appear.
+const REVIEW_STATUS_RANK = { unreviewed: 0, corrected: 1, confirmed: 2 };
+function leastConfirmedStatus(statuses) {
+  if (!statuses.length) return 'unreviewed';
+  return statuses.reduce((worst, s) =>
+    (REVIEW_STATUS_RANK[s] ?? 0) < (REVIEW_STATUS_RANK[worst] ?? 0) ? s : worst
+  );
+}
+
+// Asimov governance review, 2026-08-31, condition 1 (Finding 3): this
+// page's "unmatched ticket" path shows maintenance_requests.title/
+// description straight from AppFolio (appfolio-sync/sync.js ~line 280,
+// job_description/service_request_description) — raw staff/vendor free
+// text that has NEVER passed through the two-layer content check that
+// gates maintenance_claims (that check only runs on the Latchel-derived
+// extraction pipeline). Applied here to every raw title this page shows
+// — unmatched-ticket one-liners, the older-history compressed line, and
+// the "Currently Open" list — not only the literal unmatched path Asimov
+// named, since all three pull from the same unscreened AppFolio fields.
+// On a hit: show a generic placeholder instead of the raw text, and log
+// the exclusion the same way a flagged claim is logged today.
+const APPFOLIO_EXCLUSION_ACTION = 'maintenance_history.appfolio_text_excluded';
+const APPFOLIO_TEXT_PLACEHOLDER = 'AppFolio record — see ticket for details';
+
+async function safeTicketTitle(ticket, propertyId) {
+  const raw = (ticket.title || '').split('\n')[0] || '(no title)';
+  const scan = scanText(`${ticket.title || ''} ${ticket.description || ''}`);
+  if (!scan.flagged) return { text: raw, flagged: false };
+
+  // Log once per ticket, not once per page view — check for an existing
+  // entry first so repeat visits to the same property don't write a new
+  // audit_log row every time for a flag that's already on record.
+  try {
+    const { data: existing, error: existingErr } = await supabase
+      .from('audit_log')
+      .select('id')
+      .eq('action', APPFOLIO_EXCLUSION_ACTION)
+      .eq('entity_id', ticket.id)
+      .maybeSingle();
+    if (existingErr) throw existingErr;
+    if (!existing) {
+      await supabase.from('audit_log').insert({
+        action: APPFOLIO_EXCLUSION_ACTION,
+        entity_type: 'maintenance_request',
+        entity_id: ticket.id,
+        actor_type: 'system',
+        actor_id: 'maintenance-history-content-check',
+        actor_version: TERMS_VERSION,
+        privacy_category: 'processing',
+        risk_level: 'high',
+        property_id: propertyId || null,
+        details: { flagged_category: scan.categories.join(', '), matched_layer: 'keyword', source: 'appfolio_title_description' },
+      });
+    }
+  } catch (err) {
+    console.error('[maintenance-history] audit_log check/insert failed for AppFolio text exclusion:', err.message);
+  }
+
+  return { text: APPFOLIO_TEXT_PLACEHOLDER, flagged: true };
+}
+
+router.get('/api/maintenance-history/property/:property_id/overview', requireMaintenanceHistoryAccess, async (req, res) => {
+  const propertyId = req.params.property_id;
+  if (!isValidUuid(propertyId)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  const { data: property, error: propErr } = await supabase
+    .from('properties')
+    .select('id, name, address, city, state, zip, unit_count, appfolio_id')
+    .eq('id', propertyId)
+    .maybeSingle();
+  if (propErr) return res.status(500).json({ error: propErr.message });
+  if (!property) return res.status(404).json({ error: 'Property not found.' });
+
+  // Per-ticket safe-title lookups are cached for the life of this request
+  // — the same ticket can appear in "Currently Open," a component's
+  // detail list, and its compressed line, and safeTicketTitle's audit-log
+  // check/insert shouldn't run three times for one page view.
+  const safeTitleCache = new Map();
+  async function getSafeTitle(ticket) {
+    if (safeTitleCache.has(ticket.id)) return safeTitleCache.get(ticket.id);
+    const result = await safeTicketTitle(ticket, property.id);
+    safeTitleCache.set(ticket.id, result);
+    return result;
+  }
+
+  // ── Header: units + occupancy/lease status ──────────────────────────
+  const { data: units, error: unitsErr } = await supabase
+    .from('units')
+    .select('id, unit_number, status')
+    .eq('property_id', property.id)
+    .order('unit_number', { ascending: true });
+  if (unitsErr) return res.status(500).json({ error: unitsErr.message });
+  const unitIds = (units || []).map(u => u.id);
+
+  const leaseByUnit = {};
+  if (unitIds.length) {
+    const { data: leases, error: leasesErr } = await supabase
+      .from('leases')
+      .select('unit_id, status, lease_end')
+      .in('unit_id', unitIds)
+      .order('lease_end', { ascending: false });
+    if (leasesErr) return res.status(500).json({ error: leasesErr.message });
+    // Sorted lease_end desc above, so the first row seen per unit is
+    // already its most-recent lease; only replace it if a later row is
+    // 'active' and the one already stored isn't (prefer an active lease
+    // over a more-recent-but-lapsed one).
+    for (const l of leases || []) {
+      const existing = leaseByUnit[l.unit_id];
+      if (!existing || (l.status === 'active' && existing.status !== 'active')) {
+        leaseByUnit[l.unit_id] = l;
+      }
+    }
+  }
+
+  // Occupancy is derived from a real active lease, not units.status —
+  // confirmed live 2026-09-01 that the AppFolio sync writes 'vacant' for
+  // every unit on every run (unit_directory's default, never overwritten
+  // to 'occupied' anywhere) and nothing else ever sets it, so units.status
+  // reads "vacant" portfolio-wide regardless of real occupancy. This
+  // endpoint already fetches each unit's active lease for lease_end above;
+  // reusing it here is the correct signal, not a workaround.
+  const unitRows = (units || []).map(u => ({
+    id: u.id,
+    unit_number: u.unit_number,
+    status: leaseByUnit[u.id] && leaseByUnit[u.id].status === 'active' ? 'occupied' : 'vacant',
+    lease_end: leaseByUnit[u.id] ? leaseByUnit[u.id].lease_end : null,
+  }));
+
+  // ── Header: current owner. property_owners has no FK here — it joins
+  // on AppFolio's own text IDs (20260720000002_owners.sql) — and only
+  // ever holds the CURRENT owner-property link (no start/end date), a
+  // limitation this response surfaces via has_owner_history_gap so the UI
+  // can show it honestly rather than implying this is full ownership
+  // history. ─────────────────────────────────────────────────────────
+  let owners = [];
+  if (property.appfolio_id) {
+    const { data: poRows, error: poErr } = await supabase
+      .from('property_owners')
+      .select('appfolio_owner_id')
+      .eq('appfolio_property_id', property.appfolio_id);
+    if (poErr) return res.status(500).json({ error: poErr.message });
+    const ownerIds = (poRows || []).map(p => p.appfolio_owner_id);
+    if (ownerIds.length) {
+      const { data: ownerRows, error: ownerErr } = await supabase
+        .from('owners')
+        .select('name, phone, email')
+        .in('appfolio_id', ownerIds);
+      if (ownerErr) return res.status(500).json({ error: ownerErr.message });
+      owners = ownerRows || [];
+    }
+  }
+
+  // ── Every maintenance_requests row for this property, Latchel-matched
+  // or not — SPEC.md's "completeness point": an unmatched ticket still
+  // exists with real AppFolio fields and must not be silently dropped
+  // from "everything that's going on." ─────────────────────────────────
+  let tickets = [];
+  if (unitIds.length) {
+    const { data: mrRows, error: mrErr } = await supabase
+      .from('maintenance_requests')
+      .select('id, title, description, status, cost, vendor_name, completed_at, created_at, appfolio_id, latchel_job_id, unit_id')
+      .in('unit_id', unitIds);
+    if (mrErr) return res.status(500).json({ error: mrErr.message });
+    tickets = mrRows || [];
+  }
+
+  // ── Spend rollup — pure SQL-shape sum over already-synced cost values,
+  // not itemized invoice reconciliation (spec's "light context, not full
+  // financial reconciliation"). ────────────────────────────────────────
+  const twelveMonthsAgo = monthsAgo(RECENT_MONTHS);
+  let spendTrailing12 = 0;
+  let spendAllTime = 0;
+  for (const t of tickets) {
+    const cost = typeof t.cost === 'number' ? t.cost : 0;
+    spendAllTime += cost;
+    const d = t.completed_at || t.created_at;
+    if (d && new Date(d) >= twelveMonthsAgo) spendTrailing12 += cost;
+  }
+
+  const baseResponse = {
+    property: {
+      id: property.id, name: property.name, address: property.address,
+      city: property.city, state: property.state, zip: property.zip, unit_count: property.unit_count,
+    },
+    owners: owners.map(o => ({ name: o.name, phone: o.phone, email: o.email })),
+    has_owner_history_gap: true, // property_owners holds current ownership only — see comment above
+    units: unitRows,
+    spend: {
+      trailing_12mo: Math.round(spendTrailing12 * 100) / 100,
+      all_time: Math.round(spendAllTime * 100) / 100,
+      note: 'Sum of maintenance_requests.cost as synced from AppFolio — not every work order has a cost populated, so this is a lower bound, not full invoice reconciliation.',
+    },
+    has_data: tickets.length > 0,
+  };
+
+  if (tickets.length === 0) {
+    return res.json({
+      ...baseResponse,
+      open_items: [],
+      components: [],
+      no_data_message: 'No maintenance ticket data synced for this property yet.',
+    });
+  }
+
+  // ── Flagged-privacy-review count, role-gated — shared-property-context-
+  // SPEC.md Part 2. Queried against the raw maintenance_claims table, not
+  // maintenance_claims_decision_safe above — that view structurally
+  // excludes flagged rows, which is exactly what this count needs to see.
+  // count:'exact'+head:true matches the established pattern
+  // (security-deposit/router.js's lease_tenants count check) rather than
+  // fetching and counting rows client-side.
+  //
+  // Left undefined (never spread into the response) for any role outside
+  // PRIVACY_REVIEW_ROLES, and also when the real count is 0 — same
+  // omit-don't-send-a-zero discipline in both cases, so there is no code
+  // path where presence of the key itself doesn't already mean "a person
+  // with real reviewer access should look at this."
+  const ticketIds = tickets.map(t => t.id);
+  let flaggedReviewCount = null;
+  if (PRIVACY_REVIEW_ROLES.includes(req.maintenanceHistoryRole)) {
+    const { count: flaggedCount, error: flaggedCountErr } = await supabase
+      .from('maintenance_claims')
+      .select('id', { count: 'exact', head: true })
+      .in('maintenance_request_id', ticketIds)
+      .eq('flagged_protected_class', true);
+    if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
+    flaggedReviewCount = flaggedCount || 0;
+  }
+
+  // ── Claims for every ticket on this property, decision-safe only —
+  // reused exactly as SPEC.md directs, no new exclusion path for claims.
+  const { data: claimRows, error: claimsErr } = await supabase
+    .from('maintenance_claims_decision_safe')
+    .select('id, maintenance_request_id, claim_type, claim_text, claim_date, outcome_level, review_status')
+    .in('maintenance_request_id', ticketIds);
+  if (claimsErr) return res.status(500).json({ error: claimsErr.message });
+
+  const claimsByTicket = {};
+  for (const c of claimRows || []) {
+    (claimsByTicket[c.maintenance_request_id] = claimsByTicket[c.maintenance_request_id] || []).push(c);
+  }
+  const allClaimIds = new Set((claimRows || []).map(c => c.id));
+  const claimById = new Map((claimRows || []).map(c => [c.id, c]));
+
+  // ── Per-ticket derived facts — Steps 1-4: component bucket(s),
+  // open/resolved, recurrence, recency. ────────────────────────────────
+  const enriched = tickets.map(t => {
+    const claims = claimsByTicket[t.id] || [];
+    const hasClaims = claims.length > 0;
+    const outcomeLevels = claims.filter(c => c.claim_type === 'outcome' && c.outcome_level != null).map(c => c.outcome_level);
+    const maxOutcomeLevel = outcomeLevels.length ? Math.max(...outcomeLevels) : 0;
+    const hasRecurrenceClaim = claims.some(c => c.claim_type === 'recurrence');
+    const statusResolved = ['completed', 'closed'].includes(t.status);
+    // Step 2 — made from the claims' own outcome evidence when claims
+    // exist, not just the AppFolio status field: a "Completed" ticket
+    // whose only outcome claim is level 1 ("vendor says done") still
+    // reads as unresolved here, exactly the 17445-1 case the spec calls
+    // out. Falls back to AppFolio status alone for tickets with no
+    // Latchel claims at all — nothing to check outcome evidence against.
+    const resolved = hasClaims ? (statusResolved && maxOutcomeLevel >= 3) : statusResolved;
+    const recencyDate = t.completed_at || t.created_at || null;
+    const recent = !resolved || hasRecurrenceClaim || (recencyDate && new Date(recencyDate) >= twelveMonthsAgo);
+    const components = componentCategories.categorize(`${t.title || ''} ${t.description || ''}`);
+    return { ticket: t, claims, hasClaims, maxOutcomeLevel, hasRecurrenceClaim, resolved, recencyDate, recent, components };
+  });
+
+  // ── "Currently Open / Unresolved" — pinned above the component
+  // breakdown, per spec's "single most important section." One row per
+  // ticket (not per component), listing every component it touches. ────
+  const openItemsRaw = enriched.filter(e => !e.resolved);
+  const open_items = [];
+  for (const e of openItemsRaw) {
+    const label = await getSafeTitle(e.ticket);
+    open_items.push({
+      ticket_id: e.ticket.id,
+      title: label.text,
+      title_redacted: label.flagged,
+      status: e.ticket.status,
+      appfolio_id: e.ticket.appfolio_id,
+      cost: e.ticket.cost,
+      components: e.components.map(k => componentCategories.CATEGORY_LABELS[k]),
+      last_activity: e.recencyDate,
+    });
+  }
+  open_items.sort((a, b) => (a.last_activity < b.last_activity ? 1 : a.last_activity > b.last_activity ? -1 : 0));
+
+  // ── By System — one card per component bucket that actually has data
+  // for this property (empty buckets don't show). ─────────────────────
+  const components = [];
+  for (const key of componentCategories.CATEGORY_ORDER) {
+    const bucketTickets = enriched
+      .filter(e => e.components.includes(key))
+      .sort((a, b) => (a.recencyDate || '') < (b.recencyDate || '') ? 1 : (a.recencyDate || '') > (b.recencyDate || '') ? -1 : 0);
+    if (!bucketTickets.length) continue;
+
+    // Step 3 — recurring marker: any claim_type='recurrence' row, or two
+    // or more tickets in this bucket.
+    const recurring = bucketTickets.length >= 2 || bucketTickets.some(e => e.hasRecurrenceClaim);
+
+    // Step 4 — recent gets detail, old gets compressed.
+    const detailed = bucketTickets.filter(e => e.recent);
+    const compressed = bucketTickets.filter(e => !e.recent);
+
+    // Step 5 — synthesis, built only from claims belonging to "detailed"
+    // tickets in this bucket. Compressed old history gets a deterministic
+    // one-line summary below, not an AI call.
+    //
+    // Judge's finding, this build: ticket_title here used to be raw
+    // (e.ticket.title || '').split('\n')[0] — never scanned, even though
+    // this same title IS scanned via getSafeTitle()/safeTicketTitle() before
+    // DISPLAY everywhere else on this page (open_items above, the
+    // compressed_line and unmatched_entries below). A flagged title reaching
+    // the synthesis prompt as AI context could influence or leak into a
+    // generated sentence shown to every role (this page has no role gate at
+    // all). Reusing getSafeTitle() here — not a second scan implementation —
+    // closes that gap the same way display already is closed: a flagged
+    // title is replaced with the same safe placeholder before it ever
+    // becomes prompt text, not just before it's rendered. One lookup per
+    // ticket (not per claim) via the same request-scoped cache getSafeTitle
+    // already uses.
+    const detailedClaims = [];
+    for (const e of detailed) {
+      if (!e.hasClaims) continue;
+      const label = await getSafeTitle(e.ticket);
+      for (const c of e.claims) {
+        detailedClaims.push({
+          id: c.id, claim_type: c.claim_type, claim_text: c.claim_text, claim_date: c.claim_date,
+          ticket_title: label.text,
+        });
+      }
+    }
+
+    let synthesis = null;
+    if (detailedClaims.length) {
+      try {
+        const result = await synthesizeComponent({
+          componentLabel: componentCategories.CATEGORY_LABELS[key],
+          propertyLabel: property.name || property.address,
+          claims: detailedClaims,
+        });
+        // Citation validation (spec Step 5) — every cited claim_id must
+        // actually exist and actually belong to this property's real
+        // claim set, or that sentence is dropped rather than shown.
+        const validatedSentences = [];
+        for (const s of result.sentences) {
+          const validIds = s.claim_ids.filter(id => allClaimIds.has(id));
+          if (!validIds.length) continue; // fully hallucinated citation — drop the sentence
+          // Defense-in-depth, per Judge's alternative suggestion this build:
+          // the claims fed into this prompt already passed the two-layer
+          // content check at ingestion (maintenance_claims_decision_safe),
+          // and the ticket title feeding it is now scanned too (above), but
+          // the model's own generated wording is a third, independent
+          // surface — a borderline-but-passed claim could still combine
+          // into a sentence that itself reads as protected-class-flagged.
+          // Same drop-and-continue as the hallucinated-citation check right
+          // above: if the generated text itself trips the scan, the
+          // sentence is dropped, not shown.
+          if (scanText(s.text).flagged) continue;
+          const statuses = validIds.map(id => claimById.get(id).review_status);
+          validatedSentences.push({ text: s.text, claim_ids: validIds, review_status: leastConfirmedStatus(statuses) });
+        }
+        synthesis = { sentences: validatedSentences, truncated: !!result.truncated && validatedSentences.length === 0 };
+      } catch (err) {
+        console.error(`[maintenance-history] overview synthesis failed for component "${key}", property ${property.id}:`, err.message);
+        synthesis = { sentences: [], truncated: false, error: true };
+      }
+    }
+
+    // Step 4's compressed line — deterministic, not AI: "Also resolved,
+    // no recurrence since: X (Mon YYYY); Y (Mon YYYY)." Covers BOTH
+    // matched and unmatched old/resolved/non-recurring tickets.
+    let compressed_line = null;
+    if (compressed.length) {
+      const parts = [];
+      for (const e of compressed) {
+        const label = await getSafeTitle(e.ticket);
+        const dateStr = e.recencyDate ? new Date(e.recencyDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : 'date unknown';
+        parts.push(`${label.text} (${dateStr})`);
+      }
+      compressed_line = `Also resolved, no recurrence since: ${parts.join('; ')}.`;
+    }
+
+    // Unmatched-ticket minimal one-liners — SPEC.md's completeness point:
+    // "a matched ticket gets the full synthesized treatment; an unmatched
+    // one still gets a minimal one-line entry sourced straight from
+    // AppFolio's own fields." Only covers DETAILED unmatched tickets —
+    // compressed unmatched tickets are already folded into
+    // compressed_line above.
+    const unmatched_entries = [];
+    for (const e of detailed) {
+      if (e.hasClaims) continue;
+      const label = await getSafeTitle(e.ticket);
+      const costStr = typeof e.ticket.cost === 'number' ? `$${e.ticket.cost.toFixed(2)}` : 'cost not recorded';
+      const dateStr = e.ticket.completed_at ? e.ticket.completed_at.slice(0, 10) : null;
+      const statusStr = e.resolved
+        ? `completed ${dateStr || '(date not recorded)'}`
+        : 'still open';
+      unmatched_entries.push({
+        ticket_id: e.ticket.id,
+        text: `${label.text} — ${statusStr}, ${costStr}${e.ticket.vendor_name ? ', vendor: ' + e.ticket.vendor_name : ''} — no detailed Latchel history available.`,
+        title_redacted: label.flagged,
+      });
+    }
+
+    const bucketDates = bucketTickets.map(e => e.recencyDate).filter(Boolean).sort();
+
+    components.push({
+      key,
+      label: componentCategories.CATEGORY_LABELS[key],
+      ticket_count: bucketTickets.length,
+      date_range: { earliest: bucketDates[0] || null, latest: bucketDates[bucketDates.length - 1] || null },
+      recurring,
+      synthesis,
+      compressed_line,
+      unmatched_entries,
+      open_ticket_ids: detailed.filter(e => !e.resolved).map(e => e.ticket.id),
+    });
+  }
+
+  return res.json({
+    ...baseResponse,
+    open_items,
+    components,
+    ...(flaggedReviewCount ? { flagged_review_count: flaggedReviewCount } : {}),
+  });
+});
+
 // Round-trip calendar validation — `new Date("2026-02-30")` does NOT return
 // an invalid date the way you'd expect; JS silently rolls it forward to
 // March 2nd instead of failing. That let bad month-end dates (Apr 31, Jun
@@ -341,6 +858,27 @@ router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHist
     .maybeSingle();
   if (beforeErr) return res.status(500).json({ error: beforeErr.message });
   if (!before) return res.status(404).json({ error: 'Claim not found.' });
+
+  // Acknowledgment gate, Mason's condition 1 (PRIVACY_REVIEW_ROLES comment
+  // above) — director_of_operations only, and only for a flagged claim.
+  // admin/reviewer hit neither branch of this condition, so their existing
+  // Confirm/Correct/Reject flow is byte-for-byte unchanged. A
+  // director_of_operations user can already reach this route for an
+  // UNFLAGGED claim exactly as before (that grant predates this build,
+  // commit 79c43cf, and Mason's condition is specifically about flagged/
+  // protected-class content) — this only blocks the flagged case, and only
+  // until they've acknowledged once.
+  if (before.flagged_protected_class && req.maintenanceHistoryRole === PRIVACY_QUEUE_ACK_ROLE) {
+    let acknowledged;
+    try {
+      acknowledged = await hasAcknowledgedPrivacyQueue(req.user.email);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!acknowledged) {
+      return res.status(403).json({ error: 'privacy_queue_acknowledgment_required', message: PRIVACY_QUEUE_ACK_MESSAGE });
+    }
+  }
 
   const reviewerName = req.maintenanceHistoryMemberName || req.user.email;
   const review_status = action === 'confirm' ? 'confirmed' : action === 'correct' ? 'corrected' : 'rejected';
@@ -415,7 +953,14 @@ router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHist
     actor_id: req.user.email,
     privacy_category: 'processing',
     risk_level: riskLevel,
-    details: { review_status, reviewer_notes: reviewer_notes || null },
+    // Mason's condition 2 (PRIVACY_REVIEW_ROLES comment above): the role in
+    // effect at the time of this action must be recoverable later, not just
+    // the actor's email — added to details rather than a new column, the
+    // least-disruptive way to extend this existing write. actor_id (email)
+    // is also always resolvable back through team_member_tool_roles for
+    // anyone whose role has since changed, so this is redundant-by-design
+    // (belt-and-suspenders), not the only path to the answer.
+    details: { review_status, reviewer_notes: reviewer_notes || null, actor_role: req.maintenanceHistoryRole },
   });
   if (auditErr) {
     console.error('[maintenance-history] audit_log insert failed for claim review:', auditErr.message);
@@ -424,11 +969,98 @@ router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHist
   return res.json({ success: true, claim: updated });
 });
 
+// ─── POST /api/maintenance-history/privacy-queue/acknowledge ────────────
+// Mason's condition 1 (PRIVACY_REVIEW_ROLES comment above). Role-gated to
+// PRIVACY_QUEUE_ACK_ROLE specifically, not the whole PRIVACY_REVIEW_ROLES
+// set — admin/reviewer never need to call this, and there's no reason to
+// let them. Idempotent: a second acknowledgment from someone who already
+// has one on record is a silent no-op, not a duplicate row — same
+// check-then-insert shape as safeTicketTitle's audit_log dedup above.
+router.post('/api/maintenance-history/privacy-queue/acknowledge', requireMaintenanceHistoryRole(PRIVACY_QUEUE_ACK_ROLE), async (req, res) => {
+  try {
+    const already = await hasAcknowledgedPrivacyQueue(req.user.email);
+    if (!already) {
+      const { data: userRow } = await supabase.from('users').select('id').eq('email', req.user.email).maybeSingle();
+      const { error: ackErr } = await supabase.from('audit_log').insert({
+        action: PRIVACY_QUEUE_ACK_ACTION,
+        entity_type: 'team_member',
+        entity_id: req.teamMemberId,
+        performed_by: userRow ? userRow.id : null,
+        actor_type: 'human',
+        actor_id: req.user.email,
+        privacy_category: 'processing',
+        risk_level: 'low',
+        details: { role: req.maintenanceHistoryRole },
+      });
+      if (ackErr) return res.status(500).json({ error: ackErr.message });
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/maintenance-history/flagged-queue ─────────────────────────
-// "Needs privacy review" — reviewer/admin only, per SPEC.md. Shows the
-// real claim text (a reviewer has to be able to read it to judge it) —
-// never logged, only displayed to an authorized human.
-router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
+// "Needs privacy review" — gated to PRIVACY_REVIEW_ROLES (admin, reviewer,
+// director_of_operations — see that constant's own comment for the full
+// history of why director_of_operations was out, then back in with
+// conditions). Shows the real claim text (a reviewer has to be able to
+// read it to judge it) — never logged itself, only the fact that the queue
+// was opened (see the view-logging block below, added by this build for
+// the first time).
+//
+// Optional ?property_id= — shared-property-context-SPEC.md Part 2,
+// "caught on review": additive only. With no filter this is the same
+// portfolio-wide query as before, unchanged, and stays the default when
+// this route is reached normally (not via the Property Overview badge) —
+// that comprehensive-sweep behavior is the whole point of this queue.
+router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
+  // Acknowledgment gate, Mason's condition 1 — director_of_operations only
+  // (see PRIVACY_REVIEW_ROLES comment above). This route returns real
+  // claim_text in its response body, so the gate has to sit at the API
+  // level, not just hide a button in the front-end — hiding the button
+  // still lets the browser receive the text. admin/reviewer never hit this
+  // branch, so nothing changes for them.
+  if (req.maintenanceHistoryRole === PRIVACY_QUEUE_ACK_ROLE) {
+    let acknowledged;
+    try {
+      acknowledged = await hasAcknowledgedPrivacyQueue(req.user.email);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!acknowledged) {
+      return res.status(403).json({ error: 'privacy_queue_acknowledgment_required', message: PRIVACY_QUEUE_ACK_MESSAGE });
+    }
+  }
+
+  const propertyIdFilter = req.query.property_id;
+  if (propertyIdFilter !== undefined && !isValidUuid(propertyIdFilter)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  // maintenance_claims has no property_id of its own — it only reaches a
+  // property through maintenance_request_id -> units -> properties, same
+  // path the Property Overview route above already walks. Resolve that
+  // property's ticket ids first, then narrow the claims query to them.
+  // ticketIds stays null (no filter applied below) when no property_id
+  // was given; it can also resolve to a real, correctly-empty array — a
+  // property with zero tickets has zero flagged claims, a genuine
+  // "nothing flagged here" case, not an error.
+  let ticketIds = null;
+  if (propertyIdFilter) {
+    const { data: units, error: unitsErr } = await supabase
+      .from('units').select('id').eq('property_id', propertyIdFilter);
+    if (unitsErr) return res.status(500).json({ error: unitsErr.message });
+    const unitIds = (units || []).map(u => u.id);
+    ticketIds = [];
+    if (unitIds.length) {
+      const { data: mrRows, error: mrErr } = await supabase
+        .from('maintenance_requests').select('id').in('unit_id', unitIds);
+      if (mrErr) return res.status(500).json({ error: mrErr.message });
+      ticketIds = (mrRows || []).map(r => r.id);
+    }
+  }
+
   // No time bound and no review_status filter — every claim ever flagged
   // as touching a protected class stays visible here forever (by design:
   // this is the Fair Housing / privacy review queue). A silent 1,000-row
@@ -436,21 +1068,32 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
   // from the humans who are supposed to review it — worth fixing
   // regardless of exactly how fast this table grows. Paged by `id`; the
   // real sort (created_at desc) is applied in JS.
+  //
+  // Skip the query entirely (rather than calling .in() with an empty
+  // array) when a property filter resolved to zero tickets — same
+  // "don't query on a known-empty id list" convention the ingest route
+  // above already follows for unitIds/tickets.
   let data;
-  try {
-    data = await fetchAllRows((from, to) => supabase
-      .from('maintenance_claims')
-      .select(`
-        id, claim_type, claim_text, claim_date, outcome_level, source_type, source_reference,
-        confidence, extracted_by, flagged_category, review_status, reviewed_by, reviewed_at, created_at,
-        maintenance_request_id,
-        maintenance_requests!maintenance_claims_maintenance_request_id_fkey ( title, appfolio_id, units ( unit_number, properties ( name, address ) ) )
-      `)
-      .eq('flagged_protected_class', true)
-      .order('id', { ascending: true })
-      .range(from, to));
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
+  if (ticketIds !== null && ticketIds.length === 0) {
+    data = [];
+  } else {
+    try {
+      data = await fetchAllRows((from, to) => {
+        let query = supabase
+          .from('maintenance_claims')
+          .select(`
+            id, claim_type, claim_text, claim_date, outcome_level, source_type, source_reference,
+            confidence, extracted_by, flagged_category, review_status, reviewed_by, reviewed_at, created_at,
+            maintenance_request_id,
+            maintenance_requests!maintenance_claims_maintenance_request_id_fkey ( title, appfolio_id, units ( unit_number, properties ( name, address ) ) )
+          `)
+          .eq('flagged_protected_class', true);
+        if (ticketIds !== null) query = query.in('maintenance_request_id', ticketIds);
+        return query.order('id', { ascending: true }).range(from, to);
+      });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
   }
   data.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
 
@@ -475,6 +1118,42 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
       ? c.maintenance_requests.units.properties.name : null,
     unit_number: c.maintenance_requests && c.maintenance_requests.units ? c.maintenance_requests.units.unit_number : null,
   }));
+
+  // View-logging — Asimov's condition on this build: before now, nothing
+  // logged the act of *viewing* the flagged queue at all (only ingest-time
+  // flagging and review-time decisions were audited). Same performed_by/
+  // actor_type/actor_id lookup as POST /claims/:id/review above. Never the
+  // claim text, claim ids, or any tenant-identifying field — only the
+  // property/filter/result-count shape below.
+  //
+  // audit_log.entity_id is UUID NOT NULL (20260720000003_foundation.sql),
+  // so a literal null isn't possible for the unfiltered (portfolio-wide)
+  // case even though there's no single real entity this open is "about."
+  // Same fix insurance/router.js's batch-import summary task already uses
+  // for that exact situation: a synthetic crypto.randomUUID() placeholder,
+  // never reused or looked up anywhere — the real fact of whether this was
+  // filtered, and to what property, lives in `details` below, which does
+  // allow null.
+  const { data: viewerRow } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', req.user.email)
+    .maybeSingle();
+  const { error: viewAuditErr } = await supabase.from('audit_log').insert({
+    action: 'maintenance_claims.flagged_queue_viewed',
+    entity_type: 'flagged_queue',
+    entity_id: propertyIdFilter || crypto.randomUUID(),
+    performed_by: viewerRow ? viewerRow.id : null,
+    actor_type: 'human',
+    actor_id: req.user.email,
+    privacy_category: 'processing',
+    risk_level: 'low',
+    details: { property_id: propertyIdFilter || null, filtered: !!propertyIdFilter, result_count: rows.length },
+  });
+  if (viewAuditErr) {
+    console.error('[maintenance-history] audit_log insert failed for flagged-queue view:', viewAuditErr.message);
+  }
+
   return res.json(rows);
 });
 

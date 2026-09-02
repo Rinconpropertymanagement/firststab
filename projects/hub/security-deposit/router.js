@@ -76,10 +76,12 @@ function createMailer() {
 // fixed process.env.DO_EMAIL address), this tool has no separate
 // standalone DO inbox configured — recipients are looked up the same way
 // send-reminders looks up pod_lead: everyone holding the
-// director_of_operations role for tool='security_deposit' in
-// team_member_tool_roles (that role value already exists in the shared
-// CHECK constraint — 20260813000004 only needed to add 'pod_lead', see
-// SPEC.md Neo section #6). This is a manual, pod-lead-initiated
+// director_of_operations OR admin role for tool='security_deposit' in
+// team_member_tool_roles (admin included per Peter's 2026-08-31 call —
+// team_member_tool_roles only allows one role per person per tool, so an
+// admin can't also hold director_of_operations without losing the
+// Users-management tab; widening this query was the alternative).
+// This is a manual, pod-lead-initiated
 // escalation (no AI-suggested-status to trigger off of, unlike
 // insurance's approve route), so there's exactly one call site: the
 // escalate route below.
@@ -103,13 +105,13 @@ async function sendEscalationEmail(kase, escalatedBy, reason) {
       .from('team_member_tool_roles')
       .select('team_members ( email, is_active )')
       .eq('tool', 'security_deposit')
-      .eq('role', 'director_of_operations');
+      .in('role', ['director_of_operations', 'admin']);
     const recipients = (roleRows || [])
       .filter(r => r.team_members && r.team_members.is_active)
       .map(r => r.team_members.email);
 
     if (!recipients.length) {
-      console.warn('[security-deposit email] Case escalated but no active director_of_operations recipients found for tool=security_deposit.');
+      console.warn('[security-deposit email] Case escalated but no active director_of_operations/admin recipients found for tool=security_deposit.');
       return false;
     }
 
@@ -211,9 +213,29 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// How long any single request from this client will wait for a response
+// before giving up — same AbortSignal.timeout pattern (and the same
+// 9-15s precedent range) as AUTH_TIMEOUT_MS in projects/hub/lib/auth.js.
+// Before this, this client had no timeout at all, so a stalled connection
+// hung the calling route forever instead of failing cleanly. postgrest-js
+// and storage-js both already catch a rejected fetch (including an
+// AbortSignal timeout) internally and resolve with { error } rather than
+// throwing (confirmed against the installed @supabase/postgrest-js —
+// PostgrestBuilder's executeWithRetry() is wrapped in res.catch() unless
+// .throwOnError() is used, which nothing in this file does), so every
+// existing `if (error) return res.status(500)...` check in this file
+// already turns a timeout into the same clean HTTP error response it
+// turns any other Supabase error into — no route-level changes needed.
+const SUPABASE_TIMEOUT_MS = 15000;
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    global: {
+      fetch: (url, opts = {}) => fetch(url, { ...opts, signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS) }),
+    },
+  }
 );
 
 // ─── Pagination helper — Supabase/PostgREST caps any single .select() at
@@ -1030,6 +1052,9 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   // keep in sync, and storing it would create a second copy of the truth
   // that could drift from the real B2/AppFolio state between reads.
   const flags = [];
+  if (!property || !property.address) {
+    flags.push({ code: 'no_property_address', message: 'This case\'s property address could not be resolved — check the lease, unit, and property records. Move-in/move-out photo matching cannot run without it.' });
+  }
   if (!moveInPhotos) {
     if (moveInUnconfirmed && moveInUnconfirmed.review_status === 'needs_review') {
       flags.push({
@@ -3142,14 +3167,9 @@ internalRouter.post('/api/security-deposit/internal/index-b2-photos', async (req
     if (configErr) return res.status(500).json({ error: configErr.message });
     if (!config) return res.status(500).json({ error: 'No active b2_match_confidence_config row — cannot decide auto-index vs. manual-review.' });
 
-    let allPaths;
-    try {
-      allPaths = await listPhotoFolders();
-    } catch (err) {
-      console.error(`[${ts}] index-b2-photos B2 error:`, err.message);
-      return res.status(500).json({ error: 'Failed to list B2 folders.', detail: err.message });
-    }
-
+    // Fetched before the bucket walk (not after, like this route used to)
+    // specifically so listPhotoFolders can skip re-listing folders it
+    // already knows about — see the comment on that function for why.
     let existingPathList;
     try {
       existingPathList = await fetchAllExistingB2FolderPaths();
@@ -3158,6 +3178,14 @@ internalRouter.post('/api/security-deposit/internal/index-b2-photos', async (req
       return res.status(500).json({ error: 'Failed to load already-indexed folders.', detail: err.message });
     }
     const existingPaths = new Set(existingPathList);
+
+    let allPaths;
+    try {
+      allPaths = await listPhotoFolders('', 0, existingPaths);
+    } catch (err) {
+      console.error(`[${ts}] index-b2-photos B2 error:`, err.message);
+      return res.status(500).json({ error: 'Failed to list B2 folders.', detail: err.message });
+    }
     const newPaths = allPaths.filter(p => !existingPaths.has(p));
 
     let indexed = 0;

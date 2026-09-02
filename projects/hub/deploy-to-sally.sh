@@ -42,6 +42,15 @@ echo "==> Copying Hub code to Sally..."
 # --exclude below — .env and node_modules on Sally are left alone here;
 # node_modules is rebuilt by the npm install step that follows, and .env
 # is managed separately (see the project's .env.example).
+#
+# cron-*.sh — 2026-09-01 incident: these wrapper scripts (create-cases-
+# from-sync, index-b2-photos, send-reminders, maintenance-history-ingest)
+# are written directly onto Sally by hand, not checked into this repo, so
+# --delete removed all four the first time this script ran after they
+# existed — breaking every scheduled cron job that calls one, silently,
+# until caught and all four were recreated by hand. Excluded here so a
+# normal deploy can never do that again. If one of these is ever added to
+# the git repo instead, this exclude becomes unnecessary but harmless.
 rsync -az --delete \
   --exclude 'node_modules' \
   --exclude '.env' \
@@ -49,6 +58,7 @@ rsync -az --delete \
   --exclude '.git' \
   --exclude '.DS_Store' \
   --exclude '*.log' \
+  --exclude 'cron-*.sh' \
   "$LOCAL_DIR/" "$SALLY:$REMOTE_DIR/"
 
 echo ""

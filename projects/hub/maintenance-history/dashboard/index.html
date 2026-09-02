@@ -21,6 +21,16 @@
     .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
     #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
 
+    /* ── Toast (save confirmation) ── */
+    .toast {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px);
+      background: #111827; color: #fff; font-size: 13px; font-weight: 500;
+      padding: 10px 18px; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease;
+      z-index: 1000;
+    }
+    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
     /* ── Tabs ── */
     .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid #e5e7eb; margin-bottom: 18px; }
     .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 9px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; }
@@ -65,6 +75,7 @@
     .correct-form.visible { display: block; }
     .correct-form textarea, .correct-form input { width: 100%; font-size: 12.5px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; margin-bottom: 6px; font-family: inherit; }
     .correct-form textarea { min-height: 50px; }
+    .form-hint { color: #6b7280; font-size: 11.5px; margin-bottom: 8px; }
     .flagged-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
 
     .prop-line { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
@@ -83,6 +94,38 @@
     .actual-spend-note { color: #9ca3af; font-size: 12px; margin: -4px 0 10px; }
     .actual-reimbursed-note { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
     .actual-not-tracked { color: #9ca3af; font-style: italic; }
+
+    /* ── Property Overview tab ── */
+    .prop-link { color: #1d4ed8; cursor: pointer; text-decoration: none; }
+    .prop-link:hover { text-decoration: underline; }
+    #overview-search-results .result-row { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 13px; }
+    #overview-search-results .result-row:last-child { border-bottom: none; }
+    #overview-search-results .result-row:hover { background: #f9fafb; }
+    #overview-search-results .result-addr { color: #6b7280; font-size: 12px; }
+    .disclaimer-banner { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 6px; padding: 10px 14px; font-size: 12.5px; margin-bottom: 16px; line-height: 1.4; }
+    .ov-header-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+    .ov-header-title { font-size: 17px; font-weight: 700; }
+    .ov-header-sub { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
+    .ov-owner-note { color: #9ca3af; font-size: 11.5px; margin-top: 6px; }
+    .ov-units-list { margin-top: 10px; font-size: 12.5px; color: #374151; }
+    .ov-units-list span.unit-item { display: inline-block; margin: 2px 10px 2px 0; }
+    .ov-spend-row { display: flex; gap: 24px; margin-top: 8px; }
+    .ov-spend-figure { font-size: 15px; font-weight: 700; }
+    .ov-spend-label { color: #6b7280; font-size: 11.5px; }
+    .open-item-row { border: 1px solid #fecaca; background: #fff7f7; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+    .open-item-row:hover { background: #fef2f2; }
+    .open-item-title { font-weight: 600; font-size: 13px; color: #111827; }
+    .open-item-meta { color: #6b7280; font-size: 11.5px; margin-top: 3px; }
+    .component-card { margin-bottom: 14px; }
+    .component-card-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .component-card-title { font-size: 14.5px; font-weight: 700; }
+    .component-card-meta { color: #9ca3af; font-size: 11.5px; }
+    .synth-sentence { font-size: 13.5px; line-height: 1.5; margin-bottom: 4px; }
+    .synth-sentence .badge { margin-left: 4px; vertical-align: 1px; }
+    .compressed-line { color: #6b7280; font-size: 12.5px; font-style: italic; margin-top: 8px; }
+    .unmatched-entry { font-size: 12.5px; color: #374151; margin-top: 6px; padding-top: 6px; border-top: 1px dashed #f3f4f6; }
+    .unmatched-entry .prop-link { font-size: 11px; margin-left: 6px; }
+    .ov-empty-note { color: #9ca3af; font-size: 12.5px; font-style: italic; }
   </style>
 </head>
 <body>
@@ -98,6 +141,7 @@
     <div id="content" style="display:none;">
       <div class="tab-bar">
         <button class="tab-btn tab-active" id="tab-tickets">Tickets</button>
+        <button class="tab-btn" id="tab-overview">Property Overview</button>
         <button class="tab-btn" id="tab-budget">Budget</button>
         <button class="tab-btn" id="tab-flagged" style="display:none;">Needs privacy review <span id="flagged-badge"></span></button>
         <button class="tab-btn" id="tab-users" style="display:none;">Users</button>
@@ -123,6 +167,17 @@
         <div id="ticket-detail-body"></div>
       </div>
 
+      <div id="view-overview" style="display:none;">
+        <div class="disclaimer-banner">
+          This overview includes AI-generated summaries composed from claims already extracted from Latchel maintenance tickets. Sentences marked <strong>unreviewed</strong> have not been confirmed by a person — check the source ticket before relying on an unreviewed detail.
+        </div>
+        <div class="search-row" style="position:relative;">
+          <input type="text" id="overview-search-input" placeholder="Search by property name or address" autocomplete="off">
+        </div>
+        <div id="overview-search-results" class="card" style="display:none; padding:0;"></div>
+        <div id="overview-content"></div>
+      </div>
+
       <div id="view-budget" style="display:none;">
         <p class="sub" style="margin-top:-8px;">AppFolio's own budgeted-vs-actual figures for a property, straight from AppFolio's books — nothing here is AI-derived or needs review. Maintenance ticket costs are shown underneath for context only; they will not match AppFolio's numbers exactly, and that's expected (a ticket's cost can post to AppFolio weeks after it closes, and AppFolio's books can include repair costs that never went through Latchel).</p>
         <div class="search-row" style="position:relative;">
@@ -133,9 +188,26 @@
       </div>
 
       <div id="view-flagged" style="display:none;">
-        <div class="card">
+        <!-- One-time acknowledgment gate — Mason's condition 1 on
+             director_of_operations regaining this access (see router.js's
+             PRIVACY_REVIEW_ROLES comment). admin/reviewer never see this:
+             the backend only returns privacy_queue_acknowledgment_required
+             for director_of_operations, so loadFlagged() below only ever
+             shows this gate for that role. -->
+        <div id="privacy-ack-gate" class="card" style="display:none;">
+          <div style="font-weight:700;font-size:14px;margin-bottom:8px;">Before you continue</div>
+          <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:12px;">
+            This queue contains real tenant claims touching Fair Housing-protected characteristics
+            (race, disability, immigration status, health, familial status, and similar). Treat
+            everything here as confidential, and use it only for legitimate review &mdash; not for
+            any other purpose. You'll only see this notice once.
+          </div>
+          <button class="btn btn-confirm" id="privacy-ack-btn">I acknowledge &mdash; continue</button>
+        </div>
+        <div id="flagged-filter-bar" class="disclaimer-banner" style="display:none;"></div>
+        <div class="card" id="flagged-list-card">
           <div id="flagged-list"></div>
-          <div id="flagged-empty" class="empty" style="display:none;">Nothing in the privacy review queue right now.</div>
+          <div id="flagged-empty" class="empty" style="display:none;"></div>
         </div>
       </div>
 
@@ -159,11 +231,52 @@
     </div>
   </div>
 
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
   <script>
     let myRole = null;
     let myEmail = null;
     let allTickets = [];
     let currentTicketId = null;
+
+    // ── Shared property context — shared-property-context-SPEC.md Part 1.
+    // One page-level "current property," set whenever a property is
+    // picked from Property Overview's or Budget's own search box, or from
+    // a property link elsewhere (a ticket row's property link routes
+    // through loadOverview() below, so it's covered too). Tickets,
+    // Property Overview, and Budget all read this on tab-switch to
+    // auto-load the same property instead of a blank search box.
+    //
+    // Replaces this file's old `lastOverviewPropertyId` (spec Open Item
+    // #5 — decided here: replace, don't keep both, since it was already
+    // tracking this exact concept, just narrower). `cameFromOverview` is
+    // kept as its own separate flag — it answers a different question
+    // (did the ticket-detail back link come from Overview?), not "which
+    // property is current."
+    //
+    // In-memory only for v1 (lost on a page refresh) — spec Open Item #4
+    // flagged URL-param persistence as a real open question never put to
+    // Peter. This is the simpler default until that's decided, not a gap.
+    let currentPropertyId = null;
+    let currentPropertyLabel = null;
+    // What Overview/Budget last actually loaded, so switching tabs back
+    // and forth without picking a new property doesn't re-fire their
+    // network call every time — Property Overview's synthesis step calls
+    // the AI per component per request (router.js, no caching table by
+    // design), so a redundant auto-reload on every tab click would be
+    // real, avoidable cost and latency, not just a wasted round trip.
+    let overviewLoadedPropertyId = null;
+    let budgetLoadedPropertyId = null;
+
+    // Correction from shared-property-context-SPEC.md, caught on review:
+    // ticket rows already carry a real property_id from the backend, but
+    // onSearch() below only ever did text matching — there was no
+    // id-based filter to reuse. This is that filter, used when a shared
+    // property carries into this tab; onSearch()'s own text box and its
+    // filter are untouched.
+    function filterTicketsById(propertyId) {
+      renderTickets(allTickets.filter(t => t.property_id === propertyId));
+    }
 
     function escapeHtml(s) {
       return String(s == null ? '' : s)
@@ -187,7 +300,12 @@
       myEmail = me.email;
 
       document.getElementById('content').style.display = 'block';
-      if (myRole === 'admin' || myRole === 'reviewer') {
+      // director_of_operations added here per Mason's conditional approval
+      // — see router.js's PRIVACY_REVIEW_ROLES comment for the full
+      // history. Their first visit to this tab shows the one-time
+      // acknowledgment gate (loadFlagged() below); admin/reviewer are
+      // unaffected — nothing about their flow changes.
+      if (myRole === 'admin' || myRole === 'reviewer' || myRole === 'director_of_operations') {
         document.getElementById('tab-flagged').style.display = 'inline-block';
         loadFlaggedCount();
       }
@@ -199,6 +317,10 @@
 
     async function loadFlaggedCount() {
       const res = await fetch('/api/maintenance-history/flagged-queue');
+      // Before director_of_operations has acknowledged (see loadFlagged()
+      // below), this comes back 403 — same as any other non-OK response
+      // here, the tab badge just stays empty rather than erroring. It
+      // fills in normally after they acknowledge once.
       if (!res.ok) return;
       const rows = await res.json();
       const needsReview = rows.filter(r => r.review_status === 'unreviewed').length;
@@ -207,14 +329,30 @@
 
     function showTab(tab) {
       document.getElementById('tab-tickets').classList.toggle('tab-active', tab === 'tickets');
+      document.getElementById('tab-overview').classList.toggle('tab-active', tab === 'overview');
       document.getElementById('tab-budget').classList.toggle('tab-active', tab === 'budget');
       document.getElementById('tab-flagged').classList.toggle('tab-active', tab === 'flagged');
       document.getElementById('tab-users').classList.toggle('tab-active', tab === 'users');
       document.getElementById('view-tickets').style.display = tab === 'tickets' ? 'block' : 'none';
       document.getElementById('view-ticket-detail').style.display = 'none';
+      document.getElementById('view-overview').style.display = tab === 'overview' ? 'block' : 'none';
       document.getElementById('view-budget').style.display = tab === 'budget' ? 'block' : 'none';
       document.getElementById('view-flagged').style.display = tab === 'flagged' ? 'block' : 'none';
       document.getElementById('view-users').style.display = tab === 'users' ? 'block' : 'none';
+      // Shared property context (Part 1) — auto-load the current property
+      // into whichever property-aware tab was just switched to, instead
+      // of a blank search box or an unfiltered list. Each tab's own
+      // search box is untouched by this — it only fires on tab entry.
+      if (tab === 'tickets' && currentPropertyId) {
+        document.getElementById('search-input').value = currentPropertyLabel || '';
+        filterTicketsById(currentPropertyId);
+      }
+      if (tab === 'overview' && currentPropertyId && currentPropertyId !== overviewLoadedPropertyId) {
+        loadOverview(currentPropertyId);
+      }
+      if (tab === 'budget' && currentPropertyId && currentPropertyId !== budgetLoadedPropertyId) {
+        loadBudget(currentPropertyId);
+      }
       if (tab === 'flagged') loadFlagged();
       if (tab === 'users') loadUserManagement();
     }
@@ -258,8 +396,18 @@
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.onclick = () => openTicket(t.id);
+        const propertyLabel = escapeHtml(t.property_name || t.property_address || '—');
+        // Property names/addresses link through to the Property Overview
+        // page (SPEC.md's third entry point — "the fastest path for
+        // someone who's already looking at a ticket and wants the bigger
+        // picture"). data-action handled by the delegated #content
+        // listener below; stopPropagation so clicking the link doesn't
+        // also fire the row's own openTicket().
+        const propertyCell = t.property_id
+          ? '<a href="#" class="prop-link" data-action="open-overview" data-property-id="' + escapeHtml(t.property_id) + '">' + propertyLabel + '</a>'
+          : propertyLabel;
         tr.innerHTML =
-          '<td>' + escapeHtml(t.property_name || t.property_address || '—') + '</td>' +
+          '<td>' + propertyCell + '</td>' +
           '<td>' + escapeHtml(t.unit_number || '—') + '</td>' +
           '<td>' + escapeHtml(t.title || '—') + '</td>' +
           '<td>' + escapeHtml(t.appfolio_id || '—') + '</td>' +
@@ -290,9 +438,11 @@
 
       document.getElementById('view-tickets').style.display = 'none';
       document.getElementById('view-flagged').style.display = 'none';
+      document.getElementById('view-overview').style.display = 'none';
       document.getElementById('view-ticket-detail').style.display = 'block';
       document.getElementById('tab-tickets').classList.remove('tab-active');
       document.getElementById('tab-flagged').classList.remove('tab-active');
+      document.getElementById('tab-overview').classList.remove('tab-active');
 
       const propLine = t.property
         ? escapeHtml(t.property.name || t.property.address) + (t.property.unit_number ? ', Unit ' + escapeHtml(t.property.unit_number) : '')
@@ -317,7 +467,13 @@
     }
 
     function renderClaim(c) {
-      const canReview = myRole === 'admin' || myRole === 'reviewer';
+      // director_of_operations added per Mason's conditional approval (see
+      // router.js's PRIVACY_REVIEW_ROLES comment). The backend's own
+      // acknowledgment gate (loadFlagged()) is what actually keeps this
+      // role from reaching a flagged claim's Confirm/Correct/Reject before
+      // acknowledging once — this flag only controls whether the buttons
+      // render at all once a claim is already on screen.
+      const canReview = myRole === 'admin' || myRole === 'reviewer' || myRole === 'director_of_operations';
       let meta = reviewBadge(c.review_status);
       if (c.claim_date) meta += '<span>' + escapeHtml(c.claim_date) + '</span>';
       if (c.claim_type === 'outcome' && c.outcome_level) meta += '<span class="badge badge-blue">Level ' + c.outcome_level + ' — ' + (OUTCOME_LABELS[c.outcome_level] || '') + '</span>';
@@ -330,10 +486,11 @@
       if (canReview) {
         html += '<div class="claim-actions">';
         html += '<button class="btn btn-confirm" data-action="confirm" data-claim-id="' + escapeHtml(c.id) + '">Confirm</button>';
-        html += '<button class="btn btn-correct" data-action="toggle-correct" data-claim-id="' + escapeHtml(c.id) + '">Correct</button>';
-        html += '<button class="btn btn-reject" data-action="toggle-reject" data-claim-id="' + escapeHtml(c.id) + '">Reject</button>';
+        html += '<button class="btn btn-correct" id="toggle-correct-btn-' + c.id + '" data-action="toggle-correct" data-claim-id="' + escapeHtml(c.id) + '">Correct</button>';
+        html += '<button class="btn btn-reject" id="toggle-reject-btn-' + c.id + '" data-action="toggle-reject" data-claim-id="' + escapeHtml(c.id) + '">Reject</button>';
         html += '</div>';
         html += '<div class="correct-form" id="correct-form-' + c.id + '">';
+        html += '<div class="form-hint">Edit the text below, then click Save correction to save.</div>';
         html += '<textarea id="correct-text-' + c.id + '">' + escapeHtml(c.claim_text) + '</textarea>';
         html += '<input type="date" id="correct-date-' + c.id + '" value="' + escapeHtml(c.claim_date || '') + '">';
         if (c.claim_type === 'outcome') {
@@ -343,6 +500,7 @@
         html += '<button class="btn btn-correct" data-action="correct" data-claim-id="' + escapeHtml(c.id) + '">Save correction</button>';
         html += '</div>';
         html += '<div class="correct-form" id="reject-form-' + c.id + '">';
+        html += '<div class="form-hint">Add a note, then click Confirm reject to save.</div>';
         html += '<input type="text" id="reject-notes-' + c.id + '" placeholder="Reason for rejecting (optional)">';
         html += '<button class="btn btn-reject" data-action="reject" data-claim-id="' + escapeHtml(c.id) + '">Confirm reject</button>';
         html += '</div>';
@@ -352,12 +510,37 @@
     }
 
     function toggleCorrectForm(id) {
-      document.getElementById('correct-form-' + id).classList.toggle('visible');
+      const form = document.getElementById('correct-form-' + id);
+      const isOpen = form.classList.toggle('visible');
+      const btn = document.getElementById('toggle-correct-btn-' + id);
+      if (btn) btn.textContent = isOpen ? 'Cancel' : 'Correct';
     }
 
     function toggleRejectForm(id) {
-      document.getElementById('reject-form-' + id).classList.toggle('visible');
+      const form = document.getElementById('reject-form-' + id);
+      const isOpen = form.classList.toggle('visible');
+      const btn = document.getElementById('toggle-reject-btn-' + id);
+      if (btn) btn.textContent = isOpen ? 'Cancel' : 'Reject';
     }
+
+    // Auto-dismissing save confirmation. A toast (not an inline message near
+    // the claim) because reviewClaim() below re-renders the whole ticket
+    // detail / flagged list from a fresh fetch right after saving, which
+    // would wipe out any inline message before the reviewer could read it.
+    let toastHideTimer = null;
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('visible');
+      clearTimeout(toastHideTimer);
+      toastHideTimer = setTimeout(() => toast.classList.remove('visible'), 2500);
+    }
+
+    const REVIEW_SAVED_MESSAGES = {
+      confirm: 'Saved — marked as confirmed.',
+      correct: 'Saved — marked as corrected.',
+      reject: 'Saved — marked as rejected.',
+    };
 
     async function reviewClaim(id, action) {
       const body = { action };
@@ -381,6 +564,8 @@
         alert(err.error || 'Could not save review.');
         return;
       }
+
+      showToast(REVIEW_SAVED_MESSAGES[action] || 'Saved.');
 
       // Re-render whichever view we're in — stay put instead of bouncing
       // the reviewer back out, so reviewing several claims on one ticket
@@ -455,6 +640,7 @@
     const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
 
     async function loadBudget(propertyId) {
+      currentPropertyId = propertyId; // shared property context (Part 1)
       const content = document.getElementById('budget-content');
       content.innerHTML = '<div class="empty">Loading…</div>';
       const res = await fetch('/api/maintenance-history/property/' + propertyId + '/budget');
@@ -464,6 +650,8 @@
         return;
       }
       const data = await res.json();
+      budgetLoadedPropertyId = propertyId;
+      currentPropertyLabel = data.property.name || data.property.address || currentPropertyLabel;
       renderBudgetContent(data);
     }
 
@@ -569,12 +757,298 @@
       content.innerHTML = html;
     }
 
+    // ── Property Overview tab — property-overview-SPEC.md. Search reuses
+    // the same hub-wide /api/hub/search-properties endpoint the Budget
+    // tab already uses (same debounce pattern), then loads
+    // GET .../property/:id/overview and renders header, spend, the
+    // pinned "Currently Open" list, and one card per system. ────────────
+    let overviewSearchDebounce = null;
+    let overviewSearchQuery = '';
+    let cameFromOverview = false;
+
+    function onOverviewSearch() {
+      const q = document.getElementById('overview-search-input').value.trim();
+      overviewSearchQuery = q;
+      clearTimeout(overviewSearchDebounce);
+      const results = document.getElementById('overview-search-results');
+      if (!q) { results.style.display = 'none'; results.innerHTML = ''; return; }
+      overviewSearchDebounce = setTimeout(async () => {
+        const res = await fetch('/api/hub/search-properties?q=' + encodeURIComponent(q));
+        if (!res.ok) return;
+        const matches = await res.json();
+        if (q !== overviewSearchQuery) return; // a newer keystroke already fired
+        renderOverviewSearchResults(matches);
+      }, 200);
+    }
+
+    function renderOverviewSearchResults(matches) {
+      const results = document.getElementById('overview-search-results');
+      if (!matches.length) {
+        results.innerHTML = '<div class="result-row" style="color:#9ca3af;cursor:default;">No properties match.</div>';
+        results.style.display = 'block';
+        return;
+      }
+      results.innerHTML = '';
+      matches.forEach(p => {
+        const row = document.createElement('div');
+        row.className = 'result-row';
+        row.innerHTML = '<div>' + escapeHtml(p.name || p.address || 'Unknown property') + '</div>' +
+          (p.address ? '<div class="result-addr">' + escapeHtml(p.address) + (p.city ? ', ' + escapeHtml(p.city) : '') + '</div>' : '');
+        row.onclick = () => {
+          document.getElementById('overview-search-input').value = p.name || p.address || '';
+          results.style.display = 'none';
+          loadOverview(p.id);
+        };
+        results.appendChild(row);
+      });
+      results.style.display = 'block';
+    }
+
+    // Entry point used both from search results above and from the
+    // clickable property links in the ticket table (SPEC.md's third
+    // entry point). Sets currentPropertyId first, then lets showTab()'s
+    // own dedup check (Part 1) decide whether to actually (re)fetch —
+    // calling loadOverview() again here too would double-fire the
+    // request (and the AI synthesis it triggers) on every click.
+    function openPropertyOverview(propertyId) {
+      currentPropertyId = propertyId;
+      showTab('overview');
+    }
+
+    async function loadOverview(propertyId) {
+      currentPropertyId = propertyId; // shared property context (Part 1)
+      const content = document.getElementById('overview-content');
+      content.innerHTML = '<div class="card empty">Loading…</div>';
+      const res = await fetch('/api/maintenance-history/property/' + propertyId + '/overview');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        content.innerHTML = '<div class="card empty">' + escapeHtml(err.error || 'Could not load this property.') + '</div>';
+        return;
+      }
+      const data = await res.json();
+      overviewLoadedPropertyId = propertyId;
+      currentPropertyLabel = data.property.name || data.property.address || currentPropertyLabel;
+      renderOverviewContent(data);
+    }
+
+    const REVIEW_STATUS_LABELS = { unreviewed: 'unreviewed', confirmed: 'confirmed', corrected: 'corrected' };
+
+    function renderOverviewContent(data) {
+      const content = document.getElementById('overview-content');
+      let html = '';
+
+      // ── Header ──
+      html += '<div class="card">';
+      html += '<div class="ov-header-row"><div>';
+      html += '<div class="ov-header-title">' + escapeHtml(data.property.name || data.property.address || '—') + '</div>';
+      html += '<div class="ov-header-sub">' + escapeHtml(data.property.address || '') + (data.property.city ? ', ' + escapeHtml(data.property.city) : '') +
+        (data.property.unit_count ? ' &middot; ' + data.property.unit_count + ' unit' + (data.property.unit_count === 1 ? '' : 's') : '') + '</div>';
+      html += '</div><div style="text-align:right;">';
+      if (data.owners && data.owners.length) {
+        html += '<div style="font-size:12.5px;color:#374151;">Owner' + (data.owners.length > 1 ? 's' : '') + ': ' +
+          data.owners.map(o => escapeHtml(o.name || 'Unnamed')).join(', ') + '</div>';
+        const contacts = data.owners.map(o => [o.phone, o.email].filter(Boolean).join(' / ')).filter(Boolean);
+        if (contacts.length) html += '<div style="font-size:11.5px;color:#9ca3af;">' + escapeHtml(contacts.join('; ')) + '</div>';
+      } else {
+        html += '<div style="font-size:12.5px;color:#9ca3af;">No linked owner on file</div>';
+      }
+      html += '</div></div>';
+      if (data.has_owner_history_gap) {
+        html += '<div class="ov-owner-note">Showing current ownership only — this system does not track ownership history.</div>';
+      }
+      if (data.units && data.units.length) {
+        html += '<div class="ov-units-list">';
+        html += data.units.map(u => {
+          const statusText = u.status === 'occupied'
+            ? 'occupied' + (u.lease_end ? ', lease ends ' + escapeHtml(u.lease_end) : '')
+            : escapeHtml(u.status || 'unknown');
+          return '<span class="unit-item">Unit ' + escapeHtml(u.unit_number || '—') + ': ' + statusText + '</span>';
+        }).join('');
+        html += '</div>';
+      }
+      html += '<div class="ov-spend-row">';
+      html += '<div><div class="ov-spend-figure">' + formatMoney(data.spend.trailing_12mo) + '</div><div class="ov-spend-label">Trailing 12 months</div></div>';
+      html += '<div><div class="ov-spend-figure">' + formatMoney(data.spend.all_time) + '</div><div class="ov-spend-label">All-time</div></div>';
+      html += '</div>';
+      html += '<div class="ov-owner-note">' + escapeHtml(data.spend.note) + '</div>';
+      // Property-scoped privacy-review badge — shared-property-context-
+      // SPEC.md Part 2. Only present at all when the backend included the
+      // field (role-gated there, and only when the real count is above
+      // zero) — never rendered as a literal "0" for anyone. Label
+      // deliberately avoids the word "confidence" (spec point 5) so staff
+      // don't learn to read a real Fair Housing flag as routine
+      // AI-confidence uncertainty, which this tool already uses that word
+      // for elsewhere.
+      if (data.flagged_review_count) {
+        const propLabel = data.property.name || data.property.address || '';
+        html += '<div class="ov-owner-note" style="margin-top:6px;">' +
+          '<a href="#" class="prop-link" data-action="open-flagged-for-property" ' +
+          'data-property-id="' + escapeHtml(data.property.id) + '" data-property-label="' + escapeHtml(propLabel) + '">' +
+          data.flagged_review_count + ' item' + (data.flagged_review_count === 1 ? '' : 's') + ' need privacy review &rarr;</a></div>';
+      }
+      html += '</div>';
+
+      if (!data.has_data) {
+        html += '<div class="card empty">' + escapeHtml(data.no_data_message || 'No maintenance ticket data synced for this property yet.') + '</div>';
+        content.innerHTML = html;
+        return;
+      }
+
+      // ── Currently Open / Unresolved — pinned above the component cards ──
+      html += '<div class="section-title">Currently Open / Unresolved</div>';
+      if (!data.open_items.length) {
+        html += '<div class="card ov-empty-note">Nothing currently open or unresolved for this property.</div>';
+      } else {
+        data.open_items.forEach(item => {
+          html += '<div class="open-item-row" data-action="open-ticket" data-ticket-id="' + escapeHtml(item.ticket_id) + '">';
+          html += '<div class="open-item-title">' + escapeHtml(item.title) + (item.title_redacted ? ' <span class="badge badge-amber">redacted</span>' : '') + '</div>';
+          html += '<div class="open-item-meta">' + escapeHtml((item.components || []).join(', ') || 'Uncategorized') +
+            ' &middot; status: ' + escapeHtml(item.status || '—') +
+            (item.cost != null ? ' &middot; ' + formatMoney(item.cost) : '') +
+            (item.last_activity ? ' &middot; ' + escapeHtml(String(item.last_activity).slice(0, 10)) : '') + '</div>';
+          html += '</div>';
+        });
+      }
+
+      // ── By System ──
+      html += '<div class="section-title">By System</div>';
+      if (!data.components.length) {
+        html += '<div class="card ov-empty-note">Nothing categorized yet.</div>';
+      } else {
+        data.components.forEach(c => { html += renderComponentCard(c); });
+      }
+
+      content.innerHTML = html;
+    }
+
+    function renderComponentCard(c) {
+      let html = '<div class="card component-card">';
+      html += '<div class="component-card-header">';
+      html += '<span class="component-card-title">' + escapeHtml(c.label) + '</span>';
+      html += '<span class="component-card-meta">' + c.ticket_count + ' ticket' + (c.ticket_count === 1 ? '' : 's') +
+        (c.date_range && c.date_range.earliest ? ' &middot; ' + escapeHtml(String(c.date_range.earliest).slice(0, 10)) + ' – ' + escapeHtml(String(c.date_range.latest).slice(0, 10)) : '') + '</span>';
+      if (c.recurring) html += '<span class="badge badge-amber">Recurring</span>';
+      html += '</div>';
+
+      if (c.synthesis && c.synthesis.sentences && c.synthesis.sentences.length) {
+        c.synthesis.sentences.forEach(s => {
+          html += '<div class="synth-sentence">' + escapeHtml(s.text) + reviewBadge(s.review_status) + '</div>';
+        });
+      } else if (c.synthesis && c.synthesis.truncated) {
+        html += '<div class="ov-empty-note">A summary couldn\'t be generated for this system right now — see the individual tickets below.</div>';
+      }
+
+      if (c.unmatched_entries && c.unmatched_entries.length) {
+        c.unmatched_entries.forEach(u => {
+          html += '<div class="unmatched-entry">' + escapeHtml(u.text) +
+            (u.title_redacted ? ' <span class="badge badge-amber">redacted</span>' : '') +
+            ' <a href="#" class="prop-link" data-action="open-ticket" data-ticket-id="' + escapeHtml(u.ticket_id) + '">View ticket</a></div>';
+        });
+      }
+
+      if (c.compressed_line) {
+        html += '<div class="compressed-line">' + escapeHtml(c.compressed_line) + '</div>';
+      }
+
+      if (!(c.synthesis && c.synthesis.sentences && c.synthesis.sentences.length) && !(c.unmatched_entries && c.unmatched_entries.length) && !c.compressed_line) {
+        html += '<div class="ov-empty-note">Nothing summarized for this system yet.</div>';
+      }
+
+      html += '</div>';
+      return html;
+    }
+
     // ── Flagged / privacy review queue ──────────────────────────────────
+    // Property-filter state — shared-property-context-SPEC.md Part 2.
+    // Read by loadFlagged() below rather than passed as an argument, so
+    // both the badge/link on Property Overview (via openFlaggedQueue) and
+    // this tab's own button (which resets it — see the event wiring at
+    // the bottom of this file) go through the exact same load path.
+    let flaggedFilterPropertyId = null;
+    let flaggedFilterPropertyLabel = null;
+
+    // Entry point for the Property Overview badge/link — carries the
+    // property label over from Property Overview's own already-fetched
+    // data (the flagged-queue response itself has no property id to
+    // derive a label from — spec's "caught on review" point).
+    function openFlaggedQueue(propertyId, propertyLabel) {
+      flaggedFilterPropertyId = propertyId || null;
+      flaggedFilterPropertyLabel = propertyLabel || null;
+      showTab('flagged');
+    }
+
+    // Acknowledgment gate — Mason's condition 1, director_of_operations
+    // only (router.js's PRIVACY_REVIEW_ROLES comment). Hidden/shown around
+    // the existing filter-bar + list card rather than replacing them, so
+    // nothing else in this function has to change shape.
+    function showPrivacyAckGate() {
+      document.getElementById('privacy-ack-gate').style.display = 'block';
+      document.getElementById('flagged-filter-bar').style.display = 'none';
+      document.getElementById('flagged-list-card').style.display = 'none';
+    }
+    function hidePrivacyAckGate() {
+      document.getElementById('privacy-ack-gate').style.display = 'none';
+      document.getElementById('flagged-list-card').style.display = 'block';
+    }
+
+    async function acknowledgePrivacyQueue() {
+      const btn = document.getElementById('privacy-ack-btn');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        const res = await fetch('/api/maintenance-history/privacy-queue/acknowledge', { method: 'POST' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert(err.error || 'Could not save acknowledgment.');
+          btn.disabled = false;
+          btn.textContent = 'I acknowledge — continue';
+          return;
+        }
+        loadFlagged(); // now succeeds — re-fetches with the gate cleared
+      } catch (err) {
+        alert('Network error: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'I acknowledge — continue';
+      }
+    }
+
     async function loadFlagged() {
-      const res = await fetch('/api/maintenance-history/flagged-queue');
+      const url = flaggedFilterPropertyId
+        ? '/api/maintenance-history/flagged-queue?property_id=' + encodeURIComponent(flaggedFilterPropertyId)
+        : '/api/maintenance-history/flagged-queue';
+      const res = await fetch(url);
+      if (res.status === 403) {
+        // The only role that ever sees this is director_of_operations
+        // before their first acknowledgment — admin/reviewer's existing
+        // access means this branch never fires for them.
+        const err = await res.json().catch(() => ({}));
+        if (err.error === 'privacy_queue_acknowledgment_required') {
+          showPrivacyAckGate();
+          return;
+        }
+        return;
+      }
       if (!res.ok) return;
+      hidePrivacyAckGate();
       const rows = await res.json();
+
+      const filterBar = document.getElementById('flagged-filter-bar');
+      if (flaggedFilterPropertyId) {
+        filterBar.style.display = 'block';
+        filterBar.innerHTML = 'Filtered to <strong>' + escapeHtml(flaggedFilterPropertyLabel || 'this property') +
+          '</strong> &middot; <a href="#" class="prop-link" data-action="clear-flagged-filter">view all</a>';
+      } else {
+        filterBar.style.display = 'none';
+        filterBar.innerHTML = '';
+      }
+
       const container = document.getElementById('flagged-list');
+      // Distinct empty-state copy when filtered, so zero results here
+      // can't be misread as "the whole queue is empty" (spec's "caught on
+      // review" point) — the portfolio-wide default keeps its own line.
+      document.getElementById('flagged-empty').textContent = flaggedFilterPropertyId
+        ? 'Nothing flagged for ' + (flaggedFilterPropertyLabel || 'this property') + ' right now.'
+        : 'Nothing in the privacy review queue right now.';
       document.getElementById('flagged-empty').style.display = rows.length ? 'none' : 'block';
       container.innerHTML = '';
       rows.forEach(c => {
@@ -724,15 +1198,34 @@
     // listener on #content (data-action + data-claim-id) instead of
     // re-attaching listeners after every render.
     document.getElementById('tab-tickets').addEventListener('click', () => showTab('tickets'));
+    document.getElementById('tab-overview').addEventListener('click', () => showTab('overview'));
     document.getElementById('tab-budget').addEventListener('click', () => showTab('budget'));
-    document.getElementById('tab-flagged').addEventListener('click', () => showTab('flagged'));
+    document.getElementById('tab-flagged').addEventListener('click', () => {
+      // Reached normally (not via the Property Overview badge/link) —
+      // always the un-filtered, portfolio-wide default per spec Part 2
+      // point 4, even if a property filter was left over from an earlier
+      // visit via the badge.
+      flaggedFilterPropertyId = null;
+      flaggedFilterPropertyLabel = null;
+      showTab('flagged');
+    });
     document.getElementById('tab-users').addEventListener('click', () => showTab('users'));
     document.getElementById('search-input').addEventListener('input', onSearch);
+    document.getElementById('overview-search-input').addEventListener('input', onOverviewSearch);
     document.getElementById('budget-search-input').addEventListener('input', onBudgetSearch);
     document.getElementById('add-user-btn').addEventListener('click', addUser);
+    document.getElementById('privacy-ack-btn').addEventListener('click', acknowledgePrivacyQueue);
     document.getElementById('ticket-detail-back').addEventListener('click', (e) => {
       e.preventDefault();
-      showTab('tickets');
+      // Drill-down from Property Overview goes back to the overview it
+      // came from (SPEC.md's drill-down section), not the flat ticket
+      // list, so a reviewer doesn't lose their place on the property.
+      if (cameFromOverview && currentPropertyId) {
+        cameFromOverview = false;
+        openPropertyOverview(currentPropertyId);
+      } else {
+        showTab('tickets');
+      }
     });
 
     document.getElementById('content').addEventListener('click', (e) => {
@@ -745,6 +1238,31 @@
         case 'toggle-reject': toggleRejectForm(claimId); break;
         case 'correct': reviewClaim(claimId, 'correct'); break;
         case 'reject': reviewClaim(claimId, 'reject'); break;
+        case 'open-overview':
+          e.preventDefault();
+          e.stopPropagation();
+          openPropertyOverview(btn.dataset.propertyId);
+          break;
+        case 'open-ticket':
+          e.preventDefault();
+          e.stopPropagation();
+          // Remember whether this ticket was opened from the overview
+          // page so the back-link (above) can return there.
+          cameFromOverview = document.getElementById('view-overview').style.display !== 'none';
+          openTicket(btn.dataset.ticketId);
+          break;
+        case 'open-flagged-for-property':
+          e.preventDefault();
+          e.stopPropagation();
+          openFlaggedQueue(btn.dataset.propertyId, btn.dataset.propertyLabel);
+          break;
+        case 'clear-flagged-filter':
+          e.preventDefault();
+          e.stopPropagation();
+          flaggedFilterPropertyId = null;
+          flaggedFilterPropertyLabel = null;
+          loadFlagged();
+          break;
       }
     });
 

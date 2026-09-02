@@ -26,13 +26,46 @@ const { createClient } = require('@supabase/supabase-js');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-function getAuthClient() {
+// How long to wait for a response from Supabase's Auth service (not the
+// database — that's a separate, unrelated service and stays fast) before
+// giving up and telling the user to try again instead of hanging forever.
+// Confirmed live 2026-08-26: one real call to Supabase Auth from the
+// production server took 75+ seconds while 6 immediate retries were all
+// under 0.2s and the database REST API stayed fast throughout — this is
+// intermittent external network flakiness to that one service, not
+// something we can fix, only bound.
+const AUTH_TIMEOUT_MS = 9000;
+
+/**
+ * Thrown by signInWithPassword / getUserFromToken / refreshSession
+ * specifically when Supabase's Auth service didn't answer in time (or a
+ * lower-level network error came back instead of a real response) — NOT
+ * when credentials are wrong or a token/refresh token is genuinely invalid.
+ * Callers check for this (`instanceof AuthTimeoutError`) to show an honest
+ * "try again" message instead of "wrong password" or "you're logged out."
+ */
+class AuthTimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuthTimeoutError';
+  }
+}
+
+// Pass timeoutMs to bound how long this client will wait on any Auth call
+// before aborting. Omit it (as requestPasswordReset does) to keep the
+// client's default (no timeout) — deliberately opt-in per call site so this
+// change stays scoped to the functions that needed it.
+function getAuthClient(timeoutMs) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY in .env');
   }
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const options = { auth: { persistSession: false, autoRefreshToken: false } };
+  if (timeoutMs) {
+    options.global = {
+      fetch: (url, opts = {}) => fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) }),
+    };
+  }
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, options);
 }
 
 /**
@@ -40,9 +73,17 @@ function getAuthClient() {
  * Returns { user, session } on success, throws on failure.
  */
 async function signInWithPassword(email, password) {
-  const client = getAuthClient();
+  const client = getAuthClient(AUTH_TIMEOUT_MS);
   const { data, error } = await client.auth.signInWithPassword({ email, password });
   if (error) {
+    if (error.name === 'AuthRetryableFetchError') {
+      // supabase-js's own name for "the fetch itself failed" — covers both
+      // our timeout aborting the request and any other network-level
+      // failure reaching Supabase Auth. Distinct from a real credential
+      // rejection (AuthApiError, e.g. wrong password), which still falls
+      // through to the message below unchanged.
+      throw new AuthTimeoutError('Login is taking too long right now — please try again.');
+    }
     throw new Error(error.message || 'Invalid email or password');
   }
   return data; // { user, session }
@@ -56,8 +97,26 @@ async function signInWithPassword(email, password) {
  */
 async function getUserFromToken(accessToken) {
   if (!accessToken) return null;
-  const client = getAuthClient();
-  const { data, error } = await client.auth.getUser(accessToken);
+  const client = getAuthClient(AUTH_TIMEOUT_MS);
+  let { data, error } = await client.auth.getUser(accessToken);
+
+  if (error && error.name === 'AuthRetryableFetchError') {
+    // This runs on every page load for an already-logged-in person, so a
+    // single transient hiccup (see AUTH_TIMEOUT_MS above) shouldn't look
+    // like "you're logged out." One quick retry before treating it as a
+    // real problem.
+    ({ data, error } = await client.auth.getUser(accessToken));
+  }
+
+  if (error && error.name === 'AuthRetryableFetchError') {
+    // Still couldn't reach Supabase Auth after a retry. This is NOT the
+    // same as an invalid/expired token (that's the `return null` below,
+    // unchanged) — returning null here would tell requireLogin to treat an
+    // already-logged-in person as logged out. Throw instead so the caller
+    // can tell the two apart.
+    throw new AuthTimeoutError('Could not verify your session right now — the login service is slow to respond.');
+  }
+
   if (error || !data.user) return null;
   return data.user;
 }
@@ -154,14 +213,24 @@ async function refreshSession(refreshToken) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY in .env');
   }
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-    method: 'POST',
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
+  let res;
+  try {
+    res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // Timeout or network-level failure reaching Supabase Auth — same gap as
+    // signInWithPassword/getUserFromToken above. NOT the same as "refresh
+    // token is invalid" (that's the !res.ok case below, still returns null
+    // unchanged) — throw so the caller can tell the two apart.
+    throw new AuthTimeoutError('Could not refresh your session right now — the login service is slow to respond.');
+  }
   if (!res.ok) {
     return null;
   }
@@ -177,4 +246,5 @@ module.exports = {
   requestPasswordReset,
   updatePasswordWithToken,
   refreshSession,
+  AuthTimeoutError,
 };

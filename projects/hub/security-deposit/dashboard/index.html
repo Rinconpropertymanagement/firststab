@@ -348,6 +348,7 @@
     <div class="header-right">
       <span id="userEmail" style="font-size:13px;color:#374151;font-weight:500"></span>
       <span id="userRole" style="font-size:12px;color:#6b7280;margin-left:4px;margin-right:8px"></span>
+      <a href="/" style="color:#2563eb;text-decoration:none;font-size:14px;margin-right:12px">&larr; Back to the Hub</a>
       <a href="/logout" style="font-size:12px;color:#6b7280;text-decoration:none;padding:6px 10px;border:1px solid #e5e7eb;border-radius:6px;margin-right:8px" title="Signs you out of the whole Rincon Hub, not just this section">Sign Out</a>
       <span class="last-updated" id="lastUpdated">Loading&hellip;</span>
       <button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>
@@ -1982,10 +1983,10 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
             body: JSON.stringify({ [key]: value, updated_at: kase.updated_at }),
           });
-          if (res.status === 409) { handleStaleCaseConflict(caseId); return; }
-          if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not save.')); }
+          if (res.status === 409) { group.querySelectorAll('.btn-toggle').forEach(b => b.disabled = false); handleStaleCaseConflict(caseId); return; }
+          if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not save.')); group.querySelectorAll('.btn-toggle').forEach(b => b.disabled = false); return; }
           openCaseDetail(caseId);
-        } catch (err) { alert('Network error: ' + err.message); }
+        } catch (err) { alert('Network error: ' + err.message); group.querySelectorAll('.btn-toggle').forEach(b => b.disabled = false); }
       });
     });
 
@@ -2180,8 +2181,16 @@
           });
           if (res.status === 409) { btnEscalate.disabled = false; handleStaleCaseConflict(caseId); return; }
           if (!res.ok) { const d = await res.json().catch(() => ({})); alert('Error: ' + (d.error || 'Could not escalate.')); btnEscalate.disabled = false; return; }
+          const data = await res.json().catch(() => ({}));
           openCaseDetail(caseId);
           fetchCases();
+          // The escalation itself already succeeded above — this only
+          // reports whether the director-of-operations notification email
+          // went out, so a failed send is visible instead of silent
+          // (matches router.js's own escalation_email_sent field).
+          if (data && data.escalation_email_sent === false) {
+            alert('Escalated, but the notification email could not be sent — check with an admin.');
+          }
         } catch (err) { alert('Network error: ' + err.message); btnEscalate.disabled = false; }
       });
     }

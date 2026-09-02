@@ -66,6 +66,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { extractPolicy } = require('./extract-policy');
+const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Nodemailer (email notifications) — unchanged from the standalone app ──
 let nodemailer = null;
@@ -252,8 +253,16 @@ router.use(attachInsuranceRole);
 // /api/insurance/auth/me on load and shows a friendly "no access" message
 // if that comes back 403, which reads better than a bare redirect. Every
 // route that actually returns or changes data below IS gated.
+// Reads the file and injects the hub-wide search widget right after
+// <body> instead of a plain res.sendFile — this is a static page with no
+// templating engine, so a string replace at serve time is the simplest
+// way to drop the same shared widget (lib/global-search-widget.js) onto
+// it without duplicating that markup by hand in this file.
 router.get('/insurance', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dashboard', 'index.html'));
+  fs.readFile(path.join(__dirname, 'dashboard', 'index.html'), 'utf8', (err, html) => {
+    if (err) return res.status(500).send('Could not load page.');
+    res.send(html.replace('<body>', '<body>\n' + GLOBAL_SEARCH_WIDGET_HTML));
+  });
 });
 
 // ─── GET /api/insurance/auth/me ────────────────────────────────────────────

@@ -53,6 +53,15 @@ const AUTH_URL = 'https://api.backblazeb2.com/b2api/v2/b2_authorize_account';
 const MAX_FOLDER_DEPTH = 4; // safety cap on recursive descent — see note above
 const AUTH_TTL_MS = 20 * 60 * 60 * 1000; // B2 tokens are valid 24h; refresh well before that
 
+// How long any single B2 HTTP call (auth, listing, or a download) will
+// wait for a response before giving up — same AbortSignal.timeout pattern,
+// and the same 9-15s precedent range, as AUTH_TIMEOUT_MS in
+// projects/hub/lib/auth.js. Before this, every fetch() in this file had no
+// timeout at all, so a stalled B2 connection hung the calling request
+// (and, for routes that await this inline, the whole response) forever
+// instead of failing cleanly.
+const B2_TIMEOUT_MS = 15000;
+
 let cachedAuth = null; // { apiUrl, authorizationToken, bucketId, accountId, fetchedAt }
 
 // ─── Basic retry for the recursive bucket walk (Ralph finding) ───────────
@@ -81,7 +90,10 @@ async function fetchWithRetry(url, options) {
   let lastErr;
   for (let attempt = 1; attempt <= FETCH_RETRY_ATTEMPTS; attempt++) {
     try {
-      return await fetch(url, options);
+      // A fresh AbortSignal.timeout() per attempt — a signal that has
+      // already fired can't be reused, and each retry is a brand new
+      // request that deserves its own full B2_TIMEOUT_MS window.
+      return await fetch(url, { ...options, signal: AbortSignal.timeout(B2_TIMEOUT_MS) });
     } catch (err) {
       lastErr = err;
       if (attempt < FETCH_RETRY_ATTEMPTS) await sleep(FETCH_RETRY_DELAY_MS * attempt);
@@ -104,7 +116,7 @@ async function authorize() {
   const { B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME } = requireB2Env();
   const credentials = Buffer.from(`${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}`).toString('base64');
 
-  const res = await fetch(AUTH_URL, { headers: { Authorization: `Basic ${credentials}` } });
+  const res = await fetch(AUTH_URL, { headers: { Authorization: `Basic ${credentials}` }, signal: AbortSignal.timeout(B2_TIMEOUT_MS) });
   if (!res.ok) {
     throw new Error(`B2 authorization failed: HTTP ${res.status} ${await res.text()}`);
   }
@@ -135,6 +147,7 @@ async function lookupBucketId(apiUrl, authToken, accountId, bucketName) {
     method: 'POST',
     headers: { Authorization: authToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ accountId, bucketName }),
+    signal: AbortSignal.timeout(B2_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`B2 list_buckets failed: HTTP ${res.status} ${await res.text()}`);
   const body = await res.json();
@@ -186,17 +199,38 @@ async function listOneLevel(prefix) {
 // the unit this tool indexes and sends (as a path string only) to Claude
 // for parsing. Capped at MAX_FOLDER_DEPTH as a safety net against an
 // unexpectedly deep bucket structure driving up B2 API calls.
-async function listPhotoFolders(prefix = '', depth = 0) {
+//
+// knownLeafPaths (2026-09-01, Peter's request): the set of folder paths
+// already indexed in b2_photo_folders. A path already in this set has
+// already been confirmed to directly contain files — once a case's
+// photo folder exists, it's created once and doesn't grow new *sub*folders
+// later (new photos land inside a folder this walk already knows about,
+// which is listFilesInFolder's job on demand, not this bulk discovery
+// walk's). So an already-known leaf is skipped entirely — no B2 call for
+// it at all — instead of re-listing it every night just to re-derive the
+// same "yes, still just files here" answer. This is the fix for the job
+// making "hundreds or thousands" of calls every night regardless of how
+// little actually changed: previously EVERY known folder, not just new
+// ones, cost a real API call before being filtered out by the caller.
+// Root (depth 0) is never skipped — new top-level case folders can only
+// ever appear as children of something already explored, so every
+// non-leaf prefix still gets re-listed every run to catch them.
+async function listPhotoFolders(prefix = '', depth = 0, knownLeafPaths = new Set()) {
+  const normalized = prefix.replace(/\/$/, '');
+  if (depth > 0 && knownLeafPaths.has(normalized)) {
+    return [];
+  }
+
   const results = [];
   const { folders, hasFiles } = await listOneLevel(prefix);
 
   if (hasFiles && prefix) {
-    results.push(prefix.replace(/\/$/, '')); // store without the trailing slash
+    results.push(normalized); // store without the trailing slash
   }
 
   if (depth < MAX_FOLDER_DEPTH) {
     for (const folder of folders) {
-      const nested = await listPhotoFolders(folder, depth + 1);
+      const nested = await listPhotoFolders(folder, depth + 1, knownLeafPaths);
       results.push(...nested);
     }
   }

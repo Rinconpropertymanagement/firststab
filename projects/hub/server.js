@@ -174,7 +174,7 @@ const session = require('express-session');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
-const { signInWithPassword, requestPasswordReset, updatePasswordWithToken } = require('./lib/auth');
+const { signInWithPassword, requestPasswordReset, updatePasswordWithToken, AuthTimeoutError } = require('./lib/auth');
 const { requireLogin } = require('./lib/middleware');
 const { router: propertySearchRouter } = require('./lib/property-search');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('./lib/global-search-widget');
@@ -448,6 +448,12 @@ app.post('/login', authLimiter, async (req, res) => {
       res.redirect('/');
     });
   } catch (err) {
+    if (err instanceof AuthTimeoutError) {
+      // Supabase Auth didn't respond in time — not a wrong password, and
+      // saying so would mislead someone who typed their credentials
+      // correctly. See lib/auth.js's AUTH_TIMEOUT_MS for why this happens.
+      return res.redirect('/login?error=' + encodeURIComponent('Login is taking too long right now — please try again.'));
+    }
     res.redirect('/login?error=' + encodeURIComponent('That email or password is not right. Please try again.'));
   }
 });

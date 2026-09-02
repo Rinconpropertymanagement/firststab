@@ -87,13 +87,49 @@ async function getAllPages(path, { maxPages = 200 } = {}) {
   return all;
 }
 
+// Dedupes a paginated Job list by job_id. Confirmed live (2026-08-28):
+// Latchel's /jobs list isn't stably sorted against a live-mutating
+// dataset, so a job updated mid-pagination-walk (a ~35-40s, ~155-page
+// pull) can shift pages and come back twice in the same pull — one live
+// measurement: listJobsUpdatedSince() returned 1,549 raw jobs, only 1,470
+// unique job_ids (79 duplicated); property 443904 alone had 9 raw entries
+// for 7 unique jobs.
+//
+// Deliberately NOT done inside getAllPages() itself: that helper is a
+// generic, shape-agnostic pager also used for state-history, files, and
+// properties responses (getJobStateHistory/getJobFiles/listProperties) —
+// none of those response items carry a job_id field (state-history
+// entries are timestamp+state only; confirmed live, SPEC.md "Live API
+// Verification"). A blind dedupe-by-job_id inside getAllPages() would
+// read `undefined` for every item in those other endpoints' results and
+// collapse each one down to a single row instead of fixing anything.
+// Scoping the dedupe to these two Job-list functions instead fixes it for
+// every current caller of Job lists (this file's own listJobsUpdatedSince
+// and listJobsNeedingApproval, in turn gather.js, maintenance-history's
+// nightly ingest, and approval-briefing's hourly reconcile poll) without
+// touching the shared pager's shape-agnostic contract.
+function dedupeByJobId(jobs) {
+  const seen = new Set();
+  const result = [];
+  for (const job of jobs) {
+    const id = job.job_id;
+    if (id != null) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    result.push(job);
+  }
+  return result;
+}
+
 /**
  * Jobs updated on/after `isoDate` (YYYY-MM-DD). This is the nightly
  * "what changed since last run" pull — exactly the shape sync.js already
  * uses for AppFolio (SPEC.md "Ingestion Approach" step 1).
  */
 async function listJobsUpdatedSince(isoDate) {
-  return getAllPages(`/jobs?updated_at_start_date=${encodeURIComponent(isoDate)}`);
+  const jobs = await getAllPages(`/jobs?updated_at_start_date=${encodeURIComponent(isoDate)}`);
+  return dedupeByJobId(jobs);
 }
 
 /** Full detail for one job — state, dates, budget/estimate, estimate_note. */
@@ -120,7 +156,8 @@ async function getJobFiles(jobId) {
  * this is the fast path's real safety net, not a fallback-only check.
  */
 async function listJobsNeedingApproval() {
-  return getAllPages('/jobs?in_states=27');
+  const jobs = await getAllPages('/jobs?in_states=27');
+  return dedupeByJobId(jobs);
 }
 
 /** Reference data — used only by the periodic property-reconciliation step, not nightly. */

@@ -46,7 +46,7 @@ const { createClient } = require('@supabase/supabase-js');
 const latchel = require('./lib/latchel-connector');
 const extractClaims = require('./lib/extract-claims');
 const contentCheck = require('./lib/content-check');
-const { scanText, TERMS_VERSION } = require('./lib/protected-class-terms');
+const { scanText, TERMS_VERSION, CATEGORIES } = require('./lib/protected-class-terms');
 const componentCategories = require('./lib/component-categories');
 const { synthesizeComponent } = require('./lib/synthesize-component');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
@@ -202,6 +202,102 @@ const PRIVACY_QUEUE_ACK_MESSAGE =
   '(race, disability, immigration status, health, familial status, and similar). Treat everything ' +
   "here as confidential, and use it only for legitimate review — not for any other purpose. " +
   "You'll only see this notice once.";
+
+// ─── Shared review-action helpers ───────────────────────────────────────
+// Factored out for the maintenance_snapshot_events review route added
+// below (governance fix, 2026-09-03: flagged snapshot-event rows had no
+// path to a human reviewer — see GET /flagged-queue's own comment) so its
+// acknowledgment gate and audit-log write are the exact same code as
+// POST /claims/:id/review's, not a hand-copied second version that could
+// drift. The three existing call sites (claims review, the ack route
+// itself, and the flagged-queue view-log) were rewritten to use these
+// too, with no change in what gets written to audit_log — same action
+// strings, same entity_type values, same details shape as before this
+// build.
+
+// audit_log.performed_by is a foreign key into the older `users` table
+// (20260720000003_foundation.sql), not into Supabase Auth — see POST
+// /claims/:id/review's git history for the original FK-violation story
+// if that context is ever needed again. Returns null (a valid "system
+// action" performed_by) if no matching `users` row exists for this email.
+async function lookupUserId(email) {
+  const { data } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  return data ? data.id : null;
+}
+
+// Rule 1 fields (GOVERNANCE.md / the snapshot-events migration's "AUDIT
+// LOG GUIDANCE FOR Q") written the same way at every call site:
+// performed_by resolved via lookupUserId, actor_type/actor_id always the
+// human's own email, privacy_category defaulted to 'processing' (every
+// call site here uses that value; pass a different one explicitly if
+// that ever changes). Returns true/false so a caller that must fail
+// closed on a write error (the acknowledgment route below) still can —
+// every other caller just ignores the return value, matching the
+// log-and-continue behavior this code already had before this helper
+// existed.
+async function writeAuditLog({ action, entity_type, entity_id, actor_email, risk_level, privacy_category, details }) {
+  const performed_by = await lookupUserId(actor_email);
+  const { error } = await supabase.from('audit_log').insert({
+    action,
+    entity_type,
+    entity_id,
+    performed_by,
+    actor_type: 'human',
+    actor_id: actor_email,
+    privacy_category: privacy_category || 'processing',
+    risk_level: risk_level || 'low',
+    details: details || {},
+  });
+  if (error) {
+    console.error(`[maintenance-history] audit_log insert failed for ${action}:`, error.message);
+    return false;
+  }
+  return true;
+}
+
+// Acknowledgment gate, Mason's condition 1 (PRIVACY_REVIEW_ROLES comment
+// above) — director_of_operations only. Writes the 403 itself on failure
+// so every caller's error handling is identical; a caller awaits this and
+// returns immediately if it's false. The role check happens first, so
+// calling this unconditionally is always safe for admin/reviewer (a
+// no-op — returns true immediately, no query run). Callers that must
+// only gate a FLAGGED item (claims/snapshot-event review) additionally
+// guard the call with `before.flagged_protected_class &&` themselves;
+// GET /flagged-queue calls it unconditionally, since everything that
+// route returns is flagged by definition.
+async function requireAcknowledgment(req, res) {
+  if (req.maintenanceHistoryRole !== PRIVACY_QUEUE_ACK_ROLE) return true;
+  let acknowledged;
+  try {
+    acknowledged = await hasAcknowledgedPrivacyQueue(req.user.email);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+    return false;
+  }
+  if (!acknowledged) {
+    res.status(403).json({ error: 'privacy_queue_acknowledgment_required', message: PRIVACY_QUEUE_ACK_MESSAGE });
+    return false;
+  }
+  return true;
+}
+
+// Flagged-count helper for maintenance_snapshot_events — governance fix,
+// 2026-09-03. Always scoped to a single property: property_id is a real,
+// direct column on this table (see the migration's "WHY A REAL
+// property_id FK" note), so no unit/ticket hop is needed the way
+// maintenance_claims' own flagged count requires. Shared by both
+// property-scoped flaggedReviewCount blocks below (/overview and
+// /summary) so the two badge counts can't drift apart from each other,
+// and by the merged flagged-queue route further down.
+async function countFlaggedSnapshotEvents(propertyId) {
+  const { count, error } = await supabase
+    .from('maintenance_snapshot_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('property_id', propertyId)
+    .eq('flagged_protected_class', true);
+  if (error) throw error;
+  return count || 0;
+}
 
 // ─── Router: everyone reaching here is already hub-logged-in ───────────
 const router = express.Router();
@@ -607,7 +703,16 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
       .in('maintenance_request_id', ticketIds)
       .eq('flagged_protected_class', true);
     if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
-    flaggedReviewCount = flaggedCount || 0;
+    // Governance fix, 2026-09-03: flagged maintenance_snapshot_events rows
+    // for this property need to feed the same badge count as flagged
+    // claims — see countFlaggedSnapshotEvents' own comment above.
+    let flaggedSnapshotCount;
+    try {
+      flaggedSnapshotCount = await countFlaggedSnapshotEvents(property.id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    flaggedReviewCount = (flaggedCount || 0) + flaggedSnapshotCount;
   }
 
   // ── Claims for every ticket on this property, decision-safe only —
@@ -808,6 +913,16 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
   });
 });
 
+// MAINT_RELATED_ACCOUNTS — AppFolio gl_account_name values that count as
+// maintenance/repair spend. Confirmed live against this account's real
+// chart of accounts while building sync.js's annual_budget_forecast entry
+// — there is no single "Repairs & Maintenance" GL line. Defined once here
+// (not duplicated) and reused by both getMaintenanceHistoryPropertySummary
+// below and the Budget route further down this file — same list, same
+// convention, so they can't drift into two different definitions of
+// "maintenance spend."
+const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
+
 // ─── GET /api/maintenance-history/property/:property_id/summary ────────
 // Property 360's Maintenance summary card — property-360-SPEC.md's
 // "Maintenance History — summary card" section. Deliberately NOT a call
@@ -848,7 +963,7 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   const { data: property, error: propErr } = await supabase
     .from('properties')
-    .select('id, name, address, city')
+    .select('id, name, address, city, appfolio_id')
     .eq('id', propertyId)
     .maybeSingle();
   if (propErr) return res.status(500).json({ error: propErr.message });
@@ -918,6 +1033,49 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
     }
   }
 
+  // AppFolio actual maintenance-category spend — Property 360 follow-up
+  // fix (2026-09). The Latchel-ticket figures above (open_ticket_count,
+  // spend_trailing_12mo) only ever reflect maintenance_requests rows that
+  // got a real Latchel job match. AppFolio's own general ledger can carry
+  // real repair/maintenance spend that never went through Latchel at all
+  // (a direct AppFolio entry) — a property can show zero Latchel tickets
+  // and still have real recorded repair spend, which used to render as a
+  // flat "nothing to report" card. Reuses MAINT_RELATED_ACCOUNTS (defined
+  // above, shared with the Budget route) and the same real-$0-vs-
+  // not-tracked-yet distinction the Budget route's own
+  // has_actual_spend_data already established, rather than inventing a
+  // second convention.
+  //
+  // Scoped to the CURRENT fiscal year only, not trailing-12mo like the
+  // Latchel spend figure above — actual-spend tracking (sync.js's
+  // general_ledger entry) has no historical backfill, so there's no full
+  // trailing-12mo window to sum even if this wanted one. fiscal_year on
+  // appfolio_property_actuals is the calendar year taken from each
+  // transaction's own post_date (see sync.js's general_ledger entry) —
+  // AppFolio's own fiscal-year convention, the same one the Budget route
+  // filters by.
+  let appfolioMaintenanceSpend = null;
+  let hasAppfolioActualData = null;
+  if (property.appfolio_id) {
+    const currentFiscalYear = new Date().getUTCFullYear();
+    const { data: actualsRows, error: actualsErr } = await supabase
+      .from('appfolio_property_actuals')
+      .select('fiscal_year, gl_account_name, net_amount')
+      .eq('appfolio_property_id', property.appfolio_id);
+    if (actualsErr) return res.status(500).json({ error: actualsErr.message });
+    // ANY row, any GL category, any year — "has actual-spend tracking
+    // started for this property at all," not narrowed to maintenance
+    // categories. A property with real actuals in other categories but
+    // genuinely $0 in maintenance categories this year must still read as
+    // "tracked" here, not "not tracked" — same reasoning Budget's own
+    // has_actual_spend_data flag uses.
+    hasAppfolioActualData = (actualsRows || []).length > 0;
+    const maintSpend = (actualsRows || [])
+      .filter(r => r.fiscal_year === currentFiscalYear && MAINT_RELATED_ACCOUNTS.includes(r.gl_account_name))
+      .reduce((sum, r) => sum + (Number(r.net_amount) || 0), 0);
+    appfolioMaintenanceSpend = Math.round(maintSpend * 100) / 100;
+  }
+
   // Gated flagged-review count — identical pattern to /overview's own
   // (count:'exact'+head:true, never fetching a row's content), same
   // PRIVACY_REVIEW_ROLES gate, same omit-don't-zero discipline as
@@ -930,22 +1088,40 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
   let flaggedReviewCount = null;
   if (PRIVACY_REVIEW_ROLES.includes(req.maintenanceHistoryRole)) {
     const ticketIds = tickets.map(t => t.id);
-    if (ticketIds.length === 0) {
-      flaggedReviewCount = 0;
-    } else {
+    let flaggedClaimsCount = 0;
+    if (ticketIds.length > 0) {
       const { count: flaggedCount, error: flaggedCountErr } = await supabase
         .from('maintenance_claims')
         .select('id', { count: 'exact', head: true })
         .in('maintenance_request_id', ticketIds)
         .eq('flagged_protected_class', true);
       if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
-      flaggedReviewCount = flaggedCount || 0;
+      flaggedClaimsCount = flaggedCount || 0;
     }
+    // Governance fix, 2026-09-03 — see countFlaggedSnapshotEvents' own
+    // comment above. NOT skipped on an empty ticket list the way the
+    // claims count is above: a property can have real flagged snapshot
+    // events (sourced from AppFolio bills, not Latchel tickets) even with
+    // zero Latchel-matched tickets.
+    let flaggedSnapshotCount;
+    try {
+      flaggedSnapshotCount = await countFlaggedSnapshotEvents(property.id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    flaggedReviewCount = flaggedClaimsCount + flaggedSnapshotCount;
   }
 
   return res.json({
     property: { id: property.id, name: property.name, address: property.address, city: property.city },
-    has_data: tickets.length > 0,
+    // Real data exists if EITHER source has it — a real Latchel-ticket row,
+    // or real AppFolio actual-spend tracking for this property (see the
+    // appfolioMaintenanceSpend comment above). A property with real, honest
+    // $0 AppFolio tracking and zero Latchel tickets still counts as "has
+    // data" — the AppFolio line on the card is what makes that zero
+    // legible, instead of the card falling back to the generic "nothing to
+    // report" message that started this fix.
+    has_data: tickets.length > 0 || hasAppfolioActualData === true,
     open_ticket_count: openTicketCount,
     spend_trailing_12mo: Math.round(spendTrailing12 * 100) / 100,
     last_activity: lastActivity,
@@ -960,11 +1136,57 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
     // spec's own "glance here, full detail there" framing — not this route.
     vendor_count: vendorIds.size,
     most_recent_vendor_name: mostRecentVendorName,
+    // AppFolio actual maintenance-category spend, current fiscal year only
+    // — see the comment above this route's flaggedReviewCount block. Both
+    // null/absent-in-spirit (null, not omitted — same convention
+    // most_recent_vendor_name already uses for "no value") when this
+    // property has no appfolio_id at all, since there's no AppFolio table
+    // to look this up against.
+    appfolio_maintenance_spend: appfolioMaintenanceSpend,
+    has_appfolio_actual_data: hasAppfolioActualData,
     ...(flaggedReviewCount ? { flagged_review_count: flaggedReviewCount } : {}),
   });
 }
 
 router.get('/api/maintenance-history/property/:property_id/summary', requireMaintenanceHistoryAccess, getMaintenanceHistoryPropertySummary);
+
+/**
+ * GET /api/maintenance-history/property/:property_id/snapshot
+ * Multi-year maintenance snapshot — property-360-SPEC.md "Multi-year
+ * maintenance snapshot," migration 20260903000000_maintenance_snapshot_
+ * events.sql, populated by maintenance-history/backfill-maintenance-
+ * snapshot.js. A short, chronological, up-to-5-years-back list of
+ * AppFolio bill-history facts for this property ("Kitchen faucet repair —
+ * 2022-03-14, $180, ABC Plumbing") — a different, separate glance from
+ * both the summary card above (open ticket count / trailing-12mo spend)
+ * and the flagged Privacy Review queue below.
+ *
+ * Gated by the same requireMaintenanceHistoryAccess every other read
+ * route in this file uses (ANY real maintenance_history role) — per the
+ * migration's own "ACCESS/GATING NOTE FOR Q": this table adds no new
+ * team_member_tool_roles value, and general reads of the decision-safe
+ * view need no narrower gate than the rest of the Maintenance section.
+ * Reads ONLY maintenance_snapshot_events_decision_safe — never the raw
+ * maintenance_snapshot_events table — so a flagged or rejected row can
+ * never reach this route regardless of role, same discipline the
+ * migration's own view comment requires ("the Property 360 card... should
+ * read ONLY the view, never this base table directly").
+ */
+router.get('/api/maintenance-history/property/:property_id/snapshot', requireMaintenanceHistoryAccess, async (req, res) => {
+  const propertyId = req.params.property_id;
+  if (!isValidUuid(propertyId)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  const { data, error } = await supabase
+    .from('maintenance_snapshot_events_decision_safe')
+    .select('id, event_date, summary, amount, vendor_name, source')
+    .eq('property_id', propertyId)
+    .order('event_date', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+
+  return res.json(data || []);
+});
 
 // Round-trip calendar validation — `new Date("2026-02-30")` does NOT return
 // an invalid date the way you'd expect; JS silently rolls it forward to
@@ -998,6 +1220,181 @@ function isValidUuid(str) {
   return typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
 
+// ─── Shared claim/snapshot-event review executor ────────────────────────
+// flagged-review-grouping-and-exclusions-SPEC.md, Asimov's Part 1 approval
+// condition 4: "refactor the shared parts (validation, the acknowledgment
+// check, the audit_log write) into a shared function both the single-item
+// routes and the new bulk route call." Extracted from what POST
+// /claims/:id/review and POST /snapshot-events/:id/review each used to do
+// independently (fetch the "before" row, gate acknowledgment for a flagged
+// row, validate a correction's fields, apply the update, write the Rule 1
+// audit_log row) — now one implementation, called by both of those routes
+// AND the new POST /flagged-queue/bulk-review route below.
+//
+// Both existing single-item routes were rewritten to call this with
+// requireAck:true, respondOnError:true, and no auditExtra — reproducing
+// their exact prior behavior (same status codes, same response shapes,
+// same audit_log rows) byte-for-byte, not a new behavior. Neither route's
+// own pre-checks (the snapshot-events route's explicit action/uuid checks
+// before it ever calls this) were touched — this function does not
+// re-decide anything either of those routes had already decided about
+// itself before this refactor; it just centralizes what both bodies did
+// next.
+//
+// itemType: 'claim' | 'snapshot_event' — the only real branch point below;
+// the acknowledgment gate, the update-then-audit-log sequence, and the
+// response contract are identical for both tables.
+//
+// fields: the request body's editable fields — only read/validated when
+// action === 'correct'. { claim_text, claim_date, outcome_level,
+// reviewer_notes } for a claim; { summary, event_date, reviewer_notes }
+// for a snapshot event. Bulk-review (confirm/reject only, never correct)
+// passes {} — no editable fields are ever read for those two actions.
+//
+// requireAck: true from both single-item routes (each already gated
+// acknowledgment itself before this refactor). false from bulk-review,
+// which gates the whole batch once, up front, instead of once per item
+// (see that route's own comment for why — everything it ever touches is
+// flagged content by definition, same reasoning GET /flagged-queue's own
+// unconditional gate already uses).
+//
+// respondOnError: true from both single-item routes — on any failure this
+// function writes res.status(...).json({error}) itself, exactly matching
+// each route's own prior inline error handling, and the caller just
+// returns. false from bulk-review, which turns a failure into one entry
+// in its own per-id `failed` array instead of an HTTP response.
+//
+// guardUnreviewed: bulk-review only. Adds `.eq('review_status',
+// 'unreviewed')` to the UPDATE itself and treats zero rows affected as a
+// failure — a last-instant guard against another request reviewing the
+// same item in the moment between this function's own "before" fetch and
+// the UPDATE actually committing, on top of (not instead of)
+// bulk-review's own fresh re-check right before calling this. Never
+// applied to the single-item routes — their UPDATE is unchanged
+// (`.select().single()`), so their existing behavior for an
+// already-reviewed item (silently overwrite, last write wins) is
+// unchanged too; this build was only asked to add race protection to the
+// new bulk path, not to change how single-item review already works.
+//
+// auditExtra: merged into the audit_log details object. Bulk-review passes
+// { bulk: true, cluster_key, batch_size } per condition 5 ("one audit_log
+// row per item... marked bulk: true with the cluster key and batch
+// size"); the single-item routes pass nothing, so their audit_log rows are
+// unchanged from before this refactor.
+async function applyReviewAction({ itemType, id, action, fields, req, res, requireAck, respondOnError, guardUnreviewed, auditExtra }) {
+  function fail(status, error) {
+    if (respondOnError && res) {
+      res.status(status).json({ error });
+      return { ok: false, responded: true };
+    }
+    return { ok: false, status, error };
+  }
+
+  if (!['confirm', 'correct', 'reject'].includes(action)) {
+    return fail(400, 'action must be "confirm", "correct", or "reject".');
+  }
+
+  const table = itemType === 'snapshot_event' ? 'maintenance_snapshot_events' : 'maintenance_claims';
+  const beforeSelect = itemType === 'snapshot_event'
+    ? 'id, flagged_protected_class, property_id'
+    : 'id, claim_type, flagged_protected_class, maintenance_request_id';
+
+  const { data: before, error: beforeErr } = await supabase.from(table).select(beforeSelect).eq('id', id).maybeSingle();
+  if (beforeErr) return fail(500, beforeErr.message);
+  if (!before) {
+    return fail(404, itemType === 'snapshot_event' ? 'Maintenance snapshot event not found.' : 'Claim not found.');
+  }
+
+  if (requireAck && before.flagged_protected_class) {
+    const acknowledged = await requireAcknowledgment(req, res);
+    if (!acknowledged) return { ok: false, responded: true };
+  }
+
+  const reviewerName = req.maintenanceHistoryMemberName || req.user.email;
+  const review_status = action === 'confirm' ? 'confirmed' : action === 'correct' ? 'corrected' : 'rejected';
+  const reviewer_notes = fields.reviewer_notes || null;
+
+  const updates = {
+    review_status,
+    reviewed_by: reviewerName,
+    reviewed_at: new Date().toISOString(),
+    reviewer_notes,
+  };
+
+  if (action === 'correct') {
+    if (itemType === 'snapshot_event') {
+      const { summary, event_date } = fields;
+      if (summary !== undefined && (typeof summary !== 'string' || !summary.trim())) {
+        return fail(400, 'summary cannot be empty.');
+      }
+      if (summary !== undefined && summary.length > 300) {
+        return fail(400, 'summary must be 300 characters or fewer.');
+      }
+      if (event_date !== undefined && event_date !== null && event_date !== '') {
+        if (!isValidCalendarDate(event_date)) {
+          return fail(400, 'event_date must be a valid date in YYYY-MM-DD format.');
+        }
+      }
+      if (summary !== undefined) updates.summary = summary;
+      // event_date is NOT NULL on this table — an explicit null/empty
+      // string is left alone (no change) rather than sent to the
+      // database, where it would fail the NOT NULL constraint.
+      if (event_date) updates.event_date = event_date;
+    } else {
+      const { claim_text, claim_date, outcome_level } = fields;
+      if (claim_text !== undefined && (typeof claim_text !== 'string' || !claim_text.trim())) {
+        return fail(400, 'claim_text cannot be empty.');
+      }
+      if (claim_date !== undefined && claim_date !== null && claim_date !== '') {
+        if (!isValidCalendarDate(claim_date)) {
+          return fail(400, 'claim_date must be a valid date in YYYY-MM-DD format.');
+        }
+      }
+      if (before.claim_type === 'outcome' && outcome_level !== undefined && outcome_level !== null && outcome_level !== '') {
+        const lvl = Number(outcome_level);
+        if (!Number.isInteger(lvl) || lvl < 1 || lvl > 5) {
+          return fail(400, 'outcome_level must be a whole number from 1 to 5.');
+        }
+      }
+      if (claim_text !== undefined) updates.claim_text = claim_text;
+      if (claim_date !== undefined) updates.claim_date = claim_date || null;
+      if (before.claim_type === 'outcome' && outcome_level !== undefined) {
+        updates.outcome_level = outcome_level === null ? null : Number(outcome_level);
+      }
+    }
+  }
+
+  let updated, updateErr;
+  if (guardUnreviewed) {
+    ({ data: updated, error: updateErr } = await supabase
+      .from(table).update(updates).eq('id', id).eq('review_status', 'unreviewed').select().maybeSingle());
+  } else {
+    ({ data: updated, error: updateErr } = await supabase.from(table).update(updates).eq('id', id).select().single());
+  }
+  if (updateErr) return fail(500, updateErr.message);
+  if (guardUnreviewed && !updated) {
+    // Someone else reviewed this exact item in the moment between this
+    // function's own "before" fetch above and this UPDATE committing —
+    // bulk-review's own fresh re-check right before calling this already
+    // catches the common case; this is the last-instant guard for the
+    // genuine race, treated the same way as any other per-id bulk
+    // failure, not a 500.
+    return fail(409, 'Already reviewed by someone else since this list was loaded.');
+  }
+
+  const riskLevel = (before.flagged_protected_class && (action === 'correct' || action === 'reject')) ? 'medium' : 'low';
+  await writeAuditLog({
+    action: itemType === 'snapshot_event' ? 'maintenance_snapshot_events.reviewed' : 'maintenance_claims.reviewed',
+    entity_type: itemType === 'snapshot_event' ? 'maintenance_snapshot_event' : 'maintenance_claim',
+    entity_id: id,
+    actor_email: req.user.email,
+    risk_level: riskLevel,
+    details: { review_status, reviewer_notes, actor_role: req.maintenanceHistoryRole, ...(auditExtra || {}) },
+  });
+
+  return { ok: true, row: updated };
+}
+
 // ─── POST /api/maintenance-history/claims/:id/review ───────────────────
 // Confirm / correct / reject one claim. Works the same for a flagged claim
 // as an unflagged one — a reviewer/admin can (and must) be able to read a
@@ -1005,126 +1402,74 @@ function isValidUuid(str) {
 // here. Only the audit_log entry below is barred from carrying the text.
 router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
   const { action, claim_text, claim_date, outcome_level, reviewer_notes } = req.body;
+  // Everything below this line — the "before" fetch, the acknowledgment
+  // gate (Mason's condition 1: director_of_operations only, and only for a
+  // flagged claim), correct-field validation, the update, and the Rule 1
+  // audit_log write — now lives in applyReviewAction (grouped-review-
+  // SPEC.md's Part 1 condition 4), shared with POST /snapshot-events/:id/
+  // review and the new bulk-review route below. requireAck:true and
+  // respondOnError:true reproduce this route's own prior behavior exactly
+  // (same status codes, same response shape) — nothing about what
+  // admin/reviewer/director_of_operations can do here changes.
+  const result = await applyReviewAction({
+    itemType: 'claim',
+    id: req.params.id,
+    action,
+    fields: { claim_text, claim_date, outcome_level, reviewer_notes },
+    req, res,
+    requireAck: true,
+    respondOnError: true,
+  });
+  if (!result.ok) return; // applyReviewAction already wrote the error response
+  return res.json({ success: true, claim: result.row });
+});
+
+// ─── POST /api/maintenance-history/snapshot-events/:id/review ──────────
+// Confirm / correct / reject one maintenance_snapshot_events row —
+// governance fix, 2026-09-03 (see GET /flagged-queue's own top comment
+// for the gap this closes: flagged snapshot-event rows had no path to a
+// human reviewer at all before this build). A parallel route, not an
+// extension of POST /claims/:id/review above: the two tables don't share
+// a row shape (summary/event_date/amount/vendor_name here vs.
+// claim_type/claim_text/claim_date/outcome_level there — outcome_level's
+// own claim_type-conditional validation alone would make one shared
+// route's body-validation branch on id type, not action, which is worse
+// than two small routes). What IS shared, via the helpers above, is
+// everything id-type-independent — the acknowledgment gate
+// (requireAcknowledgment) and the audit-log write (writeAuditLog) — the
+// two pieces this build was explicitly told not to duplicate.
+//
+// Same "works the same for a flagged row as an unflagged one" principle
+// as claims review above — a reviewer/admin can (and must) be able to
+// read a flagged row's real summary to judge it; only the audit_log entry
+// is barred from carrying it.
+router.post('/api/maintenance-history/snapshot-events/:id/review', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
+  const { action, summary, event_date, reviewer_notes } = req.body;
+  // Both pre-checks kept here, unchanged, exactly as before this route was
+  // refactored to call the shared applyReviewAction (grouped-review-
+  // SPEC.md's Part 1 condition 4) — this route validated action AND
+  // req.params.id itself before this refactor (unlike claims review, which
+  // never validated the id shape); that asymmetry is a pre-existing fact
+  // about these two routes, not something this build was asked to change,
+  // so it's preserved rather than folded into the now-shared function.
   if (!['confirm', 'correct', 'reject'].includes(action)) {
     return res.status(400).json({ error: 'action must be "confirm", "correct", or "reject".' });
   }
-
-  const { data: before, error: beforeErr } = await supabase
-    .from('maintenance_claims')
-    .select('id, claim_type, flagged_protected_class, maintenance_request_id')
-    .eq('id', req.params.id)
-    .maybeSingle();
-  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
-  if (!before) return res.status(404).json({ error: 'Claim not found.' });
-
-  // Acknowledgment gate, Mason's condition 1 (PRIVACY_REVIEW_ROLES comment
-  // above) — director_of_operations only, and only for a flagged claim.
-  // admin/reviewer hit neither branch of this condition, so their existing
-  // Confirm/Correct/Reject flow is byte-for-byte unchanged. A
-  // director_of_operations user can already reach this route for an
-  // UNFLAGGED claim exactly as before (that grant predates this build,
-  // commit 79c43cf, and Mason's condition is specifically about flagged/
-  // protected-class content) — this only blocks the flagged case, and only
-  // until they've acknowledged once.
-  if (before.flagged_protected_class && req.maintenanceHistoryRole === PRIVACY_QUEUE_ACK_ROLE) {
-    let acknowledged;
-    try {
-      acknowledged = await hasAcknowledgedPrivacyQueue(req.user.email);
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    if (!acknowledged) {
-      return res.status(403).json({ error: 'privacy_queue_acknowledgment_required', message: PRIVACY_QUEUE_ACK_MESSAGE });
-    }
+  if (!isValidUuid(req.params.id)) {
+    return res.status(400).json({ error: 'That id is not valid.' });
   }
 
-  const reviewerName = req.maintenanceHistoryMemberName || req.user.email;
-  const review_status = action === 'confirm' ? 'confirmed' : action === 'correct' ? 'corrected' : 'rejected';
-
-  // Basic validation before anything hits the database — a bad value here
-  // should come back as a clean 400, not a raw Postgres error.
-  if (action === 'correct') {
-    if (claim_text !== undefined && (typeof claim_text !== 'string' || !claim_text.trim())) {
-      return res.status(400).json({ error: 'claim_text cannot be empty.' });
-    }
-    if (claim_date !== undefined && claim_date !== null && claim_date !== '') {
-      if (!isValidCalendarDate(claim_date)) {
-        return res.status(400).json({ error: 'claim_date must be a valid date in YYYY-MM-DD format.' });
-      }
-    }
-    if (before.claim_type === 'outcome' && outcome_level !== undefined && outcome_level !== null && outcome_level !== '') {
-      const lvl = Number(outcome_level);
-      if (!Number.isInteger(lvl) || lvl < 1 || lvl > 5) {
-        return res.status(400).json({ error: 'outcome_level must be a whole number from 1 to 5.' });
-      }
-    }
-  }
-
-  const updates = {
-    review_status,
-    reviewed_by: reviewerName,
-    reviewed_at: new Date().toISOString(),
-    reviewer_notes: reviewer_notes || null,
-  };
-  if (action === 'correct') {
-    if (claim_text !== undefined) updates.claim_text = claim_text;
-    if (claim_date !== undefined) updates.claim_date = claim_date || null;
-    if (before.claim_type === 'outcome' && outcome_level !== undefined) {
-      updates.outcome_level = outcome_level === null ? null : Number(outcome_level);
-    }
-  }
-
-  const { data: updated, error } = await supabase
-    .from('maintenance_claims')
-    .update(updates)
-    .eq('id', req.params.id)
-    .select()
-    .single();
-  if (error) return res.status(500).json({ error: error.message });
-
-  // Rule 1 fields per the migration's "AUDIT LOG GUIDANCE FOR Q" #3.
-  //
-  // audit_log.performed_by is a foreign key into the older `users` table
-  // (20260720000003_foundation.sql: performed_by UUID REFERENCES users(id)),
-  // NOT into Supabase Auth. req.user.id is the Auth login ID (it's what
-  // team_members.auth_user_id holds) — that ID was never written into
-  // `users`, whose rows only line up with a person by email. Writing
-  // req.user.id straight into performed_by violated the FK constraint on
-  // every single review action, which silently killed the whole insert
-  // (the .insert() call's result was never checked). Fixed by looking up
-  // the matching `users` row by email instead. actor_id below is
-  // unaffected — it's a free-text column already correctly holding the
-  // reviewer's email, not a foreign key.
-  const { data: userRow } = await supabase
-    .from('users')
-    .select('id')
-    .eq('email', req.user.email)
-    .maybeSingle();
-
-  const riskLevel = (before.flagged_protected_class && (action === 'correct' || action === 'reject')) ? 'medium' : 'low';
-  const { error: auditErr } = await supabase.from('audit_log').insert({
-    action: 'maintenance_claims.reviewed',
-    entity_type: 'maintenance_claim',
-    entity_id: req.params.id,
-    performed_by: userRow ? userRow.id : null,
-    actor_type: 'human',
-    actor_id: req.user.email,
-    privacy_category: 'processing',
-    risk_level: riskLevel,
-    // Mason's condition 2 (PRIVACY_REVIEW_ROLES comment above): the role in
-    // effect at the time of this action must be recoverable later, not just
-    // the actor's email — added to details rather than a new column, the
-    // least-disruptive way to extend this existing write. actor_id (email)
-    // is also always resolvable back through team_member_tool_roles for
-    // anyone whose role has since changed, so this is redundant-by-design
-    // (belt-and-suspenders), not the only path to the answer.
-    details: { review_status, reviewer_notes: reviewer_notes || null, actor_role: req.maintenanceHistoryRole },
+  const result = await applyReviewAction({
+    itemType: 'snapshot_event',
+    id: req.params.id,
+    action,
+    fields: { summary, event_date, reviewer_notes },
+    req, res,
+    requireAck: true,
+    respondOnError: true,
   });
-  if (auditErr) {
-    console.error('[maintenance-history] audit_log insert failed for claim review:', auditErr.message);
-  }
-
-  return res.json({ success: true, claim: updated });
+  if (!result.ok) return; // applyReviewAction already wrote the error response
+  return res.json({ success: true, snapshot_event: result.row });
 });
 
 // ─── POST /api/maintenance-history/privacy-queue/acknowledge ────────────
@@ -1138,25 +1483,144 @@ router.post('/api/maintenance-history/privacy-queue/acknowledge', requireMainten
   try {
     const already = await hasAcknowledgedPrivacyQueue(req.user.email);
     if (!already) {
-      const { data: userRow } = await supabase.from('users').select('id').eq('email', req.user.email).maybeSingle();
-      const { error: ackErr } = await supabase.from('audit_log').insert({
+      const ok = await writeAuditLog({
         action: PRIVACY_QUEUE_ACK_ACTION,
         entity_type: 'team_member',
         entity_id: req.teamMemberId,
-        performed_by: userRow ? userRow.id : null,
-        actor_type: 'human',
-        actor_id: req.user.email,
-        privacy_category: 'processing',
-        risk_level: 'low',
+        actor_email: req.user.email,
         details: { role: req.maintenanceHistoryRole },
       });
-      if (ackErr) return res.status(500).json({ error: ackErr.message });
+      // Unlike writeAuditLog's other call sites, a failed write here must
+      // fail the request — this IS the acknowledgment record itself, not a
+      // log describing some other action that already succeeded. A
+      // swallowed failure would silently grant access without ever
+      // actually recording that Mason's condition 1 was met.
+      if (!ok) return res.status(500).json({ error: 'Could not save acknowledgment.' });
     }
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ─── Grouped review view — Part 1 of flagged-review-grouping-and-
+// exclusions-SPEC.md, built per that spec's own "Asimov's Review" section
+// (2026-09-03), which is the actually-binding version of Part 1's
+// conditions. Two pieces: clusterFlaggedRows() below (used by
+// ?grouped=true on GET /flagged-queue) and POST /flagged-queue/bulk-review
+// further down.
+//
+// TERM_TO_CATEGORY — built once at module load from protected-class-
+// terms.js's already-exported CATEGORIES object. Not a change to that
+// file (or to scanText()/content-check.js — this build was told explicitly
+// not to touch any of those three): CATEGORIES was already exported;
+// this just consumes it the same way scanText() itself already is
+// consumed elsewhere in this file.
+const TERM_TO_CATEGORY = {};
+for (const [category, terms] of Object.entries(CATEGORIES)) {
+  for (const term of terms) {
+    if (!(term in TERM_TO_CATEGORY)) TERM_TO_CATEGORY[term] = category;
+  }
+}
+
+function firstCategory(flaggedCategory) {
+  const first = (flaggedCategory || '').split(',')[0].trim();
+  return first || 'unspecified';
+}
+
+// clusterFlaggedRows — the ONLY thing this function does is label/group
+// rows the caller has already determined belong in the queue (via the
+// persisted flagged_protected_class filter GET /flagged-queue's own query
+// already applies, above). It never decides membership — Asimov's hard
+// requirement: "the live re-scan may only ever compute a display/cluster
+// label for an item already known to belong there — never decide
+// inclusion." rows passed in here are exactly the same rows the flat
+// (non-grouped) response would have returned; clustering can only ever
+// re-bucket that fixed set, never add to or drop from it — see this
+// build's own verification note (total_items below, checked against the
+// flat query's own row count) for how that invariant was actually tested.
+//
+// WHY THIS DOESN'T READ A `matched_layer` COLUMN, THE WAY THE APPROVED
+// SPEC ASSUMED: checked both tables' migrations and the ingest code that
+// computes matched_layer (lib/content-check.js's checkClaim(), and
+// router.js's own ingest route further down this file) — matched_layer is
+// written only into audit_log.details at ingest time for
+// maintenance_claims (action: 'maintenance_claims.protected_class_
+// excluded'), and for maintenance_snapshot_events it is not persisted
+// ANYWHERE — backfill-maintenance-snapshot.js never writes an audit_log
+// row at all. Neither table has a matched_layer column, and there is no
+// single join that would cover both item types.
+//
+// Fix used instead: condition 3's own actual test is "no shared matched
+// term," which is exactly what a live rescan's matchedTerms answers,
+// computed straight off each row's CURRENT text — same live scanText()
+// call this function already has to make to derive matched_term/category
+// for the cluster label. If the rescan finds a term, this is a real,
+// currently-visible, shared word/phrase — bulk_eligible = true, same bar
+// clustering-by-matched-term already implies. If it finds none, this
+// behaves exactly like a genuine Layer-2-only item — grouped for
+// browsing, bulk_eligible = false. This can only ever be MORE
+// conservative than the originally-specified column, never less: a
+// Layer-1 term present at ingest but since edited out of the text via a
+// "correct" action now correctly reads as "no shared term" instead of
+// staying falsely bulk-eligible off a stale ingest-time fact. Re-enforced
+// server-side in POST /flagged-queue/bulk-review below (not just hidden
+// in the dashboard) with this exact same live-rescan test, so a client
+// can't bypass condition 3 by calling the bulk route directly.
+function clusterFlaggedRows(rows) {
+  const clusters = new Map();
+  for (const row of rows) {
+    const text = row.item_type === 'snapshot_event' ? (row.summary || '') : (row.claim_text || '');
+    const scan = scanText(text);
+    const term = scan.matchedTerms.length ? scan.matchedTerms[0] : null;
+    const category = term
+      ? (TERM_TO_CATEGORY[term] || scan.categories[0] || firstCategory(row.flagged_category))
+      : firstCategory(row.flagged_category);
+    const clusterKey = term ? `term:${category}:${term}` : `category:${category}`;
+
+    let cluster = clusters.get(clusterKey);
+    if (!cluster) {
+      cluster = {
+        cluster_key: clusterKey,
+        category,
+        matched_term: term, // null for a Layer-2-only-style cluster
+        // 'keyword' when a live rescan of current text finds the shared
+        // term this cluster is named for; 'model' otherwise (no
+        // persisted column backs this — see the function comment above
+        // for why a live rescan is the correct, safe substitute here).
+        matched_layer: term ? 'keyword' : 'model',
+        bulk_eligible: !!term,
+        count: 0,
+        sample_text: text,
+        // Full row objects (same shape the flat, non-grouped response
+        // already returns per item — claim_text/summary and all),  not
+        // bare {id, item_type} pairs: this lets the dashboard's expand-to-
+        // individual-items view reuse the EXISTING renderClaim/
+        // renderSnapshotEvent (renderPrivacyClaim/renderPrivacySnapshotEvent
+        // on Property 360) functions directly, per condition 7, with no
+        // second fetch. Nothing new is exposed by this — a reviewer
+        // already receives every one of these same fields in the flat
+        // response today. POST /flagged-queue/bulk-review's own request
+        // body only needs { id, item_type } — the dashboard extracts just
+        // those two fields per item when it builds that call.
+        items: [],
+      };
+      clusters.set(clusterKey, cluster);
+    }
+    cluster.count++;
+    cluster.items.push(row);
+  }
+  // Largest cluster first — most useful for triage (a repeat false
+  // positive like a brand name is exactly what this view exists to let a
+  // reviewer clear in one action).
+  return Array.from(clusters.values()).sort((a, b) => b.count - a.count);
+}
+
+// Bulk-review is a real-time, human-initiated action against a real
+// portfolio flag rate the spec's own header measured at ~250-300 items
+// total — not a bulk-import job. A cap here is a sanity/abuse guard, not
+// a number anyone should ever need to raise to get real work done.
+const BULK_REVIEW_MAX_ITEMS = 500;
 
 // ─── GET /api/maintenance-history/flagged-queue ─────────────────────────
 // "Needs privacy review" — gated to PRIVACY_REVIEW_ROLES (admin, reviewer,
@@ -1167,11 +1631,28 @@ router.post('/api/maintenance-history/privacy-queue/acknowledge', requireMainten
 // was opened (see the view-logging block below, added by this build for
 // the first time).
 //
+// Governance fix, 2026-09-03: this route now ALSO returns flagged
+// maintenance_snapshot_events rows, merged into the exact same list as
+// flagged maintenance_claims rows — one queue, not two parallel screens
+// (see the migration and backfill script for how those rows get flagged
+// in the first place; before this fix, a flagged snapshot-event row was
+// correctly hidden from maintenance_snapshot_events_decision_safe but had
+// no path to ever reach a human reviewer at all). Each row in the
+// response carries `item_type` ('claim' or 'snapshot_event') so the front
+// end can render each correctly without confusing them — the two tables
+// don't share a field shape (claim_text/claim_date/outcome_level vs.
+// summary/event_date/amount/vendor_name). Reviewing a snapshot-event row
+// goes through the separate POST /snapshot-events/:id/review route below
+// (not this route's own POST /claims/:id/review) for the same reason.
+//
 // Optional ?property_id= — shared-property-context-SPEC.md Part 2,
 // "caught on review": additive only. With no filter this is the same
 // portfolio-wide query as before, unchanged, and stays the default when
 // this route is reached normally (not via the Property Overview badge) —
 // that comprehensive-sweep behavior is the whole point of this queue.
+// Applies to snapshot-event rows too, straight against their own real
+// property_id column (no unit/ticket hop needed — see
+// countFlaggedSnapshotEvents' own comment above).
 //
 // Optional ?include_reviewed=true — property-360-SPEC.md's Privacy Review
 // section, resolved 2026-09-02, approved by Mason with conditions. Same
@@ -1185,25 +1666,18 @@ router.post('/api/maintenance-history/privacy-queue/acknowledge', requireMainten
 // param adds no further role distinction on top of it. Mason's condition
 // 3: this is a display filter only, applied to the SELECT below — the
 // view-logging audit_log write further down is untouched by this change,
-// on purpose.
+// on purpose. Applies identically to snapshot-event rows, same param.
 router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
   // Acknowledgment gate, Mason's condition 1 — director_of_operations only
-  // (see PRIVACY_REVIEW_ROLES comment above). This route returns real
-  // claim_text in its response body, so the gate has to sit at the API
-  // level, not just hide a button in the front-end — hiding the button
-  // still lets the browser receive the text. admin/reviewer never hit this
-  // branch, so nothing changes for them.
-  if (req.maintenanceHistoryRole === PRIVACY_QUEUE_ACK_ROLE) {
-    let acknowledged;
-    try {
-      acknowledged = await hasAcknowledgedPrivacyQueue(req.user.email);
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    if (!acknowledged) {
-      return res.status(403).json({ error: 'privacy_queue_acknowledgment_required', message: PRIVACY_QUEUE_ACK_MESSAGE });
-    }
-  }
+  // (see PRIVACY_REVIEW_ROLES comment above and requireAcknowledgment's own
+  // comment). This route returns real claim_text/summary in its response
+  // body, so the gate has to sit at the API level, not just hide a button
+  // in the front-end — hiding the button still lets the browser receive
+  // the text. admin/reviewer never hit this branch, so nothing changes for
+  // them. Applied unconditionally here (not guarded by a flagged check the
+  // way claims/snapshot-event review are) because everything this route
+  // returns is flagged by definition.
+  if (!(await requireAcknowledgment(req, res))) return;
 
   const propertyIdFilter = req.query.property_id;
   if (propertyIdFilter !== undefined && !isValidUuid(propertyIdFilter)) {
@@ -1251,12 +1725,12 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
   // array) when a property filter resolved to zero tickets — same
   // "don't query on a known-empty id list" convention the ingest route
   // above already follows for unitIds/tickets.
-  let data;
+  let claimsData;
   if (ticketIds !== null && ticketIds.length === 0) {
-    data = [];
+    claimsData = [];
   } else {
     try {
-      data = await fetchAllRows((from, to) => {
+      claimsData = await fetchAllRows((from, to) => {
         let query = supabase
           .from('maintenance_claims')
           .select(`
@@ -1274,9 +1748,37 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
       return res.status(500).json({ error: error.message });
     }
   }
-  data.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
 
-  const rows = data.map(c => ({
+  // Flagged maintenance_snapshot_events rows — governance fix, 2026-09-03
+  // (see this route's own top comment). No time bound and no separate
+  // "skip on empty id list" step: property_id is a direct column here, so
+  // the property filter (when given) applies straight to the query below,
+  // no ticketIds-style resolution needed first.
+  let snapshotData;
+  try {
+    snapshotData = await fetchAllRows((from, to) => {
+      let query = supabase
+        .from('maintenance_snapshot_events')
+        .select(`
+          id, event_date, summary, amount, vendor_name, source, source_reference, extracted_by,
+          flagged_category, review_status, reviewed_by, reviewed_at, created_at, property_id,
+          properties ( name, address )
+        `)
+        .eq('flagged_protected_class', true);
+      if (propertyIdFilter) query = query.eq('property_id', propertyIdFilter);
+      if (!includeReviewed) query = query.eq('review_status', 'unreviewed');
+      return query.order('id', { ascending: true }).range(from, to);
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // One merged, sorted queue — item_type ('claim' / 'snapshot_event')
+  // distinguishes a claim row from a snapshot-event row so the front end
+  // can render (and act on) each correctly without confusing them, per
+  // this build's own instruction: one queue, not two parallel screens.
+  const claimRows = claimsData.map(c => ({
+    item_type: 'claim',
     id: c.id,
     claim_type: c.claim_type,
     claim_text: c.claim_text,
@@ -1298,12 +1800,41 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
     unit_number: c.maintenance_requests && c.maintenance_requests.units ? c.maintenance_requests.units.unit_number : null,
   }));
 
+  const snapshotRows = snapshotData.map(s => ({
+    item_type: 'snapshot_event',
+    id: s.id,
+    summary: s.summary,
+    event_date: s.event_date,
+    amount: s.amount,
+    vendor_name: s.vendor_name,
+    source: s.source,
+    source_reference: s.source_reference,
+    extracted_by: s.extracted_by,
+    flagged_category: s.flagged_category,
+    review_status: s.review_status,
+    reviewed_by: s.reviewed_by,
+    reviewed_at: s.reviewed_at,
+    created_at: s.created_at,
+    property_id: s.property_id,
+    property_name: s.properties ? s.properties.name : null,
+  }));
+
+  const rows = claimRows.concat(snapshotRows);
+  rows.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+
   // View-logging — Asimov's condition on this build: before now, nothing
   // logged the act of *viewing* the flagged queue at all (only ingest-time
   // flagging and review-time decisions were audited). Same performed_by/
-  // actor_type/actor_id lookup as POST /claims/:id/review above. Never the
-  // claim text, claim ids, or any tenant-identifying field — only the
-  // property/filter/result-count shape below.
+  // actor_type/actor_id lookup as POST /claims/:id/review above, now via
+  // the shared writeAuditLog helper. Never the claim text, snapshot-event
+  // summary, ids, or any tenant-identifying field — only the
+  // property/filter/result-count shape below. Action name kept as-is
+  // (maintenance_claims.flagged_queue_viewed, unchanged from before this
+  // build) rather than renamed for the merged queue — SPEC.md and
+  // compliance/director-of-operations-privacy-review-access.md both
+  // reference this exact string; claim_count/snapshot_event_count are
+  // added to `details` instead, so any existing report filtering on this
+  // action keeps working, and the breakdown is still fully recoverable.
   //
   // audit_log.entity_id is UUID NOT NULL (20260720000003_foundation.sql),
   // so a literal null isn't possible for the unfiltered (portfolio-wide)
@@ -1313,27 +1844,156 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
   // never reused or looked up anywhere — the real fact of whether this was
   // filtered, and to what property, lives in `details` below, which does
   // allow null.
-  const { data: viewerRow } = await supabase
-    .from('users')
-    .select('id')
-    .eq('email', req.user.email)
-    .maybeSingle();
-  const { error: viewAuditErr } = await supabase.from('audit_log').insert({
+  await writeAuditLog({
     action: 'maintenance_claims.flagged_queue_viewed',
     entity_type: 'flagged_queue',
     entity_id: propertyIdFilter || crypto.randomUUID(),
-    performed_by: viewerRow ? viewerRow.id : null,
-    actor_type: 'human',
-    actor_id: req.user.email,
-    privacy_category: 'processing',
-    risk_level: 'low',
-    details: { property_id: propertyIdFilter || null, filtered: !!propertyIdFilter, result_count: rows.length },
+    actor_email: req.user.email,
+    details: {
+      property_id: propertyIdFilter || null,
+      filtered: !!propertyIdFilter,
+      result_count: rows.length,
+      claim_count: claimRows.length,
+      snapshot_event_count: snapshotRows.length,
+      grouped: req.query.grouped === 'true',
+    },
   });
-  if (viewAuditErr) {
-    console.error('[maintenance-history] audit_log insert failed for flagged-queue view:', viewAuditErr.message);
+
+  // ?grouped=true — grouped-review-SPEC.md Part 1. Clusters the exact same
+  // `rows` this route would otherwise return flat (built above from the
+  // persisted flagged_protected_class filter, untouched by grouping) —
+  // see clusterFlaggedRows' own comment for why membership can never
+  // change here, only labeling. total_items is `rows.length`, the same
+  // number the flat (non-grouped) call against this same query would
+  // return — the sum of every cluster's own count always equals it,
+  // because clusterFlaggedRows only re-buckets rows, never drops or adds
+  // one.
+  if (req.query.grouped === 'true') {
+    return res.json({ grouped: true, total_items: rows.length, clusters: clusterFlaggedRows(rows) });
   }
 
   return res.json(rows);
+});
+
+// ─── POST /api/maintenance-history/flagged-queue/bulk-review ───────────
+// Grouped-review-SPEC.md Part 1 — one-click Confirm-all/Reject-all for a
+// cluster from the grouped view above. Same role gate as the queue itself
+// (PRIVACY_REVIEW_ROLES), one acknowledgment check for the whole batch —
+// not per item — because everything this route ever touches is, by
+// definition, still-flagged content, the same reasoning GET
+// /flagged-queue's own unconditional gate above already uses. Confirm/
+// reject only, never correct — a bulk correction would mean applying one
+// edited text to many different underlying claims/summaries at once,
+// which doesn't mean anything; a real correction needs per-item text
+// editing, unchanged, through the individual routes above.
+//
+// Every id is re-verified fresh against the database, immediately before
+// acting on it — never trusts the client's cluster snapshot (Asimov's
+// second, more serious finding on this build: a client-held list can be
+// stale by the time this request arrives — another reviewer already
+// acted on one of these items, or the underlying text was corrected out
+// from under a keyword match). An id that's no longer flagged, already
+// reviewed, or no longer has a shared matched term by the time this runs
+// is skipped and reported as a per-id failure, never silently applied or
+// silently dropped. applyReviewAction's own guardUnreviewed option closes
+// the remaining, genuinely-concurrent race (two bulk actions landing on
+// the same item in the same instant) on top of this pre-check.
+//
+// Layer-2-only items never get a bulk button in either dashboard (per
+// condition 3), but this route enforces that server-side too, with the
+// same live-rescan test clusterFlaggedRows uses — a client can't bypass
+// the UI restriction by calling this route directly with a hand-built id
+// list.
+//
+// Rule 1: applyReviewAction's own writeAuditLog call runs once per item
+// (never once for the whole batch), each with details.bulk=true, this
+// batch's cluster key, and its total size — condition 5.
+//
+// cluster_key IS NOT taken from the request body, and is NEVER the literal
+// matched term/phrase — CATEGORY ONLY. Caught by this build's own
+// end-to-end verification: condition 5's literal text asks for "the
+// batch's cluster key (matched term + category...)" written into
+// audit_log, but protected-class-terms.js's own header is explicit and
+// pre-existing: "callers MUST NOT write matchedTerms or the source text
+// into audit_log." Writing the actual matched word (e.g. "wheelchair")
+// into an audit_log row — even alongside a category — would violate that
+// already-established rule, which this build was separately told not to
+// weaken. Category alone (e.g. "disability_health") is the same thing
+// already written into audit_log everywhere else in this file (the
+// ingest-time flagged_category writes, safeTicketTitle's own write) — a
+// real, useful, already-accepted-as-safe trace of what a bulk action was
+// about, without ever logging the term itself. Computed fresh, per item,
+// from that item's own live rescan below — not trusted from the client.
+router.post('/api/maintenance-history/flagged-queue/bulk-review', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
+  if (!(await requireAcknowledgment(req, res))) return;
+
+  const { items, action } = req.body;
+  if (!['confirm', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'action must be "confirm" or "reject" for a bulk action — bulk-correct is not supported (edit items individually).' });
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array of { id, item_type }.' });
+  }
+  if (items.length > BULK_REVIEW_MAX_ITEMS) {
+    return res.status(400).json({ error: `A single bulk action is limited to ${BULK_REVIEW_MAX_ITEMS} items.` });
+  }
+
+  const succeeded = [];
+  const failed = [];
+  const batchSize = items.length;
+
+  for (const raw of items) {
+    const id = raw && raw.id;
+    const itemType = raw && raw.item_type;
+    if (!isValidUuid(id) || !['claim', 'snapshot_event'].includes(itemType)) {
+      failed.push({ id: id || null, reason: 'Malformed item — each must have a valid id and item_type ("claim" or "snapshot_event").' });
+      continue;
+    }
+
+    // Fresh re-check, right before acting — never the client's list.
+    const table = itemType === 'snapshot_event' ? 'maintenance_snapshot_events' : 'maintenance_claims';
+    const textColumn = itemType === 'snapshot_event' ? 'summary' : 'claim_text';
+    const { data: current, error: currentErr } = await supabase
+      .from(table)
+      .select(`id, flagged_protected_class, flagged_category, review_status, ${textColumn}`)
+      .eq('id', id)
+      .maybeSingle();
+    if (currentErr) { failed.push({ id, reason: currentErr.message }); continue; }
+    if (!current) { failed.push({ id, reason: 'Item no longer exists.' }); continue; }
+    if (!current.flagged_protected_class) {
+      failed.push({ id, reason: 'No longer flagged — it may have been corrected since this list was loaded.' });
+      continue;
+    }
+    if (current.review_status !== 'unreviewed') {
+      failed.push({ id, reason: 'Already reviewed — someone else may have acted on this item since this list was loaded.' });
+      continue;
+    }
+    // Condition 3, enforced server-side (not just a hidden button) — same
+    // live-rescan test clusterFlaggedRows uses above. term (not just
+    // whether one exists) is kept here only long enough to derive a
+    // CATEGORY for the audit_log write below — the term itself is never
+    // put in auditExtra (see this route's own top comment).
+    const scan = scanText(current[textColumn] || '');
+    const term = scan.matchedTerms.length ? scan.matchedTerms[0] : null;
+    if (!term) {
+      failed.push({ id, reason: 'This item has no shared matched keyword — Layer-2-only items must be reviewed individually, not in bulk.' });
+      continue;
+    }
+    const category = TERM_TO_CATEGORY[term] || scan.categories[0] || firstCategory(current.flagged_category);
+
+    const result = await applyReviewAction({
+      itemType, id, action, fields: {},
+      req, res,
+      requireAck: false, // gated once for the whole batch, above
+      respondOnError: false, // a failure here becomes a `failed` entry, not an HTTP response
+      guardUnreviewed: true, // last-instant race guard — see this route's own comment
+      auditExtra: { bulk: true, cluster_key: category, batch_size: batchSize },
+    });
+    if (result.ok) succeeded.push(id);
+    else failed.push({ id, reason: result.error || 'Could not save review.' });
+  }
+
+  return res.json({ succeeded, failed });
 });
 
 // ─── GET /api/maintenance-history/property/:property_id/budget ─────────
@@ -1349,14 +2009,17 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
 // non-Latchel-tracked costs) — that is expected, not a bug, per the
 // spec's "What Could Go Wrong" section.
 //
-// MAINT_RELATED_ACCOUNTS / SUBTOTAL_ACCOUNTS confirmed live against this
-// account's real chart of accounts while building sync.js's
-// annual_budget_forecast entry — there is no single "Repairs &
-// Maintenance" GL line, and the report includes two synthetic subtotal
-// rows ("Total Forecast Income"/"Total Forecast Expense") that are sums
-// of the other rows, not real spending categories — mixing them into a
-// per-category list would double-count. They're split out here instead.
-const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
+// MAINT_RELATED_ACCOUNTS is now defined once, up near the Property 360
+// summary route above (it's shared with getMaintenanceHistoryPropertySummary's
+// appfolio_maintenance_spend field as of the Property 360 Maintenance-card
+// follow-up fix — same constant, not a second copy that could drift).
+//
+// SUBTOTAL_ACCOUNTS confirmed live against this account's real chart of
+// accounts while building sync.js's annual_budget_forecast entry — the
+// report includes two synthetic subtotal rows ("Total Forecast Income"/
+// "Total Forecast Expense") that are sums of the other rows, not real
+// spending categories — mixing them into a per-category list would
+// double-count. They're split out here instead.
 const SUBTOTAL_ACCOUNTS = ['Total Forecast Income', 'Total Forecast Expense'];
 
 router.get('/api/maintenance-history/property/:property_id/budget', requireMaintenanceHistoryAccess, async (req, res) => {

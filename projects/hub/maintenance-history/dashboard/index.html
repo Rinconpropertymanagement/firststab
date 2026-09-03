@@ -77,6 +77,7 @@
     .correct-form textarea { min-height: 50px; }
     .form-hint { color: #6b7280; font-size: 11.5px; margin-bottom: 8px; }
     .flagged-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
+    .toggle-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; margin-bottom: 14px; color: #374151; }
 
     .prop-line { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
 
@@ -200,6 +201,21 @@
         </div>
         <div id="flagged-filter-bar" class="disclaimer-banner" style="display:none;"></div>
         <div class="card" id="flagged-list-card">
+          <!-- Resolved 2026-09-02 (property-360-SPEC.md Privacy Review),
+               same toggle property-360/dashboard already has for this same
+               queue — added here too, 2026-09-03, for consistency: this
+               tab had no way to see a reviewed item at all before now,
+               for either claims or (new as of this build) snapshot-event
+               rows. Default off, per Mason's condition 1. -->
+          <div class="toggle-row">
+            <label><input type="checkbox" id="flagged-include-reviewed-toggle"> Show reviewed items</label>
+            <!-- Grouped review view — flagged-review-grouping-and-exclusions-
+                 SPEC.md Part 1. Default OFF: today's flat, one-row-per-item
+                 list is unchanged unless someone opts into grouping —
+                 same additive-only convention ?property_id= and
+                 ?include_reviewed= already use on this route. -->
+            <label style="margin-left:16px;"><input type="checkbox" id="flagged-grouped-toggle"> Group similar items</label>
+          </div>
           <div id="flagged-list"></div>
           <div id="flagged-empty" class="empty" style="display:none;"></div>
         </div>
@@ -449,6 +465,69 @@
       if (btn) btn.textContent = isOpen ? 'Cancel' : 'Reject';
     }
 
+    // ── Flagged maintenance_snapshot_events rows — governance fix,
+    // 2026-09-03. Rendered in the SAME "Needs privacy review" list as
+    // claims (loadFlagged() below), never a second screen, but with their
+    // own render/toggle/review functions rather than threading a second
+    // id-type branch through renderClaim/reviewClaim above: the two
+    // tables don't share a row shape (summary/event_date/amount/
+    // vendor_name here vs. claim_type/claim_text/claim_date/outcome_level
+    // there), and renderClaim/reviewClaim are also still used, unchanged,
+    // by the ticket-detail view (openTicket) — a snapshot-event row never
+    // appears there, so this stays fully separate rather than risking
+    // that existing path. "snap-" prefix on every element id here keeps
+    // its DOM ids from ever colliding with a claim's own (both are real
+    // UUIDs, so a collision is already near-impossible, but the prefix
+    // also just makes which kind of row a given form belongs to obvious
+    // when reading the DOM).
+    function renderSnapshotEvent(s) {
+      let meta = reviewBadge(s.review_status);
+      if (s.event_date) meta += '<span>' + escapeHtml(s.event_date) + '</span>';
+      meta += '<span>' + formatMoney(s.amount) + '</span>';
+      if (s.vendor_name) meta += '<span>' + escapeHtml(s.vendor_name) + '</span>';
+      meta += '<span class="claim-source">source: ' + escapeHtml(s.source_reference || '') + '</span>';
+
+      const canReview = myRole === 'admin' || myRole === 'reviewer' || myRole === 'director_of_operations';
+      let html = '<div class="claim" id="snap-' + s.id + '">';
+      html += '<div class="claim-text">' + escapeHtml(s.summary) + '</div>';
+      html += '<div class="claim-meta">' + meta + '</div>';
+      if (canReview) {
+        html += '<div class="claim-actions">';
+        html += '<button class="btn btn-confirm" data-action="confirm-snapshot" data-claim-id="' + escapeHtml(s.id) + '">Confirm</button>';
+        html += '<button class="btn btn-correct" id="toggle-correct-btn-snap-' + s.id + '" data-action="toggle-correct-snapshot" data-claim-id="' + escapeHtml(s.id) + '">Correct</button>';
+        html += '<button class="btn btn-reject" id="toggle-reject-btn-snap-' + s.id + '" data-action="toggle-reject-snapshot" data-claim-id="' + escapeHtml(s.id) + '">Reject</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="correct-form-snap-' + s.id + '">';
+        html += '<div class="form-hint">Edit the summary below, then click Save correction to save.</div>';
+        html += '<textarea id="correct-summary-' + s.id + '" maxlength="300">' + escapeHtml(s.summary) + '</textarea>';
+        html += '<input type="date" id="correct-eventdate-' + s.id + '" value="' + escapeHtml(s.event_date || '') + '">';
+        html += '<input type="text" id="correct-notes-snap-' + s.id + '" placeholder="Reviewer notes (optional)">';
+        html += '<button class="btn btn-correct" data-action="correct-snapshot" data-claim-id="' + escapeHtml(s.id) + '">Save correction</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="reject-form-snap-' + s.id + '">';
+        html += '<div class="form-hint">Add a note, then click Confirm reject to save.</div>';
+        html += '<input type="text" id="reject-notes-snap-' + s.id + '" placeholder="Reason for rejecting (optional)">';
+        html += '<button class="btn btn-reject" data-action="reject-snapshot" data-claim-id="' + escapeHtml(s.id) + '">Confirm reject</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function toggleCorrectFormSnapshot(id) {
+      const form = document.getElementById('correct-form-snap-' + id);
+      const isOpen = form.classList.toggle('visible');
+      const btn = document.getElementById('toggle-correct-btn-snap-' + id);
+      if (btn) btn.textContent = isOpen ? 'Cancel' : 'Correct';
+    }
+
+    function toggleRejectFormSnapshot(id) {
+      const form = document.getElementById('reject-form-snap-' + id);
+      const isOpen = form.classList.toggle('visible');
+      const btn = document.getElementById('toggle-reject-btn-snap-' + id);
+      if (btn) btn.textContent = isOpen ? 'Cancel' : 'Reject';
+    }
+
     // Auto-dismissing save confirmation. A toast (not an inline message near
     // the claim) because reviewClaim() below re-renders the whole ticket
     // detail / flagged list from a fresh fetch right after saving, which
@@ -507,6 +586,37 @@
         // other tab left to land on now that Tickets is retired.
         showTab('overview');
       }
+    }
+
+    // Governance fix, 2026-09-03 — maintenance_snapshot_events' own review
+    // action, POST /snapshot-events/:id/review (a separate route from
+    // claims' own, see that route's comment for why). Only ever reached
+    // from the flagged queue (a snapshot-event row is never rendered in
+    // ticket detail), so unlike reviewClaim above this always re-renders
+    // via loadFlagged() — no ticket-detail fallback to consider.
+    async function reviewSnapshotEvent(id, action) {
+      const body = { action };
+      if (action === 'correct') {
+        body.summary = document.getElementById('correct-summary-' + id).value;
+        body.event_date = document.getElementById('correct-eventdate-' + id).value || null;
+        body.reviewer_notes = document.getElementById('correct-notes-snap-' + id).value || null;
+      } else if (action === 'reject') {
+        body.reviewer_notes = document.getElementById('reject-notes-snap-' + id).value || null;
+      }
+
+      const res = await fetch('/api/maintenance-history/snapshot-events/' + id + '/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Could not save review.');
+        return;
+      }
+
+      showToast(REVIEW_SAVED_MESSAGES[action] || 'Saved.');
+      loadFlagged();
     }
 
     // ── Budget tab — reuses the existing hub-wide property search API
@@ -893,6 +1003,20 @@
     // the bottom of this file) go through the exact same load path.
     let flaggedFilterPropertyId = null;
     let flaggedFilterPropertyLabel = null;
+    // "Show reviewed items" toggle state — see the checkbox's own HTML
+    // comment above for why this was added to this tab now.
+    let flaggedIncludeReviewed = false;
+    // Grouped-review toggle state (flagged-review-grouping-and-exclusions-
+    // SPEC.md Part 1) — default off, same reasoning as flaggedIncludeReviewed.
+    // lastFlaggedClusters holds the most recently fetched cluster array so
+    // the click-delegated bulk/expand handlers below (which only see a
+    // data-cluster-index) can look up a cluster's real items — the server
+    // is still re-verifying every id fresh at bulk-review time regardless
+    // of what this array holds (router.js's own hard requirement), so a
+    // stale in-memory copy here is a UX/performance convenience only, never
+    // a source of truth.
+    let flaggedGrouped = false;
+    let lastFlaggedClusters = [];
 
     // Entry point for the Property Overview badge/link — carries the
     // property label over from Property Overview's own already-fetched
@@ -939,10 +1063,123 @@
       }
     }
 
+    // Shared per-item markup — the flat list below AND a cluster's
+    // "View individually" expansion both render exactly this, via
+    // renderClaim/renderSnapshotEvent (unchanged, per condition 7 — no new
+    // render logic for an individual item, grouped or not).
+    function renderFlaggedItem(item) {
+      // item_type ('claim' / 'snapshot_event') — governance fix,
+      // 2026-09-03. See renderSnapshotEvent's own comment above for why
+      // this branches to a separate renderer/note line rather than
+      // reusing renderClaim for both.
+      if (item.item_type === 'snapshot_event') {
+        return '<div class="flagged-note">Flagged category: ' + escapeHtml(item.flagged_category || 'unspecified') +
+          ' &middot; AppFolio bill history' +
+          (item.property_name ? ' (' + escapeHtml(item.property_name) + ')' : '') +
+          '</div>' + renderSnapshotEvent(item);
+      }
+      return '<div class="flagged-note">Flagged category: ' + escapeHtml(item.flagged_category || 'unspecified') +
+        ' &middot; Ticket: ' + escapeHtml(item.ticket_title || '—') +
+        (item.property_name ? ' (' + escapeHtml(item.property_name) + (item.unit_number ? ', Unit ' + escapeHtml(item.unit_number) : '') + ')' : '') +
+        '</div>' + renderClaim(item);
+    }
+
+    // Grouped-review view (flagged-review-grouping-and-exclusions-SPEC.md
+    // Part 1) — one card per cluster: a sample line, a count, and (only for
+    // a cluster with a real shared matched term — condition 3)
+    // Confirm-all/Reject-all buttons. "View individually" expands the
+    // cluster into its real items using renderFlaggedItem above, unchanged.
+    // bulk_eligible is trusted here only to decide whether to SHOW a
+    // button — router.js re-derives and re-checks the same thing
+    // server-side on every actual bulk-review call, so a stale or
+    // tampered client value here can't cause a Layer-2-only item to
+    // actually get bulk-acted on.
+    function renderFlaggedClusters(clusters) {
+      const container = document.getElementById('flagged-list');
+      container.innerHTML = '';
+      clusters.forEach((cluster, idx) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'claim';
+        let html = '<div class="claim-meta" style="margin-bottom:2px;">' +
+          '<span class="badge badge-gray">' + cluster.count + ' item' + (cluster.count === 1 ? '' : 's') + '</span>' +
+          '<span>' + escapeHtml(cluster.category) + '</span>' +
+          (cluster.matched_term
+            ? '<span class="badge badge-blue">matched: &ldquo;' + escapeHtml(cluster.matched_term) + '&rdquo;</span>'
+            : '<span class="badge badge-amber">AI judgment &mdash; no shared keyword</span>') +
+          '</div>';
+        html += '<div class="claim-text">' + escapeHtml(cluster.sample_text) + '</div>';
+        html += '<div class="claim-actions">';
+        if (cluster.bulk_eligible) {
+          html += '<button class="btn btn-confirm" data-action="bulk-confirm-cluster" data-cluster-index="' + idx + '">Confirm all ' + cluster.count + '</button>';
+          html += '<button class="btn btn-reject" data-action="bulk-reject-cluster" data-cluster-index="' + idx + '">Reject all ' + cluster.count + '</button>';
+        } else {
+          html += '<span class="form-hint" style="margin-bottom:0;">No shared keyword across this group &mdash; review individually.</span>';
+        }
+        html += '<button class="btn btn-correct" id="toggle-cluster-btn-' + idx + '" data-action="toggle-cluster-expand" data-cluster-index="' + idx + '">View individually</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="cluster-expand-' + idx + '"></div>';
+        wrap.innerHTML = html;
+        container.appendChild(wrap);
+      });
+    }
+
+    function toggleClusterExpand(idx) {
+      const el = document.getElementById('cluster-expand-' + idx);
+      const btn = document.getElementById('toggle-cluster-btn-' + idx);
+      const isOpen = el.classList.toggle('visible');
+      if (btn) btn.textContent = isOpen ? 'Hide individual items' : 'View individually';
+      if (isOpen && !el.dataset.rendered) {
+        const cluster = lastFlaggedClusters[idx];
+        el.innerHTML = cluster ? cluster.items.map(renderFlaggedItem).join('') : '';
+        el.dataset.rendered = '1';
+      }
+    }
+
+    // Bulk-confirm/reject a whole cluster in one call — POST
+    // /flagged-queue/bulk-review, condition 4/6. The server re-verifies
+    // every id fresh (still-flagged, still-unreviewed, still has a shared
+    // matched term) before acting on it, so `failed` here can legitimately
+    // be non-empty even right after loading this view (someone else acted
+    // on an item in between) — reported honestly, not swallowed into a
+    // single pass/fail result (condition 6).
+    async function bulkReviewCluster(idx, action) {
+      const cluster = lastFlaggedClusters[idx];
+      if (!cluster) return;
+      const label = action === 'confirm' ? 'Confirm' : 'Reject';
+      if (!confirm(label + ' all ' + cluster.count + ' item' + (cluster.count === 1 ? '' : 's') + ' in this group?')) return;
+
+      const items = cluster.items.map(i => ({ id: i.id, item_type: i.item_type }));
+      let res, body;
+      try {
+        res = await fetch('/api/maintenance-history/flagged-queue/bulk-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items, action }),
+        });
+        body = await res.json();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+        return;
+      }
+      if (!res.ok) {
+        alert(body.error || 'Could not complete the bulk action.');
+        return;
+      }
+      const succeededCount = body.succeeded ? body.succeeded.length : 0;
+      const failedCount = body.failed ? body.failed.length : 0;
+      showToast(
+        succeededCount + ' saved' +
+        (failedCount ? ', ' + failedCount + ' skipped (already changed since this list loaded — check them individually).' : '.')
+      );
+      loadFlagged();
+    }
+
     async function loadFlagged() {
-      const url = flaggedFilterPropertyId
-        ? '/api/maintenance-history/flagged-queue?property_id=' + encodeURIComponent(flaggedFilterPropertyId)
-        : '/api/maintenance-history/flagged-queue';
+      const params = [];
+      if (flaggedFilterPropertyId) params.push('property_id=' + encodeURIComponent(flaggedFilterPropertyId));
+      if (flaggedIncludeReviewed) params.push('include_reviewed=true');
+      if (flaggedGrouped) params.push('grouped=true');
+      const url = '/api/maintenance-history/flagged-queue' + (params.length ? '?' + params.join('&') : '');
       const res = await fetch(url);
       if (res.status === 403) {
         // The only role that ever sees this is director_of_operations
@@ -957,7 +1194,14 @@
       }
       if (!res.ok) return;
       hidePrivacyAckGate();
-      const rows = await res.json();
+      const body = await res.json();
+      // Flat mode: body is the row array itself (unchanged shape).
+      // Grouped mode (?grouped=true): body is { grouped, total_items, clusters }.
+      const rows = flaggedGrouped ? body.clusters : body;
+      if (flaggedGrouped) lastFlaggedClusters = body.clusters;
+
+      document.getElementById('flagged-include-reviewed-toggle').checked = flaggedIncludeReviewed;
+      document.getElementById('flagged-grouped-toggle').checked = flaggedGrouped;
 
       const filterBar = document.getElementById('flagged-filter-bar');
       if (flaggedFilterPropertyId) {
@@ -973,18 +1217,24 @@
       // Distinct empty-state copy when filtered, so zero results here
       // can't be misread as "the whole queue is empty" (spec's "caught on
       // review" point) — the portfolio-wide default keeps its own line.
-      document.getElementById('flagged-empty').textContent = flaggedFilterPropertyId
-        ? 'Nothing flagged for ' + (flaggedFilterPropertyLabel || 'this property') + ' right now.'
-        : 'Nothing in the privacy review queue right now.';
+      // "ever" instead of "right now" when the reviewed-items toggle is on
+      // — same distinction property-360's own privacy review section
+      // already makes.
+      const emptyScope = flaggedFilterPropertyId ? ('for ' + (flaggedFilterPropertyLabel || 'this property')) : 'in the privacy review queue';
+      document.getElementById('flagged-empty').textContent = flaggedIncludeReviewed
+        ? 'No flagged items ever, ' + emptyScope + '.'
+        : 'Nothing ' + emptyScope + ' right now.';
       document.getElementById('flagged-empty').style.display = rows.length ? 'none' : 'block';
+
+      if (flaggedGrouped) {
+        renderFlaggedClusters(rows);
+        return;
+      }
+
       container.innerHTML = '';
-      rows.forEach(c => {
+      rows.forEach(item => {
         const wrap = document.createElement('div');
-        wrap.innerHTML =
-          '<div class="flagged-note">Flagged category: ' + escapeHtml(c.flagged_category || 'unspecified') +
-          ' &middot; Ticket: ' + escapeHtml(c.ticket_title || '—') +
-          (c.property_name ? ' (' + escapeHtml(c.property_name) + (c.unit_number ? ', Unit ' + escapeHtml(c.unit_number) : '') + ')' : '') +
-          '</div>' + renderClaim(c);
+        wrap.innerHTML = renderFlaggedItem(item);
         container.appendChild(wrap);
       });
     }
@@ -1140,6 +1390,14 @@
     document.getElementById('budget-search-input').addEventListener('input', onBudgetSearch);
     document.getElementById('add-user-btn').addEventListener('click', addUser);
     document.getElementById('privacy-ack-btn').addEventListener('click', acknowledgePrivacyQueue);
+    document.getElementById('flagged-include-reviewed-toggle').addEventListener('change', (e) => {
+      flaggedIncludeReviewed = e.target.checked;
+      loadFlagged();
+    });
+    document.getElementById('flagged-grouped-toggle').addEventListener('change', (e) => {
+      flaggedGrouped = e.target.checked;
+      loadFlagged();
+    });
     document.getElementById('ticket-detail-back').addEventListener('click', (e) => {
       e.preventDefault();
       // Drill-down from Property Overview goes back to the overview it
@@ -1167,6 +1425,16 @@
         case 'toggle-reject': toggleRejectForm(claimId); break;
         case 'correct': reviewClaim(claimId, 'correct'); break;
         case 'reject': reviewClaim(claimId, 'reject'); break;
+        // Governance fix, 2026-09-03 — maintenance_snapshot_events' own
+        // review actions, distinct data-action values (see
+        // renderSnapshotEvent's own comment for why this is a fully
+        // separate path from the claim cases just above rather than a
+        // shared one branching on item_type).
+        case 'confirm-snapshot': reviewSnapshotEvent(claimId, 'confirm'); break;
+        case 'toggle-correct-snapshot': toggleCorrectFormSnapshot(claimId); break;
+        case 'toggle-reject-snapshot': toggleRejectFormSnapshot(claimId); break;
+        case 'correct-snapshot': reviewSnapshotEvent(claimId, 'correct'); break;
+        case 'reject-snapshot': reviewSnapshotEvent(claimId, 'reject'); break;
         case 'open-ticket':
           e.preventDefault();
           e.stopPropagation();
@@ -1186,6 +1454,19 @@
           flaggedFilterPropertyId = null;
           flaggedFilterPropertyLabel = null;
           loadFlagged();
+          break;
+        // Grouped review view (flagged-review-grouping-and-exclusions-
+        // SPEC.md Part 1) — cluster expand/collapse and bulk Confirm-
+        // all/Reject-all, addressed by data-cluster-index into
+        // lastFlaggedClusters (set by loadFlagged's own grouped branch).
+        case 'toggle-cluster-expand':
+          toggleClusterExpand(Number(btn.dataset.clusterIndex));
+          break;
+        case 'bulk-confirm-cluster':
+          bulkReviewCluster(Number(btn.dataset.clusterIndex), 'confirm');
+          break;
+        case 'bulk-reject-cluster':
+          bulkReviewCluster(Number(btn.dataset.clusterIndex), 'reject');
           break;
       }
     });

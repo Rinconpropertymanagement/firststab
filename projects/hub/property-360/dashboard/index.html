@@ -115,8 +115,8 @@
     .days-red   { color: #dc2626; font-weight: 600; }
     .days-gray  { color: #9ca3af; font-weight: 600; }
 
-    /* ── Maintenance section: summary + two collapsed-by-default
-       subsections (Budget, Needs Privacy Review) ─────────────────── */
+    /* ── Maintenance section: summary + one collapsed-by-default
+       subsection (Needs Privacy Review) ─────────────────── */
     details.subsection { border-top: 1px solid #f3f4f6; margin-top: 16px; padding-top: 14px; }
     details.subsection summary { cursor: pointer; font-size: 14px; font-weight: 700; list-style: none; display: flex; align-items: center; gap: 6px; color: #111827; }
     details.subsection summary::-webkit-details-marker { display: none; }
@@ -128,18 +128,6 @@
     th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
     td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
     .table-scroll { overflow-x: auto; }
-    .num { text-align: right; }
-
-    /* Budget — reused verbatim from maintenance-history/dashboard's own Budget tab */
-    .budget-asof { color: #9ca3af; font-size: 12px; margin-bottom: 6px; }
-    .actual-spend-note { color: #9ca3af; font-size: 12px; margin-bottom: 12px; }
-    .budget-year-title { font-size: 15px; font-weight: 700; margin: 16px 0 6px; }
-    .budget-subtotal-row { display: flex; gap: 18px; font-size: 13px; color: #374151; margin-bottom: 10px; flex-wrap: wrap; }
-    .budget-subtotal-row b { color: #111827; }
-    .maint-row td { background: #fffbeb; }
-    .ticket-cost-note { color: #9ca3af; font-size: 12px; margin-top: 8px; }
-    .actual-reimbursed-note { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
-    .actual-not-tracked { color: #9ca3af; font-style: italic; }
 
     /* Privacy Review claims — reused verbatim from maintenance-history/dashboard */
     .claim { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 14px; margin-bottom: 8px; }
@@ -485,6 +473,19 @@
         html += '<div class="fact"><span class="fl">Vendors used:</span> ' + d.vendor_count +
           (d.most_recent_vendor_name ? ', most recent: ' + escapeHtml(d.most_recent_vendor_name) : '') + '</div>';
       }
+      // AppFolio actual maintenance-category spend — separate from the
+      // Latchel-ticket figures above on purpose: it's sourced from
+      // AppFolio's own general ledger (can include repair/maintenance
+      // spend that never went through a Latchel ticket at all), and it
+      // covers the current fiscal year, not the trailing-12mo window the
+      // ticket spend figure above uses. Only shown once tracking has
+      // actually started for this property (has_appfolio_actual_data) —
+      // same real-$0-vs-not-tracked distinction the Budget tab already
+      // uses, so a genuine $0 here still renders (honestly), while a
+      // property AppFolio has never synced actuals for stays silent.
+      if (d.has_appfolio_actual_data) {
+        html += '<div class="fact" style="margin-top:8px;"><span class="fl">AppFolio repair/maintenance spend (this year):</span> ' + formatMoney(d.appfolio_maintenance_spend) + '</div>';
+      }
       // Gated flag — only ever present in the API response at all for a
       // viewer in PRIVACY_REVIEW_ROLES (maintenance-history/router.js
       // omits the key entirely for anyone else, and omits it on a real
@@ -495,93 +496,6 @@
           d.flagged_review_count + ' item' + (d.flagged_review_count === 1 ? '' : 's') + ' ' + (d.flagged_review_count === 1 ? 'needs' : 'need') + ' privacy review &rarr;</a></div>';
       }
       return html;
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // Budget subsection — reused, near-verbatim, from
-    // maintenance-history/dashboard's own loadBudget()/
-    // renderBudgetContent(). Same route (GET .../property/:id/budget),
-    // same gate (requireMaintenanceHistoryAccess — any real
-    // Maintenance History role, not narrowed to the privacy-review
-    // roles), so this loads for anyone with a Maintenance card at all.
-    // ────────────────────────────────────────────────────────────────
-    const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
-
-    async function loadBudget(propertyId, bodyEl) {
-      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
-      try {
-        const res = await fetch('/api/maintenance-history/property/' + encodeURIComponent(propertyId) + '/budget', { credentials: 'include' });
-        const body = await res.json();
-        if (!res.ok) {
-          bodyEl.innerHTML = '<div class="empty">' + escapeHtml(body.error || 'Couldn\'t load the budget right now.') + '</div>';
-          return;
-        }
-        renderBudget(body, bodyEl);
-      } catch (e) {
-        bodyEl.innerHTML = '<div class="empty">Couldn\'t load the budget right now.</div>';
-      }
-    }
-
-    function renderBudget(data, bodyEl) {
-      if (!data.has_appfolio_link) {
-        bodyEl.innerHTML = '<div class="empty">This property isn\'t linked to an AppFolio property ID yet, so there\'s no AppFolio budget data to show.</div>';
-        return;
-      }
-      if (!data.fiscal_years.length) {
-        bodyEl.innerHTML = '<div class="empty">No AppFolio budget data found for this property yet.</div>';
-        return;
-      }
-
-      let html = '<div class="budget-asof">AppFolio budget data as of ' + (data.synced_at ? escapeHtml(data.synced_at.slice(0, 10)) : 'unknown') + ' &mdash; from AppFolio\'s own books, not AI-derived.</div>';
-      html += '<div class="actual-spend-note">"Actual (AppFolio)" reflects AppFolio ledger activity tracked since this feature started syncing &mdash; not necessarily the whole fiscal year.</div>';
-
-      data.fiscal_years.forEach(function (year) {
-        const budget = (data.budgets_by_year && data.budgets_by_year[year]) || { categories: [], subtotals: [] };
-        const ticketInfo = (data.ticket_costs_by_year && data.ticket_costs_by_year[year]) || { total_cost: 0, count: 0, tickets: [] };
-        const actualsForYear = (data.actual_spend_by_year && data.actual_spend_by_year[year]) || [];
-        const actualsByCategory = {};
-        actualsForYear.forEach(function (a) { actualsByCategory[a.category] = a; });
-
-        html += '<div class="budget-year-title">' + year + '</div>';
-        if (budget.subtotals && budget.subtotals.length) {
-          html += '<div class="budget-subtotal-row">';
-          budget.subtotals.forEach(function (s) {
-            html += '<span>' + escapeHtml(s.gl_account_name) + ': <b>' + formatMoney(s.budgeted_amount) + ' budgeted</b>' +
-              (s.actual_amount != null ? ', ' + formatMoney(s.actual_amount) + ' actual' : '') + '</span>';
-          });
-          html += '</div>';
-        }
-
-        html += '<div class="table-scroll"><table><thead><tr><th>Category</th><th class="num">Budgeted</th><th class="num">Actual</th></tr></thead><tbody>';
-        if (!budget.categories.length) {
-          html += '<tr><td colspan="3" class="empty">No AppFolio budget line items for ' + year + '.</td></tr>';
-        } else {
-          budget.categories.forEach(function (c) {
-            const isMaint = MAINT_RELATED_ACCOUNTS.indexOf(c.gl_account_name) !== -1;
-            let actualCell;
-            if (!data.has_actual_spend_data) {
-              actualCell = '<span class="actual-not-tracked" title="Actual-spend tracking hasn\'t started collecting AppFolio activity for this property yet">not tracked yet</span>';
-            } else {
-              const actual = actualsByCategory[c.gl_account_name];
-              const spent = actual ? actual.spent : 0;
-              actualCell = formatMoney(spent);
-              if (actual && actual.reimbursed > 0) {
-                actualCell += '<div class="actual-reimbursed-note">' + formatMoney(actual.reimbursed) + ' reimbursed by tenants</div>';
-              }
-            }
-            html += '<tr' + (isMaint ? ' class="maint-row"' : '') + '>' +
-              '<td>' + escapeHtml(c.gl_account_name) + (isMaint ? ' <span class="badge badge-blue">maintenance-related</span>' : '') + '</td>' +
-              '<td class="num">' + formatMoney(c.budgeted_amount) + '</td>' +
-              '<td class="num">' + actualCell + '</td>' +
-              '</tr>';
-          });
-        }
-        html += '</tbody></table></div>';
-        html += '<div class="ticket-cost-note">Maintenance tickets in ' + year + ' (context only — will not match AppFolio\'s numbers exactly): ' +
-          ticketInfo.count + ' ticket' + (ticketInfo.count === 1 ? '' : 's') + ', ' + formatMoney(ticketInfo.total_cost) + '.</div>';
-      });
-
-      bodyEl.innerHTML = html;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -667,9 +581,127 @@
       return html;
     }
 
-    async function loadPrivacyReview(propertyId, bodyEl, includeReviewed) {
+    // Governance fix, 2026-09-03: flagged maintenance_snapshot_events rows
+    // now come back in the same GET /flagged-queue response as claims
+    // (item_type: 'snapshot_event' vs 'claim' — see router.js's own
+    // comment on that route). Rendered here as a sibling to
+    // renderPrivacyClaim above rather than folded into it: the two tables
+    // don't share a field shape (summary/event_date/amount/vendor_name
+    // here vs. claim_type/claim_text/claim_date/outcome_level there).
+    // Deliberately reuses the SAME element id convention as
+    // renderPrivacyClaim (correct-text-<id> / correct-date-<id> /
+    // correct-notes-<id>) — a claim id and a snapshot-event id are
+    // different UUID spaces and never both render for the same id at
+    // once, so this lets handlePrivacyAction below read the form values
+    // with the exact same lookups for both, branching only on what it
+    // sends, not how it reads the form.
+    function renderPrivacySnapshotEvent(s) {
+      let meta = reviewBadge(s.review_status);
+      if (s.event_date) meta += '<span>' + escapeHtml(s.event_date) + '</span>';
+      meta += '<span>' + formatMoney(s.amount) + '</span>';
+      if (s.vendor_name) meta += '<span>' + escapeHtml(s.vendor_name) + '</span>';
+      meta += '<span class="claim-source">source: ' + escapeHtml(s.source_reference || '') + '</span>';
+
+      let html = '<div class="claim" id="claim-' + escapeHtml(s.id) + '">';
+      html += '<div class="claim-meta" style="margin-bottom:2px;">' + escapeHtml(s.property_name || '') + ' &middot; AppFolio bill history</div>';
+      html += '<div class="claim-text">' + escapeHtml(s.summary) + '</div>';
+      html += '<div class="claim-meta">' + meta + '</div>';
+
+      if (s.review_status === 'unreviewed') {
+        html += '<div class="claim-actions">';
+        html += '<button class="btn btn-confirm" data-action="confirm" data-item-type="snapshot_event" data-claim-id="' + escapeHtml(s.id) + '">Confirm</button>';
+        html += '<button class="btn btn-correct" data-action="toggle-correct" data-item-type="snapshot_event" data-claim-id="' + escapeHtml(s.id) + '">Correct</button>';
+        html += '<button class="btn btn-reject" data-action="toggle-reject" data-item-type="snapshot_event" data-claim-id="' + escapeHtml(s.id) + '">Reject</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="correct-form-' + s.id + '">';
+        html += '<div class="form-hint">Edit the summary below, then click Save correction to save.</div>';
+        html += '<textarea id="correct-text-' + s.id + '" maxlength="300">' + escapeHtml(s.summary) + '</textarea>';
+        html += '<input type="date" id="correct-date-' + s.id + '" value="' + escapeHtml(s.event_date || '') + '">';
+        html += '<input type="text" id="correct-notes-' + s.id + '" placeholder="Reviewer notes (optional)">';
+        html += '<button class="btn btn-correct" data-action="correct" data-item-type="snapshot_event" data-claim-id="' + escapeHtml(s.id) + '">Save correction</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="reject-form-' + s.id + '">';
+        html += '<div class="form-hint">Add a note, then click Confirm reject to save.</div>';
+        html += '<input type="text" id="reject-notes-' + s.id + '" placeholder="Reason for rejecting (optional)">';
+        html += '<button class="btn btn-reject" data-action="reject" data-item-type="snapshot_event" data-claim-id="' + escapeHtml(s.id) + '">Confirm reject</button>';
+        html += '</div>';
+      } else {
+        html += '<div class="form-hint">Reviewed by ' + escapeHtml(s.reviewed_by || 'unknown') + (s.reviewed_at ? ' on ' + formatDate(s.reviewed_at) : '') + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    // Grouped-review view (flagged-review-grouping-and-exclusions-SPEC.md
+    // Part 1), same feature as maintenance-history/dashboard's own
+    // Needs-Privacy-Review tab, extended here per condition 7. Holds the
+    // most recently fetched cluster array for this section, so the
+    // cluster button handlers below (wired by index, not id) can look up
+    // a cluster's real items — router.js still re-verifies every id fresh
+    // at bulk-review time regardless of what this holds, so a stale copy
+    // here is only ever a UX convenience, never a source of truth.
+    let lastPrivacyClusters = [];
+
+    function renderPrivacyItem(item) {
+      return item.item_type === 'snapshot_event' ? renderPrivacySnapshotEvent(item) : renderPrivacyClaim(item);
+    }
+
+    // One card per cluster — sample line, count, and (only when
+    // bulk_eligible — condition 3) Confirm-all/Reject-all. "View
+    // individually" expands into the cluster's real items via
+    // renderPrivacyItem above, unchanged (condition 7 — no new per-item
+    // render logic). Distinct data-cluster-action attribute (not
+    // data-action) so these buttons can be wired separately from the
+    // per-item Confirm/Correct/Reject buttons handlePrivacyAction already
+    // owns — both kinds of button coexist once a cluster is expanded.
+    function renderPrivacyClusters(clusters) {
+      return clusters.map(function (cluster, idx) {
+        let html = '<div class="claim">';
+        html += '<div class="claim-meta" style="margin-bottom:2px;">' +
+          '<span class="badge badge-gray">' + cluster.count + ' item' + (cluster.count === 1 ? '' : 's') + '</span>' +
+          '<span>' + escapeHtml(cluster.category) + '</span>' +
+          (cluster.matched_term
+            ? '<span class="badge badge-blue">matched: &ldquo;' + escapeHtml(cluster.matched_term) + '&rdquo;</span>'
+            : '<span class="badge badge-amber">AI judgment &mdash; no shared keyword</span>') +
+          '</div>';
+        html += '<div class="claim-text">' + escapeHtml(cluster.sample_text) + '</div>';
+        html += '<div class="claim-actions">';
+        if (cluster.bulk_eligible) {
+          html += '<button class="btn btn-confirm" data-cluster-action="bulk-confirm" data-cluster-index="' + idx + '">Confirm all ' + cluster.count + '</button>';
+          html += '<button class="btn btn-reject" data-cluster-action="bulk-reject" data-cluster-index="' + idx + '">Reject all ' + cluster.count + '</button>';
+        } else {
+          html += '<span class="form-hint" style="margin-bottom:0;">No shared keyword across this group &mdash; review individually.</span>';
+        }
+        html += '<button class="btn btn-correct" id="privacy-cluster-toggle-' + idx + '" data-cluster-action="toggle-expand" data-cluster-index="' + idx + '">View individually</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="privacy-cluster-expand-' + idx + '"></div>';
+        html += '</div>';
+        return html;
+      }).join('');
+    }
+
+    // Pure render/toggle — does NOT wire the expanded items' own
+    // Confirm/Correct/Reject buttons itself (it has no propertyId/bodyEl/
+    // includeReviewed of its own to hand handlePrivacyAction). The caller
+    // (loadPrivacyReview's cluster-button click handler below, which does
+    // have those in scope via closure) wires them right after calling
+    // this, the same run through the event loop.
+    function togglePrivacyClusterExpand(idx) {
+      const el = document.getElementById('privacy-cluster-expand-' + idx);
+      const btn = document.getElementById('privacy-cluster-toggle-' + idx);
+      const isOpen = el.classList.toggle('visible');
+      if (btn) btn.textContent = isOpen ? 'Hide individual items' : 'View individually';
+      if (isOpen && !el.dataset.rendered) {
+        const cluster = lastPrivacyClusters[idx];
+        el.innerHTML = cluster ? cluster.items.map(renderPrivacyItem).join('') : '';
+        el.dataset.rendered = '1';
+      }
+    }
+
+    async function loadPrivacyReview(propertyId, bodyEl, includeReviewed, grouped) {
       bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
-      const url = '/api/maintenance-history/flagged-queue?property_id=' + encodeURIComponent(propertyId) + (includeReviewed ? '&include_reviewed=true' : '');
+      const url = '/api/maintenance-history/flagged-queue?property_id=' + encodeURIComponent(propertyId) +
+        (includeReviewed ? '&include_reviewed=true' : '') + (grouped ? '&grouped=true' : '');
       let res, body;
       try {
         res = await fetch(url, { credentials: 'include' });
@@ -693,7 +725,7 @@
           try {
             const ackRes = await fetch('/api/maintenance-history/privacy-queue/acknowledge', { method: 'POST', credentials: 'include' });
             if (ackRes.ok) {
-              loadPrivacyReview(propertyId, bodyEl, includeReviewed);
+              loadPrivacyReview(propertyId, bodyEl, includeReviewed, grouped);
             } else {
               const ackBody = await ackRes.json().catch(function () { return {}; });
               alert(ackBody.error || 'Could not save acknowledgment.');
@@ -714,26 +746,99 @@
         return;
       }
 
-      const rows = body || [];
-      let html = '<div class="toggle-row"><label><input type="checkbox" id="include-reviewed-toggle" ' + (includeReviewed ? 'checked' : '') + '> Show reviewed items</label></div>';
+      // Flat mode: body is the row array itself (unchanged shape).
+      // Grouped mode (&grouped=true): body is { grouped, total_items, clusters }.
+      const rows = grouped ? (body.clusters || []) : (body || []);
+      if (grouped) lastPrivacyClusters = body.clusters || [];
+
+      let html = '<div class="toggle-row">' +
+        '<label><input type="checkbox" id="include-reviewed-toggle" ' + (includeReviewed ? 'checked' : '') + '> Show reviewed items</label>' +
+        '<label style="margin-left:16px;"><input type="checkbox" id="grouped-toggle" ' + (grouped ? 'checked' : '') + '> Group similar items</label>' +
+        '</div>';
       if (!rows.length) {
         html += '<div class="empty">' + (includeReviewed ? 'No flagged items ever, for this property.' : 'Nothing needs review right now.') + '</div>';
+      } else if (grouped) {
+        html += renderPrivacyClusters(rows);
       } else {
-        html += rows.map(renderPrivacyClaim).join('');
+        // item_type ('claim' / 'snapshot_event') — governance fix,
+        // 2026-09-03. See renderPrivacySnapshotEvent's own comment above.
+        html += rows.map(renderPrivacyItem).join('');
       }
       bodyEl.innerHTML = html;
 
       document.getElementById('include-reviewed-toggle').addEventListener('change', function (e) {
-        loadPrivacyReview(propertyId, bodyEl, e.target.checked);
+        loadPrivacyReview(propertyId, bodyEl, e.target.checked, grouped);
+      });
+      document.getElementById('grouped-toggle').addEventListener('change', function (e) {
+        loadPrivacyReview(propertyId, bodyEl, includeReviewed, e.target.checked);
       });
       bodyEl.querySelectorAll('[data-action]').forEach(function (btn) {
-        btn.addEventListener('click', function () { handlePrivacyAction(this, propertyId, bodyEl, includeReviewed); });
+        btn.addEventListener('click', function () { handlePrivacyAction(this, propertyId, bodyEl, includeReviewed, grouped); });
+      });
+      bodyEl.querySelectorAll('[data-cluster-action]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const idx = Number(this.dataset.clusterIndex);
+          if (this.dataset.clusterAction === 'toggle-expand') {
+            togglePrivacyClusterExpand(idx);
+            // Individual items inside a just-expanded cluster need the
+            // same Confirm/Correct/Reject wiring as the flat list's own
+            // items — wire them the moment they're first rendered.
+            const expandEl = document.getElementById('privacy-cluster-expand-' + idx);
+            expandEl.querySelectorAll('[data-action]').forEach(function (itemBtn) {
+              if (itemBtn.dataset.wired) return;
+              itemBtn.dataset.wired = '1';
+              itemBtn.addEventListener('click', function () { handlePrivacyAction(this, propertyId, bodyEl, includeReviewed, grouped); });
+            });
+          } else if (this.dataset.clusterAction === 'bulk-confirm') {
+            bulkReviewPrivacyCluster(idx, 'confirm', propertyId, bodyEl, includeReviewed, grouped);
+          } else if (this.dataset.clusterAction === 'bulk-reject') {
+            bulkReviewPrivacyCluster(idx, 'reject', propertyId, bodyEl, includeReviewed, grouped);
+          }
+        });
       });
     }
 
-    async function handlePrivacyAction(btn, propertyId, bodyEl, includeReviewed) {
+    // Bulk-confirm/reject a whole cluster in one call — POST
+    // /flagged-queue/bulk-review, condition 4/6. The server re-verifies
+    // every id fresh (still-flagged, still-unreviewed, still has a shared
+    // matched term) before acting on it, so `failed` can legitimately be
+    // non-empty even right after loading this view — reported honestly,
+    // never collapsed into a single pass/fail result.
+    async function bulkReviewPrivacyCluster(idx, action, propertyId, bodyEl, includeReviewed, grouped) {
+      const cluster = lastPrivacyClusters[idx];
+      if (!cluster) return;
+      const label = action === 'confirm' ? 'Confirm' : 'Reject';
+      if (!confirm(label + ' all ' + cluster.count + ' item' + (cluster.count === 1 ? '' : 's') + ' in this group?')) return;
+
+      const items = cluster.items.map(function (i) { return { id: i.id, item_type: i.item_type }; });
+      try {
+        const res = await fetch('/api/maintenance-history/flagged-queue/bulk-review', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ items: items, action: action }),
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          alert(body.error || 'Could not complete the bulk action.');
+          return;
+        }
+        const succeededCount = body.succeeded ? body.succeeded.length : 0;
+        const failedCount = body.failed ? body.failed.length : 0;
+        showToast(succeededCount + ' saved' +
+          (failedCount ? ', ' + failedCount + ' skipped (already changed since this list loaded — check them individually).' : '.'));
+        loadPrivacyReview(propertyId, bodyEl, includeReviewed, grouped);
+      } catch (e) {
+        alert('Network error.');
+      }
+    }
+
+    async function handlePrivacyAction(btn, propertyId, bodyEl, includeReviewed, grouped) {
       const action = btn.dataset.action;
       const id = btn.dataset.claimId;
+      // Governance fix, 2026-09-03 — see renderPrivacySnapshotEvent's own
+      // comment above for why the form fields are read the same way for
+      // both item types (same element id convention) while what gets
+      // sent, and to which route, differs.
+      const itemType = btn.dataset.itemType || 'claim';
 
       if (action === 'toggle-correct' || action === 'toggle-reject') {
         const form = document.getElementById((action === 'toggle-correct' ? 'correct-form-' : 'reject-form-') + id);
@@ -743,18 +848,32 @@
       }
 
       const payload = { action: action };
-      if (action === 'correct') {
-        payload.claim_text = document.getElementById('correct-text-' + id).value;
-        payload.claim_date = document.getElementById('correct-date-' + id).value || null;
-        const outcomeEl = document.getElementById('correct-outcome-' + id);
-        if (outcomeEl && outcomeEl.value) payload.outcome_level = Number(outcomeEl.value);
-        payload.reviewer_notes = document.getElementById('correct-notes-' + id).value || null;
-      } else if (action === 'reject') {
-        payload.reviewer_notes = document.getElementById('reject-notes-' + id).value || null;
+      if (itemType === 'snapshot_event') {
+        if (action === 'correct') {
+          payload.summary = document.getElementById('correct-text-' + id).value;
+          payload.event_date = document.getElementById('correct-date-' + id).value || null;
+          payload.reviewer_notes = document.getElementById('correct-notes-' + id).value || null;
+        } else if (action === 'reject') {
+          payload.reviewer_notes = document.getElementById('reject-notes-' + id).value || null;
+        }
+      } else {
+        if (action === 'correct') {
+          payload.claim_text = document.getElementById('correct-text-' + id).value;
+          payload.claim_date = document.getElementById('correct-date-' + id).value || null;
+          const outcomeEl = document.getElementById('correct-outcome-' + id);
+          if (outcomeEl && outcomeEl.value) payload.outcome_level = Number(outcomeEl.value);
+          payload.reviewer_notes = document.getElementById('correct-notes-' + id).value || null;
+        } else if (action === 'reject') {
+          payload.reviewer_notes = document.getElementById('reject-notes-' + id).value || null;
+        }
       }
 
+      const endpoint = itemType === 'snapshot_event'
+        ? '/api/maintenance-history/snapshot-events/' + encodeURIComponent(id) + '/review'
+        : '/api/maintenance-history/claims/' + encodeURIComponent(id) + '/review';
+
       try {
-        const res = await fetch('/api/maintenance-history/claims/' + encodeURIComponent(id) + '/review', {
+        const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -766,7 +885,7 @@
           return;
         }
         showToast(action === 'confirm' ? 'Saved — marked as confirmed.' : action === 'correct' ? 'Saved — marked as corrected.' : 'Saved — marked as rejected.');
-        loadPrivacyReview(propertyId, bodyEl, includeReviewed);
+        loadPrivacyReview(propertyId, bodyEl, includeReviewed, grouped);
       } catch (e) {
         alert('Could not save that review.');
       }
@@ -887,7 +1006,7 @@
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Maintenance section assembly — summary + Budget (collapsed) +
+    // Maintenance section assembly — summary +
     // Needs Privacy Review (collapsed, added only after the role check
     // above resolves in favor of a PRIVACY_REVIEW_ROLES role).
     // ────────────────────────────────────────────────────────────────
@@ -896,17 +1015,73 @@
       return '<div class="card" id="maintenance-section">' +
         '<div class="section-title">Maintenance</div>' +
         renderMaintenanceSummary(card) +
-        '<details class="subsection" id="budget-details"><summary>Budget</summary><div class="subsection-body" id="budget-body"></div></details>' +
+        '<details class="subsection" id="snapshot-details">' +
+        '<summary>Maintenance History Snapshot</summary>' +
+        '<div class="subsection-body" id="snapshot-body"></div>' +
+        '</details>' +
         '</div>';
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // Multi-year maintenance snapshot subsection — property-360-SPEC.md
+    // "Multi-year maintenance snapshot": a short, chronological list of
+    // historical AppFolio bill-history facts for this property (up to 5
+    // years back, one line each — date, summary, amount), populated by
+    // maintenance-history/backfill-maintenance-snapshot.js. Reads ONLY
+    // the new, gated GET /api/maintenance-history/property/:property_id/
+    // snapshot route, which itself reads ONLY
+    // maintenance_snapshot_events_decision_safe (never the raw table) —
+    // flagged/rejected rows never reach this page. Gated by the same
+    // requireMaintenanceHistoryAccess as the Maintenance summary card
+    // itself (ANY real role), not the narrower PRIVACY_REVIEW_ROLES gate
+    // Privacy Review below uses — so, unlike Privacy Review, this
+    // subsection needs no extra role lookup before rendering; the
+    // Maintenance card already being present is enough. Collapsed by
+    // default, lazy-loaded on first open — same phone-friendly pattern
+    // as Privacy Review and the old Budget section it's modeled on.
+    // ────────────────────────────────────────────────────────────────
+    async function loadMaintenanceSnapshot(propertyId, bodyEl) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      try {
+        const res = await fetch('/api/maintenance-history/property/' + encodeURIComponent(propertyId) + '/snapshot', { credentials: 'include' });
+        const rows = await res.json();
+        if (!res.ok) {
+          bodyEl.innerHTML = '<div class="empty">Couldn\'t load the maintenance snapshot right now.</div>';
+          return;
+        }
+        if (!rows.length) {
+          bodyEl.innerHTML = '<div class="empty">No historical maintenance bill records for this property yet.</div>';
+          return;
+        }
+        let html = '<div class="table-scroll"><table><thead><tr><th>Date</th><th>Summary</th><th>Amount</th></tr></thead><tbody>';
+        rows.forEach(function (r) {
+          html += '<tr><td>' + formatDate(r.event_date) + '</td><td>' + escapeHtml(r.summary) + '</td><td>' + formatMoney(r.amount) + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+        bodyEl.innerHTML = html;
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load the maintenance snapshot right now.</div>';
+      }
+    }
+
     function wireMaintenanceSection(propertyId, data) {
-      const budgetDetails = document.getElementById('budget-details');
-      if (!budgetDetails) return;
-      let budgetLoaded = false;
-      budgetDetails.addEventListener('toggle', function () {
-        if (budgetDetails.open && !budgetLoaded) { budgetLoaded = true; loadBudget(propertyId, document.getElementById('budget-body')); }
-      });
+      if (!document.getElementById('maintenance-section')) return; // no Maintenance section rendered — nothing to wire
+
+      // Multi-year maintenance snapshot — needs no role lookup beyond the
+      // Maintenance card already being present (see loadMaintenanceSnapshot's
+      // own comment above for why this differs from Privacy Review below).
+      // Collapsed by default; the real fetch only happens the first time
+      // it's actually opened.
+      const snapshotDetails = document.getElementById('snapshot-details');
+      if (snapshotDetails) {
+        let snapshotLoaded = false;
+        snapshotDetails.addEventListener('toggle', function () {
+          if (snapshotDetails.open && !snapshotLoaded) {
+            snapshotLoaded = true;
+            loadMaintenanceSnapshot(propertyId, document.getElementById('snapshot-body'));
+          }
+        });
+      }
 
       // Privacy Review + the admin Users section both need the viewer's
       // real Maintenance History role (see loadPrivacyReview's own

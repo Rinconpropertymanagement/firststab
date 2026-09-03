@@ -82,10 +82,26 @@ GET  /security-deposit        Security Deposit dashboard (requires login
                               + a role in that tool — see
                               security-deposit/router.js)
      /api/security-deposit/*  Security Deposit API routes
-GET  /maintenance-history     Maintenance History dashboard (requires login
-                              + a role in that tool — see
+GET  /property-360            Property 360 — one page composing Insurance,
+                              Security Deposit, Maintenance History (now
+                              retired as a standalone tool — see below),
+                              and LeadSimple onto one per-property summary
+                              (requires login; what you SEE on it is
+                              entirely a function of your existing role in
+                              each of those tools — see property-360/router.js)
+     /api/property-360/*      Property 360 API routes
+GET  /maintenance-history     Retired as a standalone page — redirects to
+                              /property-360?property_id= (resolved from the
+                              old ?property= text label when possible) or
+                              to bare /property-360 otherwise. Its
+                              /api/maintenance-history/* API routes are
+                              unchanged and still live — see below.
+     /api/maintenance-history/*  Maintenance History API routes (Overview,
+                              Budget, Needs Privacy Review, and admin Users
+                              management now surface on /property-360
+                              instead of a dedicated Tickets/Overview/
+                              Budget/Users tab set — see
                               maintenance-history/router.js)
-     /api/maintenance-history/*  Maintenance History API routes
 GET  /call-stats              Call Stats dashboard (requires login + a role
                               in that tool — see call-stats/router.js)
      /api/call-stats/*        Call Stats API routes
@@ -181,6 +197,7 @@ const { GLOBAL_SEARCH_WIDGET_HTML } = require('./lib/global-search-widget');
 const { router: insuranceRouter, internalRouter: insuranceInternalRouter } = require('./insurance/router');
 const { router: securityDepositRouter, internalRouter: securityDepositInternalRouter } = require('./security-deposit/router');
 const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInternalRouter } = require('./maintenance-history/router');
+const { router: property360Router } = require('./property-360/router');
 const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = require('./call-stats/router');
 const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter } = require('./content-engine/router');
 const { router: contentReviewRouter } = require('./content-review/router');
@@ -681,9 +698,9 @@ app.get('/', (req, res) => {
             <strong>Security Deposit</strong>
             <span>Review move-out disposition packets before the 21-day deadline</span>
           </a>
-          <a class="section-link" href="/maintenance-history">
-            <strong>Maintenance History</strong>
-            <span>Ticket timelines, decisions, and outcomes pulled from Latchel — every fact reviewed before it's trusted</span>
+          <a class="section-link" href="/property-360">
+            <strong>Property 360</strong>
+            <span>Everything the Hub knows about one property — insurance, security deposit, maintenance, and leasing activity together</span>
           </a>
           <a class="section-link" href="/call-stats">
             <strong>Call Stats</strong>
@@ -722,11 +739,37 @@ app.use(insuranceRouter);
 // security-deposit/router.js and its SPEC.md for the full detail.
 app.use(securityDepositRouter);
 
+// ─── Property 360 section ───────────────────────────────────────────────
+// property-360-SPEC.md, "Where It Lives": mounted alongside — not inside
+// — the other tool mounts, after requireLogin. No tool-specific access
+// check of its own (property-360/router.js's own file header explains
+// why): every card on this page is gated by that card's own tool's real,
+// unmodified access-check function, run in-process — see that file.
+//
+// Mounted BEFORE maintenanceHistoryRouter below, on purpose: this
+// router's own `GET /maintenance-history` handler is the real redirect
+// (spec: "the /maintenance-history route itself — should redirect to
+// /property-360...") and Express answers the first registered route
+// that matches and sends a response. Registering this router first means
+// maintenanceHistoryRouter's own (now-orphaned) `GET /maintenance-
+// history` page-shell handler is never reached — see
+// property-360/router.js's own comment on that route for the full
+// reasoning. maintenanceHistoryRouter is still mounted right after this
+// (unchanged) because its /api/maintenance-history/* routes — Overview,
+// Budget, Needs Privacy Review, claim review, and admin Users management
+// — are all still real, still used, now called from Property 360's own
+// page instead of a standalone dashboard.
+app.use(property360Router);
+
 // ─── Maintenance History section ───────────────────────────────────────────
-// Same shape again: requireLogin already ran; maintenance-history/router.js
-// does its own additional check — does this specific person hold a role in
-// team_member_tool_roles for tool='maintenance_history' ('reviewer' or
-// 'admin'). See maintenance-history/router.js and its SPEC.md.
+// Retired as a standalone PAGE (property360Router's own `GET
+// /maintenance-history` redirect above already wins that exact path) —
+// but this router is still mounted for its /api/maintenance-history/*
+// routes, which Property 360's Maintenance section, Budget subsection,
+// Privacy Review subsection, and admin Users section all call directly.
+// Same access shape as before: does this specific person hold a role in
+// team_member_tool_roles for tool='maintenance_history'. See
+// maintenance-history/router.js and its SPEC.md.
 app.use(maintenanceHistoryRouter);
 
 // ─── Call Stats section ─────────────────────────────────────────────────

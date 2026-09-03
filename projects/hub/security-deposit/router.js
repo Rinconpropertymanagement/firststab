@@ -1181,6 +1181,178 @@ router.get('/api/security-deposit/cases/:id', requireSecurityDepositAccess, asyn
   });
 });
 
+// ─── GET /api/security-deposit/property/:propertyId/summary ───────────────
+// New for Property 360 (property-360-SPEC.md's "Security Deposit" section
+// under "Per-Tool Card Content") — a property-scoped glance card, gated by
+// the same requireSecurityDepositAccess every other read route in this
+// file already uses (the "any of the four roles" gate, per that spec).
+//
+// This table has no property_id column of its own — the join is real but
+// three hops, every hop NOT NULL (20260626000000_initial_schema.sql,
+// 20260813000002_security_deposit_cases.sql):
+//   security_deposit_cases.lease_id → leases.id
+//   leases.unit_id                  → units.id
+//   units.property_id               → properties.id
+// Queried from the units side, embedding leases → security_deposit_cases,
+// the same shape lease-search's own leg-1 query already uses above (~line
+// 1267) — properties(address) added alongside for the photo-match step
+// below, so this stays one query instead of a second round trip.
+//
+// One property can have more than one case over time (a unit re-leases;
+// each occupancy gets its own leases row and is eligible for its own
+// case) — v1 shows only the single most recent case, matching "one
+// property, one glance" (property-360-SPEC.md, Open Item #2). A
+// property's full case history stays inside Security Deposit itself;
+// this route doesn't try to summarize a list.
+// Named (not an inline arrow function) and exported below, alongside
+// attachSecurityDepositRole/requireSecurityDepositAccess —
+// property-360-SPEC.md's aggregation route calls this in-process to get
+// the actual card data. This route reuses fetchAllIndexedB2Folders /
+// findBestPhotoMatch / CONFIRMED_FOLDER_STATUSES_EXCLUDED, all defined
+// earlier in this file and not otherwise exported — reproducing that
+// B2-folder-scan logic a third time in a different file would be a real
+// duplication risk, not just a style preference, so this function is
+// exported and called directly instead. Zero change to this function's
+// own behavior — same handler, same route, just also reachable
+// in-process.
+async function getSecurityDepositPropertySummary(req, res) {
+  const { data: units, error: unitsErr } = await supabase
+    .from('units')
+    .select(`
+      properties ( address ),
+      leases (
+        id, lease_start, deposit_held_total,
+        security_deposit_cases (
+          id, status, move_out_date, disposition_deadline, tenancy_status,
+          checklist_notice_sent, checklist_inspection_conducted, checklist_photos_documented,
+          prepaid_rent_balance, created_at
+        )
+      )
+    `)
+    .eq('property_id', req.params.propertyId);
+
+  if (unitsErr) return res.status(500).json({ error: unitsErr.message });
+
+  // Flatten every case across every unit/lease at this property.
+  // security_deposit_cases.lease_id carries its own UNIQUE constraint
+  // (20260813000002_security_deposit_cases.sql), so in principle PostgREST
+  // embeds it from the leases side as a to-one relation — but lease-
+  // search's own hasExistingCase() above documents a real, live-confirmed
+  // case (2026-08-28) where treating this embed as reliably one shape or
+  // the other broke: it can come back as a plain object OR a (possibly
+  // empty) array. Handled the same defensive way here — an empty array is
+  // truthy in JS, so a naive `if (lease.security_deposit_cases)` would
+  // silently treat "no case" as a case with an array where a case object
+  // was expected.
+  function extractCase(sdc) {
+    if (!sdc) return null;
+    if (Array.isArray(sdc)) return sdc.length ? sdc[0] : null;
+    return sdc;
+  }
+  const cases = [];
+  (units || []).forEach(u => {
+    const address = u.properties ? u.properties.address : null;
+    (u.leases || []).forEach(lease => {
+      const kase = extractCase(lease.security_deposit_cases);
+      if (kase) cases.push({ kase, lease, address });
+    });
+  });
+
+  // No case anywhere at this property — genuinely "no data," not an
+  // error. Property 360's aggregation route leaves this card out
+  // entirely on this response, the same "no data, no card" convention
+  // the global search widget already uses.
+  if (!cases.length) return res.json({ has_case: false });
+
+  // Most recent by the case's own move_out_date (nulls last, though
+  // move_out_date is NOT NULL on this table) — the real-world event
+  // "most recent case" means, not row-insertion order; ties (same day)
+  // broken by created_at.
+  cases.sort((a, b) => {
+    if (a.kase.move_out_date !== b.kase.move_out_date) {
+      return a.kase.move_out_date < b.kase.move_out_date ? 1 : -1;
+    }
+    return new Date(b.kase.created_at) - new Date(a.kase.created_at);
+  });
+  const { kase, lease, address } = cases[0];
+
+  // Open-flags count — the same signals GET /cases/:id's own flags[]
+  // array above already computes at read time for this exact case shape
+  // (no deposit on file, no move-in/move-out photos, etc., per
+  // property-360-SPEC.md's own description of this fact), reused here as
+  // a count rather than the full messages array a glance card doesn't
+  // need. Deliberately NOT included: the rare move_out_date_mismatch
+  // defense-in-depth flag from that route (self-correcting on the next
+  // sync, not something a glance card needs to surface) and the
+  // unconfirmed-vs-missing distinction on photo matches (both count as
+  // "not confirmed evidence yet" here — the distinction only matters when
+  // showing someone where to go fix it, which is /cases/:id's job, not
+  // this card's).
+  let openFlagsCount = 0;
+  if (lease.deposit_held_total == null || Number(lease.deposit_held_total) === 0) openFlagsCount++;
+  if (kase.prepaid_rent_balance == null) openFlagsCount++;
+  if (!kase.tenancy_status) openFlagsCount++;
+  if (kase.checklist_notice_sent == null) openFlagsCount++;
+  if (kase.checklist_inspection_conducted == null) openFlagsCount++;
+  if (kase.checklist_photos_documented == null) openFlagsCount++;
+
+  const { data: ltRows, error: ltErr } = await supabase
+    .from('lease_tenants')
+    .select('id')
+    .eq('lease_id', lease.id)
+    .limit(1);
+  if (ltErr) return res.status(500).json({ error: ltErr.message });
+  if (!ltRows || !ltRows.length) openFlagsCount++;
+
+  const { data: docs, error: docErr } = await supabase
+    .from('documents')
+    .select('file_type')
+    .eq('entity_type', 'security_deposit_case')
+    .eq('entity_id', kase.id)
+    .in('file_type', ['inspection_form_move_in', 'inspection_form_move_out']);
+  if (docErr) return res.status(500).json({ error: docErr.message });
+  const uploadedFormTypes = new Set((docs || []).map(d => d.file_type));
+  if (!uploadedFormTypes.has('inspection_form_move_in')) openFlagsCount++;
+  if (!uploadedFormTypes.has('inspection_form_move_out')) openFlagsCount++;
+
+  // Move-in/move-out photo match — reuses the exact helpers
+  // GET /cases/:id already factored out for this (fetchAllIndexedB2Folders,
+  // findBestPhotoMatch, CONFIRMED_FOLDER_STATUSES_EXCLUDED, all defined
+  // above) rather than duplicating the B2-folder-scan logic a third time —
+  // see fetchAllIndexedB2Folders's own comment for why it was factored out
+  // in the first place. Same cost as opening this one case's own detail
+  // page today (this route only ever looks at the single most recent
+  // case, never the whole portfolio), so it isn't a new expense — just
+  // relocated to this card.
+  if (address) {
+    let folders = [];
+    try {
+      folders = await fetchAllIndexedB2Folders();
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+    const moveIn = findBestPhotoMatch(address, lease.lease_start, 'move_in', folders, CONFIRMED_FOLDER_STATUSES_EXCLUDED);
+    const moveOut = findBestPhotoMatch(address, kase.move_out_date, 'move_out', folders, CONFIRMED_FOLDER_STATUSES_EXCLUDED);
+    if (!moveIn) openFlagsCount++;
+    if (!moveOut) openFlagsCount++;
+  } else {
+    openFlagsCount++; // can't verify photos without an address to match on
+  }
+
+  return res.json({
+    has_case: true,
+    case_id: kase.id,
+    status: kase.status,
+    escalated: kase.status === 'escalated',
+    disposition_deadline: kase.disposition_deadline,
+    days_remaining: daysRemaining(kase.disposition_deadline),
+    tenancy_status: kase.tenancy_status,
+    open_flags_count: openFlagsCount,
+  });
+}
+
+router.get('/api/security-deposit/property/:propertyId/summary', requireSecurityDepositAccess, getSecurityDepositPropertySummary);
+
 // ─── GET /api/security-deposit/lease-search — find a lease for the manual
 // "Create Case" form ─────────────────────────────────────────────────────
 // Backs the Queue tab's "Create Case" button (Tron) — the safety valve for
@@ -3265,4 +3437,11 @@ internalRouter.post('/api/security-deposit/internal/index-b2-photos', async (req
   }
 });
 
-module.exports = { router, internalRouter };
+// attachSecurityDepositRole / requireSecurityDepositAccess exported for
+// Property 360 (property-360-SPEC.md, "Access Control") — its aggregation
+// route calls this tool's own, unmodified gate in-process to decide
+// whether to include the Security Deposit card at all, the same
+// composed-not-reimplemented pattern Insurance and Maintenance History
+// export for. Nothing about either function's logic changes here — this
+// is exporting an already-reviewed function, not writing a new one.
+module.exports = { router, internalRouter, attachSecurityDepositRole, requireSecurityDepositAccess, getSecurityDepositPropertySummary };

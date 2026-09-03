@@ -294,6 +294,109 @@ router.get('/api/insurance/records', requireInsuranceAccess, async (req, res) =>
   return res.json(data || []);
 });
 
+// ─── GET /api/insurance/property/:propertyId/summary ──────────────────────
+// Built for Property 360 (property-360-SPEC.md, "Per-Tool Card Content →
+// Insurance") — the 5-fact glance card for one property, gated by the same
+// requireInsuranceAccess every other read route here uses. /records above
+// already returns this same is_current=true data, just for every property
+// at once with no filter; this is that query, scoped to one property.
+//
+// property_id is a real FK on property_insurance but is nullable, and the
+// table's own current-policy uniqueness constraint
+// (idx_pi_one_current_per_property, 20260720000004_insurance_compliance.sql)
+// is enforced on appfolio_property_id, not property_id — a row saved
+// through an older or batch path (before a UUID match was ever confirmed)
+// can carry only appfolio_property_id. Query on property_id first and, if
+// nothing comes back, fall back to appfolio_property_id for this property
+// so a real policy doesn't silently disappear from the card just because
+// of which path it was originally saved through.
+function isValidUuid(str) {
+  return typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+const PROPERTY_SUMMARY_FIELDS = 'status, expiration_date, coverage_amount, additional_insured_verified, insurer_name, property_id, appfolio_property_id';
+
+// Named (not an inline arrow function) and exported below, alongside
+// attachInsuranceRole/requireInsuranceAccess — property-360-SPEC.md's
+// aggregation route calls this in-process to get the actual card data,
+// the same "literally the same function, called the same way" reuse
+// already established for the access-check functions, rather than a
+// second HTTP round-trip back into this same server (explicitly
+// rejected by that spec's own Access Control section) or a duplicated
+// copy of this query logic living in two files. Zero change to this
+// function's own behavior — same handler, same route, just also
+// reachable in-process.
+async function getInsurancePropertySummary(req, res) {
+  const propertyId = req.params.propertyId;
+  if (!isValidUuid(propertyId)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  const { data: property, error: propErr } = await supabase
+    .from('properties')
+    .select('id, appfolio_id')
+    .eq('id', propertyId)
+    .maybeSingle();
+  if (propErr) return res.status(500).json({ error: propErr.message });
+  if (!property) return res.status(404).json({ error: 'Property not found.' });
+
+  // .limit(1) + take the first row instead of .maybeSingle() — because
+  // idx_pi_one_current_per_property doesn't cover property_id (see comment
+  // above), more than one is_current=true row could in principle share a
+  // property_id, and .maybeSingle() throws on that instead of just picking
+  // one. Same ordering /records already uses (soonest-expiring first).
+  const { data: byPropertyId, error: byPropIdErr } = await supabase
+    .from('property_insurance')
+    .select(PROPERTY_SUMMARY_FIELDS)
+    .eq('is_current', true)
+    .eq('property_id', propertyId)
+    .order('expiration_date', { ascending: true, nullsFirst: false })
+    .limit(1);
+  if (byPropIdErr) return res.status(500).json({ error: byPropIdErr.message });
+
+  let policy = (byPropertyId && byPropertyId[0]) || null;
+
+  if (!policy && property.appfolio_id) {
+    const { data: byAppfolioId, error: byAppfolioIdErr } = await supabase
+      .from('property_insurance')
+      .select(PROPERTY_SUMMARY_FIELDS)
+      .eq('is_current', true)
+      .eq('appfolio_property_id', property.appfolio_id)
+      .order('expiration_date', { ascending: true, nullsFirst: false })
+      .limit(1);
+    if (byAppfolioIdErr) return res.status(500).json({ error: byAppfolioIdErr.message });
+    policy = (byAppfolioId && byAppfolioId[0]) || null;
+  }
+
+  // No current policy row at all for this property, through either path —
+  // a real, honest "no data" case (e.g. a brand-new property the nightly
+  // check-new-properties job hasn't reached yet), not an error. Property
+  // 360's aggregation route treats a null response here as "no card,"
+  // same convention as "a tool with no data for this property has no card
+  // either."
+  if (!policy) return res.json(null);
+
+  const covAmt = policy.coverage_amount != null ? Number(policy.coverage_amount) : null;
+  // Same day-count math as the dashboard's own daysLeft() (dashboard/index.html:1124-1130)
+  // and the same $500K floor already hardcoded server-side above (POST /save's belowMin).
+  const daysUntilExpiration = policy.expiration_date
+    ? Math.floor((new Date(policy.expiration_date) - new Date()) / 86400000)
+    : null;
+
+  return res.json({
+    status: policy.status,
+    days_until_expiration: daysUntilExpiration,
+    expiration_date: policy.expiration_date,
+    coverage_amount: covAmt,
+    minimum_coverage: 500000,
+    below_minimum: covAmt != null && covAmt < 500000,
+    additional_insured_verified: !!policy.additional_insured_verified,
+    insurer_name: policy.insurer_name || null,
+  });
+}
+
+router.get('/api/insurance/property/:propertyId/summary', requireInsuranceAccess, getInsurancePropertySummary);
+
 // ─── POST /api/insurance/upload ────────────────────────────────────────────
 router.post('/api/insurance/upload', requireInsuranceAccess, upload.single('file'), async (req, res) => {
   const ts = new Date().toISOString();
@@ -1395,4 +1498,4 @@ internalRouter.post('/api/insurance/internal/check-new-properties', async (req, 
   return res.json({ flagged: uninsured.length, properties: uninsured.map(p => p.name || p.address) });
 });
 
-module.exports = { router, internalRouter };
+module.exports = { router, internalRouter, attachInsuranceRole, requireInsuranceAccess, getInsurancePropertySummary };

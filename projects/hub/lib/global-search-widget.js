@@ -20,6 +20,19 @@
  * tools with tools.<x> === true get a link; a property matched by name
  * but with no data anywhere yet shows a plain "No records yet" line.
  *
+ * "Property 360" link — added property-360-SPEC.md, "How It Works" /
+ * "Where It Lives" (retiring the old entry points). Replaces the old
+ * "Maintenance History" link (that tool no longer has its own standalone
+ * page — see maintenance-history/router.js and property-360/router.js).
+ * Unlike every other link here, it's built from the match's real
+ * `id` (property-search.js:156 — "returned but currently unused by
+ * anything," per this file's own header before this change; Property
+ * 360 is the first real consumer of that field) rather than a text
+ * name/address label, and it's shown for EVERY match, not gated behind
+ * a tools.<x> flag — "nothing here yet" is itself a useful, honest
+ * answer on that page, matching this widget's own existing empty-state
+ * line below.
+ *
  * Styled to match server.js's page() helper (stone/neutral palette:
  * #1c1917 text, #78716c muted, #d6d3d1 borders, #f5f5f4 backgrounds) —
  * deliberately NOT each dashboard's own color scheme, per the build
@@ -64,18 +77,17 @@ const GLOBAL_SEARCH_WIDGET_HTML = `
     }
     results.innerHTML = matches.map(function (p) {
       var links = [];
+      // Property 360 — always shown, real id, first (see file header for
+      // why this one link doesn't follow the tools.<x>-gated pattern
+      // below; it replaces the old Maintenance History link).
+      links.push('<a href="/property-360?property_id=' + encodeURIComponent(p.id) + '" style="margin-right:0.75rem;color:#44403c;">Property 360</a>');
       if (p.tools && p.tools.insurance) {
         links.push('<a href="' + toolLink('/insurance', p) + '" style="margin-right:0.75rem;color:#44403c;">Insurance</a>');
-      }
-      if (p.tools && p.tools.maintenance_history) {
-        links.push('<a href="' + toolLink('/maintenance-history', p) + '" style="margin-right:0.75rem;color:#44403c;">Maintenance History</a>');
       }
       if (p.tools && p.tools.security_deposit) {
         links.push('<a href="' + toolLink('/security-deposit', p) + '" style="margin-right:0.75rem;color:#44403c;">Security Deposit</a>');
       }
-      var linkRow = links.length
-        ? '<div style="margin-top:3px;font-size:0.75rem;">' + links.join('') + '</div>'
-        : '<div style="margin-top:3px;font-size:0.75rem;color:#a8a29e;">No records yet in any tool</div>';
+      var linkRow = '<div style="margin-top:3px;font-size:0.75rem;">' + links.join('') + '</div>';
       return '<div style="padding:0.55rem 0.75rem;border-bottom:1px solid #f5f5f4;">' +
         '<div style="font-size:0.875rem;font-weight:600;color:#1c1917;">' + escapeHtml(p.name || p.address || 'Unknown property') + '</div>' +
         (p.address ? '<div style="font-size:0.75rem;color:#78716c;">' + escapeHtml(p.address) + (p.city ? ', ' + escapeHtml(p.city) : '') + '</div>' : '') +

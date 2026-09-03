@@ -808,6 +808,164 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
   });
 });
 
+// ─── GET /api/maintenance-history/property/:property_id/summary ────────
+// Property 360's Maintenance summary card — property-360-SPEC.md's
+// "Maintenance History — summary card" section. Deliberately NOT a call
+// into the /overview route above: that route groups tickets by system and
+// calls Claude once per non-empty component bucket
+// (property-overview-SPEC.md's Step 5) — real AI cost and latency a
+// glance-only summary card shouldn't pay every time someone opens a
+// property. This route is pure SQL, reusing the exact trailing-12mo-spend
+// math already written above (RECENT_MONTHS / monthsAgo()) and the exact
+// gated flagged_review_count pattern already written for /overview — as
+// the same functions/constants, not a second copy that could drift.
+//
+// Asimov's condition on this build, verified again at Judge review: this
+// route must never read maintenance_claims or maintenance_claims_decision_safe
+// for CONTENT. The one place it touches maintenance_claims at all is the
+// same count-only, head:true lookup /overview's flagged_review_count
+// already uses — already reviewed and approved by Asimov ("the reused
+// count function does technically query maintenance_claims for a
+// count-only head query, never content... what actually matters — no
+// claim text ever leaves that function — holds"). No claim row, of any
+// shape, is ever selected or returned here.
+// Named (not an inline arrow function) and exported below, alongside
+// attachMaintenanceHistoryRole/requireMaintenanceHistoryAccess/
+// requireMaintenanceHistoryRole — property-360-SPEC.md's aggregation
+// route calls this in-process to get the Maintenance summary card's
+// actual data. Same "literally the same function, called the same way"
+// reuse already established for the access-check functions, rather than
+// a second HTTP round-trip back into this same server or a duplicated
+// copy of this query logic (which reuses RECENT_MONTHS/monthsAgo() and
+// the PRIVACY_REVIEW_ROLES-gated flagged-count pattern defined above)
+// living in two files. Zero change to this function's own behavior —
+// same handler, same route, just also reachable in-process.
+async function getMaintenanceHistoryPropertySummary(req, res) {
+  const propertyId = req.params.property_id;
+  if (!isValidUuid(propertyId)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  const { data: property, error: propErr } = await supabase
+    .from('properties')
+    .select('id, name, address, city')
+    .eq('id', propertyId)
+    .maybeSingle();
+  if (propErr) return res.status(500).json({ error: propErr.message });
+  if (!property) return res.status(404).json({ error: 'Property not found.' });
+
+  const { data: units, error: unitsErr } = await supabase
+    .from('units')
+    .select('id')
+    .eq('property_id', property.id);
+  if (unitsErr) return res.status(500).json({ error: unitsErr.message });
+  const unitIds = (units || []).map(u => u.id);
+
+  // Same fields /overview's own spend math reads (status, cost,
+  // completed_at/created_at) — nothing from maintenance_claims. Open
+  // ticket count uses the plain AppFolio status field only, per
+  // property-360-SPEC.md's own table ("maintenance_requests.status for
+  // this property's units, not closed/completed") — deliberately NOT
+  // /overview's richer claims-informed "resolved" logic above (which
+  // reads outcome claims' text to override a stale "Completed" status).
+  // Pulling that richer logic in here would mean this route reading
+  // claim content, which is exactly what it must never do.
+  let tickets = [];
+  if (unitIds.length) {
+    const { data: mrRows, error: mrErr } = await supabase
+      .from('maintenance_requests')
+      .select('id, status, cost, completed_at, created_at, latchel_vendor_id, latchel_vendor_name')
+      .in('unit_id', unitIds);
+    if (mrErr) return res.status(500).json({ error: mrErr.message });
+    tickets = mrRows || [];
+  }
+
+  const openTicketCount = tickets.filter(t => !['completed', 'closed'].includes(t.status)).length;
+
+  // Same trailing-12mo sum as /overview's baseResponse.spend, reusing
+  // RECENT_MONTHS/monthsAgo() defined above — not a second copy of the
+  // math. last_activity is new here (not something /overview's response
+  // already surfaces as a single field) but uses the exact same
+  // completed_at-then-created_at fallback /overview's own recencyDate
+  // logic uses per ticket.
+  const twelveMonthsAgo = monthsAgo(RECENT_MONTHS);
+  let spendTrailing12 = 0;
+  let lastActivity = null;
+  // Vendor history (property-360-SPEC.md "Vendor history") — both columns
+  // are written only by the nightly Latchel ingest (internal/ingest route
+  // below), never looked up live here. Distinct count is keyed on
+  // latchel_vendor_id, not the display name — the migration's own
+  // "many-to-one" identity (the same vendor legitimately does many
+  // tickets) — so two tickets for the same vendor never double-count.
+  // "Most recent" reuses this same activityDate fallback, restricted to
+  // tickets that actually resolved a name: a ticket whose vendor_id is set
+  // but whose one-night name lookup failed still counts toward the
+  // distinct total, but is skipped here in favor of the next-most-recent
+  // ticket that does have a name — showing no name at all would be worse
+  // than skipping to one that has it.
+  const vendorIds = new Set();
+  let mostRecentVendorName = null;
+  let mostRecentVendorDate = null;
+  for (const t of tickets) {
+    const cost = typeof t.cost === 'number' ? t.cost : 0;
+    const activityDate = t.completed_at || t.created_at;
+    if (activityDate && new Date(activityDate) >= twelveMonthsAgo) spendTrailing12 += cost;
+    if (activityDate && (!lastActivity || activityDate > lastActivity)) lastActivity = activityDate;
+    if (t.latchel_vendor_id) vendorIds.add(t.latchel_vendor_id);
+    if (t.latchel_vendor_name && activityDate && (!mostRecentVendorDate || activityDate > mostRecentVendorDate)) {
+      mostRecentVendorDate = activityDate;
+      mostRecentVendorName = t.latchel_vendor_name;
+    }
+  }
+
+  // Gated flagged-review count — identical pattern to /overview's own
+  // (count:'exact'+head:true, never fetching a row's content), same
+  // PRIVACY_REVIEW_ROLES gate, same omit-don't-zero discipline as
+  // /overview: left out of the response entirely for a role outside that
+  // set, and also when the real count is 0, so there is no code path
+  // where presence of the key itself doesn't already mean "a person with
+  // real reviewer access should look at this." Skips the query entirely
+  // on a known-empty ticket list, same convention flagged-queue's own
+  // property filter already follows below.
+  let flaggedReviewCount = null;
+  if (PRIVACY_REVIEW_ROLES.includes(req.maintenanceHistoryRole)) {
+    const ticketIds = tickets.map(t => t.id);
+    if (ticketIds.length === 0) {
+      flaggedReviewCount = 0;
+    } else {
+      const { count: flaggedCount, error: flaggedCountErr } = await supabase
+        .from('maintenance_claims')
+        .select('id', { count: 'exact', head: true })
+        .in('maintenance_request_id', ticketIds)
+        .eq('flagged_protected_class', true);
+      if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
+      flaggedReviewCount = flaggedCount || 0;
+    }
+  }
+
+  return res.json({
+    property: { id: property.id, name: property.name, address: property.address, city: property.city },
+    has_data: tickets.length > 0,
+    open_ticket_count: openTicketCount,
+    spend_trailing_12mo: Math.round(spendTrailing12 * 100) / 100,
+    last_activity: lastActivity,
+    // Vendor history (property-360-SPEC.md "Vendor history") — the short
+    // summary-card line ("3 vendors used, most recent: [name]"). Always
+    // included (0 / null when there's no vendor data yet), same as
+    // open_ticket_count/spend_trailing_12mo above — this is a plain
+    // aggregate fact, not a gated privacy-review flag like
+    // flagged_review_count below. The full per-vendor breakdown (every
+    // vendor, job count, most recent date) is explicitly a separate,
+    // not-yet-built piece living on Overview's synthesis output per the
+    // spec's own "glance here, full detail there" framing — not this route.
+    vendor_count: vendorIds.size,
+    most_recent_vendor_name: mostRecentVendorName,
+    ...(flaggedReviewCount ? { flagged_review_count: flaggedReviewCount } : {}),
+  });
+}
+
+router.get('/api/maintenance-history/property/:property_id/summary', requireMaintenanceHistoryAccess, getMaintenanceHistoryPropertySummary);
+
 // Round-trip calendar validation — `new Date("2026-02-30")` does NOT return
 // an invalid date the way you'd expect; JS silently rolls it forward to
 // March 2nd instead of failing. That let bad month-end dates (Apr 31, Jun
@@ -1014,6 +1172,20 @@ router.post('/api/maintenance-history/privacy-queue/acknowledge', requireMainten
 // portfolio-wide query as before, unchanged, and stays the default when
 // this route is reached normally (not via the Property Overview badge) —
 // that comprehensive-sweep behavior is the whole point of this queue.
+//
+// Optional ?include_reviewed=true — property-360-SPEC.md's Privacy Review
+// section, resolved 2026-09-02, approved by Mason with conditions. Same
+// additive pattern as ?property_id= above: omitted or any value other
+// than the literal string 'true' keeps today's queue a real, shrinking
+// to-do list (adds .eq('review_status', 'unreviewed') below); 'true'
+// removes that filter and reveals the exact same full history this route
+// has always returned, unchanged. Mason's condition 2: this toggle is
+// available to all three PRIVACY_REVIEW_ROLES equally — this route's own
+// role gate below already grants all three the same access, and this
+// param adds no further role distinction on top of it. Mason's condition
+// 3: this is a display filter only, applied to the SELECT below — the
+// view-logging audit_log write further down is untouched by this change,
+// on purpose.
 router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
   // Acknowledgment gate, Mason's condition 1 — director_of_operations only
   // (see PRIVACY_REVIEW_ROLES comment above). This route returns real
@@ -1037,6 +1209,12 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
   if (propertyIdFilter !== undefined && !isValidUuid(propertyIdFilter)) {
     return res.status(400).json({ error: 'That property ID is not valid.' });
   }
+
+  // Resolved 2026-09-02 — reviewed items drop out of the default view.
+  // Anything other than the literal string 'true' keeps today's behavior
+  // (filtered to unreviewed). See this route's own top comment for
+  // Mason's conditions.
+  const includeReviewed = req.query.include_reviewed === 'true';
 
   // maintenance_claims has no property_id of its own — it only reaches a
   // property through maintenance_request_id -> units -> properties, same
@@ -1089,6 +1267,7 @@ router.get('/api/maintenance-history/flagged-queue', requireMaintenanceHistoryRo
           `)
           .eq('flagged_protected_class', true);
         if (ticketIds !== null) query = query.in('maintenance_request_id', ticketIds);
+        if (!includeReviewed) query = query.eq('review_status', 'unreviewed');
         return query.order('id', { ascending: true }).range(from, to);
       });
     } catch (error) {
@@ -1604,6 +1783,27 @@ internalRouter.post('/api/maintenance-history/internal/ingest', async (req, res)
       const stateHistory = await latchel.getJobStateHistory(jobSummary.job_id);
       const files = await latchel.getJobFiles(jobSummary.job_id);
 
+      // Vendor capture — property-360-SPEC.md "Vendor history." Every real
+      // Latchel Job carries a vendor_id (getJob() already returns it, no
+      // extra API call needed for this part); the real name comes from
+      // getVendor(vendorId), called here at nightly ingest time only —
+      // deliberately never looked up live on page load (spec: "name
+      // resolved and stored at nightly ingest, never fetched live"). Same
+      // per-row isolation as the AI extraction call below: a failed vendor
+      // lookup is logged and this ticket keeps processing — it does not
+      // abort ingest for this job or any other.
+      const vendorId = job.vendor_id != null ? String(job.vendor_id) : null;
+      let vendorName = null;
+      if (vendorId) {
+        try {
+          const vendor = await latchel.getVendor(vendorId);
+          vendorName = vendor && vendor.name ? vendor.name : null;
+        } catch (vendorErr) {
+          console.error(`[${ts}] ingest: vendor lookup failed, job ${jobId}, vendor ${vendorId}:`, vendorErr.message);
+          summary.errors.push({ job_id: jobId, stage: 'vendor_lookup', error: vendorErr.message });
+        }
+      }
+
       const pdfFileMeta = (files || []).filter(
         f => PDF_FILE_CLASSIFICATIONS.includes(f.classification) && f.extension === 'pdf' && f.download_link && f.download_link.uri
       );
@@ -1712,6 +1912,15 @@ internalRouter.post('/api/maintenance-history/internal/ingest', async (req, res)
       const mrUpdates = {};
       if (!mr.latchel_job_id) mrUpdates.latchel_job_id = jobId;
       if (!aiResult.truncated) mrUpdates.latchel_claims_synced_at = new Date().toISOString();
+      // Vendor columns — only included when this run actually resolved a
+      // fresh value, same "omit rather than send null over an existing
+      // good value" discipline as this migration's own comment describes
+      // (contrasted with vendor_name, which sync.js's upsert always
+      // includes even as null and so silently clobbers). vendorId is set
+      // whenever this job carries one; vendorName only when this run's
+      // getVendor() call actually succeeded above.
+      if (vendorId) mrUpdates.latchel_vendor_id = vendorId;
+      if (vendorName) mrUpdates.latchel_vendor_name = vendorName;
       if (Object.keys(mrUpdates).length > 0) {
         await supabase.from('maintenance_requests').update(mrUpdates).eq('id', mr.id);
       }
@@ -1789,4 +1998,18 @@ internalRouter.post('/api/maintenance-history/internal/reconcile-properties', as
   return res.json({ matched, latchel_properties_seen: latchelProperties.length });
 });
 
-module.exports = { router, internalRouter };
+// attachMaintenanceHistoryRole / requireMaintenanceHistoryAccess /
+// requireMaintenanceHistoryRole exported for the first time here —
+// property-360-SPEC.md's Access Control section: composing this tool's
+// already-gated summary onto Property 360 reuses these exact, unmodified
+// functions in-process, the same way opening this tool's own dashboard
+// would gate a viewer, rather than reimplementing the check a second
+// time. Nothing about the functions' own logic changes by exporting them.
+module.exports = {
+  router,
+  internalRouter,
+  attachMaintenanceHistoryRole,
+  requireMaintenanceHistoryAccess,
+  requireMaintenanceHistoryRole,
+  getMaintenanceHistoryPropertySummary,
+};

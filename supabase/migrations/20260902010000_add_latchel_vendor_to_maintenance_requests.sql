@@ -1,0 +1,181 @@
+-- ============================================================
+-- Migration: 20260902010000_add_latchel_vendor_to_maintenance_requests
+-- Created:   2026-09-02
+-- Author:    Neo (database specialist)
+--
+-- Part of the Property 360 build (projects/hub/property-360-SPEC.md,
+-- "Vendor history" section, added 2026-09-02). A Q build agent working on
+-- projects/hub/maintenance-history/ hit a real gap while wiring the
+-- Maintenance summary card's vendor line ("3 vendors used, most recent:
+-- [name]"): there is nowhere safe to persist a Latchel-resolved vendor
+-- name on a maintenance_requests row. Adds two nullable columns to close
+-- that gap. Purely additive — no row deleted, moved, or overwritten; no
+-- existing column, constraint, or RLS policy touched.
+--
+-- ============================================================
+-- Why a new column, not the existing vendor_name column
+-- ============================================================
+--
+-- maintenance_requests.vendor_name already exists (20260626000000_initial_
+-- schema.sql) and already holds this exact category of fact — but it
+-- cannot be reused here, for two confirmed-live reasons:
+--
+--   1. It is unconditionally overwritten every night by the AppFolio sync.
+--      projects/appfolio-sync/sync.js's work_order buildRow() (~line 316)
+--      always includes `vendor_name: row.vendor || null` in the upsert
+--      body it sends for every work order, every run — never omitted the
+--      way this same file omits appfolio_unit_id when AppFolio has no
+--      value (buildRow's own comment on that field: "omit the field on a
+--      run that finds no match rather than writing NULL over a
+--      previously-found match"). vendor_name gets no such treatment.
+--      Per this schema's own "SYNC CONFLICT RULE" convention (referenced
+--      in router.js:932-940): a field present in an upsert body always
+--      overwrites, even with null. Anything a Latchel-ingest step wrote
+--      into vendor_name today would be silently clobbered within 24
+--      hours by the next AppFolio sync run.
+--   2. AppFolio's own vendor value is separately confirmed useless as a
+--      source, so this isn't a "stop two writers from racing" problem
+--      that could be solved by changing sync.js instead. Live-checked
+--      per property-360-SPEC.md: only 4 of 133 recent work orders have
+--      AppFolio's vendor field populated at all, and all 4 say "Rincon
+--      Property Management" (Rincon itself, self-managed work) — never a
+--      real third-party vendor. AppFolio's data genuinely doesn't carry
+--      this fact; it isn't a sync gap to fix.
+--
+-- Latchel is the real, confirmed-working source instead: every real
+-- Latchel job carries a vendor_id, and GET /vendors/:id resolves it to a
+-- real vendor record (name, phone, email) — confirmed live 2026-09-02 on
+-- a real job (vendor_id resolved to Quickturn Maintenance,
+-- regina@quickturnmaintenance.com). lib/latchel-connector.js's getVendor
+-- (vendorId) already wraps that call, ready for the nightly ingest job.
+-- Two new columns, distinct from vendor_name, keep this Latchel-sourced
+-- fact permanently out of reach of the AppFolio sync's upsert.
+--
+-- ============================================================
+-- Column shape
+-- ============================================================
+--
+--   latchel_vendor_id    TEXT, nullable. Latchel's own vendor_id off the
+--     matched Job record (the value getVendor(vendorId) is called with).
+--     Stored as TEXT, matching this schema's existing latchel_job_id /
+--     latchel_property_id / appfolio_id convention of storing an
+--     externally-sourced ID as TEXT even where the source API types it as
+--     an integer (20260815010000_maintenance_history_schema.sql).
+--
+--   latchel_vendor_name  TEXT, nullable. The resolved name from
+--     GET /vendors/:id (getVendor's return value), written at ingest
+--     time only — matching property-360-SPEC.md's explicit requirement,
+--     "name resolved and stored at nightly ingest, never fetched live" —
+--     never computed on page load.
+--
+-- Both NULL means one of: this ticket has no matched Latchel job yet
+-- (latchel_job_id IS NULL — the same 204 older, AppFolio-only tickets
+-- already documented in property-360-SPEC.md as permanently unmatchable),
+-- the matched job has no vendor_id, or the nightly ingest job simply
+-- hasn't run since this row's latchel_job_id was set. All three are
+-- normal, expected states, not error states — same discipline as every
+-- other nullable Latchel-sourced column in this schema.
+--
+-- No unique index on latchel_vendor_id, unlike latchel_job_id/
+-- latchel_property_id: those two are 1:1 match keys (one Rincon ticket
+-- matches at most one Latchel job), so a duplicate match is a real bug
+-- worth catching loudly. latchel_vendor_id is intentionally many-to-one —
+-- the same vendor legitimately does many tickets — so a unique constraint
+-- here would be wrong, not just unnecessary.
+--
+-- No new index at all, in fact. The one query this data exists to serve
+-- — "every vendor used on this property, with job count and most recent
+-- date" (property-360-SPEC.md's full vendor breakdown, feeding Property
+-- Overview's synthesis) — already loads every ticket for a property's
+-- units via the existing unit_id -> units -> properties join before
+-- grouping by vendor in application code (same shape /overview already
+-- uses for its per-component ticket buckets). Nothing planned queries
+-- maintenance_requests by latchel_vendor_id directly across the whole
+-- table. If a future feature needs "every ticket for vendor X, portfolio-
+-- wide," add a plain btree index then, against a real query — not
+-- speculatively here.
+--
+-- What this migration does NOT do: no ingest wiring, no router.js change,
+-- no call to getVendor(). That's Q's already-planned follow-up piece —
+-- this migration only makes the two columns exist for it to write into.
+--
+-- ============================================================
+-- Rule 4 (GOVERNANCE.md) — no new data inventory block needed
+-- ============================================================
+--
+-- Same precedent as 20260827010000 (documents.captured_at) and
+-- 20260828000000 (properties.year_built/maintenance_limit): Rule 4's
+-- registration requirement ("When creating any new table that stores
+-- personal data...") applies to new tables, not additive nullable columns
+-- on an existing, already-governed, already-RLS-enabled table.
+--
+-- Flagged explicitly anyway, because a vendor name is contact-adjacent
+-- and worth a real look, not a reflexive skip: this is not a new
+-- category of personal data on this table. maintenance_requests has
+-- carried a vendor name in vendor_name since the original schema
+-- (20260626000000) — the same fact, from a more reliable source, in a
+-- column the nightly sync can't overwrite. It is business/vendor contact
+-- information about a third-party service provider engaged to do work,
+-- not information about a tenant, applicant, or any protected-class-
+-- adjacent fact — a different, lower-sensitivity category than, say,
+-- maintenance_claims.claim_text (free-text narrative that routinely
+-- names tenants and health details, per that table's own Rule 4 writeup)
+-- or lease_tenants' tenant PII. latchel_vendor_id is an opaque external
+-- ID, no more sensitive than the appfolio_id/latchel_job_id columns
+-- already on this table. No retention-policy placeholder is added for
+-- these two columns specifically, for the same reason none was added for
+-- vendor_name itself in 20260626000000 — vendor identity is operational
+-- business-relationship data, not the kind of personal record this
+-- schema's retention-policy placeholders (security_deposit_cases,
+-- lease_tenants, maintenance_claims) exist to bound.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist, run before any
+-- migration is handed off for Peter to apply)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. ADD COLUMN IF NOT EXISTS
+--       on two brand-new, nullable columns with no default — every
+--       existing row gets NULL in both; nothing already stored is read,
+--       moved, or overwritten. vendor_name is untouched.
+--   [x] Does this touch a table other code depends on? Yes —
+--       maintenance_requests is read/written by the AppFolio sync, the
+--       maintenance-history tool, Property Overview, Approval Briefing,
+--       and Property 360. That is exactly why this migration adds only
+--       two nullable columns with no default and no constraint — nothing
+--       already reading or writing this table changes behavior. An
+--       existing `SELECT *` caller (including sync.js's own upsert)
+--       gains two new NULL-valued columns; nothing breaks by getting an
+--       extra column back, and sync.js's work_order upsert body does not
+--       set either new column, so it cannot clobber them — that's the
+--       entire point of this migration.
+--   [x] Additive or destructive? Purely additive. No column dropped, no
+--       type changed, no existing constraint tightened, no default that
+--       could alter existing INSERT/UPDATE behavior. RLS is untouched —
+--       already enabled on maintenance_requests (20260626000000), no
+--       policy added, changed, or removed here.
+--   [x] Tested on a copy of the data first? Not yet — standard practice
+--       before applying to the real database, same as every migration in
+--       this repo. Peter (or whoever applies this) should run it against
+--       a Supabase branch/copy first, same as always.
+-- ============================================================
+
+ALTER TABLE maintenance_requests
+  ADD COLUMN IF NOT EXISTS latchel_vendor_id    TEXT,
+  ADD COLUMN IF NOT EXISTS latchel_vendor_name  TEXT;
+
+COMMENT ON COLUMN maintenance_requests.latchel_vendor_id IS
+  'Latchel''s own vendor_id off this ticket''s matched Job record (see latchel_job_id), the value lib/latchel-connector.js''s getVendor(vendorId) is called with (GET /vendors/:id). Stored as TEXT, matching this schema''s latchel_job_id/latchel_property_id/appfolio_id convention. Distinct from vendor_name on purpose: vendor_name is unconditionally overwritten by every AppFolio sync run (projects/appfolio-sync/sync.js work_order buildRow(), always sends vendor_name in its upsert body) and AppFolio''s own vendor field is separately confirmed to never carry a real third-party vendor (property-360-SPEC.md "Vendor history," live-checked 2026-09-02: 4/133 populated, all "Rincon Property Management"). NULL means no matched Latchel job yet, no vendor_id on the matched job, or nightly ingest has not run since matching — all normal, expected states. Written by the nightly Latchel ingestion job only, never on page load.';
+
+COMMENT ON COLUMN maintenance_requests.latchel_vendor_name IS
+  'The real vendor name resolved from Latchel via GET /vendors/:id (lib/latchel-connector.js''s getVendor()), keyed by latchel_vendor_id above. Written once, at nightly ingest time, per property-360-SPEC.md''s explicit requirement ("name resolved and stored at nightly ingest, never fetched live") — never computed live on page load. Feeds the Maintenance summary card''s vendor line and the full per-property vendor breakdown on Property Overview''s synthesis. NULL for the same reasons latchel_vendor_id is NULL.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE maintenance_requests DROP COLUMN IF EXISTS latchel_vendor_name;
+-- ALTER TABLE maintenance_requests DROP COLUMN IF EXISTS latchel_vendor_id;
+--
+-- ============================================================

@@ -166,6 +166,21 @@ async function listProperties() {
 }
 
 /**
+ * Resolves a Job's vendor_id to the real vendor record (name, phone,
+ * email) — property-360-SPEC.md "Vendor history." Every real Job carries
+ * a vendor_id (confirmed live, 2026-09-02); this is the one place that
+ * turns it into an actual name, via GET /vendors/:id. Same latchelGet()
+ * helper, same GET-only discipline as every other function in this file
+ * — see this file's own header comment. Intended to be called once per
+ * job at nightly ingest time, not live on page load (property-360-SPEC.md:
+ * "name resolved and stored at nightly ingest, never fetched live").
+ */
+async function getVendor(vendorId) {
+  const body = await latchelGet(`/vendors/${vendorId}`);
+  return body.data;
+}
+
+/**
  * Downloads a file from Latchel's time-limited, pre-signed S3 download
  * link (the `download_link.uri` field on a file object from getJobFiles()).
  * This is still a plain GET — the pre-signed URL carries its own AWS
@@ -203,5 +218,6 @@ module.exports = {
   getJobFiles,
   listJobsNeedingApproval,
   listProperties,
+  getVendor,
   downloadFile,
 };

@@ -139,35 +139,29 @@
     </div>
 
     <div id="content" style="display:none;">
+      <!-- Tickets tab retired 2026-09-02 — property-360-SPEC.md's "Tickets
+           — retired" note: raw ticket-by-ticket browsing isn't part of the
+           Hub in any form going forward (nobody acted on a flat ticket
+           list, and AppFolio/Latchel already do that job natively). Property
+           Overview is the new default tab. The per-ticket four-section
+           detail view below (#view-ticket-detail / openTicket()) is NOT
+           part of that retirement — it's Property Overview's own
+           drill-into-one-ticket view (reached from "Currently Open" and
+           the unmatched-ticket lines), not the flat browse list, and stays
+           exactly as it was. -->
       <div class="tab-bar">
-        <button class="tab-btn tab-active" id="tab-tickets">Tickets</button>
-        <button class="tab-btn" id="tab-overview">Property Overview</button>
+        <button class="tab-btn tab-active" id="tab-overview">Property Overview</button>
         <button class="tab-btn" id="tab-budget">Budget</button>
         <button class="tab-btn" id="tab-flagged" style="display:none;">Needs privacy review <span id="flagged-badge"></span></button>
         <button class="tab-btn" id="tab-users" style="display:none;">Users</button>
       </div>
 
-      <div id="view-tickets">
-        <div class="search-row">
-          <input type="text" id="search-input" placeholder="Search by property, address, ticket title, or AppFolio #">
-        </div>
-        <div class="card">
-          <table>
-            <thead>
-              <tr><th>Property</th><th>Unit</th><th>Ticket</th><th>AppFolio #</th><th>Unreviewed</th><th>Flagged</th><th>Last synced</th></tr>
-            </thead>
-            <tbody id="tickets-body"></tbody>
-          </table>
-          <div id="tickets-empty" class="empty" style="display:none;">No synced tickets yet. Run the nightly ingestion job to pull data from Latchel.</div>
-        </div>
-      </div>
-
       <div id="view-ticket-detail" style="display:none;">
-        <a class="back" href="#" id="ticket-detail-back">&larr; All tickets</a>
+        <a class="back" href="#" id="ticket-detail-back">&larr; Property Overview</a>
         <div id="ticket-detail-body"></div>
       </div>
 
-      <div id="view-overview" style="display:none;">
+      <div id="view-overview">
         <div class="disclaimer-banner">
           This overview includes AI-generated summaries composed from claims already extracted from Latchel maintenance tickets. Sentences marked <strong>unreviewed</strong> have not been confirmed by a person — check the source ticket before relying on an unreviewed detail.
         </div>
@@ -236,16 +230,15 @@
   <script>
     let myRole = null;
     let myEmail = null;
-    let allTickets = [];
     let currentTicketId = null;
 
     // ── Shared property context — shared-property-context-SPEC.md Part 1.
     // One page-level "current property," set whenever a property is
     // picked from Property Overview's or Budget's own search box, or from
-    // a property link elsewhere (a ticket row's property link routes
-    // through loadOverview() below, so it's covered too). Tickets,
-    // Property Overview, and Budget all read this on tab-switch to
-    // auto-load the same property instead of a blank search box.
+    // a property link elsewhere. Property Overview and Budget both read
+    // this on tab-switch to auto-load the same property instead of a
+    // blank search box. (Previously also read by the now-retired Tickets
+    // tab — property-360-SPEC.md's "Tickets — retired" note.)
     //
     // Replaces this file's old `lastOverviewPropertyId` (spec Open Item
     // #5 — decided here: replace, don't keep both, since it was already
@@ -267,16 +260,6 @@
     // real, avoidable cost and latency, not just a wasted round trip.
     let overviewLoadedPropertyId = null;
     let budgetLoadedPropertyId = null;
-
-    // Correction from shared-property-context-SPEC.md, caught on review:
-    // ticket rows already carry a real property_id from the backend, but
-    // onSearch() below only ever did text matching — there was no
-    // id-based filter to reuse. This is that filter, used when a shared
-    // property carries into this tab; onSearch()'s own text box and its
-    // filter are untouched.
-    function filterTicketsById(propertyId) {
-      renderTickets(allTickets.filter(t => t.property_id === propertyId));
-    }
 
     function escapeHtml(s) {
       return String(s == null ? '' : s)
@@ -312,7 +295,19 @@
       if (myRole === 'admin') {
         document.getElementById('tab-users').style.display = 'inline-block';
       }
-      loadTickets();
+
+      // Landed here from the hub-wide search box (?property=<name or
+      // address>) — property-360-SPEC.md's "Tickets — retired" note
+      // removed the old Tickets tab this handoff used to land on; this
+      // pre-fills Property Overview's own search box and reuses its
+      // existing search (onOverviewSearch, below) instead, so the same
+      // link still lands somewhere useful rather than silently doing
+      // nothing now that Overview is the default tab.
+      const urlProperty = new URLSearchParams(window.location.search).get('property');
+      if (urlProperty) {
+        document.getElementById('overview-search-input').value = urlProperty;
+        onOverviewSearch();
+      }
     }
 
     async function loadFlaggedCount() {
@@ -328,12 +323,10 @@
     }
 
     function showTab(tab) {
-      document.getElementById('tab-tickets').classList.toggle('tab-active', tab === 'tickets');
       document.getElementById('tab-overview').classList.toggle('tab-active', tab === 'overview');
       document.getElementById('tab-budget').classList.toggle('tab-active', tab === 'budget');
       document.getElementById('tab-flagged').classList.toggle('tab-active', tab === 'flagged');
       document.getElementById('tab-users').classList.toggle('tab-active', tab === 'users');
-      document.getElementById('view-tickets').style.display = tab === 'tickets' ? 'block' : 'none';
       document.getElementById('view-ticket-detail').style.display = 'none';
       document.getElementById('view-overview').style.display = tab === 'overview' ? 'block' : 'none';
       document.getElementById('view-budget').style.display = tab === 'budget' ? 'block' : 'none';
@@ -341,12 +334,8 @@
       document.getElementById('view-users').style.display = tab === 'users' ? 'block' : 'none';
       // Shared property context (Part 1) — auto-load the current property
       // into whichever property-aware tab was just switched to, instead
-      // of a blank search box or an unfiltered list. Each tab's own
-      // search box is untouched by this — it only fires on tab entry.
-      if (tab === 'tickets' && currentPropertyId) {
-        document.getElementById('search-input').value = currentPropertyLabel || '';
-        filterTicketsById(currentPropertyId);
-      }
+      // of a blank search box. Each tab's own search box is untouched by
+      // this — it only fires on tab entry.
       if (tab === 'overview' && currentPropertyId && currentPropertyId !== overviewLoadedPropertyId) {
         loadOverview(currentPropertyId);
       }
@@ -355,67 +344,6 @@
       }
       if (tab === 'flagged') loadFlagged();
       if (tab === 'users') loadUserManagement();
-    }
-
-    // ── Ticket list ──────────────────────────────────────────────────────
-    async function loadTickets() {
-      const res = await fetch('/api/maintenance-history/tickets');
-      if (!res.ok) return;
-      allTickets = await res.json();
-
-      // Landed here from the hub-wide search box (?property=<name or
-      // address>) — pre-fill the existing search box and reuse its own
-      // filter (onSearch) so the list opens already narrowed to that
-      // property, instead of the unfiltered list.
-      const urlProperty = new URLSearchParams(window.location.search).get('property');
-      if (urlProperty) {
-        document.getElementById('search-input').value = urlProperty;
-        onSearch();
-      } else {
-        renderTickets(allTickets);
-      }
-    }
-
-    function onSearch() {
-      const q = document.getElementById('search-input').value.toLowerCase().trim();
-      if (!q) return renderTickets(allTickets);
-      const filtered = allTickets.filter(t =>
-        (t.title || '').toLowerCase().includes(q) ||
-        (t.property_name || '').toLowerCase().includes(q) ||
-        (t.property_address || '').toLowerCase().includes(q) ||
-        (t.appfolio_id || '').toLowerCase().includes(q)
-      );
-      renderTickets(filtered);
-    }
-
-    function renderTickets(rows) {
-      const tbody = document.getElementById('tickets-body');
-      tbody.innerHTML = '';
-      document.getElementById('tickets-empty').style.display = rows.length ? 'none' : 'block';
-      rows.forEach(t => {
-        const tr = document.createElement('tr');
-        tr.className = 'clickable';
-        tr.onclick = () => openTicket(t.id);
-        const propertyLabel = escapeHtml(t.property_name || t.property_address || '—');
-        // Property names/addresses link through to the Property Overview
-        // page (SPEC.md's third entry point — "the fastest path for
-        // someone who's already looking at a ticket and wants the bigger
-        // picture"). data-action handled by the delegated #content
-        // listener below; stopPropagation so clicking the link doesn't
-        // also fire the row's own openTicket().
-        const propertyCell = t.property_id
-          ? '<a href="#" class="prop-link" data-action="open-overview" data-property-id="' + escapeHtml(t.property_id) + '">' + propertyLabel + '</a>'
-          : propertyLabel;
-        tr.innerHTML =
-          '<td>' + propertyCell + '</td>' +
-          '<td>' + escapeHtml(t.unit_number || '—') + '</td>' +
-          '<td>' + escapeHtml(t.title || '—') + '</td>' +
-          '<td>' + escapeHtml(t.appfolio_id || '—') + '</td>' +
-          '<td>' + (t.claim_counts.unreviewed ? '<span class="badge badge-amber">' + t.claim_counts.unreviewed + '</span>' : '—') + '</td>' +
-          '<td>' + (t.claim_counts.flagged ? '<span class="badge badge-red">' + t.claim_counts.flagged + '</span>' : '—') + '</td>' +
-          '<td>' + escapeHtml(t.latchel_claims_synced_at ? t.latchel_claims_synced_at.slice(0, 10) : '—') + '</td>';
-        tbody.appendChild(tr);
-      });
     }
 
     // ── Ticket detail (four sections) ──────────────────────────────────
@@ -436,11 +364,9 @@
       const t = await res.json();
       currentTicketId = id;
 
-      document.getElementById('view-tickets').style.display = 'none';
       document.getElementById('view-flagged').style.display = 'none';
       document.getElementById('view-overview').style.display = 'none';
       document.getElementById('view-ticket-detail').style.display = 'block';
-      document.getElementById('tab-tickets').classList.remove('tab-active');
       document.getElementById('tab-flagged').classList.remove('tab-active');
       document.getElementById('tab-overview').classList.remove('tab-active');
 
@@ -575,10 +501,11 @@
       } else if (currentTicketId) {
         openTicket(currentTicketId);
       } else {
-        loadTickets();
-        document.getElementById('view-ticket-detail').style.display = 'none';
-        document.getElementById('view-tickets').style.display = 'block';
-        document.getElementById('tab-tickets').classList.add('tab-active');
+        // Defensive fallback — not a path normal use reaches (a claim is
+        // only ever rendered inside the flagged queue or an open ticket
+        // detail, both handled above). Property Overview is the only
+        // other tab left to land on now that Tickets is retired.
+        showTab('overview');
       }
     }
 
@@ -1197,7 +1124,6 @@
     // openTicket()/loadFlagged() call, so they're wired via one delegated
     // listener on #content (data-action + data-claim-id) instead of
     // re-attaching listeners after every render.
-    document.getElementById('tab-tickets').addEventListener('click', () => showTab('tickets'));
     document.getElementById('tab-overview').addEventListener('click', () => showTab('overview'));
     document.getElementById('tab-budget').addEventListener('click', () => showTab('budget'));
     document.getElementById('tab-flagged').addEventListener('click', () => {
@@ -1210,7 +1136,6 @@
       showTab('flagged');
     });
     document.getElementById('tab-users').addEventListener('click', () => showTab('users'));
-    document.getElementById('search-input').addEventListener('input', onSearch);
     document.getElementById('overview-search-input').addEventListener('input', onOverviewSearch);
     document.getElementById('budget-search-input').addEventListener('input', onBudgetSearch);
     document.getElementById('add-user-btn').addEventListener('click', addUser);
@@ -1218,13 +1143,17 @@
     document.getElementById('ticket-detail-back').addEventListener('click', (e) => {
       e.preventDefault();
       // Drill-down from Property Overview goes back to the overview it
-      // came from (SPEC.md's drill-down section), not the flat ticket
-      // list, so a reviewer doesn't lose their place on the property.
+      // came from (SPEC.md's drill-down section). The else branch below
+      // used to fall back to the flat Tickets tab; that tab is retired
+      // (property-360-SPEC.md's "Tickets — retired" note) and Property
+      // Overview is now the only entry point into a ticket's detail view,
+      // so it falls back to Overview instead — a defensive path, not one
+      // normal use should ever actually reach.
       if (cameFromOverview && currentPropertyId) {
         cameFromOverview = false;
         openPropertyOverview(currentPropertyId);
       } else {
-        showTab('tickets');
+        showTab('overview');
       }
     });
 
@@ -1238,11 +1167,6 @@
         case 'toggle-reject': toggleRejectForm(claimId); break;
         case 'correct': reviewClaim(claimId, 'correct'); break;
         case 'reject': reviewClaim(claimId, 'reject'); break;
-        case 'open-overview':
-          e.preventDefault();
-          e.stopPropagation();
-          openPropertyOverview(btn.dataset.propertyId);
-          break;
         case 'open-ticket':
           e.preventDefault();
           e.stopPropagation();

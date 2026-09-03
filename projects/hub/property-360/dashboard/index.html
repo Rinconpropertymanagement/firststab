@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Property 360 — Rincon Management</title>
+  <style>
+    /* ============================================================
+       House style, copied from the real thing — NOT the "stone"
+       palette lib/global-search-widget.js's own comment claims every
+       dashboard matches. Checked live: insurance/dashboard/index.html,
+       security-deposit/dashboard/index.html, and
+       maintenance-history/dashboard/index.html all actually share one
+       consistent palette (gray/blue, Tailwind-ish: #f9fafb bg,
+       #111827 text, #6b7280 muted, #e5e7eb/#d1d5db borders, #1d4ed8
+       accent) — that stone comment only describes server.js's own
+       page() shell (login/home) and the search-bar widget itself, not
+       any tool's actual dashboard body. Property 360 is folding three
+       of those tools' own content onto one page, so it matches THEM,
+       not the shell comment. Every class name/color/badge/button
+       convention below is reused verbatim from those three files
+       (confirmed by reading each), not invented fresh — see e.g.
+       insurance/dashboard/index.html's statusBadge()/.badge-* block,
+       security-deposit/dashboard/index.html's daysInfo()/tenancy
+       badges, and maintenance-history/dashboard/index.html's
+       claim/correct-form/toast/budget/users patterns. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    .empty { color: #9ca3af; padding: 24px; text-align: center; }
+    .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #374151; margin: 0 0 10px; }
+    .prop-link { color: #1d4ed8; cursor: pointer; text-decoration: none; }
+    .prop-link:hover { text-decoration: underline; }
+
+    /* ── Toast (save confirmation) — maintenance-history/dashboard's
+       own pattern, verbatim ── */
+    .toast {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px);
+      background: #111827; color: #fff; font-size: 13px; font-weight: 500;
+      padding: 10px 18px; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease;
+      z-index: 1000;
+    }
+    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* ── Landing (no property picked) ─────────────────────────────── */
+    .landing-hint { text-align: center; padding: 32px 8px 8px; color: #6b7280; font-size: 13.5px; }
+    .recent-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #9ca3af; margin: 24px 0 8px; }
+    .recent-item { display: block; padding: 10px 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; text-decoration: none; color: #111827; margin-bottom: 8px; }
+    .recent-item:hover { border-color: #d1d5db; background: #f9fafb; }
+    .recent-item strong { display: block; font-size: 13.5px; }
+    .recent-item span { display: block; font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+    /* ── Property header — the same shape as Maintenance History's own
+       Property Overview tab header (ov-header-row/ov-header-title/
+       ov-spend-row), reused directly since a property "profile" header
+       is exactly what that tab already renders. ─────────────────── */
+    .ov-header-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+    .ov-header-title { font-size: 18px; font-weight: 700; }
+    .ov-header-sub { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
+    .ov-owner-note { color: #6b7280; font-size: 12.5px; margin-top: 8px; }
+    .ov-spend-row { display: flex; gap: 28px; margin-top: 14px; flex-wrap: wrap; }
+    .ov-spend-figure { font-size: 16px; font-weight: 700; }
+    .ov-spend-label { color: #6b7280; font-size: 11.5px; }
+
+    /* ── Needs-attention banner ────────────────────────────────────── */
+    .attention-banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.5; }
+
+    /* ── Insurance / Security Deposit / LeadSimple card grid ──────── */
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .summary-card h3 { font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #374151; margin-bottom: 10px; }
+    .fact { font-size: 13px; margin: 6px 0; color: #374151; }
+    .fact .fl { color: #9ca3af; margin-right: 3px; }
+    .sub-line { font-size: 12px; color: #9ca3af; margin-top: 8px; }
+    .card-link { display: inline-block; margin-top: 10px; font-size: 12.5px; color: #1d4ed8; text-decoration: none; }
+    .card-link:hover { text-decoration: underline; }
+
+    /* ── Status badges — reused verbatim, same colors and labels as
+       insurance/dashboard/index.html's statusBadge() and
+       security-deposit/dashboard/index.html's statusBadge()/tenancy
+       badges, because these are the exact same status values. ────── */
+    .badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; white-space: nowrap; letter-spacing: 0.02em; }
+    .badge-compliant               { background: #16a34a; color: #fff; }
+    .badge-expiring_soon           { background: #d97706; color: #fff; }
+    .badge-expired                 { background: #dc2626; color: #fff; }
+    .badge-pending_review          { background: #6b7280; color: #fff; }
+    .badge-escalated               { background: #7c3aed; color: #fff; }
+    .badge-no_policy               { background: #e5e7eb; color: #374151; }
+    .badge-insufficient_liability  { background: #dc2626; color: #fff; font-weight: 700; }
+    .badge-no_additional_insured   { background: #d97706; color: #fff; font-weight: 700; }
+    .badge-reviewed                { background: #16a34a; color: #fff; }
+    .badge-unknown                 { background: #e5e7eb; color: #6b7280; }
+    .badge-full_tenancy_ending        { background: #e0f2fe; color: #075985; }
+    .badge-partial_co_tenant_move_out { background: #ede9fe; color: #5b21b6; }
+    .badge-tenancy-unconfirmed        { background: #fef3c7; color: #92400e; }
+    .badge-gray  { background: #f3f4f6; color: #4b5563; }
+    .badge-amber { background: #fffbeb; color: #92400e; }
+    .badge-red   { background: #fef2f2; color: #991b1b; }
+    .badge-green { background: #f0fdf4; color: #166534; }
+    .badge-blue  { background: #eff6ff; color: #1d4ed8; }
+
+    .days-green { color: #16a34a; font-weight: 600; }
+    .days-amber { color: #d97706; font-weight: 600; }
+    .days-red   { color: #dc2626; font-weight: 600; }
+    .days-gray  { color: #9ca3af; font-weight: 600; }
+
+    /* ── Maintenance section: summary + two collapsed-by-default
+       subsections (Budget, Needs Privacy Review) ─────────────────── */
+    details.subsection { border-top: 1px solid #f3f4f6; margin-top: 16px; padding-top: 14px; }
+    details.subsection summary { cursor: pointer; font-size: 14px; font-weight: 700; list-style: none; display: flex; align-items: center; gap: 6px; color: #111827; }
+    details.subsection summary::-webkit-details-marker { display: none; }
+    details.subsection summary::before { content: '▸'; font-size: 11px; color: #9ca3af; display: inline-block; transition: transform 0.15s; }
+    details.subsection[open] summary::before { transform: rotate(90deg); }
+    .subsection-body { margin-top: 12px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    .table-scroll { overflow-x: auto; }
+    .num { text-align: right; }
+
+    /* Budget — reused verbatim from maintenance-history/dashboard's own Budget tab */
+    .budget-asof { color: #9ca3af; font-size: 12px; margin-bottom: 6px; }
+    .actual-spend-note { color: #9ca3af; font-size: 12px; margin-bottom: 12px; }
+    .budget-year-title { font-size: 15px; font-weight: 700; margin: 16px 0 6px; }
+    .budget-subtotal-row { display: flex; gap: 18px; font-size: 13px; color: #374151; margin-bottom: 10px; flex-wrap: wrap; }
+    .budget-subtotal-row b { color: #111827; }
+    .maint-row td { background: #fffbeb; }
+    .ticket-cost-note { color: #9ca3af; font-size: 12px; margin-top: 8px; }
+    .actual-reimbursed-note { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
+    .actual-not-tracked { color: #9ca3af; font-style: italic; }
+
+    /* Privacy Review claims — reused verbatim from maintenance-history/dashboard */
+    .claim { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 14px; margin-bottom: 8px; }
+    .claim-text { font-size: 13.5px; color: #111827; margin-bottom: 6px; line-height: 1.4; }
+    .claim-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 11.5px; color: #6b7280; margin-bottom: 8px; }
+    .claim-source { font-style: italic; }
+    .claim-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; font-family: inherit; }
+    .btn:hover { background: #f3f4f6; }
+    .btn-confirm { border-color: #16a34a; color: #166534; }
+    .btn-reject { border-color: #dc2626; color: #991b1b; }
+    .btn-correct { border-color: #2563eb; color: #1d4ed8; }
+    .btn-primary { background: #1d4ed8; border: none; border-radius: 6px; padding: 8px 18px; font-size: 13px; color: #fff; cursor: pointer; font-weight: 600; font-family: inherit; }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .correct-form { margin-top: 8px; display: none; border-top: 1px dashed #e5e7eb; padding-top: 8px; }
+    .correct-form.visible { display: block; }
+    .correct-form textarea, .correct-form input { width: 100%; font-size: 12.5px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; margin-bottom: 6px; font-family: inherit; }
+    .correct-form textarea { min-height: 50px; }
+    .form-hint { color: #6b7280; font-size: 11.5px; margin-bottom: 8px; }
+    .toggle-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; margin-bottom: 14px; color: #374151; }
+    .ack-gate-title { font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+    .ack-gate-body { font-size: 13px; color: #374151; line-height: 1.5; margin-bottom: 12px; }
+
+    /* Admin Users section — same table/form shape as
+       maintenance-history/dashboard's own Users tab. */
+    .grant-form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .grant-form input, .grant-form select { padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; }
+    .grant-form input { flex: 1; min-width: 200px; }
+    .users-table select { font-size: 13px; padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 4px; font-family: inherit; }
+
+    .callstats-note { text-align: center; font-size: 12.5px; color: #9ca3af; margin-top: 24px; }
+    .error-page { text-align: center; padding: 48px 16px; color: #6b7280; }
+
+    /* ── Responsive — same convention insurance/dashboard and
+       security-deposit/dashboard already use (@media max-width:600px),
+       not a new pattern. ────────────────────────────────────────── */
+    @media (max-width: 600px) {
+      .page { padding: 16px 12px 40px; }
+      h1 { font-size: 19px; }
+      .card-grid { grid-template-columns: 1fr; }
+      .ov-header-row { flex-direction: column; }
+      .ov-header-row > div:last-child { text-align: left !important; }
+      .ov-spend-row { gap: 18px; }
+      .grant-form input { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Property 360</h1>
+    <p class="sub">Everything the Hub knows about one property — insurance, security deposit, maintenance, and leasing activity — in one place. You only ever see what you could already see by opening that tool directly.</p>
+    <div id="app"><div class="empty">Loading&hellip;</div></div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    // ────────────────────────────────────────────────────────────────
+    // Shared helpers
+    // ────────────────────────────────────────────────────────────────
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function qs(name) {
+      return new URLSearchParams(window.location.search).get(name);
+    }
+
+    function formatDate(d) {
+      if (!d) return null;
+      const dt = new Date(d + (String(d).length <= 10 ? 'T00:00:00' : ''));
+      if (isNaN(dt.getTime())) return d;
+      return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function formatDateTime(dateStr) {
+      if (!dateStr) return '&#8212;';
+      const d = new Date(dateStr);
+      if (isNaN(d)) return '&#8212;';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' at ' +
+        d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+
+    // Whole-dollar formatting — matches insurance/dashboard's own
+    // formatCurrency(), used for coverage amounts (big, round figures).
+    function formatCurrency(n) {
+      if (n == null) return '&#8212;';
+      return '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    }
+
+    // Cents-precision formatting — matches maintenance-history/dashboard's
+    // own formatMoney(), used for ticket/budget spend figures.
+    function formatMoney(n) {
+      if (n == null || isNaN(n)) return '&#8212;';
+      return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function propertyLabel(property) {
+      return property.name || property.address || '';
+    }
+
+    let toastHideTimer = null;
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('visible');
+      clearTimeout(toastHideTimer);
+      toastHideTimer = setTimeout(function () { toast.classList.remove('visible'); }, 2500);
+    }
+
+    // ── Recently viewed — localStorage only, per-device, nothing new on
+    // the server (property-360-SPEC.md's "What You'll See": "stored
+    // only on your own device"). Capped at 8, most-recently-opened
+    // first, deduped by property id. ──────────────────────────────────
+    const RECENT_KEY = 'p360_recent_properties';
+    const RECENT_MAX = 8;
+
+    function getRecent() {
+      try {
+        const raw = window.localStorage.getItem(RECENT_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) { return []; }
+    }
+
+    function pushRecent(p) {
+      try {
+        const arr = getRecent().filter(function (r) { return r.id !== p.id; });
+        arr.unshift({ id: p.id, name: p.name, address: p.address, city: p.city });
+        window.localStorage.setItem(RECENT_KEY, JSON.stringify(arr.slice(0, RECENT_MAX)));
+      } catch (e) { /* storage unavailable — a per-viewer convenience, not core */ }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Landing page — no property_id in the URL. The hub-wide search
+    // widget (injected right above .page by property-360/router.js) is
+    // the only way to pick a property; this just adds the
+    // recently-viewed strip underneath the fixed page heading.
+    // ────────────────────────────────────────────────────────────────
+    function renderLanding() {
+      const recent = getRecent();
+      let html = '<div class="landing-hint">Search for a property above to get started.</div>';
+      if (recent.length) {
+        html += '<div class="recent-label">Recently viewed</div>';
+        recent.forEach(function (p) {
+          html += '<a class="recent-item" href="/property-360?property_id=' + encodeURIComponent(p.id) + '">' +
+            '<strong>' + escapeHtml(p.name || p.address || 'Unknown property') + '</strong>' +
+            (p.address ? '<span>' + escapeHtml(p.address) + (p.city ? ', ' + escapeHtml(p.city) : '') + '</span>' : '') +
+            '</a>';
+        });
+      }
+      html += '<div class="callstats-note">Call Stats tracks staff phone activity by pod, not by property, so it isn\'t part of this page.</div>';
+      document.getElementById('app').innerHTML = html;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Header — property-360-SPEC.md "What You'll See": name/address/
+    // city, real occupancy + nearest upcoming lease-end, owner name/
+    // phone/email. Same visual shape as Maintenance History's own
+    // Property Overview tab header (that file's ov-header-row /
+    // ov-spend-row), reused directly rather than invented fresh.
+    // ────────────────────────────────────────────────────────────────
+    function renderHeader(data) {
+      const p = data.property;
+      const occ = data.occupancy || { occupied: 0, total: 0 };
+      let html = '<div class="card">';
+      html += '<div class="ov-header-row"><div>';
+      html += '<div class="ov-header-title">' + escapeHtml(p.name || p.address || 'Unnamed property') + '</div>';
+      html += '<div class="ov-header-sub">' + escapeHtml(p.address || '') + (p.city ? ', ' + escapeHtml(p.city) : '') + (p.state ? ', ' + escapeHtml(p.state) : '') + '</div>';
+      html += '</div><div style="text-align:right;">';
+      if (data.owner) {
+        html += '<div style="font-size:12.5px;color:#374151;">Owner: ' + escapeHtml(data.owner.name || 'Unnamed') + '</div>';
+        const contacts = [data.owner.phone, data.owner.email].filter(Boolean).join(' / ');
+        if (contacts) html += '<div style="font-size:11.5px;color:#9ca3af;">' + escapeHtml(contacts) + '</div>';
+      } else {
+        html += '<div style="font-size:12.5px;color:#9ca3af;">No linked owner on file</div>';
+      }
+      html += '</div></div>';
+      if (data.has_owner_history_gap) {
+        html += '<div class="ov-owner-note">Showing current ownership only &mdash; this system does not track ownership history.</div>';
+      }
+      html += '<div class="ov-spend-row">';
+      html += '<div><div class="ov-spend-figure">' + occ.occupied + ' of ' + occ.total + '</div><div class="ov-spend-label">Units occupied</div></div>';
+      html += '<div><div class="ov-spend-figure">' + (data.next_lease_end ? formatDate(data.next_lease_end) : '&#8212;') + '</div><div class="ov-spend-label">Next lease end</div></div>';
+      html += '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    function renderAttentionBanner(needsAttention) {
+      if (!needsAttention) return '';
+      return '<div class="attention-banner">' + escapeHtml(needsAttention.summary) + '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Insurance card — days/badge conventions copied from
+    // insurance/dashboard/index.html's own statusBadge()/daysCell()
+    // exactly, since this is the same status vocabulary.
+    // ────────────────────────────────────────────────────────────────
+    const INSURANCE_STATUS_MAP = {
+      compliant:              ['badge-compliant',              'Compliant'],
+      expiring_soon:          ['badge-expiring_soon',          'Expiring Soon'],
+      expired:                ['badge-expired',                'Expired'],
+      pending_review:         ['badge-pending_review',         'Pending Review'],
+      escalated:              ['badge-escalated',               'Escalated'],
+      no_policy:               ['badge-no_policy',              'No Policy'],
+      insufficient_liability:  ['badge-insufficient_liability', '&#9888; Low Liability'],
+      no_additional_insured:   ['badge-no_additional_insured',  '&#9888; No Add&apos;l Insured'],
+    };
+    function insuranceStatusBadge(status) {
+      const entry = INSURANCE_STATUS_MAP[status] || ['badge-unknown', 'Unknown'];
+      return '<span class="badge ' + entry[0] + '">' + entry[1] + '</span>';
+    }
+    function daysCellExpiration(days) {
+      if (days == null) return '<span class="days-gray">&#8212;</span>';
+      if (days === 0) return '<span class="days-red">Today</span>';
+      if (days < 0) return '<span class="days-red">' + days + ' days</span>';
+      if (days <= 30) return '<span class="days-amber">' + days + ' days</span>';
+      return '<span class="days-green">' + days + ' days</span>';
+    }
+
+    function renderInsuranceCard(card, property) {
+      if (!card) return '';
+      let body;
+      if (card.status === 'error') {
+        body = '<div class="empty" style="padding:8px 0;">Couldn\'t load this right now.</div>';
+      } else if (card.status === 'no_data') {
+        body = '<div class="empty" style="padding:8px 0;">No records yet.</div>';
+      } else {
+        const d = card.data;
+        body = '<div class="fact">' + insuranceStatusBadge(d.status) + '</div>';
+        if (d.days_until_expiration != null) {
+          body += '<div class="fact"><span class="fl">Expires:</span> ' + daysCellExpiration(d.days_until_expiration) + '</div>';
+        }
+        if (d.coverage_amount != null) {
+          body += '<div class="fact"><span class="fl">Coverage:</span> ' + formatCurrency(d.coverage_amount) +
+            (d.below_minimum ? ' <span class="badge badge-amber">below $500K min</span>' : '') + '</div>';
+        }
+        body += '<div class="fact"><span class="fl">Add&apos;l insured:</span> ' + (d.additional_insured_verified ? 'Verified' : 'Not verified') + '</div>';
+        if (d.insurer_name) body += '<div class="sub-line">' + escapeHtml(d.insurer_name) + '</div>';
+        body += '<a class="card-link" href="/insurance?property=' + encodeURIComponent(propertyLabel(property)) + '">View in Insurance Compliance &rarr;</a>';
+      }
+      return '<div class="card summary-card" id="card-insurance"><h3>Insurance</h3>' + body + '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Security Deposit card — badge/day conventions copied from
+    // security-deposit/dashboard/index.html's own statusBadge()/
+    // daysInfo()/tenancy-badge helpers exactly.
+    // ────────────────────────────────────────────────────────────────
+    function sdStatusBadge(status) {
+      const map = { pending_review: ['badge-pending_review', 'Pending Review'], escalated: ['badge-escalated', 'Escalated'], reviewed: ['badge-reviewed', 'Reviewed'] };
+      const entry = map[status] || ['badge-pending_review', status || 'Unknown'];
+      return '<span class="badge ' + entry[0] + '">' + entry[1] + '</span>';
+    }
+    function tenancyBadge(status) {
+      if (status === 'full_tenancy_ending') return '<span class="badge badge-full_tenancy_ending">Full tenancy ending</span>';
+      if (status === 'partial_co_tenant_move_out') return '<span class="badge badge-partial_co_tenant_move_out">Co-tenant moving out &mdash; lease continues</span>';
+      return '<span class="badge badge-tenancy-unconfirmed">&#9888; Not yet confirmed</span>';
+    }
+    function daysInfoDeadline(n) {
+      if (n == null) return { text: '&#8212;', cls: 'days-gray' };
+      if (n < 0) return { text: Math.abs(n) + ' day' + (Math.abs(n) === 1 ? '' : 's') + ' OVERDUE', cls: 'days-red' };
+      if (n === 0) return { text: 'Due today', cls: 'days-red' };
+      if (n <= 3) return { text: n + ' day' + (n === 1 ? '' : 's') + ' left', cls: 'days-red' };
+      if (n <= 7) return { text: n + ' days left', cls: 'days-amber' };
+      return { text: n + ' days left', cls: 'days-green' };
+    }
+
+    function renderSecurityDepositCard(card, property) {
+      if (!card) return '';
+      let body;
+      if (card.status === 'error') {
+        body = '<div class="empty" style="padding:8px 0;">Couldn\'t load this right now.</div>';
+      } else if (card.status === 'no_data') {
+        body = '<div class="empty" style="padding:8px 0;">No records yet.</div>';
+      } else {
+        const d = card.data;
+        body = '<div class="fact">' + sdStatusBadge(d.status) + '</div>';
+        const info = daysInfoDeadline(d.days_remaining);
+        body += '<div class="fact"><span class="fl">21-day deadline:</span> <span class="' + info.cls + '">' + info.text + '</span></div>';
+        body += '<div class="fact"><span class="fl">Tenancy:</span> ' + tenancyBadge(d.tenancy_status) + '</div>';
+        if (typeof d.open_flags_count === 'number') {
+          body += '<div class="fact"><span class="fl">Open flags:</span> ' + d.open_flags_count + '</div>';
+        }
+        body += '<a class="card-link" href="/security-deposit?property=' + encodeURIComponent(propertyLabel(property)) + '">View in Security Deposit &rarr;</a>';
+      }
+      return '<div class="card summary-card" id="card-security_deposit"><h3>Security Deposit</h3>' + body + '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // LeadSimple card — stage name only, v1 (property-360-SPEC.md's
+    // LeadSimple section). No drill-through link for v1 — LeadSimple's
+    // web app isn't confirmed to support a stable per-record URL.
+    // ────────────────────────────────────────────────────────────────
+    function renderLeadSimpleCard(card) {
+      if (!card) return '';
+      let body;
+      if (card.status === 'error') {
+        body = '<div class="empty" style="padding:8px 0;">Couldn\'t load this right now.</div>';
+      } else {
+        const d = card.status === 'ok' ? card.data : null;
+        const rows = [];
+        if (d && d.delinquency_stage) rows.push(['Delinquency', d.delinquency_stage, d.delinquency_stage === 'Eviction']);
+        if (d && d.lease_renewal_stage) rows.push(['Lease Renewal', d.lease_renewal_stage, false]);
+        if (d && d.move_out_stage) rows.push(['Move Out', d.move_out_stage, false]);
+        if (!rows.length) {
+          body = '<div class="empty" style="padding:8px 0;">No open Delinquency, Lease Renewal, or Move Out process.</div>';
+        } else {
+          body = rows.map(function (r) {
+            return '<div class="fact"><span class="fl">' + r[0] + ':</span> ' + escapeHtml(r[1]) + (r[2] ? ' <span class="badge badge-red">Needs attention</span>' : '') + '</div>';
+          }).join('');
+        }
+      }
+      return '<div class="card summary-card" id="card-leadsimple"><h3>LeadSimple</h3>' + body + '</div>';
+    }
+
+    const CARD_RENDERERS = {
+      insurance: renderInsuranceCard,
+      security_deposit: renderSecurityDepositCard,
+      leadsimple: renderLeadSimpleCard,
+    };
+
+    // ────────────────────────────────────────────────────────────────
+    // Maintenance summary — same glance shape as the cards above, but
+    // rendered inline inside the Maintenance section rather than the
+    // card grid (property-360-SPEC.md: "Maintenance becomes small-
+    // card-plus-two-full-sections... all on one page").
+    // ────────────────────────────────────────────────────────────────
+    function renderMaintenanceSummary(card) {
+      if (card.status === 'error') return '<div class="empty" style="padding:8px 0;">Couldn\'t load this right now.</div>';
+      if (card.status === 'no_data') return '<div class="empty" style="padding:8px 0;">No maintenance ticket data synced for this property yet.</div>';
+      const d = card.data;
+      let html = '<div class="ov-spend-row" style="margin-top:0;">';
+      html += '<div><div class="ov-spend-figure">' + d.open_ticket_count + '</div><div class="ov-spend-label">Open tickets</div></div>';
+      html += '<div><div class="ov-spend-figure">' + formatMoney(d.spend_trailing_12mo) + '</div><div class="ov-spend-label">Spend, trailing 12mo</div></div>';
+      html += '</div>';
+      html += '<div class="fact" style="margin-top:12px;"><span class="fl">Last activity:</span> ' + (d.last_activity ? formatDate(d.last_activity) : '&#8212;') + '</div>';
+      if (d.vendor_count) {
+        html += '<div class="fact"><span class="fl">Vendors used:</span> ' + d.vendor_count +
+          (d.most_recent_vendor_name ? ', most recent: ' + escapeHtml(d.most_recent_vendor_name) : '') + '</div>';
+      }
+      // Gated flag — only ever present in the API response at all for a
+      // viewer in PRIVACY_REVIEW_ROLES (maintenance-history/router.js
+      // omits the key entirely for anyone else, and omits it on a real
+      // zero too), so this line inherits that same "nobody else sees
+      // any hint that field exists" guarantee for free.
+      if (d.flagged_review_count) {
+        html += '<div class="fact" style="margin-top:8px;"><a href="#" class="prop-link" id="jump-privacy-review">' +
+          d.flagged_review_count + ' item' + (d.flagged_review_count === 1 ? '' : 's') + ' ' + (d.flagged_review_count === 1 ? 'needs' : 'need') + ' privacy review &rarr;</a></div>';
+      }
+      return html;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Budget subsection — reused, near-verbatim, from
+    // maintenance-history/dashboard's own loadBudget()/
+    // renderBudgetContent(). Same route (GET .../property/:id/budget),
+    // same gate (requireMaintenanceHistoryAccess — any real
+    // Maintenance History role, not narrowed to the privacy-review
+    // roles), so this loads for anyone with a Maintenance card at all.
+    // ────────────────────────────────────────────────────────────────
+    const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
+
+    async function loadBudget(propertyId, bodyEl) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      try {
+        const res = await fetch('/api/maintenance-history/property/' + encodeURIComponent(propertyId) + '/budget', { credentials: 'include' });
+        const body = await res.json();
+        if (!res.ok) {
+          bodyEl.innerHTML = '<div class="empty">' + escapeHtml(body.error || 'Couldn\'t load the budget right now.') + '</div>';
+          return;
+        }
+        renderBudget(body, bodyEl);
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load the budget right now.</div>';
+      }
+    }
+
+    function renderBudget(data, bodyEl) {
+      if (!data.has_appfolio_link) {
+        bodyEl.innerHTML = '<div class="empty">This property isn\'t linked to an AppFolio property ID yet, so there\'s no AppFolio budget data to show.</div>';
+        return;
+      }
+      if (!data.fiscal_years.length) {
+        bodyEl.innerHTML = '<div class="empty">No AppFolio budget data found for this property yet.</div>';
+        return;
+      }
+
+      let html = '<div class="budget-asof">AppFolio budget data as of ' + (data.synced_at ? escapeHtml(data.synced_at.slice(0, 10)) : 'unknown') + ' &mdash; from AppFolio\'s own books, not AI-derived.</div>';
+      html += '<div class="actual-spend-note">"Actual (AppFolio)" reflects AppFolio ledger activity tracked since this feature started syncing &mdash; not necessarily the whole fiscal year.</div>';
+
+      data.fiscal_years.forEach(function (year) {
+        const budget = (data.budgets_by_year && data.budgets_by_year[year]) || { categories: [], subtotals: [] };
+        const ticketInfo = (data.ticket_costs_by_year && data.ticket_costs_by_year[year]) || { total_cost: 0, count: 0, tickets: [] };
+        const actualsForYear = (data.actual_spend_by_year && data.actual_spend_by_year[year]) || [];
+        const actualsByCategory = {};
+        actualsForYear.forEach(function (a) { actualsByCategory[a.category] = a; });
+
+        html += '<div class="budget-year-title">' + year + '</div>';
+        if (budget.subtotals && budget.subtotals.length) {
+          html += '<div class="budget-subtotal-row">';
+          budget.subtotals.forEach(function (s) {
+            html += '<span>' + escapeHtml(s.gl_account_name) + ': <b>' + formatMoney(s.budgeted_amount) + ' budgeted</b>' +
+              (s.actual_amount != null ? ', ' + formatMoney(s.actual_amount) + ' actual' : '') + '</span>';
+          });
+          html += '</div>';
+        }
+
+        html += '<div class="table-scroll"><table><thead><tr><th>Category</th><th class="num">Budgeted</th><th class="num">Actual</th></tr></thead><tbody>';
+        if (!budget.categories.length) {
+          html += '<tr><td colspan="3" class="empty">No AppFolio budget line items for ' + year + '.</td></tr>';
+        } else {
+          budget.categories.forEach(function (c) {
+            const isMaint = MAINT_RELATED_ACCOUNTS.indexOf(c.gl_account_name) !== -1;
+            let actualCell;
+            if (!data.has_actual_spend_data) {
+              actualCell = '<span class="actual-not-tracked" title="Actual-spend tracking hasn\'t started collecting AppFolio activity for this property yet">not tracked yet</span>';
+            } else {
+              const actual = actualsByCategory[c.gl_account_name];
+              const spent = actual ? actual.spent : 0;
+              actualCell = formatMoney(spent);
+              if (actual && actual.reimbursed > 0) {
+                actualCell += '<div class="actual-reimbursed-note">' + formatMoney(actual.reimbursed) + ' reimbursed by tenants</div>';
+              }
+            }
+            html += '<tr' + (isMaint ? ' class="maint-row"' : '') + '>' +
+              '<td>' + escapeHtml(c.gl_account_name) + (isMaint ? ' <span class="badge badge-blue">maintenance-related</span>' : '') + '</td>' +
+              '<td class="num">' + formatMoney(c.budgeted_amount) + '</td>' +
+              '<td class="num">' + actualCell + '</td>' +
+              '</tr>';
+          });
+        }
+        html += '</tbody></table></div>';
+        html += '<div class="ticket-cost-note">Maintenance tickets in ' + year + ' (context only — will not match AppFolio\'s numbers exactly): ' +
+          ticketInfo.count + ' ticket' + (ticketInfo.count === 1 ? '' : 's') + ', ' + formatMoney(ticketInfo.total_cost) + '.</div>';
+      });
+
+      bodyEl.innerHTML = html;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Privacy Review subsection — reused, near-verbatim, from
+    // maintenance-history/dashboard's own claim rendering (renderClaim,
+    // reviewBadge, correct/reject forms) and loadFlagged() (the
+    // acknowledgment gate, the property filter). Pre-filtered to this
+    // property via ?property_id=. Resolved 2026-09-02: reviewed items
+    // drop out of the default view; "Show reviewed items" (default off,
+    // per Mason's condition 1) removes that filter.
+    //
+    // WHO EVEN SEES THIS SUBSECTION AT ALL: gated client-side by the
+    // caller (see maintenanceSectionLoaded() below) using the real
+    // Maintenance History role from GET /api/maintenance-history/auth/me
+    // — NOT just "a Maintenance card is present." A maintenance card
+    // only proves requireMaintenanceHistoryAccess (ANY role — includes
+    // property_manager/inspection_coordinator/pod_lead); Privacy Review
+    // itself is gated one level narrower, to admin/reviewer/
+    // director_of_operations only (PRIVACY_REVIEW_ROLES). Rendering
+    // this section for everyone with a Maintenance card and just letting
+    // the fetch below 403 would still have revealed the mere EXISTENCE
+    // of a "needs privacy review" workflow to a role that was never
+    // vetted for that content — exactly the "nobody else sees any hint
+    // that field exists" guarantee the spec's own summary-card bullet
+    // states for flagged_review_count, extended here to the section
+    // itself. /auth/me is the same, already-gated, side-effect-free
+    // lookup the (now-retiring) Maintenance History dashboard already
+    // used for this exact purpose — reused here rather than guessed at
+    // fresh. Deliberately NOT probed via flagged-queue itself: that
+    // route writes a real audit_log "viewed" entry on every call
+    // (router.js:1122-1156), so eagerly calling it just to check access
+    // would defeat both this section's own "collapsed by default, lazy-
+    // loaded" intent and generate a spurious view record before anyone
+    // actually chose to look.
+    // ────────────────────────────────────────────────────────────────
+    const PRIVACY_REVIEW_ROLES = ['admin', 'reviewer', 'director_of_operations'];
+    const OUTCOME_LABELS = { 1: 'Vendor says done', 2: 'Function restored', 3: 'Resident confirmed', 4: 'No recurrence in window', 5: 'Verified by later inspection' };
+
+    function reviewBadge(status) {
+      const map = { unreviewed: 'badge-amber', confirmed: 'badge-green', corrected: 'badge-blue', rejected: 'badge-red' };
+      return '<span class="badge ' + (map[status] || 'badge-gray') + '">' + escapeHtml(status) + '</span>';
+    }
+
+    function renderPrivacyClaim(c) {
+      let meta = reviewBadge(c.review_status);
+      if (c.claim_date) meta += '<span>' + escapeHtml(c.claim_date) + '</span>';
+      if (c.claim_type === 'outcome' && c.outcome_level) meta += '<span class="badge badge-blue">Level ' + c.outcome_level + ' &mdash; ' + (OUTCOME_LABELS[c.outcome_level] || '') + '</span>';
+      if (c.confidence != null) meta += '<span>confidence ' + Math.round(c.confidence * 100) + '%</span>';
+      meta += '<span class="claim-source">source: ' + escapeHtml(c.source_reference || '') + '</span>';
+
+      let html = '<div class="claim" id="claim-' + escapeHtml(c.id) + '">';
+      html += '<div class="claim-meta" style="margin-bottom:2px;">' + escapeHtml(c.property_name || '') +
+        (c.unit_number ? ' &middot; Unit ' + escapeHtml(c.unit_number) : '') +
+        (c.ticket_title ? ' &middot; ' + escapeHtml(c.ticket_title) : '') + '</div>';
+      html += '<div class="claim-text">' + escapeHtml(c.claim_text) + '</div>';
+      html += '<div class="claim-meta">' + meta + '</div>';
+
+      if (c.review_status === 'unreviewed') {
+        html += '<div class="claim-actions">';
+        html += '<button class="btn btn-confirm" data-action="confirm" data-claim-id="' + escapeHtml(c.id) + '">Confirm</button>';
+        html += '<button class="btn btn-correct" data-action="toggle-correct" data-claim-id="' + escapeHtml(c.id) + '">Correct</button>';
+        html += '<button class="btn btn-reject" data-action="toggle-reject" data-claim-id="' + escapeHtml(c.id) + '">Reject</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="correct-form-' + c.id + '">';
+        html += '<div class="form-hint">Edit the text below, then click Save correction to save.</div>';
+        html += '<textarea id="correct-text-' + c.id + '">' + escapeHtml(c.claim_text) + '</textarea>';
+        html += '<input type="date" id="correct-date-' + c.id + '" value="' + escapeHtml(c.claim_date || '') + '">';
+        if (c.claim_type === 'outcome') {
+          html += '<input type="number" min="1" max="5" id="correct-outcome-' + c.id + '" placeholder="Outcome level 1-5" value="' + (c.outcome_level || '') + '">';
+        }
+        html += '<input type="text" id="correct-notes-' + c.id + '" placeholder="Reviewer notes (optional)">';
+        html += '<button class="btn btn-correct" data-action="correct" data-claim-id="' + escapeHtml(c.id) + '">Save correction</button>';
+        html += '</div>';
+        html += '<div class="correct-form" id="reject-form-' + c.id + '">';
+        html += '<div class="form-hint">Add a note, then click Confirm reject to save.</div>';
+        html += '<input type="text" id="reject-notes-' + c.id + '" placeholder="Reason for rejecting (optional)">';
+        html += '<button class="btn btn-reject" data-action="reject" data-claim-id="' + escapeHtml(c.id) + '">Confirm reject</button>';
+        html += '</div>';
+      } else {
+        html += '<div class="form-hint">Reviewed by ' + escapeHtml(c.reviewed_by || 'unknown') + (c.reviewed_at ? ' on ' + formatDate(c.reviewed_at) : '') + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    async function loadPrivacyReview(propertyId, bodyEl, includeReviewed) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      const url = '/api/maintenance-history/flagged-queue?property_id=' + encodeURIComponent(propertyId) + (includeReviewed ? '&include_reviewed=true' : '');
+      let res, body;
+      try {
+        res = await fetch(url, { credentials: 'include' });
+        body = await res.json();
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load privacy review right now.</div>';
+        return;
+      }
+
+      // Acknowledgment gate — Mason's condition 1, director_of_operations
+      // only. admin/reviewer never hit this branch.
+      if (res.status === 403 && body && body.error === 'privacy_queue_acknowledgment_required') {
+        bodyEl.innerHTML =
+          '<div class="ack-gate-title">Before you continue</div>' +
+          '<div class="ack-gate-body">' + escapeHtml(body.message) + '</div>' +
+          '<button class="btn btn-confirm" id="privacy-ack-btn">I acknowledge &mdash; continue</button>';
+        document.getElementById('privacy-ack-btn').addEventListener('click', async function () {
+          const btn = this;
+          btn.disabled = true;
+          btn.textContent = 'Saving…';
+          try {
+            const ackRes = await fetch('/api/maintenance-history/privacy-queue/acknowledge', { method: 'POST', credentials: 'include' });
+            if (ackRes.ok) {
+              loadPrivacyReview(propertyId, bodyEl, includeReviewed);
+            } else {
+              const ackBody = await ackRes.json().catch(function () { return {}; });
+              alert(ackBody.error || 'Could not save acknowledgment.');
+              btn.disabled = false;
+              btn.textContent = 'I acknowledge — continue';
+            }
+          } catch (e) {
+            alert('Network error.');
+            btn.disabled = false;
+            btn.textContent = 'I acknowledge — continue';
+          }
+        });
+        return;
+      }
+
+      if (!res.ok) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load privacy review right now.</div>';
+        return;
+      }
+
+      const rows = body || [];
+      let html = '<div class="toggle-row"><label><input type="checkbox" id="include-reviewed-toggle" ' + (includeReviewed ? 'checked' : '') + '> Show reviewed items</label></div>';
+      if (!rows.length) {
+        html += '<div class="empty">' + (includeReviewed ? 'No flagged items ever, for this property.' : 'Nothing needs review right now.') + '</div>';
+      } else {
+        html += rows.map(renderPrivacyClaim).join('');
+      }
+      bodyEl.innerHTML = html;
+
+      document.getElementById('include-reviewed-toggle').addEventListener('change', function (e) {
+        loadPrivacyReview(propertyId, bodyEl, e.target.checked);
+      });
+      bodyEl.querySelectorAll('[data-action]').forEach(function (btn) {
+        btn.addEventListener('click', function () { handlePrivacyAction(this, propertyId, bodyEl, includeReviewed); });
+      });
+    }
+
+    async function handlePrivacyAction(btn, propertyId, bodyEl, includeReviewed) {
+      const action = btn.dataset.action;
+      const id = btn.dataset.claimId;
+
+      if (action === 'toggle-correct' || action === 'toggle-reject') {
+        const form = document.getElementById((action === 'toggle-correct' ? 'correct-form-' : 'reject-form-') + id);
+        const isOpen = form.classList.toggle('visible');
+        btn.textContent = isOpen ? 'Cancel' : (action === 'toggle-correct' ? 'Correct' : 'Reject');
+        return;
+      }
+
+      const payload = { action: action };
+      if (action === 'correct') {
+        payload.claim_text = document.getElementById('correct-text-' + id).value;
+        payload.claim_date = document.getElementById('correct-date-' + id).value || null;
+        const outcomeEl = document.getElementById('correct-outcome-' + id);
+        if (outcomeEl && outcomeEl.value) payload.outcome_level = Number(outcomeEl.value);
+        payload.reviewer_notes = document.getElementById('correct-notes-' + id).value || null;
+      } else if (action === 'reject') {
+        payload.reviewer_notes = document.getElementById('reject-notes-' + id).value || null;
+      }
+
+      try {
+        const res = await fetch('/api/maintenance-history/claims/' + encodeURIComponent(id) + '/review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          alert(body.error || 'Could not save that review.');
+          return;
+        }
+        showToast(action === 'confirm' ? 'Saved — marked as confirmed.' : action === 'correct' ? 'Saved — marked as corrected.' : 'Saved — marked as rejected.');
+        loadPrivacyReview(propertyId, bodyEl, includeReviewed);
+      } catch (e) {
+        alert('Could not save that review.');
+      }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Admin Users section (admin-only) — property-360-SPEC.md's "A
+    // Maintenance Users section (admin-only)... the exact content of
+    // today's standalone 'Users' tab, folded into this page." Calls the
+    // existing, unchanged /api/maintenance-history/users GET/POST/
+    // PATCH/DELETE routes directly — nothing new added to
+    // maintenance-history/router.js for this section. VALID_ROLES
+    // includes director_of_operations (the old standalone Users tab's
+    // dropdown only offered admin/reviewer — a real gap versus what the
+    // backend has actually allowed since Mason's conditional approval;
+    // fixed here rather than carried forward).
+    // ────────────────────────────────────────────────────────────────
+    const VALID_ROLES = ['admin', 'reviewer', 'director_of_operations'];
+    function formatRole(role) {
+      const map = { admin: 'Admin', reviewer: 'Reviewer', director_of_operations: 'Director of Operations' };
+      return map[role] || role;
+    }
+
+    async function loadUsers(bodyEl, myEmail) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      try {
+        const res = await fetch('/api/maintenance-history/users', { credentials: 'include' });
+        const users = await res.json();
+        if (!res.ok) { bodyEl.innerHTML = '<div class="empty">Couldn\'t load Users right now.</div>'; return; }
+
+        let html = '<div class="grant-form">' +
+          '<input type="email" id="grant-email" placeholder="name@rinconmanagement.com">' +
+          '<select id="grant-role">' + VALID_ROLES.map(function (r) { return '<option value="' + r + '">' + formatRole(r) + '</option>'; }).join('') + '</select>' +
+          '<button class="btn-primary" id="grant-btn">Grant access</button>' +
+          '</div><div id="grant-msg" style="font-size:12px;margin-bottom:10px;"></div>';
+
+        if (!users.length) {
+          html += '<div class="empty">No one has Maintenance History access yet.</div>';
+        } else {
+          html += '<div class="table-scroll users-table"><table><thead><tr><th>Person</th><th>Role</th><th>Access Granted</th><th></th></tr></thead><tbody>';
+          users.forEach(function (u) {
+            const isMe = myEmail && u.email === myEmail;
+            html += '<tr data-email="' + escapeHtml(u.email) + '">' +
+              '<td>' + escapeHtml(u.name || u.email) + (isMe ? ' <span style="color:#9ca3af;font-size:11px;">(you)</span>' : '') +
+              '<div style="font-size:11.5px;color:#9ca3af;">' + escapeHtml(u.email) + '</div></td>' +
+              '<td><select class="role-select">' + VALID_ROLES.map(function (r) { return '<option value="' + r + '"' + (r === u.role ? ' selected' : '') + '>' + formatRole(r) + '</option>'; }).join('') + '</select></td>' +
+              '<td style="color:#6b7280;">' + formatDateTime(u.granted_at) + '</td>' +
+              '<td>' + (!isMe ? '<button class="btn btn-reject remove-user-btn">Remove</button>' : '') + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table></div>';
+        }
+        bodyEl.innerHTML = html;
+
+        document.getElementById('grant-btn').addEventListener('click', async function () {
+          const email = document.getElementById('grant-email').value.trim();
+          const role = document.getElementById('grant-role').value;
+          const msgEl = document.getElementById('grant-msg');
+          if (!email) return;
+          msgEl.style.color = '#6b7280';
+          msgEl.textContent = 'Adding…';
+          try {
+            const grantRes = await fetch('/api/maintenance-history/users', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+              body: JSON.stringify({ email: email, role: role }),
+            });
+            const grantBody = await grantRes.json();
+            if (!grantRes.ok) {
+              msgEl.style.color = '#dc2626';
+              msgEl.textContent = grantBody.error || 'Could not grant access.';
+              return;
+            }
+            loadUsers(bodyEl, myEmail);
+          } catch (e) {
+            msgEl.style.color = '#dc2626';
+            msgEl.textContent = 'Network error.';
+          }
+        });
+
+        bodyEl.querySelectorAll('tr[data-email]').forEach(function (row) {
+          const email = row.getAttribute('data-email');
+          row.querySelector('.role-select').addEventListener('change', async function (e) {
+            try {
+              const patchRes = await fetch('/api/maintenance-history/users/' + encodeURIComponent(email), {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                body: JSON.stringify({ role: e.target.value }),
+              });
+              if (!patchRes.ok) {
+                const patchBody = await patchRes.json().catch(function () { return {}; });
+                alert(patchBody.error || 'Could not update role.');
+                loadUsers(bodyEl, myEmail);
+              } else {
+                showToast('Role updated.');
+              }
+            } catch (err) {
+              alert('Network error.');
+              loadUsers(bodyEl, myEmail);
+            }
+          });
+          const removeBtn = row.querySelector('.remove-user-btn');
+          if (removeBtn) {
+            removeBtn.addEventListener('click', async function () {
+              if (!confirm('Remove ' + email + '’s Maintenance History access?')) return;
+              try {
+                const delRes = await fetch('/api/maintenance-history/users/' + encodeURIComponent(email), { method: 'DELETE', credentials: 'include' });
+                const delBody = await delRes.json().catch(function () { return {}; });
+                if (!delRes.ok) { alert(delBody.error || 'Could not remove access.'); return; }
+                loadUsers(bodyEl, myEmail);
+              } catch (err) {
+                alert('Network error.');
+              }
+            });
+          }
+        });
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load Users right now.</div>';
+      }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Maintenance section assembly — summary + Budget (collapsed) +
+    // Needs Privacy Review (collapsed, added only after the role check
+    // above resolves in favor of a PRIVACY_REVIEW_ROLES role).
+    // ────────────────────────────────────────────────────────────────
+    function maintenanceSectionHtml(card) {
+      if (!card) return ''; // no Maintenance History access at all — no section, no hint it exists
+      return '<div class="card" id="maintenance-section">' +
+        '<div class="section-title">Maintenance</div>' +
+        renderMaintenanceSummary(card) +
+        '<details class="subsection" id="budget-details"><summary>Budget</summary><div class="subsection-body" id="budget-body"></div></details>' +
+        '</div>';
+    }
+
+    function wireMaintenanceSection(propertyId, data) {
+      const budgetDetails = document.getElementById('budget-details');
+      if (!budgetDetails) return;
+      let budgetLoaded = false;
+      budgetDetails.addEventListener('toggle', function () {
+        if (budgetDetails.open && !budgetLoaded) { budgetLoaded = true; loadBudget(propertyId, document.getElementById('budget-body')); }
+      });
+
+      // Privacy Review + the admin Users section both need the viewer's
+      // real Maintenance History role (see loadPrivacyReview's own
+      // comment for why this can't be inferred from the summary
+      // response alone). One shared, already-gated, side-effect-free
+      // lookup serves both — myEmail from the same call also feeds the
+      // Users table's "(you)" marker.
+      fetch('/api/maintenance-history/auth/me', { credentials: 'include' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (me) {
+          if (!me) return;
+          if (PRIVACY_REVIEW_ROLES.indexOf(me.role) !== -1) {
+            const section = document.getElementById('maintenance-section');
+            if (section) {
+              const details = document.createElement('details');
+              details.className = 'subsection';
+              details.id = 'privacy-review-details';
+              details.innerHTML = '<summary>Needs Privacy Review</summary><div class="subsection-body" id="privacy-review-body"></div>';
+              section.appendChild(details);
+              let privacyLoaded = false;
+              details.addEventListener('toggle', function () {
+                if (details.open && !privacyLoaded) { privacyLoaded = true; loadPrivacyReview(propertyId, document.getElementById('privacy-review-body'), false); }
+              });
+              const jumpLink = document.getElementById('jump-privacy-review');
+              if (jumpLink) {
+                jumpLink.addEventListener('click', function (e) {
+                  e.preventDefault();
+                  details.open = true;
+                  details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+              }
+            }
+          }
+          if (data.maintenance_admin) {
+            const adminSection = document.getElementById('admin-section');
+            if (adminSection) loadUsers(document.getElementById('users-body'), me.email);
+          }
+        })
+        .catch(function () { /* role lookup failed — Privacy Review/Users sections just don't appear; the rest of the page still works */ });
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Whole-property page assembly
+    // ────────────────────────────────────────────────────────────────
+    function renderProperty(data, propertyId) {
+      const cardKeys = data.card_order || [];
+      const cardsHtml = cardKeys
+        .map(function (key) {
+          const renderer = CARD_RENDERERS[key];
+          return renderer ? renderer(data.cards[key], data.property) : '';
+        })
+        .filter(Boolean)
+        .join('');
+
+      const anyCards = Object.keys(data.cards || {}).length > 0;
+
+      document.getElementById('app').innerHTML =
+        renderHeader(data) +
+        renderAttentionBanner(data.needs_attention) +
+        (cardsHtml ? '<div class="card-grid">' + cardsHtml + '</div>' : '') +
+        maintenanceSectionHtml(data.cards.maintenance) +
+        (data.maintenance_admin ? '<div class="card" id="admin-section"><div class="section-title">Maintenance History — Users (admin only)</div><div id="users-body"></div></div>' : '') +
+        (!anyCards ? '<div class="empty">Nothing on file for this property in any tool you have access to yet.</div>' : '') +
+        '<div class="callstats-note">Call Stats tracks staff phone activity by pod, not by property, so it isn\'t part of this page.</div>';
+
+      wireMaintenanceSection(propertyId, data);
+      pushRecent(data.property);
+    }
+
+    function renderError(message) {
+      document.getElementById('app').innerHTML =
+        '<div class="error-page">' + escapeHtml(message) + '<div style="margin-top:16px;"><a class="prop-link" href="/property-360">&larr; Back to search</a></div></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Entry point
+    // ────────────────────────────────────────────────────────────────
+    async function init() {
+      const propertyId = qs('property_id');
+      if (!propertyId) { renderLanding(); return; }
+      try {
+        const res = await fetch('/api/property-360/' + encodeURIComponent(propertyId) + '/summary', { credentials: 'include' });
+        const body = await res.json();
+        if (!res.ok) {
+          renderError(res.status === 404 ? 'That property could not be found.' : (body && body.error) || 'Something went wrong loading this property.');
+          return;
+        }
+        renderProperty(body, propertyId);
+      } catch (e) {
+        renderError('Something went wrong loading this property.');
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

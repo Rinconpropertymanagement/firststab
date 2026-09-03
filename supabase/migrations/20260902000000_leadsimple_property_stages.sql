@@ -1,0 +1,367 @@
+-- ============================================================
+-- Migration: 20260902000000_leadsimple_property_stages
+-- Created:   2026-09-02
+-- Author:    Neo (database specialist)
+--
+-- Part of the Property 360 build (projects/hub/property-360-SPEC.md,
+-- LeadSimple section — "Technical blocker" and "The fix — sync it like
+-- everything else on this page, not live," both resolved 2026-09-02).
+-- One new table only. No other schema changes.
+--
+-- WHY THIS TABLE EXISTS
+-- ============================================================
+-- The LeadSimple card was originally scoped as a live, per-page-load
+-- lookup against LeadSimple's API. The spec's own "Technical blocker"
+-- section found that doesn't hold up: LeadSimple's API has no address
+-- or property filter at all (only process_type_id, updated_since,
+-- step_ids[]) — finding one property's data means paging through every
+-- record of a process type and matching addresses in memory, which the
+-- connector's own comments document at "~110 minutes minimum" for a
+-- full scan. Opening one property's Property 360 page cannot trigger
+-- that.
+--
+-- The fix (spec, same section): a nightly scheduled job pulls the three
+-- v1 process types using updated_since, matches by address once (the
+-- same technique leadsimple-property-brain's own connector already
+-- uses — LeadSimple's property records carry no AppFolio ID), and
+-- writes its findings here. The LeadSimple card then becomes a plain
+-- SQL read, exactly like Insurance, Security Deposit, and Maintenance —
+-- zero live LeadSimple calls from a page load. This table is that
+-- write target. Sizing: spec's own Size Estimate section revises Neo's
+-- original "0 sessions" figure to "0.5-1 session, up from 0" for
+-- exactly this table.
+--
+-- ============================================================
+-- SCOPE — v1 ONLY, PER "Card content, v1 — resolved 2026-09-02"
+-- ============================================================
+-- Stage name only. No custom-field content of any kind. Per Peter's
+-- decision ("go with your rec," adopting Asimov's recommendation): the
+-- richer detail originally scoped for Lease Renewal/Move Out (tenant
+-- behavior, property condition, renewal recommendation) is a named
+-- v1.1/v2 candidate, held back until it gets its own Mason review — the
+-- same review the parallel leadsimple_delinquency/leadsimple_
+-- application_screening claims work already required before any
+-- LeadSimple free text ships anywhere (20260825000000, Section A/D).
+-- This table's `stage` column must never hold anything but a LeadSimple
+-- stage name. Do not widen it to carry custom-field values, notes, or
+-- any other freeform content in a later "small addition" without that
+-- Mason review happening first — see the CHECK on `stage` below, which
+-- exists specifically to catch that mistake loudly rather than let it
+-- slip through silently.
+--
+-- Three process types only for v1 (spec: "Why only these three for
+-- v1, not all ~12 property-linked types"): delinquency, lease_renewal,
+-- move_out. The other nine property-linked types the research found
+-- (Application Screening, Move Ins, Property Onboarding, Property
+-- Advertising, HOA Violation, Insurance Compliance – Owners, Owner
+-- Terminating Contract, Quarterly Maintenance, Rent Reduction) are a
+-- named v2 expansion, not built here — the CHECK on process_type below
+-- is deliberately narrow for the same reason claim_type_registry is a
+-- fail-closed vocabulary rather than an open TEXT column: widening it
+-- later is a real, visible migration, not a silent default.
+--
+-- ============================================================
+-- WHY A REAL property_id FK, NOT AN EXTERNAL-ID TEXT JOIN
+-- ============================================================
+-- appfolio_property_budgets (20260817000000) deliberately does NOT use
+-- a real FK to properties — it joins on appfolio_property_id at query
+-- time, because AppFolio's sync can write a budget row before that
+-- property's own row has finished FK-resolution. That reasoning does
+-- not apply here: this table's whole reason for existing is that the
+-- nightly job already did the address-match against `properties`
+-- before writing (per the spec's "matches by address once" phrasing) —
+-- there is no unresolved external ID to join on later, because
+-- LeadSimple's own property records carry no AppFolio ID at all
+-- (confirmed by leadsimple-property-brain's connector). A row only
+-- ever gets written here once a real properties.id is already known,
+-- so a real UUID FK, resolved at write time, is the correct shape —
+-- same reasoning already used for units.property_id.
+--
+-- ON DELETE CASCADE, not RESTRICT (property_brain_claims_phase1's
+-- claims.property_id) or SET NULL (rental_analyses.property_id).
+-- Both of those are standalone historical/audit records deliberately
+-- designed to survive their cross-reference vanishing or to block an
+-- accidental delete. This table is neither — it is a plain, fully
+-- re-derivable cache of "what LeadSimple currently says," rewritten by
+-- the nightly job, not an audit trail (see "WHY NO RETENTION-POLICY
+-- FIGURE" below). It has no meaning without its property, the same
+-- reasoning security_deposit_cases used to explicitly reject the
+-- rental_analyses SET NULL pattern for lease_id. If a property row is
+-- ever deleted, its cached LeadSimple stage rows should go with it,
+-- not linger or null out.
+--
+-- ============================================================
+-- GRAIN AND ROW LIFECYCLE — Q's sync job, flagged here since it shapes
+-- the schema
+-- ============================================================
+-- One row per (property_id, process_type) — the current open stage for
+-- that process type at that property, if any. A property can have an
+-- open Delinquency, Lease Renewal, and Move Out process at the same
+-- time (rare, but real — e.g. a delinquent tenant who is also moving
+-- out), so process_type is part of the key, not a single "current
+-- stage" column on one row per property.
+--
+-- The card's own language is "open stage, if any" (spec, "What You'll
+-- See") — the simplest, least-error-prone way to make "if any" true is
+-- "a row exists here only while the process is open." This migration
+-- does not add an is_open/status column to represent a closed process
+-- as a row with a terminal value; the recommended design (Q's call to
+-- actually implement, not fixed by this schema) is: the nightly job
+-- upserts a row on (property_id, process_type) while LeadSimple shows
+-- an open process of that type for that property, and DELETEs the row
+-- the first night it no longer does. No row for a given
+-- (property_id, process_type) reads, correctly, as "nothing open" —
+-- the same "no data = no card content" convention this whole page
+-- already uses elsewhere (spec: "A tool with no data for this property
+-- has no card either"). UNIQUE(property_id, process_type) below is
+-- both the sync job's upsert key and, on its own (leftmost-prefix),
+-- the index a property-scoped read needs — same reasoning already
+-- given for appfolio_property_budgets' own UNIQUE constraint; no
+-- separate index is needed for a table this small.
+--
+-- ============================================================
+-- WHY THIS DOESN'T TOUCH team_member_tool_roles
+-- ============================================================
+-- The spec's Access Control section (RESOLVED 2026-09-02, final) gates
+-- this card through the already-built leadsimple_delinquency /
+-- leasing_reviewer mechanism — not a new tool value, not Maintenance
+-- History's role. Both the 'leadsimple_delinquency' tool value and the
+-- 'leasing_reviewer' role value already exist, added eight days ago in
+-- 20260825000000 (Section C). Nothing in this migration widens either
+-- CHECK constraint, and nothing here grants the role to anyone — same
+-- "schema exists, granting it is Peter's call" deferral 20260825000000
+-- itself used. This table has no RLS-level connection to
+-- team_member_tool_roles at all (see RLS note below); the access check
+-- happens in application code, exactly like every other card on this
+-- page.
+--
+-- ============================================================
+-- WHY NO RETENTION-POLICY FIGURE LIKE THE OTHER LEADSIMPLE TABLES
+-- ============================================================
+-- 20260825000000's claims-domain addendum and 20260829000000's
+-- security-deposit addendum both state a 7-year retention figure,
+-- Rincon's real company-wide records policy. That figure answers "how
+-- long do we keep a historical record of what happened." This table
+-- isn't a historical record — per "GRAIN AND ROW LIFECYCLE" above, a
+-- row is upserted or deleted every night to reflect LeadSimple's
+-- current state; nothing here accumulates history, and LeadSimple
+-- itself remains the system of record for what actually happened and
+-- when. Applying a 7-year retention figure to a cache that's designed
+-- to be overwritten within 24 hours would misstate what this table is.
+-- See the Data Inventory addendum below for the real answer and the
+-- one open operational question it flags (a stalled sync job leaving
+-- stale rows behind with nothing to expire them).
+--
+-- ============================================================
+-- DATA INVENTORY (GOVERNANCE.md Rule 4 — required for every new table
+-- storing personal data; per this build's task brief, this table has
+-- no PII beyond a stage label and a property reference, but a stage
+-- label like "Eviction" is real personal-context data about a specific
+-- tenant at that property even without a name stored alongside it — a
+-- bare table is not the right shape for this, hence this addendum)
+-- ============================================================
+--   pii_fields:          `stage` only — a LeadSimple process stage name
+--                         (e.g. "Eviction," "Grace Period," "Backlog"),
+--                         nothing else. No tenant/owner name, email,
+--                         phone, financial detail, or any other
+--                         free-text content — deliberately excluded by
+--                         v1 scope (see "SCOPE" above). Low PII
+--                         density in isolation, but a delinquency- or
+--                         eviction-stage row is still a real fact about
+--                         a specific person's housing/financial
+--                         situation, reachable by anyone who can join
+--                         this table's property_id to that property's
+--                         current tenant via leases/tenants elsewhere
+--                         in the Hub — not de-identified data in
+--                         practice, even though no name is stored here
+--                         directly. `property_id` itself identifies a
+--                         physical property, not a person.
+--   agents_with_access:  The nightly LeadSimple sync job (system,
+--                         service-role key, LEADSIMPLE_API_KEY,
+--                         read-only against LeadSimple per the
+--                         connector's own GET-only discipline —
+--                         leadsimple-property-brain/lib/
+--                         leadsimple-connector.js's header rule, "every
+--                         function below issues a plain GET and NOTHING
+--                         ELSE") writes it. Property 360's aggregation
+--                         route reads it, gated in application code by
+--                         the leadsimple_delinquency tool's access
+--                         check (role IN ('admin', 'leasing_reviewer'))
+--                         before any row from this table reaches a
+--                         response — per the spec's final Access
+--                         Control decision, this is true for all three
+--                         process types on the card, not Delinquency
+--                         alone. No other tool's role grants any access
+--                         to this table.
+--   privacy_category:    Tenant collections/leasing-status data — the
+--                         same category the leadsimple_delinquency
+--                         claims domain already carries (20260825000000:
+--                         "leadsimple_delinquency is tenant collections
+--                         data, sensitive on its own terms"). The
+--                         move_out row touches the same real-world
+--                         event Security Deposit's own case tracks
+--                         (spec: "same real-world event, two systems'
+--                         views of it") but, like the other two process
+--                         types, carries no name/contact/financial
+--                         detail in this table — only a stage label.
+--   retention_policy:    Not a historical record — see "WHY NO
+--                         RETENTION-POLICY FIGURE" above. A row's
+--                         actual lifetime is however long the
+--                         corresponding LeadSimple process stays open,
+--                         governed entirely by the nightly sync job's
+--                         upsert/delete behavior, not by a stated
+--                         retention window. FLAGGED, not silently
+--                         assumed safe: if the nightly sync job ever
+--                         stops running for a property (an error, a
+--                         removed property that still has a stale
+--                         LeadSimple row, etc.), nothing in this schema
+--                         expires a row on its own — it would sit here
+--                         indefinitely until the job resumes and
+--                         corrects it. No cleanup job exists yet. Worth
+--                         a real answer from Peter/Mason before this
+--                         ships if that risk needs its own bound (e.g.
+--                         "delete any row untouched by the sync job for
+--                         N days"); not a blocker to this migration,
+--                         same "flag it rather than skip it" discipline
+--                         security_deposit_cases used for its own
+--                         original retention PLACEHOLDER.
+--   ccpa_exportable:     TRUE — same as every other LeadSimple-sourced
+--                         table in this schema (20260825000000,
+--                         20260829000000). A comprehensive export for a
+--                         tenant should be able to surface "this
+--                         property currently shows an open Eviction
+--                         stage" if that tenant's records are being
+--                         exported.
+--   ccpa_deletable:      TRUE, by plain row DELETE — not the
+--                         redact-in-place convention used for
+--                         security_deposit_cases/claims, because there
+--                         is no structural/free-text split to preserve
+--                         here: the only content on a row is the stage
+--                         label itself, so deleting the row removes all
+--                         of it, with nothing worth keeping behind. Note
+--                         this table has no tenant_id column (it's
+--                         keyed by property_id only, matching the card
+--                         it feeds) — carrying out a request scoped to
+--                         one tenant means first resolving which
+--                         property/properties that tenant is linked to
+--                         via leases, the same indirection every other
+--                         property-keyed table in this schema already
+--                         requires, not a new problem this table
+--                         introduces.
+--
+-- RLS: enabled, no permissive policies — matches every other table in
+-- this schema (including every other LeadSimple-sourced table:
+-- 20260825000000's claims/claim_type_registry/team_member_tool_roles
+-- note, "these new domain rows and CHECK values inherit that same
+-- locked-down posture automatically"). Access is enforced in
+-- application code via the leadsimple_delinquency tool's existing
+-- attach/require gate functions, called from Property 360's
+-- aggregation route with a service-role connection — identical
+-- enforcement shape to every other card on that page (spec's Access
+-- Control section).
+--
+-- Governance path: per CLAUDE.md's compliance-build boundary, this
+-- table itself sends no message and makes no housing decision, but it
+-- does store real personal-context data (Rule 4 applies, addressed
+-- above) reached through the same LeadSimple domain Asimov's Core
+-- governance track already reviewed once (20260825000000) — this
+-- migration reuses that track's access mechanism rather than reopening
+-- it, per the spec's Access Control section and Governance section
+-- (item 4, RESOLVED 2026-09-02).
+--
+-- Gate check (must pass before applying to any real database):
+--   [x] Rollback exists — see bottom of this file
+--   [x] No existing data is deleted or overwritten — new table, no
+--       existing row anywhere is touched
+--   [x] Touches only this new table — no ALTER on properties,
+--       team_member_tool_roles, or any other shared table; the
+--       leadsimple_delinquency tool value and leasing_reviewer role
+--       value this table's access model depends on already exist
+--       (20260825000000) and are not modified here
+--   [x] Additive only — CREATE TABLE IF NOT EXISTS, safe to re-run
+--   [ ] Tested on a copy of Supabase before production apply — no
+--       staging copy exists in this project, same standing caveat as
+--       every migration here to date
+--
+-- Rollback: see the DROP section at the bottom of this file.
+-- ============================================================
+
+
+-- ============================================================
+-- TABLE: leadsimple_property_stages
+-- What it stores: the current open LeadSimple stage, if any, for a
+-- property on each of the three v1 process types (Delinquency, Lease
+-- Renewal, Move Out) — stage name only, written by a nightly sync job,
+-- never a live LeadSimple call from a page load. See "GRAIN AND ROW
+-- LIFECYCLE" above for exactly when a row is expected to exist,
+-- upsert, or be deleted.
+-- RLS: enabled, locked by default.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS leadsimple_property_stages (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Real FK, resolved by the nightly sync job's address match before
+  -- this row is ever written — see "WHY A REAL property_id FK" above.
+  property_id   UUID        NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+
+  -- v1 scope only — see "SCOPE" above. Widening this list is a real,
+  -- visible migration (same DROP-then-ADD pattern used everywhere else
+  -- in this schema for a CHECK widening), not a silent addition.
+  process_type  TEXT        NOT NULL CHECK (process_type IN (
+                  'delinquency',
+                  'lease_renewal',
+                  'move_out'
+                )),
+
+  -- LeadSimple's own stage-name vocabulary (e.g. "Eviction," "Grace
+  -- Period," "Backlog") — free text, not a CHECK-constrained enum,
+  -- same reasoning as gl_account_name in appfolio_property_budgets:
+  -- LeadSimple owns this vocabulary, not Rincon. The length cap is a
+  -- structural guardrail, not a real limit on LeadSimple's data —
+  -- stage names are short by nature. A value anywhere near this cap
+  -- is a sign the sync job is accidentally writing custom-field or
+  -- note content here instead of a stage name — exactly the "no
+  -- freeform custom-field content ships without its own Mason review"
+  -- boundary this card's v1 design depends on (see "SCOPE" above) —
+  -- and should fail loudly at write time, not slip through silently.
+  stage         TEXT        NOT NULL CHECK (char_length(stage) <= 100),
+
+  -- Standard trigger-managed pair, same as every other table in this
+  -- schema. updated_at is also, in effect, "when the nightly sync job
+  -- last confirmed this row" — the same role synced_at/updated_at play
+  -- in appfolio_property_budgets — letting the card show data is
+  -- current without a second timestamp column for the same purpose.
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- One row per property per process type — the nightly job's upsert
+  -- key, and (leftmost-prefix) the only index a property-scoped read
+  -- needs. See "GRAIN AND ROW LIFECYCLE" above.
+  UNIQUE (property_id, process_type)
+);
+
+-- RLS: enabled, no permissive policies — all access denied until a
+-- tool explicitly grants it via a policy scoped to authenticated
+-- users. No policy is added here; Property 360's aggregation route
+-- reads this table with a service-role connection after its own
+-- application-code gate (the leadsimple_delinquency tool's
+-- attach/require functions) has already decided the viewer may see
+-- it — same shape as every other card's access check on that page.
+ALTER TABLE leadsimple_property_stages ENABLE ROW LEVEL SECURITY;
+
+DROP TRIGGER IF EXISTS trg_leadsimple_property_stages_updated_at ON leadsimple_property_stages;
+CREATE TRIGGER trg_leadsimple_property_stages_updated_at
+  BEFORE UPDATE ON leadsimple_property_stages
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- DROP TRIGGER IF EXISTS trg_leadsimple_property_stages_updated_at ON leadsimple_property_stages;
+--
+-- DROP TABLE IF EXISTS leadsimple_property_stages;
+--
+-- ============================================================

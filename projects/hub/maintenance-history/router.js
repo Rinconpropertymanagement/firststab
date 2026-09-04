@@ -2631,6 +2631,22 @@ router.delete('/api/maintenance-history/users/:email', requireMaintenanceHistory
 // ─── internalRouter: no login required — own shared-secret check ────────
 const internalRouter = express.Router();
 
+// ─── In-process overlap guard for the ingest route below ───────────────
+// The cron trigger for POST .../internal/ingest is moving from nightly to
+// every 15 minutes (Scotty, separately, after this ships). Measured live
+// against production: a typical run with nothing new takes ~9s, but a run
+// with real new tickets to process can take ~3.5min — comfortably under 15
+// minutes normally, but with no guard, a slow run (a busy day, or Latchel
+// responding slowly) could still overlap the next cron trigger and run two
+// syncs at once. Confirmed live: the Hub runs as a single pm2 process
+// (fork mode, 1 instance), so a plain module-level flag is sufficient —
+// no database-backed or cross-process lock is needed here. Set true right
+// before the real work starts and always cleared in a `finally` (see the
+// route below) so a run that throws partway through can never leave this
+// stuck on — a permanently stuck lock would be worse than the overlap
+// problem this exists to prevent.
+let maintenanceHistoryIngestRunning = false;
+
 function checkCronSecret(req, res) {
   const secret = req.headers['x-cron-secret'];
   if (!secret || secret !== process.env.CRON_SECRET) {
@@ -2650,6 +2666,36 @@ function checkCronSecret(req, res) {
 internalRouter.post('/api/maintenance-history/internal/ingest', async (req, res) => {
   if (!checkCronSecret(req, res)) return;
   const ts = new Date().toISOString();
+
+  // Skip immediately if a previous run is still going — see
+  // maintenanceHistoryIngestRunning's own comment above for why this is a
+  // safe, sufficient guard for this route. 409 (Conflict), and a
+  // skipped:true body, so this is unambiguous in the cron log/response —
+  // never confusable with a normal completed run (which always returns
+  // the summary object below, with no `skipped` key at all).
+  if (maintenanceHistoryIngestRunning) {
+    console.log(`[${ts}] maintenance-history ingest: SKIPPED — a previous run is still in progress.`);
+    return res.status(409).json({
+      skipped: true,
+      reason: 'already_running',
+      message: 'A maintenance-history ingest run was already in progress; this run was skipped rather than starting a second concurrent sync.',
+    });
+  }
+
+  maintenanceHistoryIngestRunning = true;
+  try {
+    return await runMaintenanceHistoryIngest(req, res, ts);
+  } finally {
+    // Always runs — normal return, an early `return res.status(...)` from
+    // inside runMaintenanceHistoryIngest (the 502 Latchel-fetch failure
+    // and the 500 mrRows-fetch failure below both return from there, not
+    // from here), or an uncaught throw. Nothing in this route can leave
+    // the lock stuck on.
+    maintenanceHistoryIngestRunning = false;
+  }
+});
+
+async function runMaintenanceHistoryIngest(req, res, ts) {
   const sinceDays = Number(req.query.since_days) || 30;
   const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
@@ -2899,7 +2945,7 @@ internalRouter.post('/api/maintenance-history/internal/ingest', async (req, res)
 
   console.log(`[${ts}] maintenance-history ingest done:`, JSON.stringify(summary));
   return res.json(summary);
-});
+}
 
 /**
  * POST /api/maintenance-history/internal/reconcile-properties

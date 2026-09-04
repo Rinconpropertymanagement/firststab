@@ -77,6 +77,7 @@
 
       <div id="view-stats">
         <div class="range-row">
+          <button class="range-preset" data-preset="yesterday">Yesterday</button>
           <button class="range-preset" data-preset="week">This week</button>
           <button class="range-preset" data-preset="last7">Last 7 days</button>
           <button class="range-preset" data-preset="month">This month</button>
@@ -147,6 +148,10 @@
 
     function presetRange(preset) {
       const today = new Date();
+      if (preset === 'yesterday') {
+        const y = addDays(today, -1);
+        return { from: toDateStr(y), to: toDateStr(y) };
+      }
       if (preset === 'week') {
         // Monday-start week containing today.
         const dow = today.getDay(); // 0=Sun..6=Sat
@@ -260,7 +265,7 @@
         html += '<div class="pod-title">Not in a Pod</div>';
         html += '<div class="card" style="padding:0;">' + renderStaffTable(otherRows) + '</div>';
       }
-      html += '<p class="sub" style="margin-top:8px;">"Missed" and "Avg. Speed to Answer" cover inbound calls only — a staff member calling a vendor who doesn\'t pick up isn\'t a missed call in the same sense, so outbound no-answers aren\'t counted here.</p>';
+      html += '<p class="sub" style="margin-top:8px;">"Missed" and "Avg. Speed to Answer" cover inbound calls only — calls that came IN and nobody picked up. "Outbound, No Answer" is a different thing: calls a staff member PLACED where the other person didn\'t pick up (e.g. calling a vendor who doesn\'t answer). That\'s not a missed call in the same sense — it isn\'t a sign of a staff responsiveness problem — so it\'s shown as its own separate column rather than folded into "Missed."</p>';
       podTables.innerHTML = html;
 
       renderLineMisses(data.line_misses || []);
@@ -296,7 +301,7 @@
     // Same table shape/columns for every group — Solimar, Faria, and the
     // "Not in a Pod" group all render identically.
     function renderStaffTable(rows) {
-      let html = '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th></tr></thead><tbody>';
+      let html = '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th><th class="num">Outbound, No Answer</th></tr></thead><tbody>';
       rows.forEach(r => {
         html += '<tr>' +
           '<td>' + escapeHtml(r.name) + '</td>' +
@@ -304,6 +309,7 @@
           '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
           '<td class="num ' + (r.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + r.inbound_missed_calls + '</td>' +
           '<td class="num">' + formatDuration(r.avg_speed_to_answer_seconds) + '</td>' +
+          '<td class="num ' + (r.outbound_not_answered > 0 ? 'missed-nonzero' : 'muted') + '">' + r.outbound_not_answered + '</td>' +
           '</tr>';
       });
       html += '</tbody></table>';

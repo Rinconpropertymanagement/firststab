@@ -146,7 +146,11 @@ router.get('/api/call-stats/auth/me', requireCallStatsAccess, (req, res) => {
 // to Answer" are inbound-only, per the spec's explicit "don't present
 // speed-to-answer as a staff performance number for outbound rows" and
 // "'Missed' means inbound calls nobody picked up, not every call that
-// didn't connect."
+// didn't connect." `outbound_not_answered` is the outbound counterpart —
+// same missed_calls column, opposite direction, deliberately a separate
+// field rather than folded into inbound_missed_calls, since the spec is
+// explicit that the two aren't the same signal (a vendor not picking up
+// isn't a staff responsiveness problem the way an inbound miss is).
 function isValidCalendarDate(dateStr) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return false;
   const [year, month, day] = dateStr.split('-').map(Number);
@@ -206,6 +210,7 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
       agg = {
         total_calls: 0, answered_calls: 0, total_talk_seconds: 0,
         inbound_answered_calls: 0, inbound_missed_calls: 0, inbound_total_ring_seconds: 0,
+        outbound_not_answered: 0,
       };
       byEmail.set(r.staff_email, agg);
     }
@@ -216,6 +221,16 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
       agg.inbound_answered_calls += r.answered_calls;
       agg.inbound_missed_calls += r.missed_calls;
       agg.inbound_total_ring_seconds += r.total_ring_seconds;
+    } else if (r.direction === 'outbound') {
+      // NOT the same signal as inbound_missed_calls above — see this
+      // route's own header comment and SPEC.md Design Decision 2. This is
+      // a call a staff member PLACED that the other party never answered
+      // (missed_calls on an outbound row, same column, different meaning
+      // per-direction — SPEC.md line ~64). Not a staff responsiveness
+      // problem the way an inbound miss is, so it's surfaced under its own
+      // name everywhere (API field + dashboard column), never folded into
+      // "Missed".
+      agg.outbound_not_answered += r.missed_calls;
     }
   }
 
@@ -230,6 +245,7 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
       avg_length_seconds: agg.answered_calls > 0 ? Math.round(agg.total_talk_seconds / agg.answered_calls) : null,
       inbound_missed_calls: agg.inbound_missed_calls,
       avg_speed_to_answer_seconds: agg.inbound_answered_calls > 0 ? Math.round(agg.inbound_total_ring_seconds / agg.inbound_answered_calls) : null,
+      outbound_not_answered: agg.outbound_not_answered,
     };
     if (user.pod && pods[user.pod]) {
       pods[user.pod].push(row);
@@ -255,6 +271,7 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     pods[user.pod].push({
       name: user.name, email: user.email.toLowerCase(),
       total_calls: 0, avg_length_seconds: null, inbound_missed_calls: 0, avg_speed_to_answer_seconds: null,
+      outbound_not_answered: 0,
     });
   }
   pods.Solimar.sort((a, b) => a.name.localeCompare(b.name));

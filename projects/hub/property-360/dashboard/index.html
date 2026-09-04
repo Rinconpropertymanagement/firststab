@@ -146,7 +146,18 @@
        (its siblings in that row have none) while keeping the same arrow
        marker + rotate-on-open behavior. */
     .ov-spend-row details.subsection.ov-open-tickets { border-top: none; margin-top: 0; padding-top: 0; flex: 1 1 160px; }
-    .ov-spend-row details.subsection.ov-open-tickets summary { font-size: inherit; font-weight: inherit; gap: 4px; }
+    /* Made clearly clickable per Peter's feedback (2026-09-04) — the
+       plain arrow-before-a-stat treatment every other collapsible
+       subsection uses read as just another number next to "Spend,
+       trailing 12mo" (which isn't clickable), not as a control. This
+       one gets its own affordance: a bordered chip, a hover state, and
+       the same link-blue .card-link already uses elsewhere on this page
+       for "click to see more," so it reads as a button, not a stat. */
+    .ov-spend-row details.subsection.ov-open-tickets summary { font-size: inherit; font-weight: inherit; gap: 6px; padding: 6px 10px; margin: -6px -10px; border: 1px solid #bfdbfe; border-radius: 8px; background: #eff6ff; transition: background 0.12s, border-color 0.12s; }
+    .ov-spend-row details.subsection.ov-open-tickets summary:hover { background: #dbeafe; border-color: #93c5fd; }
+    .ov-spend-row details.subsection.ov-open-tickets summary::before { content: '▸'; font-size: 15px; font-weight: 700; color: #1d4ed8; }
+    .ov-spend-row details.subsection.ov-open-tickets .ov-spend-figure { color: #1d4ed8; }
+    .ov-spend-row details.subsection.ov-open-tickets .ov-spend-label { color: #1d4ed8; }
     .ov-spend-row details.subsection.ov-open-tickets .subsection-body { min-width: 260px; }
 
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

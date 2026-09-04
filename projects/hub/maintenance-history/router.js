@@ -1019,10 +1019,11 @@ function categorizeMaintenanceVendor(vendorName) {
   // bill_detail report carries both as separate rows for one job). Not a
   // trade, and there's no reliable job-pairing column in this schema to
   // fold it into whichever vendor it rode in with, so it gets its own
-  // honest "Management Fee" slice instead of being misattributed to a
-  // trade or silently dropped. Flagged to Peter in this build's report —
-  // happy to change if he'd rather see it folded in some other way.
-  if (/rincon/i.test(name) && /management/i.test(name)) return 'Management Fee';
+  // honest "Maintenance Coordination Fee" slice instead of being
+  // misattributed to a trade or silently dropped. Named "Management
+  // Fee" until 2026-09-04 — renamed at Peter's request, this fee is
+  // specifically for coordinating maintenance, not general management.
+  if (/rincon/i.test(name) && /management/i.test(name)) return 'Maintenance Coordination Fee';
   // Known-vendor special case, not a general rule — "Quick Turn
   // Maintenance" is 33% of ALL 5-year maintenance dollars portfolio-wide
   // ($1.09M) and its name doesn't self-report a trade, so it fell through

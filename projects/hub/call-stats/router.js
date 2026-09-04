@@ -21,7 +21,7 @@ const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 
 const aircall = require('./lib/aircall-connector');
-const { buildDailyAggregates } = require('./lib/sync');
+const { buildDailyAggregates, buildLineMissAggregates } = require('./lib/sync');
 const { pacificDayBoundsUnix, yesterdayPacificDateStr } = require('./lib/timezone');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
@@ -183,13 +183,16 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
 
   // Pod (Solimar/Faria) is looked up here, at query time, never stored on
   // call_stats — Design Decision 1. Only the four "pod role" users have a
-  // non-null pod; everyone else's calls are still summed correctly below,
-  // they just won't appear on the dashboard's two pod tables (matches
-  // SPEC.md's "What You'll See": two grouped tables, Solimar and Faria).
+  // non-null pod. Everyone else's calls are still summed correctly below
+  // and captured by the nightly sync regardless of pod — but historically
+  // they simply didn't appear anywhere on this dashboard. That's the gap
+  // this fetch (now unfiltered by pod) and the `Other` bucket below fix:
+  // active staff with no pod (Business Development, Operations, Executive
+  // — e.g. Kristen Rau) who have real call activity in the requested range
+  // now show up too, in a third group, rather than being invisible.
   const { data: users, error: usersErr } = await supabase
     .from('users')
-    .select('email, name, pod')
-    .not('pod', 'is', null);
+    .select('email, name, pod, is_active');
   if (usersErr) return res.status(500).json({ error: usersErr.message });
   const usersByEmail = new Map((users || []).map(u => [u.email.toLowerCase(), u]));
 
@@ -216,23 +219,36 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     }
   }
 
-  const pods = { Solimar: [], Faria: [] };
+  const pods = { Solimar: [], Faria: [], Other: [] };
   for (const [email, agg] of byEmail.entries()) {
     const user = usersByEmail.get(email);
-    if (!user || !pods[user.pod]) continue; // no known pod for this email — not shown on this dashboard, per Design Decision 1
-    pods[user.pod].push({
+    if (!user) continue; // no known Rincon user for this email — not shown on this dashboard, per Design Decision 1
+    const row = {
       name: user.name,
       email,
       total_calls: agg.total_calls,
       avg_length_seconds: agg.answered_calls > 0 ? Math.round(agg.total_talk_seconds / agg.answered_calls) : null,
       inbound_missed_calls: agg.inbound_missed_calls,
       avg_speed_to_answer_seconds: agg.inbound_answered_calls > 0 ? Math.round(agg.inbound_total_ring_seconds / agg.inbound_answered_calls) : null,
-    });
+    };
+    if (user.pod && pods[user.pod]) {
+      pods[user.pod].push(row);
+    } else if (!user.pod && user.is_active) {
+      // No pod (Business Development / Operations / Executive), but has
+      // real call activity in this range — the `Other` bucket. Unlike
+      // Solimar/Faria there's no fixed roster of "everyone not in a pod,"
+      // so — deliberately, per this build's task — no zero-row placeholder
+      // is invented here for someone with no activity; only real activity
+      // earns a spot in `Other`.
+      pods.Other.push(row);
+    }
   }
   // Staff with a pod but zero call_stats rows in range still show up, with
   // all-zero numbers, rather than silently vanishing from their pod's
   // table — someone with genuinely no calls in a range is a real, useful
   // answer, not the same as "we have no data on this person at all."
+  // (Only applies to Solimar/Faria — see the `Other` comment above for why
+  // this same placeholder treatment doesn't extend there.)
   for (const user of users || []) {
     if (byEmail.has(user.email.toLowerCase())) continue;
     if (!pods[user.pod]) continue;
@@ -243,8 +259,43 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
   }
   pods.Solimar.sort((a, b) => a.name.localeCompare(b.name));
   pods.Faria.sort((a, b) => a.name.localeCompare(b.name));
+  pods.Other.sort((a, b) => a.name.localeCompare(b.name));
 
-  return res.json({ from, to, synced_at: mostRecentSync, pods });
+  // Shared-line misses (call_stats_line_misses) — the user:null calls
+  // buildDailyAggregates()/call_stats has no grain to hold at all (see
+  // lib/sync.js's buildLineMissAggregates and its migration header).
+  // Same date range this route already queried call_stats with, reusing
+  // whichever preset/custom range the dashboard is currently showing —
+  // no separate picker for this section. Summed across direction: this
+  // dashboard section is "how many calls did this shared line miss," not
+  // a per-direction breakdown, so inbound+outbound are combined per line
+  // for display, same simplification the pod tables' totals don't need
+  // since call_stats already reduced to person-level there.
+  let lineMissRows;
+  try {
+    lineMissRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+      .from('call_stats_line_misses')
+      .select('aircall_number_id, line_name, line_digits, call_date, direction, total_calls, missed_calls')
+      .gte('call_date', from)
+      .lte('call_date', to)
+      .range(rangeFrom, rangeTo));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const lineMissesByNumber = new Map();
+  for (const r of lineMissRows) {
+    let agg = lineMissesByNumber.get(r.aircall_number_id);
+    if (!agg) {
+      agg = { aircall_number_id: r.aircall_number_id, line_name: r.line_name, line_digits: r.line_digits, total_calls: 0, missed_calls: 0 };
+      lineMissesByNumber.set(r.aircall_number_id, agg);
+    }
+    agg.total_calls += r.total_calls;
+    agg.missed_calls += r.missed_calls;
+  }
+  const lineMisses = Array.from(lineMissesByNumber.values()).sort((a, b) => b.missed_calls - a.missed_calls);
+
+  return res.json({ from, to, synced_at: mostRecentSync, pods, line_misses: lineMisses });
 });
 
 // ─── /api/call-stats/users — admin-only role management ─────────────────
@@ -471,11 +522,34 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
     }
   }
 
+  // Same `calls` array, second aggregation pass — the shared-line-miss
+  // rows buildDailyAggregates() has no grain to represent (its own
+  // calls_unattributed_no_user count above). No second Aircall fetch.
+  const { rows: lineMissRows, summary: lineMissSummary } = buildLineMissAggregates(calls);
+
+  let lineMissesUpserted = 0;
+  const lineMissUpsertErrors = [];
+  for (const row of lineMissRows) {
+    const { error } = await supabase
+      .from('call_stats_line_misses')
+      .upsert({ ...row, synced_at: new Date().toISOString() }, { onConflict: 'aircall_number_id,call_date,direction' });
+    if (error) {
+      lineMissUpsertErrors.push({ key: `${row.aircall_number_id}|${row.call_date}|${row.direction}`, error: error.message });
+    } else {
+      lineMissesUpserted++;
+    }
+  }
+
   const result = {
     date: dateStr,
     ...summary,
     rows_upserted: upserted,
     upsert_errors: upsertErrors,
+    line_misses: {
+      ...lineMissSummary,
+      rows_upserted: lineMissesUpserted,
+      upsert_errors: lineMissUpsertErrors,
+    },
   };
   console.log(`[${ts}] call-stats sync done:`, JSON.stringify(result));
   return res.json(result);

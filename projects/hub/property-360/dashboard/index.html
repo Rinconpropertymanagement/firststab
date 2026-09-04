@@ -139,6 +139,16 @@
     details.subsection[open] summary::before { transform: rotate(90deg); }
     .subsection-body { margin-top: 12px; }
 
+    /* Open tickets toggle — the open_ticket_count stat itself, made
+       clickable. Same details.subsection/summary pattern above, just
+       sitting inline as one cell of .ov-spend-row instead of a full-width
+       block below it, so it needs the top border/spacing zeroed out
+       (its siblings in that row have none) while keeping the same arrow
+       marker + rotate-on-open behavior. */
+    .ov-spend-row details.subsection.ov-open-tickets { border-top: none; margin-top: 0; padding-top: 0; flex: 1 1 160px; }
+    .ov-spend-row details.subsection.ov-open-tickets summary { font-size: inherit; font-weight: inherit; gap: 4px; }
+    .ov-spend-row details.subsection.ov-open-tickets .subsection-body { min-width: 260px; }
+
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
     th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
     td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
@@ -590,7 +600,20 @@
       if (card.status === 'no_data') return '<div class="empty" style="padding:8px 0;">No maintenance ticket data synced for this property yet.</div>';
       const d = card.data;
       let html = '<div class="ov-spend-row" style="margin-top:0;">';
-      html += '<div><div class="ov-spend-figure">' + d.open_ticket_count + '</div><div class="ov-spend-label">Open tickets</div></div>';
+      // Open tickets — clickable/expandable when there's something to
+      // show, using the exact same details/summary collapsible pattern
+      // (arrow marker, lazy-loaded body) as the Maintenance History
+      // Snapshot / Needs Privacy Review subsections below, not a new
+      // pattern. Plain text with no toggle when open_ticket_count is 0 —
+      // nothing to expand into.
+      if (d.open_ticket_count > 0) {
+        html += '<div><details class="subsection ov-open-tickets" id="open-tickets-details">' +
+          '<summary><span class="ov-spend-figure">' + d.open_ticket_count + '</span><span class="ov-spend-label">Open tickets</span></summary>' +
+          '<div class="subsection-body" id="open-tickets-body"></div>' +
+          '</details></div>';
+      } else {
+        html += '<div><div class="ov-spend-figure">0</div><div class="ov-spend-label">Open tickets</div></div>';
+      }
       html += '<div><div class="ov-spend-figure">' + formatMoney(d.spend_trailing_12mo) + '</div><div class="ov-spend-label">Spend, trailing 12mo</div></div>';
       html += '</div>';
       html += '<div class="fact" style="margin-top:12px;"><span class="fl">Last activity:</span> ' + (d.last_activity ? formatDate(d.last_activity) : '&#8212;') + '</div>';
@@ -1190,8 +1213,64 @@
       }
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // Open tickets — the actual list behind the Open tickets stat above.
+    // Reads GET /api/maintenance-history/property/:property_id/open-tickets
+    // (new route, router.js), which uses the exact same open definition
+    // as open_ticket_count itself, so this list's length always matches
+    // the number already shown. Needs no role lookup beyond the
+    // Maintenance card already being present — same reasoning as
+    // loadMaintenanceSnapshot above, and the same access gate
+    // (requireMaintenanceHistoryAccess) protects both routes.
+    // title_redacted tickets already arrive with a safe placeholder
+    // string from the route (safeTicketTitle's own content-safety scan)
+    // — rendered as plain text here, same as any other ticket title,
+    // with no extra "(hidden)" wrapper of its own.
+    // ────────────────────────────────────────────────────────────────
+    function renderOpenTicketsList(tickets) {
+      if (!tickets.length) return '<div class="empty">No open tickets.</div>';
+      let html = '<div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Status</th><th>Cost</th><th>Last activity</th></tr></thead><tbody>';
+      tickets.forEach(function (t) {
+        html += '<tr><td>' + escapeHtml(t.title) + '</td>' +
+          '<td>' + (t.status ? escapeHtml(t.status) : '&#8212;') + '</td>' +
+          '<td>' + (typeof t.cost === 'number' ? formatMoney(t.cost) : '&#8212;') + '</td>' +
+          '<td>' + (t.last_activity ? formatDate(t.last_activity) : '&#8212;') + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      return html;
+    }
+
+    async function loadOpenTickets(propertyId, bodyEl) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      try {
+        const res = await fetch('/api/maintenance-history/property/' + encodeURIComponent(propertyId) + '/open-tickets', { credentials: 'include' });
+        const data = await res.json();
+        if (!res.ok) {
+          bodyEl.innerHTML = '<div class="empty">Couldn\'t load open tickets right now.</div>';
+          return;
+        }
+        bodyEl.innerHTML = renderOpenTicketsList(data.open_tickets || []);
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load open tickets right now.</div>';
+      }
+    }
+
     function wireMaintenanceSection(propertyId, data) {
       if (!document.getElementById('maintenance-section')) return; // no Maintenance section rendered — nothing to wire
+
+      // Open tickets toggle — collapsed by default (native <details>),
+      // lazy-loaded the first time it's actually opened, same discipline
+      // as the two subsections below.
+      const openTicketsDetails = document.getElementById('open-tickets-details');
+      if (openTicketsDetails) {
+        let openTicketsLoaded = false;
+        openTicketsDetails.addEventListener('toggle', function () {
+          if (openTicketsDetails.open && !openTicketsLoaded) {
+            openTicketsLoaded = true;
+            loadOpenTickets(propertyId, document.getElementById('open-tickets-body'));
+          }
+        });
+      }
 
       // Multi-year maintenance snapshot — needs no role lookup beyond the
       // Maintenance card already being present (see loadMaintenanceSnapshot's

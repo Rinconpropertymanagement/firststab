@@ -294,7 +294,8 @@ async function countFlaggedSnapshotEvents(propertyId) {
     .from('maintenance_snapshot_events')
     .select('id', { count: 'exact', head: true })
     .eq('property_id', propertyId)
-    .eq('flagged_protected_class', true);
+    .eq('flagged_protected_class', true)
+    .eq('review_status', 'unreviewed');
   if (error) throw error;
   return count || 0;
 }
@@ -740,7 +741,8 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
       .from('maintenance_claims')
       .select('id', { count: 'exact', head: true })
       .in('maintenance_request_id', ticketIds)
-      .eq('flagged_protected_class', true);
+      .eq('flagged_protected_class', true)
+      .eq('review_status', 'unreviewed');
     if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
     // Governance fix, 2026-09-03: flagged maintenance_snapshot_events rows
     // for this property need to feed the same badge count as flagged
@@ -1259,7 +1261,8 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
         .from('maintenance_claims')
         .select('id', { count: 'exact', head: true })
         .in('maintenance_request_id', ticketIds)
-        .eq('flagged_protected_class', true);
+        .eq('flagged_protected_class', true)
+        .eq('review_status', 'unreviewed');
       if (flaggedCountErr) return res.status(500).json({ error: flaggedCountErr.message });
       flaggedClaimsCount = flaggedCount || 0;
     }
@@ -1341,6 +1344,94 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 }
 
 router.get('/api/maintenance-history/property/:property_id/summary', requireMaintenanceHistoryAccess, getMaintenanceHistoryPropertySummary);
+
+/**
+ * GET /api/maintenance-history/property/:property_id/open-tickets
+ * Property 360 Maintenance card — the actual ticket list behind
+ * open_ticket_count (getMaintenanceHistoryPropertySummary above, its own
+ * `openTicketCount = tickets.filter(t => !['completed', 'closed']
+ * .includes(t.status)).length`). Uses that EXACT SAME open definition —
+ * not /overview's richer claims-informed "resolved" logic (which reads
+ * outcome-claim text to override a stale "Completed" status) — so this
+ * list's length can never disagree with the count already shown on the
+ * card. See getMaintenanceHistoryPropertySummary's own comment for why
+ * that distinction matters.
+ *
+ * Reads only maintenance_requests (id, title, status, cost, completed_at,
+ * created_at) plus the existing safeTicketTitle() content-safety lookup
+ * below — no maintenance_claims, no maintenance_snapshot_events, no AI
+ * synthesis call. That's what keeps this route cheap enough to lazy-load
+ * on an expand click, unlike /overview.
+ *
+ * Gated by the same requireMaintenanceHistoryAccess every other read
+ * route in this file uses (ANY real maintenance_history role) — the same
+ * gate already protecting the count this list expands on Property 360.
+ */
+router.get('/api/maintenance-history/property/:property_id/open-tickets', requireMaintenanceHistoryAccess, async (req, res) => {
+  const propertyId = req.params.property_id;
+  if (!isValidUuid(propertyId)) {
+    return res.status(400).json({ error: 'That property ID is not valid.' });
+  }
+
+  const { data: property, error: propErr } = await supabase
+    .from('properties')
+    .select('id')
+    .eq('id', propertyId)
+    .maybeSingle();
+  if (propErr) return res.status(500).json({ error: propErr.message });
+  if (!property) return res.status(404).json({ error: 'Property not found.' });
+
+  const { data: units, error: unitsErr } = await supabase
+    .from('units')
+    .select('id')
+    .eq('property_id', property.id);
+  if (unitsErr) return res.status(500).json({ error: unitsErr.message });
+  const unitIds = (units || []).map(u => u.id);
+
+  let tickets = [];
+  if (unitIds.length) {
+    const { data: mrRows, error: mrErr } = await supabase
+      .from('maintenance_requests')
+      .select('id, title, status, cost, completed_at, created_at')
+      .in('unit_id', unitIds);
+    if (mrErr) return res.status(500).json({ error: mrErr.message });
+    tickets = mrRows || [];
+  }
+
+  // Same open definition as getMaintenanceHistoryPropertySummary's
+  // openTicketCount above — deliberately the plain status check, not
+  // /overview's claims-informed "resolved" logic. Must stay identical so
+  // this list's length always matches the card's own open_ticket_count.
+  const openTickets = tickets.filter(t => !['completed', 'closed'].includes(t.status));
+
+  // safeTicketTitle() unmodified — same Fair Housing keyword+AI content
+  // check already applied everywhere else a raw AppFolio ticket title is
+  // shown (see that function's own comment above). Never skipped, never
+  // reimplemented here.
+  const withTitles = await Promise.all(openTickets.map(async (t) => {
+    const { text, flagged } = await safeTicketTitle(t, property.id);
+    return {
+      id: t.id,
+      title: text,
+      title_redacted: flagged,
+      status: t.status,
+      cost: typeof t.cost === 'number' ? t.cost : null,
+      last_activity: t.completed_at || t.created_at || null,
+    };
+  }));
+
+  // Most-recent-activity first; tickets with no completed_at/created_at
+  // at all (shouldn't happen in practice — created_at is always set on
+  // ingest — but handled defensively) sort last.
+  withTitles.sort((a, b) => {
+    if (!a.last_activity && !b.last_activity) return 0;
+    if (!a.last_activity) return 1;
+    if (!b.last_activity) return -1;
+    return a.last_activity < b.last_activity ? 1 : -1;
+  });
+
+  return res.json({ open_tickets: withTitles });
+});
 
 /**
  * GET /api/maintenance-history/property/:property_id/snapshot

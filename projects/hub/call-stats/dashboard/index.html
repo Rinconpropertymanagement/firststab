@@ -91,6 +91,7 @@
         <div id="as-of-note" class="as-of-note"></div>
 
         <div id="pod-tables"></div>
+        <div id="line-misses-section"></div>
       </div>
 
       <div id="view-users" style="display:none;">
@@ -242,22 +243,71 @@
         if (!rows.length) {
           html += '<div class="empty">No staff assigned to ' + podName + ' yet.</div>';
         } else {
-          html += '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th></tr></thead><tbody>';
-          rows.forEach(r => {
-            html += '<tr>' +
-              '<td>' + escapeHtml(r.name) + '</td>' +
-              '<td class="num">' + r.total_calls + '</td>' +
-              '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
-              '<td class="num ' + (r.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + r.inbound_missed_calls + '</td>' +
-              '<td class="num">' + formatDuration(r.avg_speed_to_answer_seconds) + '</td>' +
-              '</tr>';
-          });
-          html += '</tbody></table>';
+          html += renderStaffTable(rows);
         }
         html += '</div>';
       }
+      // "Other" (not in a pod — Business Development, Operations,
+      // Executive, e.g. Kristen Rau) only ever holds people with real call
+      // activity in the selected range (router.js deliberately invents no
+      // zero-row placeholders here, unlike Solimar/Faria) — so, same
+      // "don't show a section with nothing in it" convention already used
+      // elsewhere in this Hub (e.g. property-360's owners/units blocks),
+      // the whole table is skipped entirely when it's empty, rather than
+      // shown with an empty-state message the way Solimar/Faria are.
+      const otherRows = data.pods.Other || [];
+      if (otherRows.length) {
+        html += '<div class="pod-title">Not in a Pod</div>';
+        html += '<div class="card" style="padding:0;">' + renderStaffTable(otherRows) + '</div>';
+      }
       html += '<p class="sub" style="margin-top:8px;">"Missed" and "Avg. Speed to Answer" cover inbound calls only — a staff member calling a vendor who doesn\'t pick up isn\'t a missed call in the same sense, so outbound no-answers aren\'t counted here.</p>';
       podTables.innerHTML = html;
+
+      renderLineMisses(data.line_misses || []);
+    }
+
+    // Shared lines (e.g. Maintenance Hotline, Leasing Line) that nobody in
+    // particular picked up — calls with no staff member attached at all,
+    // so they can't appear in any of the tables above. Same "don't render
+    // a section with nothing in it" convention as the "Not in a Pod" table
+    // above: skipped entirely when there's no shared-line activity in the
+    // selected range, rather than shown empty.
+    function renderLineMisses(lines) {
+      const section = document.getElementById('line-misses-section');
+      if (!lines.length) {
+        section.innerHTML = '';
+        return;
+      }
+      let html = '<div class="pod-title">Shared Line Misses</div>';
+      html += '<p class="sub" style="margin:0 0 8px;">Calls to a shared line (like the Maintenance Hotline or Leasing Line) that came in with no staff member picking up — so there\'s no one person to show these under above.</p>';
+      html += '<div class="card" style="padding:0;">';
+      html += '<table><thead><tr><th>Line</th><th class="num">Missed</th><th class="num">Total Calls</th></tr></thead><tbody>';
+      lines.forEach(l => {
+        html += '<tr>' +
+          '<td>' + escapeHtml(l.line_name) + '<br><span class="muted" style="font-size:12px;">' + escapeHtml(l.line_digits) + '</span></td>' +
+          '<td class="num ' + (l.missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + l.missed_calls + '</td>' +
+          '<td class="num">' + l.total_calls + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+      section.innerHTML = html;
+    }
+
+    // Same table shape/columns for every group — Solimar, Faria, and the
+    // "Not in a Pod" group all render identically.
+    function renderStaffTable(rows) {
+      let html = '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th></tr></thead><tbody>';
+      rows.forEach(r => {
+        html += '<tr>' +
+          '<td>' + escapeHtml(r.name) + '</td>' +
+          '<td class="num">' + r.total_calls + '</td>' +
+          '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
+          '<td class="num ' + (r.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + r.inbound_missed_calls + '</td>' +
+          '<td class="num">' + formatDuration(r.avg_speed_to_answer_seconds) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+      return html;
     }
 
     // ── Users tab (admin only) ──────────────────────────────────────────

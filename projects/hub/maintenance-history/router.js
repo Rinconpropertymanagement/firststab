@@ -312,6 +312,45 @@ router.get('/maintenance-history', (req, res) => {
   });
 });
 
+// ─── GET /privacy-review — portfolio-wide "Needs privacy review" entry
+// point ────────────────────────────────────────────────────────────────
+// server.js mounts property360Router before this router, and
+// property-360/router.js's own GET /maintenance-history handler answers
+// that exact path first (its documented old-bookmark redirect — see that
+// file's comment) — so this file's GET /maintenance-history handler right
+// above never actually runs today. That redirect is untouched by this
+// change. This is a NEW, un-shadowed path serving the exact same
+// dashboard/index.html this file has always served, same read-file-and-
+// inject-search-widget approach as above, so a reviewer has one direct
+// link to the portfolio-wide grouped flagged-items queue instead of
+// clicking into ~390 properties one at a time (Peter, 2026-09-03 — going
+// property-by-property for 290+ flagged items was too slow).
+//
+// The one difference from the handler above: this also injects a small
+// inline script setting window.MH_DEFAULT_TAB = 'flagged', read by
+// dashboard/index.html's init() to open straight on the "Needs privacy
+// review" tab, portfolio-wide (no property filter), instead of Property
+// Overview. That flag is only ever set by THIS route's response — the
+// handler above never sets it — so this is scoped entirely to this new
+// path and changes nothing about how GET /maintenance-history behaves
+// (moot today anyway, since it's unreachable, but kept byte-for-byte
+// identical regardless, per the build instructions).
+//
+// No new access gate here, on purpose — same as every other tool's page
+// shell in this Hub (e.g. insurance/router.js's GET /insurance): the real
+// protection is on the API calls the page makes once loaded
+// (requireMaintenanceHistoryAccess, the PRIVACY_REVIEW_ROLES gate on
+// GET /api/maintenance-history/flagged-queue, and director_of_operations'
+// one-time acknowledgment gate), all unchanged by this route.
+router.get('/privacy-review', (req, res) => {
+  fs.readFile(path.join(__dirname, 'dashboard', 'index.html'), 'utf8', (err, html) => {
+    if (err) return res.status(500).send('Could not load page.');
+    const injected = '<body>\n' + GLOBAL_SEARCH_WIDGET_HTML +
+      '\n<script>window.MH_DEFAULT_TAB = \'flagged\';</script>';
+    res.send(html.replace('<body>', injected));
+  });
+});
+
 router.get('/api/maintenance-history/auth/me', requireMaintenanceHistoryAccess, (req, res) => {
   res.json({
     email: req.user.email,
@@ -923,6 +962,82 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
 // "maintenance spend."
 const MAINT_RELATED_ACCOUNTS = ['Repair', 'Maintenance Labor', 'Roof Repairs and Maintenance', 'Maintenance Only-OBP'];
 
+// ─── Vendor -> repair-type category, for the Maintenance card's "where the
+// money went" pie chart (Property 360). Deliberately infers the trade from
+// the VENDOR'S OWN NAME ONLY — never from a ticket/bill's free-text
+// description (work_order_issue, claim_text, summary) — so this never
+// touches the same fields the Fair Housing privacy-review pipeline gates,
+// and needs no privacy review of its own (Peter's explicit approval for
+// this build). A plain keyword heuristic, not AI: this is a one-time-ish
+// classification of trade names in a vendor list, not a judgment call
+// about a person or a situation.
+//
+// Order matters — rules are checked top-to-bottom, first match wins, so a
+// narrower/more-specific keyword is placed before a broader one that could
+// appear as a false-positive substring inside it (e.g. "PuroClean
+// Disaster Recovery Services" contains "Clean" — Restoration is checked
+// before Cleaning so it resolves correctly).
+//
+// Built and verified live, 2026-09-03, against the real 107 distinct
+// vendor_name values in maintenance_snapshot_events (see this build's
+// report for the full vendor -> category listing Peter reviewed). Any
+// vendor name that doesn't clearly signal a trade — including a bare
+// person's name ("Rodriguez, Jorge Luis") or a generic company name
+// ("Paramount", "Two Trees Home Services Inc") — or a trade this list
+// doesn't cover (e.g. life-safety/fire-alarm vendors) — deliberately
+// falls through to 'Other / Handyman' rather than guessing. "Quick Turn
+// Maintenance" used to be one of these (a generic name with no
+// self-reported trade) but got its own known-vendor special case below,
+// 2026-09-04, once Peter confirmed what it does — see that special case's
+// own comment.
+const VENDOR_CATEGORY_RULES = [
+  ['Restoration & Water Damage', /restoration|disaster recovery|flood|environmental|\benviro\b/i],
+  ['Pest Control', /pest|termite/i],
+  ['Locksmith', /locksmith|lock and key|lock & key/i],
+  ['Roofing', /\broof|gutter/i],
+  ['Plumbing', /plumb|backflow|\bdrain|rooter|sewer/i],
+  ['Electrical', /\belectric/i],
+  ['HVAC', /heating|\bhvac\b|air condition|\baire\b|\bair\b|\bmechanical\b/i],
+  ['Painting', /\bpaint/i],
+  ['Flooring', /\bfloor/i],
+  ['Cleaning', /\bclean|\blint\b|carpet|upholstery/i],
+  ['Landscaping & Tree Service', /landscap|\blawn\b|\btree\b/i],
+  ['Doors, Windows & Glass', /window|glass|garage door|\bscreen\b/i],
+  ['Appliance Repair', /appliance|refrigerat/i],
+  ['Fireplace & Chimney', /fireplace|chimney/i],
+  ['Fencing', /\bfence\b|fencing/i],
+];
+
+function categorizeMaintenanceVendor(vendorName) {
+  const name = (vendorName || '').trim();
+  if (!name) return 'Other / Handyman';
+  // Rincon's own markup/admin-fee line items riding on top of another
+  // vendor's real line item for the same job (confirmed against
+  // backfill-maintenance-snapshot.js's own ingest comments — AppFolio's
+  // bill_detail report carries both as separate rows for one job). Not a
+  // trade, and there's no reliable job-pairing column in this schema to
+  // fold it into whichever vendor it rode in with, so it gets its own
+  // honest "Management Fee" slice instead of being misattributed to a
+  // trade or silently dropped. Flagged to Peter in this build's report —
+  // happy to change if he'd rather see it folded in some other way.
+  if (/rincon/i.test(name) && /management/i.test(name)) return 'Management Fee';
+  // Known-vendor special case, not a general rule — "Quick Turn
+  // Maintenance" is 33% of ALL 5-year maintenance dollars portfolio-wide
+  // ($1.09M) and its name doesn't self-report a trade, so it fell through
+  // to 'Other / Handyman' with every other unclear vendor. Peter, asked
+  // directly what this vendor does (2026-09-04): "general handyman and
+  // turnover work and preventative maintenance." Matched on the vendor's
+  // known name specifically (not a broad keyword like "quick" or "turn")
+  // so this can't accidentally catch an unrelated vendor — e.g. "Quick
+  // Turn Cleaners" (a real, different vendor in this database) still
+  // correctly falls through to the Cleaning rule below, untouched.
+  if (/quick turn maintenance/i.test(name)) return 'Handyman, Turnover & Preventative Maint.';
+  for (const [category, regex] of VENDOR_CATEGORY_RULES) {
+    if (regex.test(name)) return category;
+  }
+  return 'Other / Handyman';
+}
+
 // ─── GET /api/maintenance-history/property/:property_id/summary ────────
 // Property 360's Maintenance summary card — property-360-SPEC.md's
 // "Maintenance History — summary card" section. Deliberately NOT a call
@@ -1076,6 +1191,56 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
     appfolioMaintenanceSpend = Math.round(maintSpend * 100) / 100;
   }
 
+  // "Where the money went" by repair type — Property 360 Maintenance
+  // card pie chart (2026-09). Combines both real dollar sources this
+  // route already has access to: maintenance_snapshot_events_decision_safe
+  // (the up-to-5-year AppFolio bill-history backfill — read via the
+  // decision-safe view, never the raw table, same governance discipline
+  // as the /snapshot route above, so a flagged or rejected row never
+  // contributes a dollar here) and this property's own `tickets` (the
+  // ongoing Latchel pipeline, already fetched above). Category is
+  // inferred from the VENDOR NAME ONLY via categorizeMaintenanceVendor
+  // (defined near MAINT_RELATED_ACCOUNTS above) — never from any
+  // free-text description — so this deliberately never touches a
+  // privacy-review-gated field and needed no privacy review of its own.
+  //
+  // Live-verified 2026-09-03: maintenance_requests.cost is NULL on every
+  // one of this database's 568 rows today — the Latchel pipeline has
+  // never recorded a dollar figure for a ticket, so in practice 100% of
+  // today's real category spend comes from maintenance_snapshot_events.
+  // The ticket loop below still runs (costing nothing when cost is null)
+  // so a real figure, once Latchel/AppFolio actually starts populating
+  // one, is picked up automatically instead of silently ignored.
+  const categoryTotals = {};
+  const addToCategorySpend = (vendorName, amount) => {
+    const amt = Number(amount) || 0;
+    if (!amt) return; // skip null/0 — e.g. every current maintenance_requests.cost
+    const category = categorizeMaintenanceVendor(vendorName);
+    categoryTotals[category] = (categoryTotals[category] || 0) + amt;
+  };
+  const { data: snapshotSpendRows, error: snapshotSpendErr } = await supabase
+    .from('maintenance_snapshot_events_decision_safe')
+    .select('vendor_name, amount')
+    .eq('property_id', property.id);
+  if (snapshotSpendErr) return res.status(500).json({ error: snapshotSpendErr.message });
+  for (const r of (snapshotSpendRows || [])) addToCategorySpend(r.vendor_name, r.amount);
+  for (const t of tickets) addToCategorySpend(t.latchel_vendor_name, t.cost);
+
+  // Percentages are computed from the exact (unrounded) category totals,
+  // not from the rounded `amount` below — keeps the pie chart's arcs
+  // mathematically exact (fractions sum to 1) even though the displayed
+  // amount/percent are each rounded for display. Sorted descending by
+  // dollar amount, largest slice first, matching how the vendor history
+  // fact above already reads ("most recent vendor").
+  const categorySpendTotal = Object.values(categoryTotals).reduce((sum, v) => sum + v, 0);
+  const spendByCategory = Object.entries(categoryTotals)
+    .map(([category, amount]) => ({
+      category,
+      amount: Math.round(amount * 100) / 100,
+      percent: categorySpendTotal ? Math.round((amount / categorySpendTotal) * 1000) / 10 : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
   // Gated flagged-review count — identical pattern to /overview's own
   // (count:'exact'+head:true, never fetching a row's content), same
   // PRIVACY_REVIEW_ROLES gate, same omit-don't-zero discipline as
@@ -1114,14 +1279,34 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   return res.json({
     property: { id: property.id, name: property.name, address: property.address, city: property.city },
-    // Real data exists if EITHER source has it — a real Latchel-ticket row,
-    // or real AppFolio actual-spend tracking for this property (see the
-    // appfolioMaintenanceSpend comment above). A property with real, honest
-    // $0 AppFolio tracking and zero Latchel tickets still counts as "has
-    // data" — the AppFolio line on the card is what makes that zero
-    // legible, instead of the card falling back to the generic "nothing to
-    // report" message that started this fix.
-    has_data: tickets.length > 0 || hasAppfolioActualData === true,
+    // Real data exists if ANY source has it — a real Latchel-ticket row,
+    // real AppFolio actual-spend tracking for this property (see the
+    // appfolioMaintenanceSpend comment above; hasAppfolioActualData is
+    // true on ANY actuals row for this property, any GL account, any
+    // year — not scoped to the current fiscal year the way the dollar
+    // sum above is), or real 5-year snapshot spend (spendByCategory,
+    // computed above from maintenance_snapshot_events_decision_safe —
+    // the same result the pie chart itself renders, not a second
+    // query). This third condition is the 2026-09-04 fix: a property
+    // can have real, priced AppFolio bill history going back up to 5
+    // years with zero matched Latchel tickets and zero AppFolio GL
+    // actuals of any kind — that property's own maintenance history was
+    // real, it just wasn't reflected by either of the first two
+    // conditions, so the whole card (including this same pie chart)
+    // wrongly fell back to the "no data" empty state. Full live sweep,
+    // 2026-09-04, calling this exact function against every one of the
+    // 360 properties with real priced snapshot history: 3 were actually
+    // flipped false->true by this condition (the other 357 already had
+    // a real ticket or actuals row and were unaffected) — a smaller
+    // count than an earlier same-day estimate of 96 of 289, most likely
+    // because AppFolio actuals coverage (appfolio_property_actuals) has
+    // since grown to cover 372 of 391 properties; re-run the sweep if
+    // that seems off. A property with real, honest $0 AppFolio tracking
+    // and zero Latchel tickets and zero snapshot spend still correctly
+    // counts as "has data" — the AppFolio line on the card is what
+    // makes that zero legible, instead of the card falling back to the
+    // generic "nothing to report" message that started this fix.
+    has_data: tickets.length > 0 || hasAppfolioActualData === true || spendByCategory.length > 0,
     open_ticket_count: openTicketCount,
     spend_trailing_12mo: Math.round(spendTrailing12 * 100) / 100,
     last_activity: lastActivity,
@@ -1136,6 +1321,13 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
     // spec's own "glance here, full detail there" framing — not this route.
     vendor_count: vendorIds.size,
     most_recent_vendor_name: mostRecentVendorName,
+    // "Where the money went" pie chart data — see the comment above this
+    // route's categoryTotals block. Always an array (possibly empty when
+    // this property has no priced maintenance_snapshot_events rows and no
+    // priced tickets) — same "always present, empty/zero when there's
+    // nothing yet" convention as vendor_count/open_ticket_count above,
+    // not a gated field like flagged_review_count below.
+    spend_by_category: spendByCategory,
     // AppFolio actual maintenance-category spend, current fiscal year only
     // — see the comment above this route's flaggedReviewCount block. Both
     // null/absent-in-spirit (null, not omitted — same convention

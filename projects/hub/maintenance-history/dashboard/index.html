@@ -324,6 +324,25 @@
         document.getElementById('overview-search-input').value = urlProperty;
         onOverviewSearch();
       }
+
+      // Portfolio-wide privacy-review entry point (GET /privacy-review) —
+      // window.MH_DEFAULT_TAB is only ever set by that route's own HTML
+      // response (see maintenance-history/router.js's GET /privacy-review
+      // handler); every other route that serves this same file — including
+      // the retired GET /maintenance-history page shell above it in that
+      // file — never sets it, so this is a no-op there and their default
+      // (Property Overview) is unchanged. Only switches tabs if this
+      // viewer's role actually has flagged-tab access (tab-flagged's own
+      // display is still 'none' otherwise, from the role check above); a
+      // viewer without that access just sees the normal default. Clears
+      // any leftover single-property filter the same way clicking the
+      // "Needs privacy review" tab itself does, so this always lands on
+      // the un-filtered, portfolio-wide queue.
+      if (window.MH_DEFAULT_TAB === 'flagged' && document.getElementById('tab-flagged').style.display !== 'none') {
+        flaggedFilterPropertyId = null;
+        flaggedFilterPropertyLabel = null;
+        showTab('flagged');
+      }
     }
 
     async function loadFlaggedCount() {

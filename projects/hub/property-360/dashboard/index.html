@@ -115,6 +115,21 @@
     .days-red   { color: #dc2626; font-weight: 600; }
     .days-gray  { color: #9ca3af; font-weight: 600; }
 
+    /* ── Maintenance "where the money went" pie chart — repair-type
+       breakdown, colors assigned per category in maintenance-history/
+       dashboard's shared MAINTENANCE_CATEGORY_COLORS map (validated via
+       the dataviz skill's palette validator; see that map's own
+       comment). Legend sits beside the chart on a normal-width card,
+       stacks below it on mobile (same @media breakpoint every other
+       responsive rule in this file already uses). ────────────────── */
+    .pie-wrap { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; flex-wrap: wrap; }
+    .pie-wrap svg { flex: none; }
+    .pie-legend { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 5px; }
+    .pie-legend-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: #374151; line-height: 1.4; }
+    .pie-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; margin-top: 1px; }
+    .pie-legend-cat { font-weight: 600; }
+    .pie-legend-amt { color: #6b7280; white-space: nowrap; }
+
     /* ── Maintenance section: summary + one collapsed-by-default
        subsection (Needs Privacy Review) ─────────────────── */
     details.subsection { border-top: 1px solid #f3f4f6; margin-top: 16px; padding-top: 14px; }
@@ -455,6 +470,116 @@
     };
 
     // ────────────────────────────────────────────────────────────────
+    // Maintenance "where the money went" pie chart — repair-type
+    // breakdown, 2026-09. `d.spend_by_category` (maintenance-history/
+    // router.js's getMaintenanceHistoryPropertySummary) already groups
+    // dollars by category and sorts largest-first; this just draws it.
+    // Category is inferred server-side from the VENDOR'S NAME ONLY
+    // (categorizeMaintenanceVendor in that file) — never from any
+    // ticket/bill free text — so this chart never touches a field the
+    // Fair Housing privacy-review pipeline gates.
+    //
+    // MAINTENANCE_CATEGORY_COLORS is a FIXED color per category, not
+    // reassigned by a property's own rank (dataviz skill: "color
+    // follows the entity, never its rank"). Ordered here by
+    // portfolio-wide dollar rank as of the original 2026-09-03 build;
+    // the first 8 are the dataviz skill's own documented categorical
+    // palette, validated CVD-safe as adjacent neighbors in this exact
+    // order (scripts/validate_palette.js, run 2026-09-03 — see this
+    // build's report). The remaining entries extend it for the real
+    // properties whose 5-year history spans more than 8 repair types
+    // (live-checked: up to 14 categories on one property) — past the
+    // skill's stated 8-series ceiling for a guaranteed-safe pairwise
+    // adjacency, so exact colorblind separation isn't promised for
+    // slots 9+. The always-present legend below (swatch + category
+    // name + dollar amount + percentage, same order as the slices) is
+    // the deliberate mitigation for that — color is never the only way
+    // to tell two slices apart, per the skill's own "identity is never
+    // color alone" rule. New categories are APPENDED, never inserted
+    // earlier or re-ranked — an existing category's color must never
+    // change out from under it just because another category's dollar
+    // total shifted (e.g. 'Other / Handyman' would otherwise have
+    // dropped from #1 to #3 the moment 'Handyman, Turnover &
+    // Preventative Maint.' below was split out of it, 2026-09-04).
+    const MAINTENANCE_CATEGORY_COLORS = {
+      'Other / Handyman': '#2a78d6',
+      'Plumbing': '#eb6834',
+      'Management Fee': '#1baf7a',
+      'Cleaning': '#eda100',
+      'Roofing': '#e87ba4',
+      'HVAC': '#008300',
+      'Flooring': '#4a3aa7',
+      'Doors, Windows & Glass': '#e34948',
+      'Restoration & Water Damage': '#0d9488',
+      'Painting': '#4338ca',
+      'Pest Control': '#0891b2',
+      'Locksmith': '#c026d3',
+      'Electrical': '#e11d48',
+      'Landscaping & Tree Service': '#65a30d',
+      'Appliance Repair': '#92400e',
+      'Fireplace & Chimney': '#ca8a04',
+      'Fencing': '#6b21a8',
+      // Added 2026-09-04 (Quick Turn Maintenance vendor fix, see
+      // maintenance-history/router.js's categorizeMaintenanceVendor).
+      // #0ea5e9 chosen and validated with scripts/validate_palette.js
+      // (dataviz skill) appended as slot 18, light mode, surface
+      // #ffffff (this card's actual background) — ALL CHECKS PASS
+      // against the existing 17, no new FAIL introduced; worst-case
+      // separation from any existing category (Pest Control, the
+      // nearest hue) is well clear of the hard-fail floors.
+      'Handyman, Turnover & Preventative Maint.': '#0ea5e9',
+    };
+    // Guards a future category name added server-side (categorizeMaintenanceVendor)
+    // without a matching color added here — should never actually show.
+    const MAINTENANCE_CATEGORY_FALLBACK_COLOR = '#9ca3af';
+
+    function renderMaintenancePieChart(rows) {
+      if (!rows || !rows.length) return '';
+      const total = rows.reduce(function (sum, r) { return sum + r.amount; }, 0);
+      if (!total) return '';
+
+      const cx = 70, cy = 70, r = 65;
+      let slicesSvg = '';
+      if (rows.length === 1) {
+        // A single category is 100% of the pie — the wedge math below
+        // degenerates to a zero-length arc (same start/end point) for a
+        // full circle, so draw a plain circle instead.
+        const color = MAINTENANCE_CATEGORY_COLORS[rows[0].category] || MAINTENANCE_CATEGORY_FALLBACK_COLOR;
+        slicesSvg = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + color + '"></circle>';
+      } else {
+        let cumulative = 0;
+        for (const row of rows) {
+          const fraction = row.amount / total;
+          const startAngle = -Math.PI / 2 + cumulative * 2 * Math.PI;
+          cumulative += fraction;
+          const endAngle = -Math.PI / 2 + cumulative * 2 * Math.PI;
+          const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+          const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+          const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+          const color = MAINTENANCE_CATEGORY_COLORS[row.category] || MAINTENANCE_CATEGORY_FALLBACK_COLOR;
+          slicesSvg += '<path d="M' + cx + ',' + cy + ' L' + x1.toFixed(2) + ',' + y1.toFixed(2) +
+            ' A' + r + ',' + r + ' 0 ' + largeArc + ',1 ' + x2.toFixed(2) + ',' + y2.toFixed(2) +
+            ' Z" fill="' + color + '" stroke="#fff" stroke-width="2"></path>';
+        }
+      }
+
+      const legendRows = rows.map(function (row) {
+        const color = MAINTENANCE_CATEGORY_COLORS[row.category] || MAINTENANCE_CATEGORY_FALLBACK_COLOR;
+        return '<div class="pie-legend-row">' +
+          '<span class="pie-swatch" style="background:' + color + ';"></span>' +
+          '<span class="pie-legend-cat">' + escapeHtml(row.category) + '</span>' +
+          '<span class="pie-legend-amt">' + formatMoney(row.amount) + ' &middot; ' + row.percent.toFixed(1) + '%</span>' +
+          '</div>';
+      }).join('');
+
+      return '<div class="fact" style="margin-top:12px;"><span class="fl">Where the money went:</span></div>' +
+        '<div class="pie-wrap">' +
+        '<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="Maintenance spend by repair type">' + slicesSvg + '</svg>' +
+        '<div class="pie-legend">' + legendRows + '</div>' +
+        '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Maintenance summary — same glance shape as the cards above, but
     // rendered inline inside the Maintenance section rather than the
     // card grid (property-360-SPEC.md: "Maintenance becomes small-
@@ -473,6 +598,7 @@
         html += '<div class="fact"><span class="fl">Vendors used:</span> ' + d.vendor_count +
           (d.most_recent_vendor_name ? ', most recent: ' + escapeHtml(d.most_recent_vendor_name) : '') + '</div>';
       }
+      html += renderMaintenancePieChart(d.spend_by_category);
       // AppFolio actual maintenance-category spend — separate from the
       // Latchel-ticket figures above on purpose: it's sourced from
       // AppFolio's own general ledger (can include repair/maintenance
@@ -1101,6 +1227,23 @@
               details.id = 'privacy-review-details';
               details.innerHTML = '<summary>Needs Privacy Review</summary><div class="subsection-body" id="privacy-review-body"></div>';
               section.appendChild(details);
+              // Portfolio-wide entry point, next to (not inside) the
+              // collapsed per-property subsection above so it's visible
+              // without expanding anything — Peter, 2026-09-03: going
+              // property-by-property for 290+ flagged items across ~390
+              // properties was too slow. Plain same-tab navigation to
+              // maintenance-history/router.js's GET /privacy-review, which
+              // opens straight on the grouped, portfolio-wide "Needs
+              // privacy review" queue instead of this one property's
+              // items. Access is unchanged by this link — that page's own
+              // API calls still enforce PRIVACY_REVIEW_ROLES +
+              // director_of_operations' acknowledgment gate, same as the
+              // per-property view above.
+              const allPropertiesLink = document.createElement('div');
+              allPropertiesLink.className = 'fact';
+              allPropertiesLink.style.marginTop = '8px';
+              allPropertiesLink.innerHTML = '<a class="prop-link" href="/privacy-review">Review all flagged items across every property &rarr;</a>';
+              section.appendChild(allPropertiesLink);
               let privacyLoaded = false;
               details.addEventListener('toggle', function () {
                 if (details.open && !privacyLoaded) { privacyLoaded = true; loadPrivacyReview(propertyId, document.getElementById('privacy-review-body'), false); }

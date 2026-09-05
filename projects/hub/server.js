@@ -707,12 +707,8 @@ app.get('/', (req, res) => {
             <span>Per-person call counts, average length, missed calls, and speed to answer, by pod — pulled from Aircall nightly</span>
           </a>
           <a class="section-link" href="/content-engine">
-            <strong>Content Engine</strong>
-            <span>Draft a new post, check for legal updates, or check for trending topics — with a recent-activity view</span>
-          </a>
-          <a class="section-link" href="/content-review">
-            <strong>Content Review</strong>
-            <span>Approve, reject, or request changes on drafts; review legal claims, captions, and the brand voice guide</span>
+            <strong>Content</strong>
+            <span>Draft, review, and approve content — legal updates, trending topics, and the approval queue</span>
           </a>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>

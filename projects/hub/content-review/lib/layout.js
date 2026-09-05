@@ -277,6 +277,15 @@ function layout({ title, body, user, flash }) {
     .actions { flex-direction: column; }
     .actions button, .actions .btn { width: 100%; }
   }
+
+  /* Draft/Review tab bar — same visual pattern as Call Stats' Stats/Users
+     tabs (projects/hub/call-stats/dashboard/index.html: .tab-bar/.tab-btn),
+     reused here as plain navigation links between the two top-level pages
+     (/content-engine and /content-review) rather than client-side tabs. */
+  .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid var(--border); margin-bottom: 18px; }
+  .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 9px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; text-decoration: none; display: inline-block; }
+  .tab-btn:hover { color: #374151; }
+  .tab-btn.tab-active { color: var(--blue); border-bottom-color: var(--blue); }
 </style>
 </head>
 <body>
@@ -295,6 +304,10 @@ ${user ? `<header class="topbar">
   <div class="user-info">${escapeHtml(user.email)} &nbsp;·&nbsp; <a href="/logout">Log out</a></div>
 </header>` : ''}
 <main>
+${user ? `<div class="tab-bar">
+  <a class="tab-btn" href="/content-engine">Draft</a>
+  <a class="tab-btn tab-active" href="/content-review">Review</a>
+</div>` : ''}
 ${flash ? `<div class="flash ${flash.type}">${escapeHtml(flash.message)}</div>` : ''}
 ${body}
 </main>

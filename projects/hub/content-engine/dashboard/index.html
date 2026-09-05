@@ -55,11 +55,24 @@
     .badge-gray { background: #f3f4f6; color: #4b5563; }
     .activity-section h3 { font-size: 13px; margin: 14px 0 6px; }
     .activity-section:first-child h3 { margin-top: 0; }
+
+    /* Draft/Review tab bar — same visual pattern as Call Stats' Stats/Users
+       tabs (projects/hub/call-stats/dashboard/index.html: .tab-bar/.tab-btn),
+       reused here as plain navigation links between the two top-level pages
+       (/content-engine and /content-review) rather than client-side tabs. */
+    .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid #e5e7eb; margin: 10px 0 18px; }
+    .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 9px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; text-decoration: none; display: inline-block; }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.tab-active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
   </style>
 </head>
 <body>
   <div class="page">
     <a class="back" href="/">&larr; Rincon Hub</a>
+    <div class="tab-bar">
+      <a class="tab-btn tab-active" href="/content-engine">Draft</a>
+      <a class="tab-btn" href="/content-review">Review</a>
+    </div>
     <h1>Content Engine</h1>
     <p class="sub">
       Draft new posts and check for new legal updates or trending topics — the same actions available from the

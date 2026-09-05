@@ -1183,9 +1183,12 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   const openTicketCount = tickets.filter(t => !['completed', 'closed'].includes(t.status)).length;
 
-  // Same trailing-12mo sum as /overview's baseResponse.spend, reusing
-  // RECENT_MONTHS/monthsAgo() defined above — not a second copy of the
-  // math. last_activity is new here (not something /overview's response
+  // Trailing-12mo sum, reusing RECENT_MONTHS/monthsAgo() defined above.
+  // Ticket-cost math starts the same way /overview's baseResponse.spend
+  // does, but this route's spend_trailing_12mo (unlike /overview's) is
+  // topped up further below with real maintenance_snapshot_events_decision_safe
+  // amounts too — see the "AppFolio real dollar figures" comment near that
+  // query. last_activity is new here (not something /overview's response
   // already surfaces as a single field) but uses the exact same
   // completed_at-then-created_at fallback /overview's own recencyDate
   // logic uses per ticket.
@@ -1291,10 +1294,26 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
   };
   const { data: snapshotSpendRows, error: snapshotSpendErr } = await supabase
     .from('maintenance_snapshot_events_decision_safe')
-    .select('vendor_name, amount')
+    .select('vendor_name, amount, event_date')
     .eq('property_id', property.id);
   if (snapshotSpendErr) return res.status(500).json({ error: snapshotSpendErr.message });
-  for (const r of (snapshotSpendRows || [])) addToCategorySpend(r.vendor_name, r.amount);
+  // spend_trailing_12mo real-dollar fix (2026-09-04): AppFolio work orders
+  // structurally never carry a billed amount (verified live against the
+  // real work_order report — amount/estimate_amount/vendor_bill_amount are
+  // "0.00" or null on all 132 current work orders), so the ticket-cost loop
+  // above is a no-op in practice today and spend_trailing_12mo was always
+  // $0. The real dollar figure lives in AppFolio's billing/invoice records,
+  // already synced into maintenance_snapshot_events_decision_safe — same
+  // governance-safe view the pie chart below reads, never the raw table.
+  // Additive with the ticket-cost loop above, not a replacement, so a real
+  // maintenance_requests.cost value (if AppFolio/Latchel ever starts
+  // populating one) is still picked up automatically.
+  for (const r of (snapshotSpendRows || [])) {
+    addToCategorySpend(r.vendor_name, r.amount);
+    if (r.event_date && new Date(r.event_date) >= twelveMonthsAgo) {
+      spendTrailing12 += Number(r.amount) || 0;
+    }
+  }
   for (const t of tickets) addToCategorySpend(t.latchel_vendor_name, t.cost);
 
   // Percentages are computed from the exact (unrounded) category totals,

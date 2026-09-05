@@ -1041,6 +1041,74 @@ function categorizeMaintenanceVendor(vendorName) {
   return 'Other / Handyman';
 }
 
+// ─── Related Work Orders by Category — vendor-category → component-bucket
+// mapping (related-work-orders-by-category-SPEC.md, Design Question 2,
+// Recommendation (c)). Used only to categorize
+// maintenance_snapshot_events_decision_safe rows for the "related work
+// orders" cross-reference below — NOT used anywhere categorizeMaintenanceVendor
+// is already called for spend-by-category (that stays on its own 15-plus-
+// two-catchall vendor taxonomy, unchanged).
+//
+// Each mapping here is definitional, not inferred — spec-verified against
+// real rows: every vendor-category name on the left already appears as a
+// literal keyword in its target bucket's own term list in
+// lib/component-categories.js (e.g. "plumb" the vendor rule vs. "plumbing"
+// the bucket, "roof"/"gutter" vs. structural_exterior's own "roof"/
+// "gutter" terms). Vendor categories deliberately left OUT of this table —
+// 'Other / Handyman', 'Handyman, Turnover & Preventative Maint.',
+// 'Fireplace & Chimney' — don't self-report one clear trade; those fall
+// through to a text-based fallback match on the summary line instead (see
+// categorizeSnapshotEventComponents below). 'Maintenance Coordination Fee'
+// isn't in this table either, but for a different reason: it's excluded
+// from matching entirely, before this table is even consulted — see that
+// function's own comment.
+const VENDOR_CATEGORY_TO_COMPONENT_BUCKET = {
+  'Restoration & Water Damage': 'hvac_moisture',
+  'Pest Control': 'pest_control',
+  'Locksmith': 'locks_security',
+  'Roofing': 'structural_exterior',
+  'Plumbing': 'plumbing',
+  'Electrical': 'electrical',
+  'HVAC': 'hvac_moisture',
+  'Painting': 'structural_exterior',
+  'Flooring': 'structural_exterior',
+  'Cleaning': 'turnover_cleaning',
+  'Landscaping & Tree Service': 'landscaping',
+  'Doors, Windows & Glass': 'structural_exterior',
+  'Appliance Repair': 'appliances',
+  'Fencing': 'structural_exterior',
+};
+
+// Categorizes one maintenance_snapshot_events_decision_safe row into
+// componentCategories buckets, for the "related work orders" cross-
+// reference (related-work-orders-by-category-SPEC.md). Vendor category is
+// the PRIMARY signal — proven more reliable than text alone for this
+// terse, AppFolio-bill-derived data source (spec's live example: a known
+// HVAC vendor's real rows were caught 12/12 by vendor vs. 5/12 by text
+// alone, because bill summaries use trade shorthand like "evaporator
+// coil" or "hard-start kit" that component-categories.js's plainer,
+// tenant-complaint-tuned term list doesn't contain).
+//
+// 'Maintenance Coordination Fee' rows are excluded from matching
+// entirely — Rincon's own markup line riding on another vendor's real
+// line item for the same job, per categorizeMaintenanceVendor's own
+// comment; the real, describable work is already captured by that other
+// row, so categorizing the fee line too would double-count or
+// mis-tag the same incident.
+//
+// Text is only a FALLBACK, run solely on the generic vendor categories
+// that don't resolve to one clear trade (Other / Handyman, Handyman,
+// Turnover & Preventative Maint., Fireplace & Chimney). An 'other'-only
+// text result there means genuinely no signal (not a real category) and
+// is filtered out, same convention the viewed-ticket side uses.
+function categorizeSnapshotEventComponents(row) {
+  const vendorCategory = categorizeMaintenanceVendor(row.vendor_name);
+  if (vendorCategory === 'Maintenance Coordination Fee') return [];
+  const mapped = VENDOR_CATEGORY_TO_COMPONENT_BUCKET[vendorCategory];
+  if (mapped) return [mapped];
+  return componentCategories.categorize(row.summary || '').filter(c => c !== 'other');
+}
+
 // ─── GET /api/maintenance-history/property/:property_id/summary ────────
 // Property 360's Maintenance summary card — property-360-SPEC.md's
 // "Maintenance History — summary card" section. Deliberately NOT a call
@@ -1346,6 +1414,29 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
 router.get('/api/maintenance-history/property/:property_id/summary', requireMaintenanceHistoryAccess, getMaintenanceHistoryPropertySummary);
 
+// Related Work Orders by Category — cap on items shown per matched
+// category, most-recent-first, real uncapped count still returned
+// separately so a truncated list can say "+N more" honestly.
+// related-work-orders-by-category-SPEC.md "Thresholds and Edge Cases":
+// grounded in real percentile data across every real (property, category)
+// pair in the full dataset (p50=3, p75=6, p90=12) — a cap of 10 shows the
+// true full list for ~90% of real cases. Peter-confirmed, 2026-09-04.
+const RELATED_WORK_ORDERS_CAP = 10;
+
+// Most-recent-`date`-first, missing dates sorted last — same convention
+// /open-tickets' own final sort and /snapshot's own `.order('event_date',
+// { ascending: false })` already use independently. Used here to merge
+// the two source-typed shapes (ticket / snapshot_event) into one
+// per-category list, per the spec's own "Merged sort" section.
+function sortByDateDesc(items) {
+  return items.slice().sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return a.date < b.date ? 1 : -1;
+  });
+}
+
 /**
  * GET /api/maintenance-history/property/:property_id/open-tickets
  * Property 360 Maintenance card — the actual ticket list behind
@@ -1358,15 +1449,32 @@ router.get('/api/maintenance-history/property/:property_id/summary', requireMain
  * card. See getMaintenanceHistoryPropertySummary's own comment for why
  * that distinction matters.
  *
- * Reads only maintenance_requests (id, title, status, cost, completed_at,
- * created_at) plus the existing safeTicketTitle() content-safety lookup
- * below — no maintenance_claims, no maintenance_snapshot_events, no AI
- * synthesis call. That's what keeps this route cheap enough to lazy-load
- * on an expand click, unlike /overview.
+ * Also computes each open ticket's `related_work_orders` — related-work-
+ * orders-by-category-SPEC.md, built 2026-09-04, all four of that spec's
+ * open items Peter-confirmed same day: a 10-item cap per matched category
+ * (see RELATED_WORK_ORDERS_CAP above), concurrent still-open tickets in
+ * the same category counted as "related" (shown with their real status,
+ * not just resolved/closed history), the "no hot water" taxonomy gap
+ * fixed in lib/component-categories.js, and no fresh Asimov/Mason pass
+ * needed for this specific build (matches Oracle's own recommendation in
+ * that spec — read-only cross-reference over already safety-checked data,
+ * no new PII, no tenant characterization, no message ever sent).
+ *
+ * Reads maintenance_requests (id, title, description, status, cost,
+ * completed_at, created_at — `description` added here, closing a real
+ * pre-existing gap: componentCategories.categorize() and safeTicketTitle()
+ * both need title+description to work as designed, and this select was
+ * title-only before) plus maintenance_snapshot_events_decision_safe (never
+ * the raw table) for the related-work-orders cross-reference, and the
+ * existing safeTicketTitle() content-safety lookup — no maintenance_claims
+ * read, no AI synthesis call. Both extra reads are per-property, not
+ * per-ticket, so this stays cheap enough to lazy-load on an expand click.
  *
  * Gated by the same requireMaintenanceHistoryAccess every other read
  * route in this file uses (ANY real maintenance_history role) — the same
- * gate already protecting the count this list expands on Property 360.
+ * gate already protecting the count this list expands on Property 360,
+ * and the same gate already protecting /snapshot's own read of the same
+ * decision-safe view. No new role, no new visibility.
  */
 router.get('/api/maintenance-history/property/:property_id/open-tickets', requireMaintenanceHistoryAccess, async (req, res) => {
   const propertyId = req.params.property_id;
@@ -1393,7 +1501,7 @@ router.get('/api/maintenance-history/property/:property_id/open-tickets', requir
   if (unitIds.length) {
     const { data: mrRows, error: mrErr } = await supabase
       .from('maintenance_requests')
-      .select('id, title, status, cost, completed_at, created_at')
+      .select('id, title, description, status, cost, completed_at, created_at')
       .in('unit_id', unitIds);
     if (mrErr) return res.status(500).json({ error: mrErr.message });
     tickets = mrRows || [];
@@ -1405,12 +1513,41 @@ router.get('/api/maintenance-history/property/:property_id/open-tickets', requir
   // this list's length always matches the card's own open_ticket_count.
   const openTickets = tickets.filter(t => !['completed', 'closed'].includes(t.status));
 
+  // This property's up-to-5-year AppFolio bill-history backfill, read via
+  // the decision-safe view exactly like /snapshot above and the spend-by-
+  // category card — never the raw maintenance_snapshot_events table, so a
+  // flagged/rejected row can never reach this route. One per-property
+  // query, not per-ticket.
+  const { data: snapshotRows, error: snapshotErr } = await supabase
+    .from('maintenance_snapshot_events_decision_safe')
+    .select('id, event_date, summary, amount, vendor_name')
+    .eq('property_id', property.id);
+  if (snapshotErr) return res.status(500).json({ error: snapshotErr.message });
+
+  // Per-ticket safe-title lookups cached for the life of this request —
+  // a ticket appearing both as its own row and as another ticket's
+  // "related" item shouldn't trigger safeTicketTitle's audit-log
+  // check/insert twice. Same pattern /overview's own getSafeTitle uses.
+  const safeTitleCache = new Map();
+  async function getSafeTitle(ticket) {
+    if (safeTitleCache.has(ticket.id)) return safeTitleCache.get(ticket.id);
+    const result = await safeTicketTitle(ticket, property.id);
+    safeTitleCache.set(ticket.id, result);
+    return result;
+  }
+
   // safeTicketTitle() unmodified — same Fair Housing keyword+AI content
   // check already applied everywhere else a raw AppFolio ticket title is
   // shown (see that function's own comment above). Never skipped, never
-  // reimplemented here.
+  // reimplemented here. `_components` is this ticket's OWN category
+  // assignment, computed on the raw title+description exactly like
+  // /overview's own categorize() call (Design Question 1) — used only for
+  // matching below, never displayed; 'other' is stripped immediately
+  // since it's a residual catch-all with no real trade meaning and
+  // matching on it would just produce noise (per the spec's own
+  // "other-only tickets get no related-history feature at all").
   const withTitles = await Promise.all(openTickets.map(async (t) => {
-    const { text, flagged } = await safeTicketTitle(t, property.id);
+    const { text, flagged } = await getSafeTitle(t);
     return {
       id: t.id,
       title: text,
@@ -1418,6 +1555,7 @@ router.get('/api/maintenance-history/property/:property_id/open-tickets', requir
       status: t.status,
       cost: typeof t.cost === 'number' ? t.cost : null,
       last_activity: t.completed_at || t.created_at || null,
+      _components: componentCategories.categorize(`${t.title || ''} ${t.description || ''}`).filter(c => c !== 'other'),
     };
   }));
 
@@ -1431,7 +1569,79 @@ router.get('/api/maintenance-history/property/:property_id/open-tickets', requir
     return a.last_activity < b.last_activity ? 1 : -1;
   });
 
-  return res.json({ open_tickets: withTitles });
+  // Snapshot rows categorized once each via the vendor-primary/text-
+  // fallback/fee-exclusion logic defined near categorizeMaintenanceVendor
+  // above — not reinvented here.
+  const categorizedSnapshotEvents = (snapshotRows || []).map(r => ({
+    id: r.id,
+    summary: r.summary,
+    vendor_name: r.vendor_name,
+    amount: typeof r.amount === 'number' ? r.amount : null,
+    date: r.event_date || null,
+    _components: categorizeSnapshotEventComponents(r),
+  }));
+
+  // Related Work Orders cross-reference — related-work-orders-by-
+  // category-SPEC.md "Where and How This Surfaces in the UI." For each
+  // open ticket, for each of ITS OWN matched categories (CATEGORY_ORDER,
+  // 'other' excluded), gather every OTHER open ticket and every snapshot
+  // event that also matched that same category — "same category" = shares
+  // at least one matched bucket key, no separate adjacency logic needed
+  // since categorize() already multi-tags ambiguous items by design.
+  // Concurrent still-open tickets count as related (Peter-confirmed open
+  // item #2) and keep their real status so Peter can tell historical from
+  // currently-happening. No dedup between the two sources (spec's own
+  // accepted overlap). One group per matched category — never blended
+  // into one mixed list — each independently sorted/capped/counted.
+  const results = withTitles.map(ticket => {
+    const relatedWorkOrders = [];
+    for (const category of componentCategories.CATEGORY_ORDER) {
+      if (category === 'other') continue;
+      if (!ticket._components.includes(category)) continue;
+
+      const relatedTicketItems = withTitles
+        .filter(other => other.id !== ticket.id && other._components.includes(category))
+        .map(other => ({
+          source: 'ticket',
+          id: other.id,
+          title: other.title,
+          title_redacted: other.title_redacted,
+          status: other.status,
+          cost: other.cost,
+          date: other.last_activity,
+        }));
+
+      const relatedSnapshotItems = categorizedSnapshotEvents
+        .filter(e => e._components.includes(category))
+        .map(e => ({
+          source: 'snapshot_event',
+          id: e.id,
+          summary: e.summary,
+          vendor_name: e.vendor_name,
+          amount: e.amount,
+          date: e.date,
+        }));
+
+      const merged = sortByDateDesc([...relatedTicketItems, ...relatedSnapshotItems]);
+      if (merged.length === 0) continue;
+
+      relatedWorkOrders.push({
+        category,
+        category_label: componentCategories.CATEGORY_LABELS[category],
+        count: merged.length,
+        items: merged.slice(0, RELATED_WORK_ORDERS_CAP),
+      });
+    }
+
+    const { _components, ...ticketOut } = ticket;
+    // Omitted entirely when empty — this page's own established
+    // "don't show an empty section" convention (flagged_review_count,
+    // tool cards with no data), not a zeroed/empty-array field.
+    if (relatedWorkOrders.length > 0) ticketOut.related_work_orders = relatedWorkOrders;
+    return ticketOut;
+  });
+
+  return res.json({ open_tickets: results });
 });
 
 /**

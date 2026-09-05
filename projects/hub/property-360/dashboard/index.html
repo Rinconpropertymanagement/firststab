@@ -160,6 +160,38 @@
     .ov-spend-row details.subsection.ov-open-tickets .ov-spend-label { color: #1d4ed8; }
     .ov-spend-row details.subsection.ov-open-tickets .subsection-body { min-width: 260px; }
 
+    /* Open Tickets — list of rows, not a table (related-work-orders-by-
+       category-SPEC.md: a <details> note can't nest cleanly inside a
+       <td>). Same fields the old table showed (title, status, cost,
+       last activity), each row optionally followed by one calm "Related
+       Work Orders" note per matched category. */
+    .ticket-list { display: flex; flex-direction: column; gap: 10px; }
+    .ticket-row { border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+    .ticket-row-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 14px; flex-wrap: wrap; }
+    .ticket-title { font-size: 13px; font-weight: 600; color: #111827; }
+    .ticket-meta { display: flex; gap: 12px; font-size: 12px; color: #6b7280; white-space: nowrap; }
+
+    /* Related Work Orders note — one per matched category, never blended
+       into a mixed list. Same nested details.subsection/summary
+       expand-in-place mechanics as every other collapsible bit on this
+       page (arrow marker, rotate-on-open — inherited from the base
+       details.subsection rules above), restyled here with the *exact*
+       same calm blue #eff6ff/#bfdbfe/#1d4ed8 already used for
+       .ov-open-tickets summary — deliberately not a new warning color.
+       Peter asked twice for "not scary or obtrusive": reusing this
+       page's own existing "here's more if you want it" visual language
+       is the actual answer to that, not a new alarm-shaped component. */
+    .ticket-row details.subsection.related-note { border-top: none; margin-top: 8px; padding-top: 0; }
+    .ticket-row details.subsection.related-note + details.subsection.related-note { margin-top: 6px; }
+    .ticket-row details.subsection.related-note summary { font-size: 12.5px; font-weight: 600; padding: 6px 10px; border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; color: #1d4ed8; transition: background 0.12s, border-color 0.12s; }
+    .ticket-row details.subsection.related-note summary:hover { background: #dbeafe; border-color: #93c5fd; }
+    .ticket-row details.subsection.related-note summary::before { color: #1d4ed8; }
+    .related-item { padding: 6px 2px; border-bottom: 1px solid #f3f4f6; font-size: 12.5px; }
+    .related-item:last-child { border-bottom: none; }
+    .related-item-title { display: block; color: #111827; }
+    .related-item-meta { display: block; color: #6b7280; font-size: 11.5px; margin-top: 2px; }
+    .related-more { font-size: 11.5px; color: #6b7280; padding: 6px 2px 0; }
+
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
     th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px; border-bottom: 1px solid #e5e7eb; }
     td { padding: 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
@@ -1238,16 +1270,71 @@
     // — rendered as plain text here, same as any other ticket title,
     // with no extra "(hidden)" wrapper of its own.
     // ────────────────────────────────────────────────────────────────
+    // Renders one item inside a Related Work Orders note — either a
+    // source: 'ticket' (a concurrent open ticket, real status shown so
+    // Peter can tell historical vs. currently-happening) or a
+    // source: 'snapshot_event' (an AppFolio bill-history record), per
+    // related-work-orders-by-category-SPEC.md "What Gets Displayed."
+    // Never blends the two shapes into one field — a snapshot_event has
+    // no "status," a ticket has no "vendor."
+    function renderRelatedItem(item) {
+      if (item.source === 'ticket') {
+        var meta = [];
+        if (item.status) meta.push(escapeHtml(item.status));
+        if (typeof item.cost === 'number') meta.push(formatMoney(item.cost));
+        if (item.date) meta.push(formatDate(item.date));
+        return '<div class="related-item">' +
+          '<span class="related-item-title">' + escapeHtml(item.title) + '</span>' +
+          '<span class="related-item-meta">' + meta.join(' &middot; ') + '</span>' +
+          '</div>';
+      }
+      var snapMeta = [];
+      if (item.vendor_name) snapMeta.push(escapeHtml(item.vendor_name));
+      if (typeof item.amount === 'number') snapMeta.push(formatMoney(item.amount));
+      if (item.date) snapMeta.push(formatDate(item.date));
+      return '<div class="related-item">' +
+        '<span class="related-item-title">' + escapeHtml(item.summary || '(no summary)') + '</span>' +
+        '<span class="related-item-meta">' + snapMeta.join(' &middot; ') + '</span>' +
+        '</div>';
+    }
+
+    // One calm, expandable note per matched category — never blended into
+    // one mixed list, per the spec's own "If a ticket matches more than
+    // one category" rule. Reuses the exact details.subsection/summary
+    // pattern (see .related-note CSS above for the blue restyle).
+    function renderRelatedWorkOrdersNotes(relatedWorkOrders) {
+      if (!relatedWorkOrders || !relatedWorkOrders.length) return '';
+      return relatedWorkOrders.map(function (group) {
+        var moreCount = group.count - group.items.length;
+        var label = group.count + ' past ' + escapeHtml(group.category_label) +
+          (group.count === 1 ? ' issue' : ' issues') +
+          ' in the last 5 years — worth checking before dispatching a vendor';
+        var itemsHtml = group.items.map(renderRelatedItem).join('');
+        var moreHtml = moreCount > 0 ? '<div class="related-more">+' + moreCount + ' more in the last 5 years</div>' : '';
+        return '<details class="subsection related-note">' +
+          '<summary>' + label + '</summary>' +
+          '<div class="subsection-body">' + itemsHtml + moreHtml + '</div>' +
+          '</details>';
+      }).join('');
+    }
+
     function renderOpenTicketsList(tickets) {
       if (!tickets.length) return '<div class="empty">No open tickets.</div>';
-      let html = '<div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Status</th><th>Cost</th><th>Last activity</th></tr></thead><tbody>';
+      var html = '<div class="ticket-list">';
       tickets.forEach(function (t) {
-        html += '<tr><td>' + escapeHtml(t.title) + '</td>' +
-          '<td>' + (t.status ? escapeHtml(t.status) : '&#8212;') + '</td>' +
-          '<td>' + (typeof t.cost === 'number' ? formatMoney(t.cost) : '&#8212;') + '</td>' +
-          '<td>' + (t.last_activity ? formatDate(t.last_activity) : '&#8212;') + '</td></tr>';
+        html += '<div class="ticket-row">' +
+          '<div class="ticket-row-main">' +
+            '<span class="ticket-title">' + escapeHtml(t.title) + '</span>' +
+            '<span class="ticket-meta">' +
+              '<span>' + (t.status ? escapeHtml(t.status) : '&#8212;') + '</span>' +
+              '<span>' + (typeof t.cost === 'number' ? formatMoney(t.cost) : '&#8212;') + '</span>' +
+              '<span>' + (t.last_activity ? formatDate(t.last_activity) : '&#8212;') + '</span>' +
+            '</span>' +
+          '</div>' +
+          renderRelatedWorkOrdersNotes(t.related_work_orders) +
+          '</div>';
       });
-      html += '</tbody></table></div>';
+      html += '</div>';
       return html;
     }
 

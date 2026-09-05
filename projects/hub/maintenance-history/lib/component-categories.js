@@ -95,6 +95,14 @@ const CATEGORIES = {
     // ticket titled "Hose Bibb Vacuum Breakers" was missed without this.
     'hose bibb',
     'gas line', 'gas leak', 'water softener',
+    // Added 2026-09-04, Peter-confirmed fix (related-work-orders-by-
+    // category-SPEC.md's own documented gap): 'no hot water in unit' was
+    // matching nothing at all — neither 'water heater' nor 'heater' nor
+    // 'heating' appears in that exact common phrasing, so a real,
+    // frequent complaint got zero category signal. 'hot water' covers
+    // that phrasing plus the equally common 'no hot water', 'hot water
+    // heater not working', etc.
+    'hot water',
   ],
   hvac_moisture: [
     'hvac', 'air condition', 'a/c', 'ac unit',
@@ -105,6 +113,19 @@ const CATEGORIES = {
     'ac',
     'heater', 'heating',
     'furnace', 'thermostat',
+    // 'hot water' — added 2026-09-04 alongside plumbing's own entry
+    // above, following the exact existing pattern 'water heater'
+    // already establishes in this file: a water-heater complaint is
+    // legitimately both a plumbing fixture issue AND a heating-system
+    // issue, which is why 'water heater leaking' already lands in both
+    // buckets today (plumbing's explicit 'water heater' term, plus this
+    // bucket's own bare 'heater' term matching inside that same phrase).
+    // 'hot water' doesn't contain 'heater', so it needed its own explicit
+    // entry here to get the same dual-tag treatment, not a new
+    // convention — same real-world reasoning, just spelled out because
+    // the existing terms don't overlap on this phrasing the way they
+    // happen to on 'water heater'.
+    'hot water',
     // 'vent' removed: it wrongly matched "dryer vent clean" and "vent
     // hood replacement" — routine appliance/cleaning tickets, not HVAC
     // problems — inflating this bucket by 15% in real data. 'venting',

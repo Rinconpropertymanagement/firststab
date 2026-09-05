@@ -476,13 +476,17 @@ async function checkRowContent(summaryText, rawDescriptionText) {
   const layer2Text = rawDescriptionText || summaryText;
   const layer2 = await runLayer2Check(layer2Text);
 
-  const summaryCheck = contentCheck.checkClaim({ claim_text: summaryText });
-  const rawCheck = contentCheck.checkClaim({
+  // content-screening-tier-redesign-SPEC.md Section 3.2: checkClaim() is
+  // now async (Tier B makes a network call) — every call site awaited,
+  // not just maintenance-history/router.js's (that spec's "one call site"
+  // premise didn't hold — this file alone has four).
+  const summaryCheck = await contentCheck.checkClaim({ claim_text: summaryText });
+  const rawCheck = await contentCheck.checkClaim({
     claim_text: layer2Text,
     modelFlag: layer2.modelFlag,
     modelCategory: layer2.modelCategory,
   });
-  const rawCheckLayer1Only = contentCheck.checkClaim({ claim_text: layer2Text });
+  const rawCheckLayer1Only = await contentCheck.checkClaim({ claim_text: layer2Text });
 
   const flagged = summaryCheck.flagged_protected_class || rawCheck.flagged_protected_class;
   const layer1OnlyFlagged = summaryCheck.flagged_protected_class || rawCheckLayer1Only.flagged_protected_class;
@@ -553,7 +557,7 @@ async function recheckExistingRows(supabase) {
       if (row.flagged_protected_class) continue; // already caught by Layer 1 — never downgraded, nothing to do
 
       const layer2 = await runLayer2Check(row.summary);
-      const check = contentCheck.checkClaim({
+      const check = await contentCheck.checkClaim({
         claim_text: row.summary,
         modelFlag: layer2.modelFlag,
         modelCategory: layer2.modelCategory,

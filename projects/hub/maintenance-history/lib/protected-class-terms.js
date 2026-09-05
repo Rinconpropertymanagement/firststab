@@ -132,6 +132,11 @@ const FLAT_TERMS = Object.entries(CATEGORIES).flatMap(([category, terms]) =>
  * flagged); callers MUST NOT write matchedTerms or the source text into
  * audit_log (see SPEC.md's Content Check + router.js's audit_log writes —
  * "deliberately NOT the flagged text itself").
+ * ONE NAMED EXCEPTION, Asimov/Mason-approved: content-screening-tier-
+ * redesign-SPEC.md Section 5 allows logging the triggering term ONLY for
+ * the six already-fully-disclosed Tier B terms, ONLY on the
+ * `maintenance_claims.tier_b_classification` audit action — see that
+ * section before adding any other exception to the rule above.
  */
 function scanText(text) {
   const normalized = String(text || '');

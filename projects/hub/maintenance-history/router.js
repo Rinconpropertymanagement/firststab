@@ -696,6 +696,31 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
     if (d && new Date(d) >= twelveMonthsAgo) spendTrailing12 += cost;
   }
 
+  // spend.trailing_12mo real-dollar fix (2026-09-05) — same pattern as
+  // getMaintenanceHistoryPropertySummary's own trailing_12mo fix below
+  // (see that function's "spend_trailing_12mo real-dollar fix" comment
+  // for the full live-verified root cause): AppFolio work orders
+  // structurally never carry a billed amount, so the ticket-cost loop
+  // above is a no-op in practice and trailing_12mo was always $0. The
+  // real dollar figure lives in AppFolio's billing/invoice records,
+  // already synced into maintenance_snapshot_events_decision_safe — the
+  // governance-safe view, never the raw maintenance_snapshot_events
+  // table. Additive with the ticket-cost loop above, not a replacement,
+  // so a real maintenance_requests.cost value (if AppFolio/Latchel ever
+  // starts populating one) is still picked up automatically. Scoped to
+  // trailing_12mo only, matching the reference fix — spendAllTime isn't
+  // touched here.
+  const { data: overviewSnapshotSpendRows, error: overviewSnapshotSpendErr } = await supabase
+    .from('maintenance_snapshot_events_decision_safe')
+    .select('amount, event_date')
+    .eq('property_id', property.id);
+  if (overviewSnapshotSpendErr) return res.status(500).json({ error: overviewSnapshotSpendErr.message });
+  for (const r of (overviewSnapshotSpendRows || [])) {
+    if (r.event_date && new Date(r.event_date) >= twelveMonthsAgo) {
+      spendTrailing12 += Number(r.amount) || 0;
+    }
+  }
+
   const baseResponse = {
     property: {
       id: property.id, name: property.name, address: property.address,
@@ -707,7 +732,7 @@ router.get('/api/maintenance-history/property/:property_id/overview', requireMai
     spend: {
       trailing_12mo: Math.round(spendTrailing12 * 100) / 100,
       all_time: Math.round(spendAllTime * 100) / 100,
-      note: 'Sum of maintenance_requests.cost as synced from AppFolio — not every work order has a cost populated, so this is a lower bound, not full invoice reconciliation.',
+      note: 'all_time is maintenance_requests.cost as synced from AppFolio only — not every work order has a cost populated, so it is a lower bound, not full invoice reconciliation. trailing_12mo additionally includes real AppFolio bill amounts from maintenance_snapshot_events.',
     },
     has_data: tickets.length > 0,
   };
@@ -1803,19 +1828,61 @@ async function applyReviewAction({ itemType, id, action, fields, req, res, requi
     return { ok: false, status, error };
   }
 
-  if (!['confirm', 'correct', 'reject'].includes(action)) {
-    return fail(400, 'action must be "confirm", "correct", or "reject".');
+  if (!['confirm', 'correct', 'reject', 'clear_flag', 'flag'].includes(action)) {
+    return fail(400, 'action must be "confirm", "correct", "reject", "clear_flag", or "flag".');
+  }
+
+  // content-screening-tier-redesign-SPEC.md Section 6: clear_flag/flag are
+  // maintenance_claims only. maintenance_snapshot_events' own
+  // flagged_protected_class is set by a completely separate path
+  // (backfill-maintenance-snapshot.js, a live scanText() rescan — never
+  // checkClaim()/Tier A/B), so overriding a flag there would let a
+  // reviewer override a flag Tier B never actually evaluated — an
+  // explicit, reasoned-through scope boundary, not an oversight. Guarded
+  // here (not just left to the snapshot-events route's own pre-existing
+  // action whitelist, which happens to already exclude both values) so
+  // this stays true even if that route's whitelist is ever loosened later
+  // without re-reading this reasoning.
+  if ((action === 'clear_flag' || action === 'flag') && itemType !== 'claim') {
+    return fail(400, `"${action}" is only supported for maintenance claims, not snapshot events.`);
   }
 
   const table = itemType === 'snapshot_event' ? 'maintenance_snapshot_events' : 'maintenance_claims';
   const beforeSelect = itemType === 'snapshot_event'
     ? 'id, flagged_protected_class, property_id'
-    : 'id, claim_type, flagged_protected_class, maintenance_request_id';
+    : 'id, claim_type, flagged_protected_class, flagged_category, maintenance_request_id';
 
   const { data: before, error: beforeErr } = await supabase.from(table).select(beforeSelect).eq('id', id).maybeSingle();
   if (beforeErr) return fail(500, beforeErr.message);
   if (!before) {
     return fail(404, itemType === 'snapshot_event' ? 'Maintenance snapshot event not found.' : 'Claim not found.');
+  }
+
+  // clear_flag only makes sense on a claim that is currently flagged —
+  // Section 6: "usable on any currently-flagged claim regardless of its
+  // current review_status."
+  if (action === 'clear_flag' && !before.flagged_protected_class) {
+    return fail(400, 'This claim is not currently flagged — there is no flag to clear.');
+  }
+
+  // Both new override actions require a stated reason (Section 6) —
+  // unlike confirm/correct/reject, where reviewer_notes stays optional.
+  // "Reversing a Fair Housing content-safety disposition, in either
+  // direction, should always carry a stated reason."
+  if ((action === 'clear_flag' || action === 'flag') &&
+      (typeof fields.reviewer_notes !== 'string' || !fields.reviewer_notes.trim())) {
+    return fail(400, 'reviewer_notes is required and cannot be empty for this action.');
+  }
+
+  // flag's category comes from protected-class-terms.js's existing
+  // CATEGORIES keys (Section 6) — reusing the existing vocabulary, not
+  // inventing a new one. CATEGORIES is already imported at module scope.
+  let flagCategory;
+  if (action === 'flag') {
+    flagCategory = fields.category;
+    if (!flagCategory || !Object.prototype.hasOwnProperty.call(CATEGORIES, flagCategory)) {
+      return fail(400, `category must be one of: ${Object.keys(CATEGORIES).join(', ')}.`);
+    }
   }
 
   if (requireAck && before.flagged_protected_class) {
@@ -1824,7 +1891,14 @@ async function applyReviewAction({ itemType, id, action, fields, req, res, requi
   }
 
   const reviewerName = req.maintenanceHistoryMemberName || req.user.email;
-  const review_status = action === 'confirm' ? 'confirmed' : action === 'correct' ? 'corrected' : 'rejected';
+  const REVIEW_STATUS_BY_ACTION = {
+    confirm: 'confirmed',
+    correct: 'corrected',
+    reject: 'rejected',
+    clear_flag: 'cleared_false_positive', // Section 5/6 — the new CHECK-constraint value Neo's migration adds
+    flag: 'confirmed', // Section 6: "a human already looked at this and confirmed a flag belongs here" — the existing value already fits
+  };
+  const review_status = REVIEW_STATUS_BY_ACTION[action];
   const reviewer_notes = fields.reviewer_notes || null;
 
   const updates = {
@@ -1833,6 +1907,20 @@ async function applyReviewAction({ itemType, id, action, fields, req, res, requi
     reviewed_at: new Date().toISOString(),
     reviewer_notes,
   };
+
+  if (action === 'clear_flag') {
+    // flagged_category is deliberately LEFT IN PLACE as historical record
+    // of what it used to be flagged for (Section 6) — only
+    // flagged_protected_class flips. Already valid under
+    // maintenance_claims_flag_requires_category, which only requires a
+    // category WHEN flagged_protected_class = TRUE.
+    updates.flagged_protected_class = false;
+  }
+
+  if (action === 'flag') {
+    updates.flagged_protected_class = true;
+    updates.flagged_category = flagCategory;
+  }
 
   if (action === 'correct') {
     if (itemType === 'snapshot_event') {
@@ -1895,6 +1983,33 @@ async function applyReviewAction({ itemType, id, action, fields, req, res, requi
     return fail(409, 'Already reviewed by someone else since this list was loaded.');
   }
 
+  // content-screening-tier-redesign-SPEC.md Section 6: clear_flag/flag get
+  // their OWN audit action (protected_class_flag_overridden), distinct
+  // from the generic .reviewed action every other transition writes below,
+  // so "how often is this override actually used" is directly queryable
+  // later without wading through routine corrections. This is a human
+  // actor (a reviewer took the action), so it reuses writeAuditLog()
+  // exactly as it works today, per Section 5.
+  if (action === 'clear_flag' || action === 'flag') {
+    await writeAuditLog({
+      action: 'maintenance_claims.protected_class_flag_overridden',
+      entity_type: 'maintenance_claim',
+      entity_id: id,
+      actor_email: req.user.email,
+      risk_level: action === 'clear_flag' ? 'medium' : 'high',
+      details: {
+        direction: action === 'clear_flag' ? 'cleared' : 'flagged',
+        previous_flagged_protected_class: before.flagged_protected_class,
+        new_flagged_protected_class: updated.flagged_protected_class,
+        previous_category: before.flagged_category || null,
+        new_category: updated.flagged_category || null,
+        reviewer_notes,
+        ...(auditExtra || {}),
+      },
+    });
+    return { ok: true, row: updated };
+  }
+
   const riskLevel = (before.flagged_protected_class && (action === 'correct' || action === 'reject')) ? 'medium' : 'low';
   await writeAuditLog({
     action: itemType === 'snapshot_event' ? 'maintenance_snapshot_events.reviewed' : 'maintenance_claims.reviewed',
@@ -1915,6 +2030,18 @@ async function applyReviewAction({ itemType, id, action, fields, req, res, requi
 // here. Only the audit_log entry below is barred from carrying the text.
 router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHistoryRole('admin', 'reviewer', 'director_of_operations'), async (req, res) => {
   const { action, claim_text, claim_date, outcome_level, reviewer_notes } = req.body;
+  // content-screening-tier-redesign-SPEC.md Section 6: clear_flag extends
+  // this route (it's already PRIVACY_REVIEW_ROLES-gated, and requireAck:
+  // true below already applies to every action here, satisfying Section
+  // 6's requirement that clear_flag specifically run with requireAck:
+  // true). "flag" does NOT — it gets its own standalone endpoint below,
+  // deliberately not reachable here, so its acknowledgment-gate exemption
+  // (Section 6: flag never runs against an already-flagged claim by
+  // definition, so the gate's own trigger condition doesn't apply) isn't
+  // accidentally inherited from this route's requireAck:true instead.
+  if (!['confirm', 'correct', 'reject', 'clear_flag'].includes(action)) {
+    return res.status(400).json({ error: 'action must be "confirm", "correct", "reject", or "clear_flag".' });
+  }
   // Everything below this line — the "before" fetch, the acknowledgment
   // gate (Mason's condition 1: director_of_operations only, and only for a
   // flagged claim), correct-field validation, the update, and the Rule 1
@@ -1931,6 +2058,40 @@ router.post('/api/maintenance-history/claims/:id/review', requireMaintenanceHist
     fields: { claim_text, claim_date, outcome_level, reviewer_notes },
     req, res,
     requireAck: true,
+    respondOnError: true,
+  });
+  if (!result.ok) return; // applyReviewAction already wrote the error response
+  return res.json({ success: true, claim: result.row });
+});
+
+// ─── POST /api/maintenance-history/claims/:id/flag ──────────────────────
+// content-screening-tier-redesign-SPEC.md Section 6, the second direction
+// of the two-way override: staff recognizes protected-class content the
+// system missed and flags it themselves. A standalone endpoint, not an
+// action on the route above — the existing flagged-queue/claims-review
+// routes only ever operate on already-flagged items, so this needed its
+// own path, usable on any claim regardless of its current flag state.
+// Gated to PRIVACY_REVIEW_ROLES in its own right (same set as the route
+// above), but deliberately called with requireAck: false — Section 6:
+// applyReviewAction's acknowledgment gate only ever fires when
+// before.flagged_protected_class is already true (it exists to warn a
+// reviewer before they see content that's already flagged), and "flag" by
+// definition runs against a claim nobody flagged yet. The staff member is
+// bringing a concern forward, not being exposed to a pre-existing flag
+// they didn't choose to look at — do not add an acknowledgment check here
+// "for consistency" without re-reading Section 6's own reasoning first.
+router.post('/api/maintenance-history/claims/:id/flag', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
+  if (!isValidUuid(req.params.id)) {
+    return res.status(400).json({ error: 'That id is not valid.' });
+  }
+  const { category, reviewer_notes } = req.body;
+  const result = await applyReviewAction({
+    itemType: 'claim',
+    id: req.params.id,
+    action: 'flag',
+    fields: { category, reviewer_notes },
+    req, res,
+    requireAck: false,
     respondOnError: true,
   });
   if (!result.ok) return; // applyReviewAction already wrote the error response
@@ -2509,6 +2670,119 @@ router.post('/api/maintenance-history/flagged-queue/bulk-review', requireMainten
   return res.json({ succeeded, failed });
 });
 
+// ─── POST /api/maintenance-history/flagged-queue/bulk-clear-flag ───────
+// content-screening-tier-redesign-SPEC.md Section 7 — the historical-
+// cleanup mechanism for the 340 records (and any future large batch of
+// Tier B false positives), reusing Section 6's clear_flag action instead
+// of a one-off bulk UPDATE script. NOT run against the real 340 records
+// yet — Section 7's own sequencing puts that after the live parallel test
+// (Section 8, Step 1-2), which hasn't started. This route only builds the
+// mechanism.
+//
+// The existing POST /flagged-queue/bulk-review route above cannot do this
+// as-is (verified against its code, per the spec): it hardcodes its
+// allowed actions to confirm/reject only, and unconditionally rejects any
+// item where review_status !== 'unreviewed' — but every one of the 340
+// historical records is, by this section's own premise, already reviewed,
+// so every one would be rejected by that route exactly as it exists
+// today. A SEPARATE route (the spec's option (a), not a new branch inside
+// the existing one, its option (b)) — clear_flag's eligibility bar
+// (flagged_protected_class = TRUE, regardless of review_status) and its
+// mandatory reviewer_notes are different enough from confirm/reject's
+// (review_status === 'unreviewed', notes optional) that folding both into
+// one function's branches risked exactly the kind of "one route quietly
+// does two things" complexity Q's own build standard says to avoid.
+//
+// Every other safeguard the existing bulk-review route has is carried
+// forward unchanged, per the spec's explicit requirement: the
+// PRIVACY_REVIEW_ROLES gate, one acknowledgment check for the whole
+// batch, a fresh per-id re-check immediately before acting (never the
+// client's list), the same live-rescan-for-category test (and the same
+// "no shared matched keyword -> review individually" restriction) as the
+// confirm/reject route, one audit_log row per item (never one for the
+// whole batch, via applyReviewAction's own protected_class_flag_
+// overridden write), and the same BULK_REVIEW_MAX_ITEMS cap.
+//
+// claims only — clear_flag does not exist for maintenance_snapshot_events
+// (Section 6's own scope boundary; applyReviewAction enforces this too).
+//
+// reviewer_notes: Section 6 requires non-empty reviewer_notes on every
+// clear_flag action. The spec doesn't specify per-item notes for a bulk
+// action, and asking a reviewer to type one note per item defeats the
+// point of bulk-clearing a cluster of the same false positive — so this
+// route takes ONE reviewer_notes string for the whole batch (validated
+// non-empty up front) and applies it to every item's own
+// protected_class_flag_overridden audit row. A judgment call, not spelled
+// out in the spec — flagged in the build report.
+router.post('/api/maintenance-history/flagged-queue/bulk-clear-flag', requireMaintenanceHistoryRole(...PRIVACY_REVIEW_ROLES), async (req, res) => {
+  if (!(await requireAcknowledgment(req, res))) return;
+
+  const { items, reviewer_notes } = req.body;
+  if (typeof reviewer_notes !== 'string' || !reviewer_notes.trim()) {
+    return res.status(400).json({ error: 'reviewer_notes is required and cannot be empty for clear_flag.' });
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array of { id } (claim ids only — clear_flag does not apply to snapshot events).' });
+  }
+  if (items.length > BULK_REVIEW_MAX_ITEMS) {
+    return res.status(400).json({ error: `A single bulk action is limited to ${BULK_REVIEW_MAX_ITEMS} items.` });
+  }
+
+  const succeeded = [];
+  const failed = [];
+  const batchSize = items.length;
+
+  for (const raw of items) {
+    const id = raw && raw.id;
+    if (!isValidUuid(id)) {
+      failed.push({ id: id || null, reason: 'Malformed item — each must have a valid claim id.' });
+      continue;
+    }
+
+    // Fresh re-check, right before acting — never the client's list.
+    // Eligibility bar per Section 7: flagged_protected_class = TRUE, NOT
+    // review_status === 'unreviewed' — every one of these records is, by
+    // this mechanism's own premise, already reviewed.
+    const { data: current, error: currentErr } = await supabase
+      .from('maintenance_claims')
+      .select('id, flagged_protected_class, flagged_category, review_status, claim_text')
+      .eq('id', id)
+      .maybeSingle();
+    if (currentErr) { failed.push({ id, reason: currentErr.message }); continue; }
+    if (!current) { failed.push({ id, reason: 'Claim no longer exists.' }); continue; }
+    if (!current.flagged_protected_class) {
+      failed.push({ id, reason: 'No longer flagged — nothing to clear.' });
+      continue;
+    }
+
+    // Same live-rescan-for-category test the confirm/reject bulk route
+    // uses above — never trusts the client, never logs the term itself,
+    // only the category (see that route's own comment for the full
+    // reasoning). Layer-2-only items (no shared matched keyword) are
+    // excluded from bulk action here too, same restriction as that route.
+    const scan = scanText(current.claim_text || '');
+    const term = scan.matchedTerms.length ? scan.matchedTerms[0] : null;
+    if (!term) {
+      failed.push({ id, reason: 'This item has no shared matched keyword — Layer-2-only items must be reviewed individually, not in bulk.' });
+      continue;
+    }
+    const category = TERM_TO_CATEGORY[term] || scan.categories[0] || firstCategory(current.flagged_category);
+
+    const result = await applyReviewAction({
+      itemType: 'claim', id, action: 'clear_flag', fields: { reviewer_notes },
+      req, res,
+      requireAck: false, // gated once for the whole batch, above
+      respondOnError: false, // a failure here becomes a `failed` entry, not an HTTP response
+      guardUnreviewed: false, // Section 7: these records are already reviewed by definition — the review_status race guard doesn't apply to this eligibility bar
+      auditExtra: { bulk: true, cluster_key: category, batch_size: batchSize },
+    });
+    if (result.ok) succeeded.push(id);
+    else failed.push({ id, reason: result.error || 'Could not clear flag.' });
+  }
+
+  return res.json({ succeeded, failed });
+});
+
 // ─── GET /api/maintenance-history/property/:property_id/budget ─────────
 // Maintenance Budget Cross-Check, Part 2 (budget-crosscheck-SPEC.md). A
 // plain fetched fact from AppFolio's own Budget report, synced nightly by
@@ -3066,7 +3340,9 @@ async function runMaintenanceHistoryIngest(req, res, ts) {
       const propertyId = mr.units ? mr.units.property_id : null;
 
       for (const candidate of candidates) {
-        const check = contentCheck.checkClaim(candidate);
+        // content-screening-tier-redesign-SPEC.md Section 3.2: checkClaim()
+        // is now async (Tier B makes a network call) — awaited here.
+        const check = await contentCheck.checkClaim(candidate);
         const row = {
           maintenance_request_id: mr.id,
           claim_type: candidate.claim_type,
@@ -3093,17 +3369,76 @@ async function runMaintenanceHistoryIngest(req, res, ts) {
         insertedClaimTypes.push(candidate.claim_type);
         summary.claims_inserted++;
 
+        // content-screening-tier-redesign-SPEC.md Section 5: fires for
+        // EVERY Tier B term match, cleared or flagged — not only when the
+        // claim ends up flagged overall (a Tier B term can be checked and
+        // cleared here even if nothing else about the claim is flagged).
+        // A genuine addition: today's system otherwise only logs an event
+        // when something IS flagged. Written via a direct insert, not
+        // writeAuditLog() (which hardcodes actor_type: 'human') — the same
+        // established pattern this route's own protected_class_excluded
+        // write below already uses for a non-human actor.
+        // NAMED EXCEPTION (Section 5, Asimov/Mason-approved): this is the
+        // one place this codebase logs a Tier B triggering term — see
+        // protected-class-terms.js's header for the matching note.
+        for (const tb of check.tier_b_results) {
+          await supabase.from('audit_log').insert({
+            action: 'maintenance_claims.tier_b_classification',
+            entity_type: 'maintenance_claim',
+            entity_id: inserted.id,
+            actor_type: 'ai_agent',
+            actor_id: 'maintenance-history-tier-b-classifier',
+            actor_version: contentCheck.TIER_B_CLASSIFIER_VERSION,
+            privacy_category: 'processing',
+            risk_level: tb.disposition === 'flagged' ? 'high' : 'low',
+            property_id: propertyId || null,
+            details: {
+              triggering_term: tb.term,
+              category: tb.category,
+              classification: tb.classification,
+              disposition: tb.disposition,
+            },
+          });
+        }
+
         if (check.flagged_protected_class) {
           flaggedThisTicket++;
           summary.claims_flagged++;
           // AUDIT LOG GUIDANCE #2 — never the flagged text itself.
+          // matched_layer now carries tier granularity (redesign spec
+          // Section 3.2: 'keyword_tier_a'/'keyword_tier_a+model'/
+          // 'keyword_tier_b_confirmed'/'keyword_tier_b_confirmed+model'/
+          // 'model') — the old exact-match against the bare string
+          // 'keyword' would silently stop matching anything, so actor
+          // attribution is now: purely deterministic Tier A only ->
+          // 'system'; a Tier B classifier call decided it (no Layer 2) ->
+          // the tier-b-classifier agent; anything where Layer 2 (the
+          // extraction model's own self-report) also fired -> the
+          // extractor agent, unchanged from before this redesign.
+          const layer2Involved = check.matched_layer.endsWith('+model');
+          const isPureTierA = check.matched_layer === 'keyword_tier_a';
+          const isPureTierB = check.matched_layer === 'keyword_tier_b_confirmed';
+          let actorType, actorId, actorVersion;
+          if (!layer2Involved && isPureTierA) {
+            actorType = 'system';
+            actorId = 'maintenance-history-content-check';
+            actorVersion = TERMS_VERSION;
+          } else if (!layer2Involved && isPureTierB) {
+            actorType = 'ai_agent';
+            actorId = 'maintenance-history-tier-b-classifier';
+            actorVersion = contentCheck.TIER_B_CLASSIFIER_VERSION;
+          } else {
+            actorType = 'ai_agent';
+            actorId = extractClaims.EXTRACTOR_ACTOR_ID;
+            actorVersion = candidate.extracted_by || aiResult.modelVersion || 'unknown';
+          }
           await supabase.from('audit_log').insert({
             action: 'maintenance_claims.protected_class_excluded',
             entity_type: 'maintenance_claim',
             entity_id: inserted.id,
-            actor_type: check.matched_layer === 'keyword' ? 'system' : 'ai_agent',
-            actor_id: check.matched_layer === 'keyword' ? 'maintenance-history-content-check' : extractClaims.EXTRACTOR_ACTOR_ID,
-            actor_version: check.matched_layer === 'keyword' ? TERMS_VERSION : (candidate.extracted_by || aiResult.modelVersion || 'unknown'),
+            actor_type: actorType,
+            actor_id: actorId,
+            actor_version: actorVersion,
             privacy_category: 'processing',
             risk_level: 'high',
             property_id: propertyId || null,

@@ -346,7 +346,11 @@ async function main() {
     const sourceTypes = new Set();
 
     for (const candidate of result.claims) {
-      const check = contentCheck.checkClaim(candidate);
+      // content-screening-tier-redesign-SPEC.md Section 3.2: checkClaim()
+      // is now async (Tier B makes a network call) — awaited here, same
+      // as every other real call site in the codebase (that spec's "one
+      // call site" premise didn't hold — this file is one of several).
+      const check = await contentCheck.checkClaim(candidate);
       const isDuplicate = existingSourceRefs.has(candidate.source_reference);
       console.log(`  - [${candidate.claim_type}]${check.flagged_protected_class ? ' [FLAGGED: ' + check.flagged_category + ']' : ''}${isDuplicate ? ' [SKIPPED — claim already exists for this source_reference]' : ''} ${candidate.claim_text}`);
 
@@ -386,13 +390,27 @@ async function main() {
 
       if (check.flagged_protected_class) {
         summary.claims_flagged++;
+        // content-screening-tier-redesign-SPEC.md Section 3.2 changed
+        // matched_layer's vocabulary from bare 'keyword'/'model'/
+        // 'keyword+model' to tier-specific values — an exact match against
+        // the old 'keyword' string would silently stop matching anything.
+        // isKeywordLayer here preserves this file's own original
+        // distinction (was Layer 2 — the extraction model's own self-
+        // report — involved, yes or no); a Tier B term confirmed with no
+        // Layer 2 hit still reads as "system" here, same simplification
+        // this file already made for a pure keyword hit before this
+        // redesign existed (this script has no actor identity of its own
+        // for the Tier B classifier — that's maintenance-history/
+        // router.js's concern, which logs it as its own audit_log action).
+        const isKeywordLayer = typeof check.matched_layer === 'string' &&
+          check.matched_layer.startsWith('keyword') && !check.matched_layer.endsWith('+model');
         await supabase.from('audit_log').insert({
           action: 'claims.protected_class_excluded',
           entity_type: 'claim',
           entity_id: inserted.id,
-          actor_type: check.matched_layer === 'keyword' ? 'system' : 'ai_agent',
-          actor_id: check.matched_layer === 'keyword' ? 'leadsimple-content-check' : extractClaims.EXTRACTOR_ACTOR_ID,
-          actor_version: check.matched_layer === 'keyword' ? TERMS_VERSION : (candidate.extracted_by || result.aiModelVersion || 'unknown'),
+          actor_type: isKeywordLayer ? 'system' : 'ai_agent',
+          actor_id: isKeywordLayer ? 'leadsimple-content-check' : extractClaims.EXTRACTOR_ACTOR_ID,
+          actor_version: isKeywordLayer ? TERMS_VERSION : (candidate.extracted_by || result.aiModelVersion || 'unknown'),
           privacy_category: 'processing',
           risk_level: 'high',
           property_id: property.id,

@@ -33,7 +33,7 @@
  * starting point, not a final word list.
  */
 
-const DEROGATORY_LANGUAGE_VERSION = 'derogatory-language-terms-v1';
+const DEROGATORY_LANGUAGE_VERSION = 'derogatory-language-terms-v2';
 
 // Grouped for readability/future Mason review, not because the grouping
 // itself is meaningful anywhere in code (unlike protected-class-terms.js's
@@ -42,26 +42,49 @@ const DEROGATORY_LANGUAGE_VERSION = 'derogatory-language-terms-v1';
 // protected-class-terms.js, reused here rather than reinvented, so a short
 // term like "problem" doesn't false-positive inside an unrelated word.
 const TERMS = [
-  // Generalized character judgments about a person, not a specific fact
+  // Generalized character judgments about a person, not a specific fact —
+  // several of these are counsel's own enumerated examples (opinion
+  // Section 6: "Crazy." "Bad tenant." "Problem tenant." "Lazy."
+  // "Entitled." "High maintenance.")
   'difficult tenant', 'difficult owner', 'problem tenant', 'problem owner',
   'high maintenance', 'high-maintenance', 'nightmare tenant', 'nightmare owner',
   'bad tenant', 'bad owner', 'troublemaker', 'trouble maker',
+  'unstable tenant', 'unstable owner',
 
   // Standalone evaluative adjectives — broad on purpose (Layer-1-style,
   // recall-oriented) but soft-warning-only, so the false-positive cost is
   // low (a rephrase prompt, not a suppression) per this file's own header.
+  // NOTE (Mason review, 2026-09-05): bare 'unstable' and 'demanding' were
+  // deliberately removed from this list — both trigger constantly on
+  // ordinary, legitimate property-fact usage that has nothing to do with
+  // characterizing a person ("the deck railing is unstable," "owner is
+  // demanding proof of insurance before releasing payment"). That's the
+  // annoying, in-the-way false positive this tool should avoid. The
+  // 'unstable tenant'/'unstable owner' phrases above still catch the
+  // actual characterization case.
   'difficult', 'unreasonable', 'dramatic', 'hostile', 'aggressive', 'rude',
-  'entitled', 'lazy', 'unstable', 'crazy', 'paranoid', 'manipulative',
+  'entitled', 'lazy', 'crazy', 'paranoid', 'manipulative',
   'liar', 'lying', 'dishonest', 'uncooperative', 'confrontational',
   'combative', 'volatile', 'disruptive', 'condescending', 'obnoxious',
   'hysterical', 'irrational', 'needy', 'clingy', 'high strung',
-  'high-strung', 'ungrateful', 'demanding', 'abrasive', 'unpleasant',
-  'annoying', 'nasty', 'vindictive', 'petty', 'unstable tenant',
+  'high-strung', 'ungrateful', 'abrasive', 'unpleasant',
+  'annoying', 'nasty', 'vindictive', 'petty',
 
   // Complaint-framed-as-negative-attribute phrasing — Section 7's own
   // "protected activity converted into a negative attribute" example.
   'always complaining', 'constantly complaining', 'chronic complainer',
   'serial complainer', 'chip on their shoulder',
+
+  // Counsel's own worked fact-vs-characterization pairs (Mason review,
+  // 2026-09-05) — opinion Section 3 (factual "Tenant disputes the
+  // plumbing charge" vs. evaluative "Tenant refuses to take
+  // responsibility") and opinion Section 2 (discouraged "Tenant always
+  // disputes charges" vs. permitted "Tenant disputes responsibility for
+  // invoice #1234. Manager approval required before charge is posted.").
+  // Added as narrow phrases, not bare 'always'/'refuses' — those words
+  // alone appear in huge numbers of ordinary factual sentences and would
+  // false-positive far more than they'd help.
+  'refuses to take responsibility', 'always disputes', 'constantly disputes',
 ];
 
 function escapeRegex(s) {

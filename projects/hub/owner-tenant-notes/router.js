@@ -14,11 +14,6 @@
  *   - The AI email-extraction pipeline (spec Section 8) — no code here
  *     ever populates `source='ai_proposed'`, `extracted_by`, or
  *     `approval_status`. Manual notes only.
- *   - CCPA deletion/redaction specifically for legal_privileged notes.
- *     POST /:id/redact below builds STANDARD redaction for
- *     operational/management_compliance_restricted notes only, and
- *     returns a loud, explicit block for legal_privileged — see that
- *     route's own comment.
  *   - Grouped/bulk review (spec Section 5's own fast-follow deferral) —
  *     the flagged-queue route below is per-property, one item at a time,
  *     matching this being "a new, low-volume-at-launch data source."
@@ -285,21 +280,14 @@ async function hasAcknowledgedTierAccess(email) {
   return (count || 0) > 0;
 }
 
-// PLACEHOLDER TEXT — spec Section 3, condition 3: "A written access-use
-// policy, shown in that same acknowledgment notice (Mason to draft the
-// actual text)." This is Q's placeholder wording only, flagged plainly in
-// the build report as needing Mason's real policy language before this
-// tool leaves shadow mode — not a finished compliance artifact, the same
-// caveat this build's derogatory-language-terms.js carries for its own
-// first-pass word list.
+// Final access-use policy text — spec Section 3, condition 3. Written and
+// approved by Mason (legal review, 2026-09-05); see
+// owner-tenant-notes/staff-guidance.md Section 1 for the reasoning.
 const TIER_ACCESS_ACK_MESSAGE =
-  'You are about to see Management/Compliance-Restricted or Legal/Privileged operational notes — ' +
-  'Fair Housing complaints, accommodation documentation, serious disputes, discriminatory owner instructions, ' +
-  'and similar sensitive records, potentially for any property in the portfolio. This access exists for active ' +
-  'operational or backup purposes only. Browsing this content outside an actual work reason is a confidentiality ' +
-  'violation and is treated like any other misuse of sensitive tenant/owner data. Every time you view a note at ' +
-  "this level, it is logged — who, what, and when. [PLACEHOLDER — Mason to provide the final access-use policy " +
-  "text; this notice text is Q's draft only, not yet reviewed.] You'll only see this notice once.";
+  "Before you continue: this section can contain Fair Housing complaints, discrimination allegations, threats, restraining orders, and other sensitive disputes — for any property in the portfolio, not just the ones you normally handle. You have this access because property manager coverage at Rincon is portfolio-wide: you may be asked to step in on a property that isn't normally yours, and this is where the sensitive facts about it live.\n\n" +
+  "Open a note only when you have an actual work reason to look. Browsing without one is a confidentiality violation — the same as misusing any other sensitive tenant or owner information — and every time you view a note at this level, it is logged: who, what property, and when.\n\n" +
+  "Most important: nothing in this section should change how you treat a tenant. A Fair Housing complaint or a dispute is a fact to be aware of, not a reason to treat someone differently — doing that is retaliation, and it is illegal.\n\n" +
+  "You'll only see this notice once.";
 
 async function requireTierAccessAcknowledgment(req, res) {
   if (!TIER_ACCESS_ACK_APPLICABLE_ROLES.includes(req.ownerTenantNotesRole)) return true;
@@ -387,12 +375,11 @@ router.post('/api/owner-tenant-notes/tier-access/acknowledge', requireOwnerTenan
 // ============================================================
 
 // Derogatory-language soft-warning message, shown to the author on
-// success — never blocks submission (spec Section 7). Wording is Q's own
-// draft, flagged in the build report as a first pass for Mason to refine.
+// success — never blocks submission (spec Section 7). Final text written
+// and approved by Mason (legal review, 2026-09-05); see
+// owner-tenant-notes/staff-guidance.md Section 2.
 const DEROGATORY_LANGUAGE_WARNING =
-  'This note may describe a characterization rather than an objectively stated fact ' +
-  '(e.g. "difficult" or "problem tenant" instead of what specifically happened). Consider ' +
-  'rephrasing to state the observable fact — this is a suggestion only; your note was saved as written.';
+  "This note may describe a characterization rather than an objectively stated fact — for example, 'difficult tenant' describes the person, while 'tenant declined the last three proposed access times' describes what happened. Words like these aren't always wrong (e.g. 'difficult access due to a locked gate' is a legitimate fact) — but if this note labels a person rather than describing an event, consider rephrasing to state what was said or done, and when. This is a suggestion only — your note was saved as written.";
 
 router.post('/api/owner-tenant-notes', requireOwnerTenantNotesAccess, async (req, res) => {
   const { property_id, unit_id, subject_type, subject_id, note_text, category, access_tier } = req.body;
@@ -938,12 +925,15 @@ router.post(
 
 // ============================================================
 // SECTION 10: Post-hoc correction (spec Section 9, counsel's item J) and
-// standard redaction (task brief's "Explicitly DO NOT build" section —
-// build the standard path for operational/management_compliance_
-// restricted tiers; block loudly for legal_privileged, no CCPA carve-out
-// yet). Both available to admin/director_of_operations/reviewer for this
-// tool at minimum, per spec Section 9 — narrower than "anyone can edit
-// anything."
+// redaction — standard path for operational/management_compliance_
+// restricted tiers, plus the admin-only disposition flow for
+// legal_privileged notes (Mason's design, Peter's no-outside-attorney-
+// sign-off-required decision, 2026-09-05 — see POST /:id/redact's own
+// comment). Both routes available to admin/director_of_operations/
+// reviewer for this tool at minimum, per spec Section 9 — narrower than
+// "anyone can edit anything," and further narrowed to admin-only for
+// legal_privileged specifically by the tier-ceiling check each route
+// applies against `before.access_tier`.
 // ============================================================
 const CORRECTION_ROLES = ['admin', 'director_of_operations', 'reviewer'];
 
@@ -999,49 +989,26 @@ router.post('/api/owner-tenant-notes/:id/correct', requireOwnerTenantNotesRole(.
   return res.json({ success: true, note: updated });
 });
 
-// POST /:id/redact — standard redaction ONLY for operational/
-// management_compliance_restricted notes (task brief). A legal_privileged
-// note gets a loud, explicit block, never a silent redaction — Mason is
-// designing the actual CCPA-vs-litigation-hold carve-out for that path
-// separately; until that lands, the safest failure mode is "nothing
-// happens, tell a human," not "quietly destroy possibly-privileged
-// content."
-router.post('/api/owner-tenant-notes/:id/redact', requireOwnerTenantNotesRole(...CORRECTION_ROLES), async (req, res) => {
-  if (!isValidUuid(req.params.id)) return res.status(400).json({ error: 'That id is not valid.' });
-
-  const { data: before, error: beforeErr } = await supabase
-    .from('operational_notes').select('id, access_tier, property_id, reviewer_notes').eq('id', req.params.id).maybeSingle();
-  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
-  if (!before) return res.status(404).json({ error: 'Note not found.' });
-
-  if (before.access_tier === 'legal_privileged') {
-    return res.status(409).json({
-      error: 'legal_privileged_redaction_not_supported',
-      message: 'This note is Legal/Privileged. Redacting or deleting privileged content requires a separate ' +
-        'process that has not been built yet (a CCPA deletion request could otherwise destroy attorney-work-product ' +
-        'Rincon needs for a legal hold). Contact Mason before taking any action on this note.',
-    });
-  }
-
-  if (!(await requireTierAccessAcknowledgment(req, res))) return;
-
-  // note_text/reviewer_notes -> "[REDACTED]", preserving subject_type/
-  // category/access_tier/dates — same convention as
-  // maintenance_claims.claim_text (task brief). subject_id is left
-  // intact (needed for "every row about a specific person is a manual
-  // lookup via subject_id/property_id" per the schema's own Rule 4 note).
+// Shared standard-redaction mechanics — note_text/reviewer_notes ->
+// "[REDACTED]", preserving subject_type/category/access_tier/dates (same
+// convention as maintenance_claims.claim_text). subject_id is left intact
+// (needed for "every row about a specific person is a manual lookup via
+// subject_id/property_id" per the schema's own Rule 4 note). Used by the
+// standard-tier path below AND by the legal_privileged
+// no_hold_confirmed_safe disposition, so the two paths can never drift
+// apart on what "redacted" actually means.
+async function applyStandardRedaction(before, req) {
   const updates = { note_text: '[REDACTED]' };
   if (before.reviewer_notes) updates.reviewer_notes = '[REDACTED]';
 
   const { data: updated, error: updateErr } = await supabase
-    .from('operational_notes').update(updates).eq('id', req.params.id).select().single();
-  if (updateErr) return res.status(500).json({ error: updateErr.message });
+    .from('operational_notes').update(updates).eq('id', before.id).select().single();
+  if (updateErr) return { error: updateErr };
 
-  // Deliberately NOT logging old_note_text here, unlike /correct above —
-  // the entire point of a redaction is removing sensitive content; writing
-  // the real old text into audit_log.details would defeat that. A boolean
-  // marker is enough of an audit trail for "this note was redacted, by
-  // whom, when."
+  // Deliberately NOT logging old_note_text here — the entire point of a
+  // redaction is removing sensitive content; writing the real old text
+  // into audit_log.details would defeat that. A boolean marker is enough
+  // of an audit trail for "this note was redacted, by whom, when."
   await writeAuditLog({
     action: 'operational_notes.corrected',
     entity_type: 'operational_note',
@@ -1052,6 +1019,106 @@ router.post('/api/owner-tenant-notes/:id/redact', requireOwnerTenantNotesRole(..
     details: { redacted: true, reason: 'ccpa_deletion_request', actor_role: req.ownerTenantNotesRole },
   });
 
+  return { updated };
+}
+
+// POST /:id/redact — standard redaction for operational/management_
+// compliance_restricted notes (unchanged behavior), plus the real
+// admin-only disposition flow for legal_privileged notes: designed by
+// Mason in an earlier review round, with one explicit change Peter made on
+// top of it — the determination stays entirely an admin call, no outside
+// attorney sign-off required per request (Mason's original design wanted
+// that; Peter declined it). This endpoint never auto-redacts a
+// legal_privileged note: it requires an admin to submit an explicit
+// disposition every time it's hit for one. There is no third "ambiguous"
+// action — per Mason's design, "unresolved" just means an admin hasn't
+// decided yet, so the note stays untouched until one actually calls this
+// endpoint with a real disposition.
+router.post('/api/owner-tenant-notes/:id/redact', requireOwnerTenantNotesRole(...CORRECTION_ROLES), async (req, res) => {
+  if (!isValidUuid(req.params.id)) return res.status(400).json({ error: 'That id is not valid.' });
+
+  const { data: before, error: beforeErr } = await supabase
+    .from('operational_notes')
+    .select('id, access_tier, property_id, reviewer_notes, subject_type, subject_id')
+    .eq('id', req.params.id).maybeSingle();
+  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
+  if (!before) return res.status(404).json({ error: 'Note not found.' });
+
+  // Same tier-reach check as /:id/review and /:id/correct above — being in
+  // CORRECTION_ROLES does not mean every tier is within THIS viewer's own
+  // reach. For a legal_privileged note this single check IS Mason's "only
+  // admin may act on a deletion/redaction request touching a
+  // legal_privileged note" rule: admin is the only role whose
+  // roleMaxTierRank reaches legal_privileged (Section 1 above), so no
+  // separate admin-only check is needed — same tier-ceiling pattern
+  // already used elsewhere in this file, not a new permission check style.
+  if ((NOTE_TIER_RANK[before.access_tier] || 0) > roleMaxTierRank(req.ownerTenantNotesRole)) {
+    return res.status(403).json({ error: 'Your role cannot redact a note at this access tier.' });
+  }
+
+  if (before.access_tier === 'legal_privileged') {
+    // System-logged automatically every time this endpoint is hit for a
+    // legal_privileged note, regardless of outcome (including a request
+    // that fails the validation below) — records that the automatic
+    // redaction path was bypassed for this note (Mason's design).
+    await writeAuditLog({
+      action: 'operational_notes.ccpa_deletion_blocked_privileged',
+      entity_type: 'operational_note',
+      entity_id: before.id,
+      actor_email: req.user.email,
+      property_id: before.property_id,
+      risk_level: 'medium',
+      details: { note_id: before.id, actor_role: req.ownerTenantNotesRole },
+    });
+
+    if (!(await requireTierAccessAcknowledgment(req, res))) return;
+
+    const { disposition, disposition_notes } = req.body;
+    if (!['hold_exception_applies', 'no_hold_confirmed_safe'].includes(disposition)) {
+      return res.status(400).json({
+        error: "disposition must be 'hold_exception_applies' or 'no_hold_confirmed_safe'.",
+      });
+    }
+    if (typeof disposition_notes !== 'string' || !disposition_notes.trim()) {
+      return res.status(400).json({ error: 'disposition_notes is required and must explain the determination.' });
+    }
+
+    // Human-logged determination — the admin's stated reasoning, never the
+    // note's own privileged text (Mason's design: this record is about the
+    // decision, not a copy of the thing being decided about).
+    await writeAuditLog({
+      action: 'operational_notes.ccpa_deletion_disposition',
+      entity_type: 'operational_note',
+      entity_id: before.id,
+      actor_email: req.user.email,
+      property_id: before.property_id,
+      risk_level: 'medium',
+      details: {
+        note_id: before.id,
+        subject_type: before.subject_type,
+        subject_id: before.subject_id,
+        disposition,
+        disposition_notes: disposition_notes.trim(),
+        actor_role: 'admin',
+      },
+    });
+
+    if (disposition === 'hold_exception_applies') {
+      // Deletion denied — note left completely unchanged.
+      return res.json({ success: true, disposition, note_redacted: false });
+    }
+
+    // no_hold_confirmed_safe — proceed with the same standard redaction
+    // used for other tiers.
+    const { updated, error: redactErr } = await applyStandardRedaction(before, req);
+    if (redactErr) return res.status(500).json({ error: redactErr.message });
+    return res.json({ success: true, disposition, note_redacted: true, note: updated });
+  }
+
+  if (!(await requireTierAccessAcknowledgment(req, res))) return;
+
+  const { updated, error: redactErr } = await applyStandardRedaction(before, req);
+  if (redactErr) return res.status(500).json({ error: redactErr.message });
   return res.json({ success: true, note: updated });
 });
 

@@ -197,6 +197,7 @@ const { GLOBAL_SEARCH_WIDGET_HTML } = require('./lib/global-search-widget');
 const { router: insuranceRouter, internalRouter: insuranceInternalRouter } = require('./insurance/router');
 const { router: securityDepositRouter, internalRouter: securityDepositInternalRouter } = require('./security-deposit/router');
 const { router: maintenanceHistoryRouter, internalRouter: maintenanceHistoryInternalRouter } = require('./maintenance-history/router');
+const { router: ownerTenantNotesRouter } = require('./owner-tenant-notes/router');
 const { router: property360Router } = require('./property-360/router');
 const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = require('./call-stats/router');
 const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter } = require('./content-engine/router');
@@ -734,6 +735,26 @@ app.use(insuranceRouter);
 // team_member_tool_roles for tool='security_deposit'. See
 // security-deposit/router.js and its SPEC.md for the full detail.
 app.use(securityDepositRouter);
+
+// ─── Owner & Tenant Operational Notes section ──────────────────────────────
+// projects/hub/property-360/owner-tenant-operational-notes-SPEC.md. Same
+// shape as Insurance Compliance/Security Deposit above: everyone reaching
+// here is already a confirmed, logged-in hub user (requireLogin already
+// ran). owner-tenant-notes/router.js does its own additional check on top
+// of that — does this specific person hold a role in team_member_tool_roles
+// for tool='owner_tenant_notes' (spec Section 3's role-tier mapping).
+//
+// Mounted BEFORE property360Router, on purpose — same reasoning as
+// insuranceRouter/securityDepositRouter above: this router's own
+// `router.use(attachOwnerTenantNotesRole)` middleware then already runs on
+// every request reaching property-360/router.js's aggregation route,
+// letting that file reuse req.ownerTenantNotesRole in-process (the same
+// pattern it already uses for req.insuranceRole/req.securityDepositRole)
+// instead of calling the gate function a second time. This tool has no
+// standalone page of its own (spec: surfaced only via Property 360's
+// collapsible section) — only its /api/owner-tenant-notes/* routes are
+// ever called, from that page.
+app.use(ownerTenantNotesRouter);
 
 // ─── Property 360 section ───────────────────────────────────────────────
 // property-360-SPEC.md, "Where It Lives": mounted alongside — not inside

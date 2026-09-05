@@ -89,6 +89,10 @@ const {
   attachMaintenanceHistoryRole,
   getMaintenanceHistoryPropertySummary,
 } = require('../maintenance-history/router');
+const {
+  attachOwnerTenantNotesRole,
+  roleHasAnyAccess: ownerTenantNotesRoleHasAnyAccess,
+} = require('../owner-tenant-notes/router');
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const missing = [];
@@ -445,7 +449,14 @@ function severityScore(tier, daysRemaining) {
 // it," per the spec's own "What You'll See" and "World-Class Review"
 // sections) rather than falling back to an arbitrary or alphabetical
 // tie-break once every card's score is equal.
-const BASE_CARD_ORDER = ['insurance', 'security_deposit', 'leadsimple', 'maintenance'];
+// 'owner_tenant_notes' appended at the end, deliberately last and
+// deliberately never scored into needs_attention below (see the card's own
+// fetch site further down) — owner-tenant-operational-notes-SPEC.md
+// Section 7/10: this data must never become a source of urgency/priority
+// signal that could read as nudging staff toward a housing-relevant
+// judgment about a specific tenant. It only ever sorts by this fixed
+// position, same as any other card with no attention items.
+const BASE_CARD_ORDER = ['insurance', 'security_deposit', 'leadsimple', 'maintenance', 'owner_tenant_notes'];
 
 function computeNeedsAttentionAndOrder(cards) {
   const items = [];
@@ -668,6 +679,14 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
   ];
   if (typeof req.insuranceRole === 'undefined') gates.push(runGate(attachInsuranceRole, req));
   if (typeof req.securityDepositRole === 'undefined') gates.push(runGate(attachSecurityDepositRole, req));
+  // ownerTenantNotesRouter is mounted BEFORE property360Router (server.js)
+  // with no path prefix, same as insuranceRouter/securityDepositRouter, so
+  // its own `router.use(attachOwnerTenantNotesRole)` already ran on this
+  // exact request by the time this handler runs — req.ownerTenantNotesRole
+  // is normally already set. Re-run defensively only if it somehow isn't
+  // (e.g. mount-order change), same "undefined check" guard already used
+  // for insurance/security-deposit above.
+  if (typeof req.ownerTenantNotesRole === 'undefined') gates.push(runGate(attachOwnerTenantNotesRole, req));
   await Promise.all(gates);
 
   // ── Per-card data — property-360-SPEC.md's "Partial-failure handling":
@@ -710,6 +729,17 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
           cards.maintenance = { status: 'error' };
         })
     );
+  }
+  // Owner & Tenant Operational Notes — deliberately NOT an async fetch
+  // here. This card carries only an access flag; the actual notes are
+  // lazy-loaded client-side the first time the collapsible section is
+  // opened (same discipline as the Maintenance section's own Snapshot/
+  // Needs Privacy Review subsections — see dashboard/index.html's
+  // loadMaintenanceSnapshot). Also deliberately excluded from
+  // computeNeedsAttentionAndOrder below — see BASE_CARD_ORDER's own
+  // comment for why this data must never feed an urgency signal.
+  if (ownerTenantNotesRoleHasAnyAccess(req.ownerTenantNotesRole)) {
+    cards.owner_tenant_notes = { status: 'ok', data: { role: req.ownerTenantNotesRole } };
   }
   if (LEADSIMPLE_ALLOWED_ROLES.has(req.leadSimpleDelinquencyRole)) {
     fetches.push(

@@ -230,6 +230,20 @@
     .callstats-note { text-align: center; font-size: 12.5px; color: #9ca3af; margin-top: 24px; }
     .error-page { text-align: center; padding: 48px 16px; color: #6b7280; }
 
+    /* ── Owner & Tenant Operational Notes — reuses .claim/.btn/.badge-*/
+       .ack-gate-*/.form-hint from Maintenance History's own Privacy
+       Review UI above (same visual language, not a new component
+       vocabulary), plus one small stacked form variant (.note-form) since
+       note_text needs a full-width textarea the way .grant-form's inline
+       row layout doesn't fit. ─────────────────────────────────────────── */
+    .note-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+    .note-form textarea, .note-form input, .note-form select { font-size: 13px; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-family: inherit; }
+    .note-form textarea { min-height: 60px; resize: vertical; }
+    .note-form-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .note-form-row > * { flex: 1; min-width: 140px; }
+    .note-pending { color: #6b7280; font-style: italic; }
+    .note-warning { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; font-size: 12.5px; padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
+
     /* ── Responsive — same convention insurance/dashboard and
        security-deposit/dashboard already use (@media max-width:600px),
        not a new pattern. ────────────────────────────────────────── */
@@ -1444,6 +1458,324 @@
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Owner & Tenant Operational Notes — owner-tenant-operational-notes-
+    // SPEC.md Section 9's UI item: "a labeled, collapsible section on the
+    // property page (same interaction pattern as 'Needs Privacy Review'
+    // and the Maintenance Snapshot section — click to open, never
+    // force-displayed)." Reuses this page's own existing visual language
+    // (.card/.section-title, details.subsection/summary, .claim/.btn/
+    // .badge-*, .ack-gate-*/.form-hint from the Privacy Review UI above)
+    // rather than inventing new UI language, per the build task's own
+    // instruction.
+    // ────────────────────────────────────────────────────────────────
+    const NOTE_TIER_LABELS = {
+      operational: 'Operational',
+      management_compliance_restricted: 'Management/Compliance-Restricted',
+      legal_privileged: 'Legal/Privileged',
+    };
+    const NOTE_TIER_BADGE_CLASS = {
+      operational: 'badge-blue',
+      management_compliance_restricted: 'badge-amber',
+      legal_privileged: 'badge-red',
+    };
+    const NOTE_SUBJECT_LABELS = { owner: 'Owner', tenant: 'Tenant', property: 'Property (general)' };
+
+    function ownerTenantNotesSectionHtml(card) {
+      if (!card) return ''; // no access at all — no section, no hint it exists
+      return '<div class="card" id="owner-tenant-notes-section">' +
+        '<div class="section-title">Owner &amp; Tenant Operational Notes</div>' +
+        '<p class="sub" style="margin:0 0 4px;">Factual notes about this property, its owner, or a tenant, for staff context. ' +
+        'Never used to make or influence a leasing, screening, renewal, or eviction decision.</p>' +
+        '<details class="subsection" id="own-notes-details">' +
+        '<summary>View &amp; Add Notes</summary>' +
+        '<div class="subsection-body" id="own-notes-body"></div>' +
+        '</details>' +
+        '</div>';
+    }
+
+    function renderNoteTierOptions(canAuthorLegalPrivileged, selected) {
+      var opts = [
+        ['operational', NOTE_TIER_LABELS.operational],
+        ['management_compliance_restricted', NOTE_TIER_LABELS.management_compliance_restricted],
+      ];
+      if (canAuthorLegalPrivileged) opts.push(['legal_privileged', NOTE_TIER_LABELS.legal_privileged]);
+      return opts.map(function (o) {
+        return '<option value="' + o[0] + '"' + (o[0] === selected ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('');
+    }
+
+    function noteFormHtml(me) {
+      return '<form class="note-form" id="own-note-form">' +
+        '<div class="note-form-row">' +
+        '<select name="subject_type" id="own-note-subject-type">' +
+        '<option value="property">' + NOTE_SUBJECT_LABELS.property + '</option>' +
+        '<option value="owner">' + NOTE_SUBJECT_LABELS.owner + '</option>' +
+        '<option value="tenant"' + (me.role === 'maintenance_coordinator' ? ' disabled' : '') + '>' + NOTE_SUBJECT_LABELS.tenant + '</option>' +
+        '</select>' +
+        '<input type="text" name="subject_id" placeholder="Owner or tenant ID (optional, if known)">' +
+        '</div>' +
+        '<div class="note-form-row">' +
+        '<input type="text" name="category" placeholder="Category (optional) — e.g. maintenance_standard, dispute">' +
+        '<select name="access_tier">' + renderNoteTierOptions(me.can_author_legal_privileged, 'operational') + '</select>' +
+        '</div>' +
+        '<textarea name="note_text" placeholder="State the fact objectively — what was said or observed, not a characterization. Example: &quot;Owner asked that vendors call before entering the unit.&quot;" required></textarea>' +
+        (me.role === 'maintenance_coordinator' ? '<div class="form-hint">Your role can only add notes about the owner or the property in general, not about a specific tenant.</div>' : '') +
+        '<div><button type="submit" class="btn-primary">Save Note</button></div>' +
+        '<div id="own-note-form-message"></div>' +
+        '</form>';
+    }
+
+    function renderNoteItem(note, me) {
+      if (note.pending_review) {
+        return '<div class="claim">' +
+          '<div class="claim-text note-pending">' + escapeHtml(note.note_text) + '</div>' +
+          '<div class="claim-meta">' +
+          '<span class="badge ' + (NOTE_TIER_BADGE_CLASS[note.access_tier] || 'badge-gray') + '">' + (NOTE_TIER_LABELS[note.access_tier] || note.access_tier) + '</span>' +
+          '<span>' + formatDate(note.created_at) + '</span>' +
+          '</div></div>';
+      }
+      var subjectLine = NOTE_SUBJECT_LABELS[note.subject_type] || note.subject_type;
+      if (note.subject_name) subjectLine += ': ' + escapeHtml(note.subject_name);
+      return '<div class="claim">' +
+        '<div class="claim-text">' + escapeHtml(note.note_text) + '</div>' +
+        '<div class="claim-meta">' +
+        '<span class="badge ' + (NOTE_TIER_BADGE_CLASS[note.access_tier] || 'badge-gray') + '">' + (NOTE_TIER_LABELS[note.access_tier] || note.access_tier) + '</span>' +
+        '<span>' + subjectLine + '</span>' +
+        (note.category ? '<span class="claim-source">' + escapeHtml(note.category) + '</span>' : '') +
+        '<span>' + formatDate(note.created_at) + '</span>' +
+        (note.flagged_protected_class ? '<span class="badge badge-amber">Under compliance review history</span>' : '') +
+        '</div></div>';
+    }
+
+    function ownTierAckGateHtml(message) {
+      return '<div class="claim">' +
+        '<div class="ack-gate-title">One-time notice — sensitive content</div>' +
+        '<div class="ack-gate-body">' + escapeHtml(message) + '</div>' +
+        '<button class="btn-primary" id="own-tier-ack-btn">I Acknowledge</button>' +
+        '</div>';
+    }
+
+    // Lazy-loaded the first time the section is opened. Re-called after a
+    // successful save, acknowledgment, or review action, so the list
+    // always reflects the server's current view of this viewer's access —
+    // never assembled client-side from a prior response.
+    async function loadOwnerTenantNotes(propertyId, bodyEl, me) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      let res, body;
+      try {
+        res = await fetch('/api/owner-tenant-notes/property/' + encodeURIComponent(propertyId), { credentials: 'include' });
+        body = await res.json();
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load notes right now.</div>';
+        return;
+      }
+      if (res.status === 403 && body && body.error === 'tier_access_acknowledgment_required') {
+        bodyEl.innerHTML = ownTierAckGateHtml(body.message || 'Please acknowledge the access-use notice to continue.');
+        document.getElementById('own-tier-ack-btn').addEventListener('click', async function () {
+          try {
+            const ackRes = await fetch('/api/owner-tenant-notes/tier-access/acknowledge', { method: 'POST', credentials: 'include' });
+            if (!ackRes.ok) { showToast('Could not save acknowledgment.'); return; }
+            loadOwnerTenantNotes(propertyId, bodyEl, me);
+          } catch (e) { showToast('Network error.'); }
+        });
+        return;
+      }
+      if (!res.ok) {
+        bodyEl.innerHTML = '<div class="empty">' + escapeHtml((body && body.error) || 'Couldn\'t load notes right now.') + '</div>';
+        return;
+      }
+
+      const notes = body.notes || [];
+      let html = noteFormHtml(me);
+      html += notes.length
+        ? notes.map(function (n) { return renderNoteItem(n, me); }).join('')
+        : '<div class="empty">No notes on file for this property yet.</div>';
+      // Reviewer-tier roles get a nested "Needs Compliance Review"
+      // subsection, same collapsed-by-default/lazy-load discipline as
+      // every other subsection on this page. Not shown at all to a role
+      // that can't review (me.review_role false) — no hint it exists.
+      if (me.review_role) {
+        html += '<details class="subsection" id="own-notes-review-details">' +
+          '<summary>Needs Compliance Review</summary>' +
+          '<div class="subsection-body" id="own-notes-review-body"></div>' +
+          '</details>';
+      }
+      bodyEl.innerHTML = html;
+
+      document.getElementById('own-note-form').addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const form = e.target;
+        const msgEl = document.getElementById('own-note-form-message');
+        msgEl.innerHTML = '';
+        const payload = {
+          property_id: propertyId,
+          subject_type: form.subject_type.value,
+          subject_id: form.subject_id.value.trim() || null,
+          category: form.category.value.trim() || null,
+          access_tier: form.access_tier.value,
+          note_text: form.note_text.value,
+        };
+        const submitBtn = form.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        try {
+          const saveRes = await fetch('/api/owner-tenant-notes', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const saveBody = await saveRes.json();
+          if (!saveRes.ok) {
+            msgEl.innerHTML = '<div class="empty" style="padding:4px 0;color:#991b1b;">' + escapeHtml(saveBody.error || 'Could not save this note.') + '</div>';
+            submitBtn.disabled = false;
+            return;
+          }
+          showToast('Note saved.');
+          if (saveBody.warnings && saveBody.warnings.derogatory_language) {
+            msgEl.innerHTML = '<div class="note-warning">' + escapeHtml(saveBody.warnings.message) + '</div>';
+          }
+          loadOwnerTenantNotes(propertyId, bodyEl, me);
+        } catch (err) {
+          msgEl.innerHTML = '<div class="empty" style="padding:4px 0;color:#991b1b;">Network error — note was not saved.</div>';
+          submitBtn.disabled = false;
+        }
+      });
+
+      const reviewDetails = document.getElementById('own-notes-review-details');
+      if (reviewDetails) {
+        let reviewLoaded = false;
+        reviewDetails.addEventListener('toggle', function () {
+          if (reviewDetails.open && !reviewLoaded) {
+            reviewLoaded = true;
+            loadOwnerTenantNotesReviewQueue(propertyId, document.getElementById('own-notes-review-body'), bodyEl, me);
+          }
+        });
+      }
+    }
+
+    // Reviewer-facing flagged queue — real content (never a placeholder),
+    // per-property, one item at a time (spec Section 5's own "fast-follow,
+    // not required for v1" on grouped/bulk review). Three disposition
+    // buttons per counsel's exact three-outcome model (spec Section 5's
+    // table) — deliberately not the confirm/correct/reject vocabulary
+    // Maintenance History's own claim review uses.
+    function renderReviewItem(item) {
+      var subjectLine = NOTE_SUBJECT_LABELS[item.subject_type] || item.subject_type;
+      if (item.subject_name) subjectLine += ': ' + escapeHtml(item.subject_name);
+      return '<div class="claim" data-note-id="' + item.id + '">' +
+        '<div class="claim-text">' + escapeHtml(item.note_text) + '</div>' +
+        '<div class="claim-meta">' +
+        '<span class="badge ' + (NOTE_TIER_BADGE_CLASS[item.access_tier] || 'badge-gray') + '">' + (NOTE_TIER_LABELS[item.access_tier] || item.access_tier) + '</span>' +
+        '<span>' + subjectLine + '</span>' +
+        (item.category ? '<span class="claim-source">' + escapeHtml(item.category) + '</span>' : '') +
+        '<span>' + formatDate(item.created_at) + '</span>' +
+        '</div>' +
+        '<div class="claim-actions">' +
+        '<button class="btn btn-confirm" data-action="retained_restricted">Retain Restricted</button>' +
+        '<button class="btn btn-correct" data-action="rephrased_and_released">Rephrase &amp; Release</button>' +
+        '<button class="btn btn-reject" data-action="false_positive_released">False Positive — Release</button>' +
+        '</div>' +
+        '<div class="correct-form" id="rephrase-form-' + item.id + '">' +
+        '<textarea placeholder="Rewrite in operationally-appropriate language" required></textarea>' +
+        '<select><option value="operational">Downgrade to Operational</option><option value="management_compliance_restricted">Keep at Management/Compliance-Restricted</option></select>' +
+        '<button class="btn-primary" data-submit-rephrase="' + item.id + '">Submit</button>' +
+        '</div>' +
+        '</div>';
+    }
+
+    async function submitNoteReview(id, action, extra, statusEl) {
+      try {
+        const res = await fetch('/api/owner-tenant-notes/' + encodeURIComponent(id) + '/review', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ action: action }, extra || {})),
+        });
+        const body = await res.json();
+        if (!res.ok) { showToast(body.error || 'Could not save this review.'); return false; }
+        showToast('Review saved.');
+        return true;
+      } catch (e) {
+        showToast('Network error.');
+        return false;
+      }
+    }
+
+    async function loadOwnerTenantNotesReviewQueue(propertyId, bodyEl, notesBodyEl, me) {
+      bodyEl.innerHTML = '<div class="empty">Loading&hellip;</div>';
+      let res, body;
+      try {
+        res = await fetch('/api/owner-tenant-notes/property/' + encodeURIComponent(propertyId) + '/flagged-queue', { credentials: 'include' });
+        body = await res.json();
+      } catch (e) {
+        bodyEl.innerHTML = '<div class="empty">Couldn\'t load the review queue right now.</div>';
+        return;
+      }
+      if (res.status === 403 && body && body.error === 'tier_access_acknowledgment_required') {
+        bodyEl.innerHTML = ownTierAckGateHtml(body.message || 'Please acknowledge the access-use notice to continue.');
+        document.getElementById('own-tier-ack-btn').addEventListener('click', async function () {
+          try {
+            const ackRes = await fetch('/api/owner-tenant-notes/tier-access/acknowledge', { method: 'POST', credentials: 'include' });
+            if (!ackRes.ok) { showToast('Could not save acknowledgment.'); return; }
+            loadOwnerTenantNotesReviewQueue(propertyId, bodyEl, notesBodyEl, me);
+          } catch (e) { showToast('Network error.'); }
+        });
+        return;
+      }
+      if (!res.ok) {
+        bodyEl.innerHTML = '<div class="empty">' + escapeHtml((body && body.error) || 'Couldn\'t load the review queue right now.') + '</div>';
+        return;
+      }
+      const items = body.items || [];
+      if (!items.length) { bodyEl.innerHTML = '<div class="empty">Nothing needs review on this property right now.</div>'; return; }
+      bodyEl.innerHTML = items.map(renderReviewItem).join('');
+
+      bodyEl.querySelectorAll('.claim[data-note-id]').forEach(function (claimEl) {
+        const id = claimEl.getAttribute('data-note-id');
+        claimEl.querySelectorAll('.claim-actions button').forEach(function (btn) {
+          btn.addEventListener('click', async function () {
+            const action = btn.getAttribute('data-action');
+            if (action === 'rephrased_and_released') {
+              document.getElementById('rephrase-form-' + id).classList.add('visible');
+              return;
+            }
+            btn.disabled = true;
+            const ok = await submitNoteReview(id, action, {});
+            if (ok) loadOwnerTenantNotesReviewQueue(propertyId, bodyEl, notesBodyEl, me);
+            else btn.disabled = false;
+          });
+        });
+        const rephraseForm = document.getElementById('rephrase-form-' + id);
+        const submitBtn = rephraseForm.querySelector('[data-submit-rephrase]');
+        submitBtn.addEventListener('click', async function () {
+          const textarea = rephraseForm.querySelector('textarea');
+          const select = rephraseForm.querySelector('select');
+          if (!textarea.value.trim()) { showToast('Enter the rephrased text first.'); return; }
+          submitBtn.disabled = true;
+          const ok = await submitNoteReview(id, 'rephrased_and_released', { note_text: textarea.value.trim(), access_tier: select.value });
+          if (ok) loadOwnerTenantNotesReviewQueue(propertyId, bodyEl, notesBodyEl, me);
+          else submitBtn.disabled = false;
+        });
+      });
+    }
+
+    function wireOwnerTenantNotesSection(propertyId, data) {
+      const section = document.getElementById('owner-tenant-notes-section');
+      if (!section) return; // no access at all — nothing to wire
+
+      fetch('/api/owner-tenant-notes/auth/me', { credentials: 'include' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (me) {
+          if (!me) return;
+          const details = document.getElementById('own-notes-details');
+          const bodyEl = document.getElementById('own-notes-body');
+          let loaded = false;
+          details.addEventListener('toggle', function () {
+            if (details.open && !loaded) { loaded = true; loadOwnerTenantNotes(propertyId, bodyEl, me); }
+          });
+        })
+        .catch(function () { /* role lookup failed — section stays present but won't load; rest of the page still works */ });
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Whole-property page assembly
     // ────────────────────────────────────────────────────────────────
     function renderProperty(data, propertyId) {
@@ -1464,10 +1796,12 @@
         (cardsHtml ? '<div class="card-grid">' + cardsHtml + '</div>' : '') +
         maintenanceSectionHtml(data.cards.maintenance) +
         (data.maintenance_admin ? '<div class="card" id="admin-section"><div class="section-title">Maintenance History — Users (admin only)</div><div id="users-body"></div></div>' : '') +
+        ownerTenantNotesSectionHtml(data.cards.owner_tenant_notes) +
         (!anyCards ? '<div class="empty">Nothing on file for this property in any tool you have access to yet.</div>' : '') +
         '<div class="callstats-note">Call Stats tracks staff phone activity by pod, not by property, so it isn\'t part of this page.</div>';
 
       wireMaintenanceSection(propertyId, data);
+      wireOwnerTenantNotesSection(propertyId, data);
       pushRecent(data.property);
     }
 

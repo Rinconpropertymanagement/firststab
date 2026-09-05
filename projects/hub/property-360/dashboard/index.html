@@ -1794,9 +1794,13 @@
         renderHeader(data) +
         renderAttentionBanner(data.needs_attention) +
         (cardsHtml ? '<div class="card-grid">' + cardsHtml + '</div>' : '') +
+        // Owner & Tenant Operational Notes placed right after the card-grid
+        // (Insurance/Security Deposit/LeadSimple) and before Maintenance,
+        // per Peter's explicit placement request (2026-09-05) — moved up
+        // from its original position after Maintenance.
+        ownerTenantNotesSectionHtml(data.cards.owner_tenant_notes) +
         maintenanceSectionHtml(data.cards.maintenance) +
         (data.maintenance_admin ? '<div class="card" id="admin-section"><div class="section-title">Maintenance History — Users (admin only)</div><div id="users-body"></div></div>' : '') +
-        ownerTenantNotesSectionHtml(data.cards.owner_tenant_notes) +
         (!anyCards ? '<div class="empty">Nothing on file for this property in any tool you have access to yet.</div>' : '') +
         '<div class="callstats-note">Call Stats tracks staff phone activity by pod, not by property, so it isn\'t part of this page.</div>';
 

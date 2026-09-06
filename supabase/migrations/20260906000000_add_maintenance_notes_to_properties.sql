@@ -1,0 +1,123 @@
+-- ============================================================
+-- Migration: 20260906000000_add_maintenance_notes_to_properties
+-- Created:   2026-09-06
+-- Author:    Neo (database specialist)
+--
+-- Adds one nullable TEXT column to `properties`: a plain mirror of
+-- AppFolio's own property-level maintenance notes field (e.g. "Call Zack
+-- for approval for any work order," owner-provided vendor contacts).
+--
+-- Source: AppFolio's property_directory report, field `maintenance_notes`
+-- — the same nightly report projects/appfolio-sync/sync.js already calls
+-- (REPORT_CONFIG entry #1, POST /api/v2/reports/property_directory.json).
+-- That report already pulls this field; sync.js's buildRow() for this
+-- report just doesn't map it to a column yet. This migration only makes
+-- the column exist — mapping it in sync.js is Q's separate follow-up
+-- step (see hand-off note at the bottom of this file), same split as the
+-- year_built / maintenance_limit precedent this migration follows
+-- (20260828000000_add_year_built_and_maintenance_limit_to_properties.sql).
+--
+-- ============================================================
+-- Why this is a plain field, not a reviewed/flagged one
+-- ============================================================
+--
+-- This column deliberately has NO review-status column, NO flagging
+-- workflow, and NO tiered access — a narrower design than
+-- maintenance_claims uses for AI-extracted vendor-report text. That
+-- narrower design is intentional and Peter-approved, not an oversight:
+--
+--   1. Peter (the business owner) personally read all 194 currently-
+--      populated real values in this AppFolio field and judged them
+--      benign.
+--   2. As a second check, every one of those same 194 values was run
+--      through the same Fair Housing keyword scan maintenance_claims
+--      uses — scanText() in
+--      projects/hub/maintenance-history/lib/protected-class-terms.js
+--      (protected-class-terms-v1, GOVERNANCE.md Rule 9's ten categories
+--      plus the California-specific expansions in
+--      compliance/ventura-county-compliance-kb.json). Zero matches
+--      across all 194 values, run 2026-09-06.
+--   3. Per Peter's explicit decision, this ships as a plain display
+--      field. No flagging column, no review-status workflow, no tiered
+--      access — matching what he approved.
+--
+-- IMPORTANT — what that scan does NOT guarantee, stated plainly for
+-- whoever reads this migration later: the 2026-09-06 scan is a
+-- point-in-time check of the 194 values that existed THEN. It is not a
+-- live or ongoing guarantee. AppFolio is the source of truth for this
+-- text (Rincon does not own or edit it — see the column comment below);
+-- any property manager can change a property's maintenance notes in
+-- AppFolio at any time, and the next nightly sync will overwrite this
+-- column with whatever new text AppFolio has, unscanned. Per Peter's
+-- explicit decision (same paragraph as above), this migration adds NO
+-- enforcement mechanism for future syncs — no re-scan on write, no
+-- trigger, no flagging. If Peter wants ongoing protection against a
+-- future AppFolio edit introducing something like a protected-class
+-- reference into this field, that is a new, separate decision for him to
+-- make later — not something this migration assumes or silently adds.
+--
+-- ============================================================
+-- Column: maintenance_notes
+-- ============================================================
+--
+-- TEXT, nullable, no default, no CHECK constraint — intentionally the
+-- simplest possible column. NULL means AppFolio has no maintenance-notes
+-- value for this property (most properties, per the 194-of-however-many
+-- populated count above) — a normal, expected outcome, not an error
+-- state.
+--
+-- ============================================================
+-- Rule 4 (GOVERNANCE.md) — no new data inventory block needed
+-- ============================================================
+--
+-- Same precedent as year_built/maintenance_limit (20260828000000): this
+-- is an additive nullable column on an already-existing, already-
+-- governed table, not a new table — Rule 4's registration requirement is
+-- for new tables storing personal data. This is not personal data about
+-- a person; it is operational text an owner/PM set about a property
+-- (vendor contacts, approval routing), already reviewed per the "Why
+-- this is a plain field" section above.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist, run before any
+-- migration is handed off for Peter to apply)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. ADD COLUMN IF NOT EXISTS
+--       on one brand-new, nullable column with no default — every
+--       existing row gets NULL; nothing is read, moved, or overwritten.
+--   [x] Does this touch a table other code depends on? Yes — `properties`
+--       is the most-referenced table in this schema. That is exactly why
+--       this migration adds nothing but one nullable column with no
+--       default and touches no existing column or constraint — nothing
+--       already reading or writing `properties` changes behavior. An
+--       existing `SELECT *` caller gains one new NULL-valued column;
+--       nothing breaks by getting an extra column back.
+--   [x] Additive or destructive? Purely additive. No column dropped, no
+--       type changed, no existing constraint tightened, no default that
+--       could alter existing INSERT/UPDATE behavior. RLS is untouched —
+--       already enabled on `properties` (20260626000000); this migration
+--       adds no new policy, so this column is exactly as visible as
+--       every other column on `properties` today. No narrower, separate
+--       policy is added for this field, per Peter's explicit decision
+--       that it ships as visible as the rest of the Maintenance tab.
+--   [x] Tested on a copy of the data first? Not yet — standard practice
+--       before applying to the real database, same as every migration in
+--       this repo. Peter (or whoever applies this) should run it against
+--       a Supabase branch/copy first, same as always.
+-- ============================================================
+
+ALTER TABLE properties
+  ADD COLUMN IF NOT EXISTS maintenance_notes TEXT;
+
+COMMENT ON COLUMN properties.maintenance_notes IS
+  'Plain-text maintenance notes for this property, mirrored from AppFolio''s property_directory report, field maintenance_notes (e.g. "Call Zack for approval for any work order," owner-provided vendor contacts). Read-only mirror: Rincon does not own or edit this text here — any edit happens in AppFolio and lands in this column on the next nightly sync (projects/appfolio-sync/sync.js), which overwrites whatever was here before. NULL means AppFolio has no value for this property. Fair Housing note, stated plainly for whoever reads this later: on 2026-09-06, all 194 populated values in this field were scanned against the same Fair Housing keyword list maintenance_claims uses (scanText() in projects/hub/maintenance-history/lib/protected-class-terms.js, protected-class-terms-v1) with ZERO matches, and Peter personally reviewed all 194 and judged them benign. That is a point-in-time result for the values that existed on that date — it is NOT a live or ongoing guarantee. This column has no review-status workflow, no flagging, and no re-scan on future syncs (a deliberate, Peter-approved simplification, not an oversight); AppFolio content can change on any future sync, and whatever new text AppFolio sends will land here unscanned.';
+
+
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE properties DROP COLUMN IF EXISTS maintenance_notes;
+--
+-- ============================================================

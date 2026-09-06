@@ -376,8 +376,25 @@ async function fetchMaintenanceCard(req) {
   }
   // getMaintenanceHistoryPropertySummary always returns an object (never
   // null) with its own has_data boolean — true only once at least one
-  // maintenance_requests row exists for this property's units.
-  return body && body.has_data === false ? { status: 'no_data' } : { status: 'ok', data: body };
+  // maintenance_requests row exists for this property's units (a real
+  // ticket, real AppFolio actuals, or real snapshot spend — see that
+  // function's own has_data comment). has_data was never designed to
+  // reflect maintenance_notes, though — that's AppFolio's own separate
+  // property-level notes field (supabase/migrations/20260906000000_
+  // add_maintenance_notes_to_properties.sql), a plain passthrough with no
+  // relationship to ticket/spend activity. Without this check, a property
+  // with a real note on file but genuinely zero tickets/actuals/snapshot
+  // spend collapsed to `no_data` below and the note never reached the
+  // page at all, even though it's real, present data. `status: 'ok'` here
+  // (with the rest of the body honestly empty/zero) is exactly what
+  // already makes renderMaintenancePieChart (dashboard/index.html) render
+  // the notes block standalone with no chart beside it — see that
+  // function's own "No spend data to chart" comment — so no frontend
+  // change is needed to show it once this card stops being collapsed.
+  if (body && body.has_data === false && !body.maintenance_notes) {
+    return { status: 'no_data' };
+  }
+  return { status: 'ok', data: body };
 }
 
 // LeadSimple's card is a plain read of the nightly-synced table

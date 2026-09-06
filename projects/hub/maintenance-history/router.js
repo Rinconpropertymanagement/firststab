@@ -1174,7 +1174,7 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   const { data: property, error: propErr } = await supabase
     .from('properties')
-    .select('id, name, address, city, appfolio_id')
+    .select('id, name, address, city, appfolio_id, maintenance_notes')
     .eq('id', propertyId)
     .maybeSingle();
   if (propErr) return res.status(500).json({ error: propErr.message });
@@ -1395,6 +1395,18 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   return res.json({
     property: { id: property.id, name: property.name, address: property.address, city: property.city },
+    // Plain mirror of AppFolio's own property-level maintenance-notes
+    // field (supabase/migrations/20260906000000_add_maintenance_notes_
+    // to_properties.sql) — a read-only passthrough, not derived from
+    // any of the maintenance/spend data above. Null/absent for most
+    // properties (194 of 379 populated as of the migration's own
+    // Fair-Housing-scan date) — left as a plain null, same "always
+    // present, null/omitted-in-spirit when there's nothing yet"
+    // convention as most_recent_vendor_name above, not a gated field
+    // like flagged_review_count below. No review-status/flagging here
+    // by design — see that migration's own "Why this is a plain field"
+    // section.
+    maintenance_notes: property.maintenance_notes || null,
     // Real data exists if ANY source has it — a real Latchel-ticket row,
     // real AppFolio actual-spend tracking for this property (see the
     // appfolioMaintenanceSpend comment above; hasAppfolioActualData is

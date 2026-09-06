@@ -110,6 +110,22 @@ const REPORT_CONFIG = [
         const parsedLimit = parseFloat(row.maintenance_limit);
         if (Number.isFinite(parsedLimit)) built.maintenance_limit = parsedLimit;
       }
+
+      // maintenance_notes — plain read-only mirror of AppFolio's own field
+      // (supabase/migrations/20260906000000_add_maintenance_notes_to_
+      // properties.sql; see that file for the Fair Housing review history
+      // and Peter's explicit decision not to add a review-status/flagging
+      // workflow). Same omit-when-absent rule as jurisdiction_county/
+      // year_built above — never send null, which would clear a
+      // previously-synced value.
+      //
+      // HOUSING-DECISION FIREWALL — do not remove this comment when editing
+      // this line. properties.maintenance_notes must never be joined,
+      // foreign-keyed, or referenced by any leasing, screening, delinquency,
+      // renewal, eviction, or security-deposit code path, now or in any
+      // future change. It is a read-only, unscreened-on-an-ongoing-basis
+      // display field only.
+      if (row.maintenance_notes) built.maintenance_notes = row.maintenance_notes;
       return built;
     },
   },
@@ -1277,6 +1293,12 @@ async function main() {
         const zeroLimit = mapped.filter(r => r.maintenance_limit === 0);
         console.log(`[${reportName}] DRY RUN — ${withYearBuilt.length} of ${mapped.length} rows include year_built.`);
         console.log(`[${reportName}] DRY RUN — ${withLimit.length} of ${mapped.length} rows include maintenance_limit (${zeroLimit.length} of those are a genuine $0.00, preserved as 0, not null).`);
+        // maintenance_notes (supabase/migrations/20260906000000_...): confirm
+        // mapped count for Q's build verification, cross-checked against
+        // compliance/appfolio-maintenance-notes-full-export.md's 194-value
+        // manual export.
+        const withMaintenanceNotes = mapped.filter(r => r.maintenance_notes);
+        console.log(`[${reportName}] DRY RUN — ${withMaintenanceNotes.length} of ${mapped.length} rows include maintenance_notes.`);
       }
       console.log('');
       summary.push({ reportName, table, status: 'DRY_RUN', rowsMapped: mapped.length });

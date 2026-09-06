@@ -426,20 +426,55 @@ Flags:
                                 mailbox (a bounded smoke test). Does NOT
                                 mark a mailbox complete, so a later run
                                 without this flag continues from there.
+  --only <mailbox-label>       Restrict this run to one mailbox (e.g.
+                                "faria" or "solimar", case-insensitive) —
+                                an intersection with the hardcoded
+                                MISSIVE_ALLOWED_TEAM_IDS allowlist, never
+                                an addition to it. Lets a second, separately
+                                invoked process (with --use-secondary-token)
+                                run the other mailbox in true parallel on
+                                its own Missive API token / rate limit.
+  --use-secondary-token        Use MISSIVE_API_TOKEN_SECONDARY instead of
+                                MISSIVE_API_TOKEN for this process — a
+                                second, independently-scoped Missive
+                                account/token, for running one mailbox
+                                fully in parallel with another process
+                                handling the other mailbox on the primary
+                                token.
   --help                        Show this help and exit.
 
 With no flags: runs for real, for as long as it takes, against both
-allowlisted mailboxes, until each reaches the true end of its history.
+allowlisted mailboxes, sequentially on one token, until each reaches the
+true end of its history.
+
+Running two mailboxes in parallel on two tokens:
+  node backfill-missive-history.js --only faria
+  node backfill-missive-history.js --only solimar --use-secondary-token
 `.trim());
 }
 
 function parseArgs(argv) {
-  const args = { dryRun: false, maxConversations: null, help: false };
+  const args = { dryRun: false, maxConversations: null, help: false, only: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--max-conversations') args.maxConversations = Number(argv[++i]);
+    // --only restricts this run to a single mailbox — added so two
+    // separate backfill processes, each with their own Missive API token
+    // (a second, narrowly-scoped Observer account, same governance model
+    // as the primary one), can run Faria and Solimar truly in parallel
+    // instead of the default single-token sequential order. This can only
+    // NARROW MISSIVE_ALLOWED_TEAM_IDS (main() intersects args.only against
+    // that hardcoded allowlist) — it has no way to add a team ID that
+    // constant doesn't already contain, so it cannot be used to widen
+    // scope beyond what governance already approved.
+    else if (a === '--only') args.only = String(argv[++i] || '').trim().toLowerCase();
+    // Paired with --only in practice (one process per mailbox, one token
+    // per process) but kept as an independent flag — remapped into
+    // MISSIVE_API_TOKEN itself in main(), so lib/missive-connector.js
+    // needs no changes at all.
+    else if (a === '--use-secondary-token') args.useSecondaryToken = true;
   }
   return args;
 }
@@ -952,10 +987,40 @@ async function main() {
     process.exit(1);
   }
 
+  // --only restricts MISSIVE_ALLOWED_TEAM_IDS down to the one matching
+  // mailbox for this run — an intersection with the existing hardcoded
+  // allowlist, never an addition to it, so this flag has no way to reach
+  // a team ID that constant doesn't already contain. Two independent
+  // invocations (one per mailbox, one per Missive API token) can then run
+  // truly in parallel instead of the default single-token sequential
+  // order, each still bound by the same governance allowlist.
+  let mailboxTeamIds = MISSIVE_ALLOWED_TEAM_IDS;
+  if (args.only) {
+    const matchedId = Object.keys(MAILBOX_LABELS).find(
+      (id) => MAILBOX_LABELS[id].toLowerCase() === args.only
+    );
+    if (!matchedId) {
+      console.error(`Invalid --only value "${args.only}". Must be one of: ${Object.values(MAILBOX_LABELS).join(', ')}.`);
+      process.exit(1);
+    }
+    mailboxTeamIds = [matchedId];
+  }
+
   const missing = [];
   if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
-  if (!process.env.MISSIVE_API_TOKEN) missing.push('MISSIVE_API_TOKEN');
+  if (args.useSecondaryToken) {
+    // A second, independently-scoped Missive account/token (its own
+    // Observer-only access, added the same narrow way the primary
+    // account was) — lets one mailbox run on a completely separate rate
+    // limit budget from the other, in parallel. Remapped into
+    // MISSIVE_API_TOKEN itself, read here, so lib/missive-connector.js
+    // needs zero changes and keeps its one-token-per-process simplicity.
+    if (!process.env.MISSIVE_API_TOKEN_SECONDARY) missing.push('MISSIVE_API_TOKEN_SECONDARY');
+    else process.env.MISSIVE_API_TOKEN = process.env.MISSIVE_API_TOKEN_SECONDARY;
+  } else if (!process.env.MISSIVE_API_TOKEN) {
+    missing.push('MISSIVE_API_TOKEN');
+  }
   if (missing.length > 0) {
     console.error(`Missing environment variables: ${missing.join(', ')}. See .env.example.`);
     process.exit(1);
@@ -973,7 +1038,7 @@ async function main() {
 
   const startedAt = ts();
   console.log(`[${startedAt}] Missive historical backfill starting. Dry run: ${args.dryRun}.${args.maxConversations != null ? ` Max conversations per mailbox: ${args.maxConversations} (testing limit).` : ''} Batch ID: ${batchId}.`);
-  console.log(`[${startedAt}] Pacing: ~${Math.round(60000 / REQUEST_DELAY_MS * 10) / 10} req/min (${REQUEST_DELAY_MS}ms between Missive requests). Mailboxes: ${MISSIVE_ALLOWED_TEAM_IDS.map((id) => MAILBOX_LABELS[id] || id).join(', ')}.`);
+  console.log(`[${startedAt}] Pacing: ~${Math.round(60000 / REQUEST_DELAY_MS * 10) / 10} req/min (${REQUEST_DELAY_MS}ms between Missive requests). Mailboxes: ${mailboxTeamIds.map((id) => MAILBOX_LABELS[id] || id).join(', ')}.${args.useSecondaryToken ? ' (secondary token)' : ''}`);
 
   // 'started' — one row, once, only for a real (non-dry-run) run. Dry runs
   // write ZERO audit rows of any kind, batch-level included (see file
@@ -1001,7 +1066,7 @@ async function main() {
   }
 
   const results = [];
-  for (const teamId of MISSIVE_ALLOWED_TEAM_IDS) {
+  for (const teamId of mailboxTeamIds) {
     try {
       const result = await backfillMailbox(teamId, { dryRun: args.dryRun, maxConversations: args.maxConversations, batchId });
       results.push(result);

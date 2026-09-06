@@ -21,6 +21,14 @@
  * omissions (no FK between the two tables, no CHECK on mailbox_key, etc.)
  * that are easy to "fix" by mistake without that context.
  *
+ * REFACTOR (backfill build): the allowlist check (assertAllowedTeam), the
+ * HTML-to-text conversion (htmlToPlainText), storeMessage, and the
+ * missive_sync_state/audit_log helpers moved verbatim into
+ * ./lib/shared.js, so the one-time historical backfill
+ * (backfill-missive-history.js) can reuse them instead of carrying a second
+ * copy that could drift from this one. No behavior change in this file —
+ * see shared.js's own header for the full reasoning on what moved and why.
+ *
  * ============================================================
  * SCOPE — READ BEFORE EXTENDING
  * ============================================================
@@ -46,10 +54,20 @@
 
 const express = require('express');
 const crypto = require('crypto');
-const cheerio = require('cheerio');
-const { createClient } = require('@supabase/supabase-js');
 
 const missive = require('./lib/missive-connector');
+const {
+  MISSIVE_ALLOWED_TEAM_IDS,
+  assertAllowedTeam,
+  missiveTimestampToMillis,
+  missiveTimestampToISO,
+  htmlToPlainText,
+  getSyncState,
+  upsertSyncState,
+  getExistingMessageIds,
+  writeAuditLog,
+  storeMessage,
+} = require('./lib/shared');
 
 // SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are already required, hard-checked
 // env vars for this Hub process (maintenance-history/router.js, loaded
@@ -58,44 +76,14 @@ const missive = require('./lib/missive-connector');
 // two variables. MISSIVE_API_TOKEN is checked lazily, inside
 // missive-connector.js, the same reasoning latchel-connector.js gives for
 // LATCHEL_API_KEY: a missing Missive credential should only fail the one
-// route that needs it, not take down the whole Hub.
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-// ─── Scope lock — Asimov's governance precheck, Finding 5 ────────────────
-// "The two team IDs approved for this build (Faria, Solimar) must be
-// hardcoded/allowlisted constants in the connector code, checked before any
-// message body is fetched (not just before storage) — fail closed on
-// anything outside the allowlist. Any expansion... requires a fresh Asimov
-// and Mason pass before deployment — not a config edit." Matches the values
-// named in the migration's own SCOPE LOCK section.
-const MISSIVE_ALLOWED_TEAM_IDS = [
-  'b56138a6-f464-43db-a861-9bd79b07c8df', // Faria
-  'ab0d3661-fb4c-498c-a311-94c6978530d6', // Solimar
-];
-
-// Governance requirement, enforced in code, not just by which values this
-// file happens to loop over today: throws if a caller ever tries to fetch a
-// message body for a team ID outside the allowlist above. Called from
-// syncConversationMessages() immediately before the one call in this file
-// that fetches a full message body (missive.getMessage()) — not only before
-// the storeMessage() write further down. Every call site today passes a
-// teamId that already came from iterating MISSIVE_ALLOWED_TEAM_IDS itself,
-// so this should never actually throw in current code — it exists as
-// defense-in-depth against a future refactor that widens how conversations
-// get discovered (e.g. an "all teams" listing) without updating this check,
-// which is exactly the scope-creep scenario Asimov's finding is guarding
-// against.
-function assertAllowedTeam(teamId, context) {
-  if (!MISSIVE_ALLOWED_TEAM_IDS.includes(teamId)) {
-    throw new Error(
-      `Refusing to fetch ${context} — team ID ${teamId} is not in MISSIVE_ALLOWED_TEAM_IDS. ` +
-      'Expanding this connector\'s scope requires a fresh Asimov/Mason governance review, not a code edit.'
-    );
-  }
-}
+// route that needs it, not take down the whole Hub. No local `supabase`
+// client in this file anymore — every Supabase read/write this route makes
+// now goes through lib/shared.js's own client (getSyncState/
+// upsertSyncState/getExistingMessageIds/storeMessage/writeAuditLog).
+//
+// MISSIVE_ALLOWED_TEAM_IDS and assertAllowedTeam — the governance scope
+// lock (Asimov's precheck, Finding 5) — now live in ./lib/shared.js, shared
+// with backfill-missive-history.js. See that file's header for why.
 
 // ─── Bounded-pagination backstops — plan Section 2.3, step 3: "page
 // backward... until reaching the previous watermark or a sane backstop...
@@ -105,185 +93,13 @@ function assertAllowedTeam(teamId, context) {
 const MAX_CONVERSATION_PAGES_PER_RUN = 10;
 const MAX_MESSAGE_PAGES_PER_CONVERSATION = 5;
 
-// Cap applied to body_html ONLY at parse time (see htmlToPlainText below) —
-// never before the verbatim missive_message_intake.body_html write itself.
-// 2MB of HTML is already an enormous single email; this exists to bound
-// cheerio's parse cost against a pathological or adversarial document, per
-// the build task's explicit "cap body_html size before parsing" instruction.
-const MAX_HTML_CHARS_TO_PARSE = 2_000_000;
-
-// ─── Missive timestamp handling ──────────────────────────────────────────
-// Oracle's connection plan verified every field name Missive's docs
-// document (last_activity_at, delivered_at, etc.) but never pinned down
-// whether those values come back as Unix seconds or ISO-8601 strings — a
-// real, flagged unknown (see missive-connector.js's own header note #3/#4
-// for the same category of caveat). Handled defensively here rather than
-// assumed: accepts either shape. FLAG FOR REAL-DATA VERIFICATION: confirm
-// against Peter's first manual trigger which shape Missive actually returns
-// (a sanity check is one console.log of a raw conversation object away).
-function missiveTimestampToMillis(value) {
-  if (value == null) return null;
-  if (typeof value === 'number') return value < 1e12 ? value * 1000 : value; // seconds vs. already-ms
-  const ms = new Date(value).getTime();
-  return Number.isNaN(ms) ? null : ms;
-}
-function missiveTimestampToISO(value) {
-  const ms = missiveTimestampToMillis(value);
-  return ms == null ? null : new Date(ms).toISOString();
-}
-
-// ─── HTML → plain text (plan Section 3.5) ────────────────────────────────
-// Static parsing only — cheerio parses a string into a DOM-like tree; it
-// never executes scripts, never renders, and never makes a network request
-// of its own, so this is safe to run against untrusted HTML by
-// construction, not because of any option set here. Size-capped before
-// parsing (see MAX_HTML_CHARS_TO_PARSE above), independent of whatever
-// length body_html itself was stored at.
-function htmlToPlainText(html) {
-  const capped = html.length > MAX_HTML_CHARS_TO_PARSE ? html.slice(0, MAX_HTML_CHARS_TO_PARSE) : html;
-  const $ = cheerio.load(capped);
-  $('script, style').remove(); // never let their contents leak into extracted text
-
-  // cheerio's .text() concatenates element boundaries with no whitespace of
-  // its own — e.g. "<div>Hello</div><div>World</div>" collapses to
-  // "HelloWorld", not "Hello World". Insert an explicit line break at every
-  // block-ish boundary first so words that were visually separated in the
-  // source HTML stay separated in the extracted text. This directly matters
-  // for whatever future keyword filter eventually reads body_text (plan
-  // Section 3.5's own flagged concern: "a keyword split across nested tags"
-  // defeating a scan) — not exercised by this file itself, since this file
-  // never calls that filter, but worth getting right at the source.
-  $('br').replaceWith('\n');
-  $('p, div, tr, li, h1, h2, h3, h4, h5, h6, blockquote').each((_, el) => {
-    $(el).after('\n');
-  });
-
-  return $.root().text()
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-// ─── missive_sync_state helpers ───────────────────────────────────────────
-async function getSyncState(mailboxKey) {
-  const { data, error } = await supabase
-    .from('missive_sync_state')
-    .select('mailbox_key, last_synced_conversation_id, last_synced_activity_at')
-    .eq('mailbox_key', mailboxKey)
-    .maybeSingle();
-  if (error) throw error;
-  return data; // null on a mailbox's first-ever run
-}
-
-// Only ever writes the specific fields passed in `fields` — on conflict,
-// every OTHER column keeps its previously stored value (Supabase upsert
-// semantics), which is what lets the error path below record a failed run
-// without touching a watermark it never actually advanced.
-async function upsertSyncState(mailboxKey, fields) {
-  const { error } = await supabase
-    .from('missive_sync_state')
-    .upsert({ mailbox_key: mailboxKey, ...fields }, { onConflict: 'mailbox_key' });
-  if (error) throw error;
-}
-
-// ─── Storing one message ──────────────────────────────────────────────────
-// Implements plan Section 2.3 steps 6-7 in order: verbatim write commits
-// first (the actual "Rincon receives and stores" step), THEN the per-
-// message audit_log row, THEN — only after both have committed — the
-// body_text derivation. Returns the new/existing row's id.
-async function storeMessage({ mailboxKey, conversationId, message }) {
-  const bodyHtml = typeof message.body === 'string' ? message.body : null;
-
-  // Step 6 — verbatim, untouched, before anything else. Upsert on
-  // missive_message_id (the schema's own idempotency key) so a re-fetch of
-  // an already-stored message after a crash mid-run is a safe no-op, not a
-  // duplicate row (migration comment, plan Section 2.3 step 8).
-  const { data: row, error: insertErr } = await supabase
-    .from('missive_message_intake')
-    .upsert({
-      mailbox_key: mailboxKey,
-      missive_conversation_id: String(conversationId),
-      missive_message_id: String(message.id),
-      email_message_id: message.email_message_id || null,
-      subject: message.subject || null,
-      from_address: (message.from_field && message.from_field.address) || null,
-      to_addresses: message.to_fields || null,
-      cc_addresses: message.cc_fields || null,
-      bcc_addresses: message.bcc_fields || null,
-      delivered_at: missiveTimestampToISO(message.delivered_at),
-      body_html: bodyHtml,
-    }, { onConflict: 'missive_message_id' })
-    .select('id')
-    .single();
-  if (insertErr) throw insertErr;
-
-  // Asimov's governance precheck, Finding 4 — one audit_log row PER
-  // MESSAGE, in addition to (not instead of) the per-run summary row
-  // further down. Direct insert, not a shared writeAuditLog() helper: this
-  // codebase's existing writeAuditLog() (maintenance-history/router.js)
-  // hardcodes actor_type: 'human', which is wrong here — this is a
-  // system-triggered write with no human in the loop. Same direct-insert
-  // pattern maintenance-history/router.js's safeTicketTitle() already uses
-  // for its own actor_type: 'system' audit rows. Structural metadata only
-  // in `details` — never body/subject/addresses, per the task's explicit
-  // instruction and this table's own Rule 4 sensitivity classification.
-  const { error: auditErr } = await supabase.from('audit_log').insert({
-    action: 'missive_message_intake.stored',
-    entity_type: 'missive_message',
-    entity_id: row.id,
-    actor_type: 'system',
-    actor_id: 'email-intake-missive-sync',
-    privacy_category: 'collection',
-    risk_level: 'low',
-    details: {
-      mailbox_key: mailboxKey,
-      missive_conversation_id: String(conversationId),
-      pipeline_status: 'pending',
-    },
-  });
-  if (auditErr) {
-    console.error(`[email-intake] audit_log insert failed for missive_message_intake.stored (row ${row.id}):`, auditErr.message);
-  }
-
-  // Step 7 — only after the row above has committed. Never the only copy
-  // kept; body_html remains the system of record (migration column
-  // comment). A body_text failure here is logged and swallowed, not
-  // rethrown — the row this message needed to land in (counsel's Section 5
-  // requirement) already succeeded; a stalled plain-text derivation is a
-  // lesser, recoverable problem, not a reason to fail the whole message.
-  if (bodyHtml) {
-    let bodyText;
-    try {
-      bodyText = htmlToPlainText(bodyHtml);
-    } catch (err) {
-      console.error(`[email-intake] HTML-to-text conversion failed for message row ${row.id}:`, err.message);
-      return row.id;
-    }
-    const { error: updateErr } = await supabase
-      .from('missive_message_intake')
-      .update({ body_text: bodyText })
-      .eq('id', row.id);
-    if (updateErr) {
-      console.error(`[email-intake] body_text update failed for message row ${row.id}:`, updateErr.message);
-    }
-  }
-
-  return row.id;
-}
-
 // ─── Syncing one conversation's messages ─────────────────────────────────
 // Per-thread "how far have we synced" is tracked implicitly by which
 // missive_message_id values already exist for this conversation (plan
 // Section 2.4 — "no separate column needed"), not a second bookkeeping
 // table.
 async function syncConversationMessages({ mailboxKey, teamId, conversationId }) {
-  const { data: existingRows, error: existingErr } = await supabase
-    .from('missive_message_intake')
-    .select('missive_message_id')
-    .eq('missive_conversation_id', String(conversationId));
-  if (existingErr) throw existingErr;
-  const existingIds = new Set((existingRows || []).map(r => r.missive_message_id));
+  const existingIds = await getExistingMessageIds(conversationId);
 
   let stored = 0;
   let until = null;
@@ -454,20 +270,18 @@ async function runMissiveSync() {
 
   // Asimov's Finding 4 — the per-run summary row, IN ADDITION TO the
   // per-message rows above, not instead of them. Counts only, per the
-  // task's instruction and this codebase's Rule 1 convention.
-  const { error: auditErr } = await supabase.from('audit_log').insert({
+  // task's instruction and this codebase's Rule 1 convention. Uses
+  // lib/shared.js's writeAuditLog now (logs+swallows its own error
+  // internally, same as the direct-insert version this replaced).
+  await writeAuditLog({
     action: 'email_intake.missive_sync_run',
     entity_type: 'email_intake_sync_run',
     entity_id: crypto.randomUUID(), // no natural entity for a whole run — same convention as insurance/router.js's batch-import summary task (entity_id: crypto.randomUUID())
-    actor_type: 'system',
     actor_id: 'email-intake-missive-sync',
     privacy_category: 'collection',
     risk_level: 'low',
     details: summary,
   });
-  if (auditErr) {
-    console.error('[email-intake] audit_log insert failed for email_intake.missive_sync_run:', auditErr.message);
-  }
 
   return summary;
 }

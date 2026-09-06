@@ -270,29 +270,128 @@
 --                         (maintenance_claims, operational_notes) only
 --                         holds it after a content check has already
 --                         run; this table holds it before.
---   retention_policy:    PLACEHOLDER pending Mason — same explicitly-
---                         allowed placeholder pattern as
---                         maintenance_claims, operational_notes,
---                         security_deposit_cases, and b2_photo_folders
---                         before Mason set an actual figure for each.
---                         Stated explicitly, not left implicit: this
---                         placeholder is a HARDER open item here than
---                         for those other tables, because retention on
---                         this table must interact with the
---                         privilege/legal-hold layer the existing
---                         filter already recognizes (privilege-
---                         filter.js's legalHoldTag) — a thread HELD for
---                         litigation or attorney-client privilege may
---                         need legal-hold retention (i.e., do not
---                         delete on the normal clock at all) rather
---                         than whatever ordinary figure Mason sets for
---                         routine correspondence. Do NOT default this
---                         table to maintenance_claims' or
---                         operational_notes' eventual retention figure
---                         when Mason sets one for those — this table's
---                         number, if any single number even applies
---                         uniformly, is Mason's own future decision,
---                         informed by the legal-hold interaction above.
+--   retention_policy:    SET BY MASON (legal review), 2026-09-05 — real
+--                         policy, replacing the prior placeholder, ahead
+--                         of the ~47,000-message historical backfill
+--                         (May 2024-present) about to land in this
+--                         table. A flat, single retention period was
+--                         considered and rejected for this table
+--                         specifically (see reasoning below); the policy
+--                         is instead GATED on the still-unbuilt Stage
+--                         0/1/2 filter (privilege-filter.js /
+--                         fair-housing-filter.js), because this table
+--                         cannot currently tell ordinary correspondence
+--                         apart from a Tier 2 HELD thread (privilege-
+--                         filter.js's term for privileged/litigation-
+--                         relevant content pulled from normal
+--                         processing) — nothing has run the filter yet,
+--                         and the entire 47,000-message backfill will
+--                         land as pipeline_status = 'pending'.
+--
+--                         RULE 1 — WHILE pipeline_status = 'pending':
+--                         no row may be deleted for age or any other
+--                         retention reason (a valid, individually-
+--                         actioned CCPA deletion request is the one
+--                         exception — see the amended ccpa_deletable
+--                         note below, which carries the same gate).
+--                         This is a real, concrete rule, not "no policy
+--                         yet": an age-based deletion clock applied to
+--                         unscreened correspondence is only "safe
+--                         because nothing is being screened or deleted
+--                         yet anyway" for as long as nobody actually
+--                         builds the deletion job — this rule makes that
+--                         explicit and enforceable instead of relying on
+--                         that never happening by accident.
+--
+--                         RULE 2 — ONCE pipeline_status = 'processed'
+--                         for a given row (the future filter has
+--                         actually run against it) AND that row's
+--                         filter outcome (held / tagged / tier) is
+--                         available to check (see PREREQUISITE below):
+--                           - Tier 2 HELD (layer-3 staff legal-hold tag,
+--                             law-firm domain, or HOLD_TERMS keyword
+--                             match anywhere in the thread) -> LEGAL
+--                             HOLD. No deletion clock at all — retained
+--                             until an attorney affirmatively releases
+--                             the hold. Mirrors the filter's own "held"
+--                             semantics (pulled from normal processing
+--                             for a human) and counsel's Section 8
+--                             framework of tying retention to continued
+--                             legal relevance rather than a fixed date
+--                             once content is known to be legally
+--                             significant.
+--                           - Everything else (ordinary correspondence,
+--                             and Tier 1 TAG/regulatory-matter threads,
+--                             which are expressly NOT held) -> 4 years
+--                             from delivered_at, then eligible for
+--                             deletion. This 4-year figure is an
+--                             independent decision for THIS table only —
+--                             anchored to California's 4-year statute of
+--                             limitations for written contracts (Code of
+--                             Civil Procedure Section 337), the most
+--                             relevant available benchmark for ordinary
+--                             landlord-tenant correspondence, with rough
+--                             allowance for a FEHA housing-discrimination
+--                             claim's combined administrative-complaint-
+--                             plus-civil-action window (Gov. Code Section
+--                             12960 et seq.). Deliberately NOT copied
+--                             from, and not to be overwritten by,
+--                             whatever figure Mason sets later for
+--                             maintenance_claims or operational_notes —
+--                             per this file's own prior instruction,
+--                             this table's number is its own decision,
+--                             and the above is it.
+--
+--                         PREREQUISITE — stated so it cannot be missed
+--                         later: this table has NO column recording a
+--                         row's filter outcome once pipeline_status
+--                         flips to 'processed' — that column only
+--                         records that the filter ran, not what it
+--                         found (see the pipeline_status column comment
+--                         below; the classification itself is designed
+--                         to live downstream, and HELD threads are, by
+--                         the filter's own design, exactly the ones
+--                         maintenance_email_context never stores at
+--                         all). Before any age-based deletion job is
+--                         ever built against this table, it must be able
+--                         to answer, per row, "was this Tier 2 HELD" —
+--                         either via a new column on this table (a
+--                         held/tier flag; Neo's call, not added by this
+--                         migration) or a reliable join to wherever the
+--                         filter actually records its output. Until that
+--                         mechanism exists, RULE 1 continues to apply
+--                         even to 'processed' rows — "processed" alone
+--                         must never be read as "safe to delete on the
+--                         age clock."
+--
+--                         SEPARATE LIMITATION, not solved by the above:
+--                         the automated filter (domain/keyword matching)
+--                         is necessary but not sufficient for a real
+--                         litigation hold. If Rincon has actual notice
+--                         of, or reasonably anticipates, litigation or a
+--                         regulatory complaint (Fair Housing or
+--                         otherwise) touching specific tenants, units, or
+--                         matters, a human-issued litigation hold on
+--                         every potentially-relevant row is required
+--                         regardless of what the automated filter
+--                         tagged — the filter catches known keyword/
+--                         domain patterns, not "everything a reasonable
+--                         person would anticipate is discoverable."
+--                         Standing operational obligation; a
+--                         retention_policy field cannot satisfy it by
+--                         itself.
+--
+--                         DOES THIS NEED TO BE REVISITED once the filter
+--                         is actually built? No — as a legal matter this
+--                         policy already accounts for that transition
+--                         and does not need to be reopened. What happens
+--                         at that time is engineering, not a new legal
+--                         decision: (1) the filter must actually run
+--                         against all 47,000 backfilled messages, not
+--                         just new arrivals, (2) its held/tier output
+--                         must land somewhere queryable per the
+--                         PREREQUISITE above, and only then (3) may an
+--                         actual age-based deletion job be built and run.
 --   ccpa_exportable:     TRUE.
 --   ccpa_deletable:      TRUE, via the same targeted-redaction
 --                         convention as maintenance_claims and
@@ -325,6 +424,44 @@
 --                         several people across three different address
 --                         fields at once. Not solved here, not silently
 --                         ignored either.
+--
+--                         AMENDED BY MASON, 2026-09-05, same pass as the
+--                         retention_policy note above — this "redact on
+--                         any valid CCPA request" convention needs the
+--                         identical gate applied to it, for the same
+--                         reason: while pipeline_status = 'pending' for
+--                         a row, this table cannot yet tell whether that
+--                         row is Tier 2 HELD (privileged / litigation-
+--                         relevant). Redacting body_html/body_text on a
+--                         row that would have been HELD, had the filter
+--                         already run, is the same spoliation risk as
+--                         age-based deletion of that row — the trigger
+--                         differs (a CCPA request vs. a retention clock)
+--                         but the underlying harm and the fix are the
+--                         same. CCPA's own regulations recognize an
+--                         exception for data a business must preserve to
+--                         comply with a legal obligation or to exercise
+--                         or defend legal claims (Cal. Civ. Code Section
+--                         1798.105(d)) — a litigation hold or privilege
+--                         obligation falls squarely within that
+--                         exception. Rule, mirroring retention_policy's
+--                         RULE 1/RULE 2 above: a CCPA deletion request
+--                         against a 'pending' row is honored for every
+--                         OTHER table reachable by that person's known
+--                         email address(es), but redaction of THIS row
+--                         is deferred (not refused — logged as deferred,
+--                         pending the filter) until pipeline_status =
+--                         'processed' and the row's filter outcome is
+--                         known; if the row then turns out to be Tier 2
+--                         HELD, redaction is withheld under the Section
+--                         1798.105(d) exception and counsel is notified
+--                         before any further action; if not HELD,
+--                         redaction proceeds as already described above.
+--                         Same PREREQUISITE dependency as
+--                         retention_policy: this deferral-then-check
+--                         logic cannot be implemented until a row's
+--                         filter outcome is recorded somewhere queryable
+--                         (see retention_policy's PREREQUISITE note).
 --
 -- RLS: enabled on BOTH tables, zero permissive policies at creation —
 -- see each table's own RLS note below for why this needs to be at

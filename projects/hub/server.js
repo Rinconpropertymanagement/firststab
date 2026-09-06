@@ -203,6 +203,7 @@ const { router: callStatsRouter, internalRouter: callStatsInternalRouter } = req
 const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter } = require('./content-engine/router');
 const { router: contentReviewRouter } = require('./content-review/router');
 const { router: approvalBriefingRouter, internalRouter: approvalBriefingInternalRouter } = require('./approval-briefing/router');
+const { internalRouter: emailIntakeInternalRouter } = require('./email-intake/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -665,6 +666,17 @@ app.use(contentEngineInternalRouter);
 // tool's internal router). Must also be registered before requireLogin —
 // Latchel's webhook has no browser session to redirect.
 app.use(approvalBriefingInternalRouter);
+
+// ─── Email Intake — internal/cron route, no login required ────────────────
+// One endpoint (internal/sync-missive — the Missive shared-inbox pull,
+// projects/hub/email-intake/missive-connection-plan.md) authenticates with
+// the same shared secret header as every other tool's internal router. Must
+// also be registered before requireLogin, for the same reason. Manually
+// triggered only for now — no crontab entry exists yet. Asimov's governance
+// precheck (compliance/missive-connector-governance-precheck.md, Finding 3)
+// requires a 7-day monitored, hand-triggered period before Scotty wires this
+// into an unattended schedule; see email-intake/router.js's file header.
+app.use(emailIntakeInternalRouter);
 
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);

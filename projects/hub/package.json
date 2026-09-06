@@ -9,6 +9,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
     "@supabase/supabase-js": "^2.45.4",
+    "cheerio": "^1.2.0",
     "diff": "^5.2.2",
     "dotenv": "^16.4.5",
     "exif-parser": "^0.1.12",

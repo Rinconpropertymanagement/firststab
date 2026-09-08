@@ -124,25 +124,26 @@
        responsive rule in this file already uses). ────────────────── */
     .pie-wrap { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; flex-wrap: wrap; }
     .pie-wrap svg { flex: none; }
-    .pie-legend { flex: 0 1 260px; min-width: 180px; display: flex; flex-direction: column; gap: 5px; }
+    .pie-legend { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 5px; }
     .pie-legend-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: #374151; line-height: 1.4; }
     .pie-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; margin-top: 1px; }
     .pie-legend-cat { font-weight: 600; }
     .pie-legend-amt { color: #6b7280; white-space: nowrap; }
-    /* Maintenance Notes — plain text field, always visible next to the
-       pie chart (Peter's explicit placement + styling call: no warning/
-       caveat language, styled like any other fact on this card, not
-       collapsible). .pie-legend above changed from flex:1 to a capped
-       flex-basis so it stops stretching to fill the whole row on a wide
-       card — that stretch was exactly the "noticeable unused white
-       space" next to the chart Peter pointed at; .pie-notes below is
-       what actually fills it. flex-wrap on .pie-wrap (existing rule
-       above) already stacks this under the chart on a narrow/mobile
-       screen, same as the legend already does — no separate @media
-       override needed. */
-    .pie-notes { flex: 1 1 220px; min-width: 200px; font-size: 13px; color: #374151; }
-    .pie-notes .fl { color: #9ca3af; margin-right: 3px; }
-    .pie-notes-text { margin-top: 4px; white-space: pre-wrap; line-height: 1.4; }
+
+    /* Maintenance Notes — moved off the Maintenance card (2026-09-08,
+       Peter's placement + styling escalation) into the property header,
+       next to the owner contact box, since that's the area staff already
+       look at first when pulling up a property. Still the exact same
+       plain field/no-caveat-wording rule as before (see
+       compliance/appfolio-maintenance-notes-decision-resolution.md) —
+       this is a prominence change only, not new warning language. Red,
+       bold, boxed so it reads as "important, look at this" the way a
+       flagged line on a bank statement does, not styled like this page's
+       own .attention-banner/error-state components (no icon, no
+       "warning"/"caution" text). */
+    .header-maintenance-notes { margin-top: 12px; padding: 10px 14px; background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #dc2626; border-radius: 6px; text-align: left; }
+    .header-maintenance-notes .fl { color: #dc2626; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; font-size: 11px; }
+    .header-maintenance-notes-text { margin-top: 4px; white-space: pre-wrap; line-height: 1.4; font-weight: 700; font-size: 14.5px; color: #b91c1c; }
 
     /* ── Maintenance section: summary + one collapsed-by-default
        subsection (Needs Privacy Review) ─────────────────── */
@@ -383,15 +384,47 @@
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Maintenance Notes — plain mirror of AppFolio's own property-level
+    // maintenance-notes field (supabase/migrations/20260906000000_
+    // add_maintenance_notes_to_properties.sql). Read from
+    // data.cards.maintenance.data.maintenance_notes — the exact same
+    // value/data path getMaintenanceHistoryPropertySummary
+    // (maintenance-history/router.js) already puts on the Maintenance
+    // card; only WHERE this renders moved (2026-09-08, Peter's placement
+    // + styling escalation), not what data feeds it or how it's escaped.
+    // Only present in `data.cards` at all for a viewer with real
+    // Maintenance History access, and fetchMaintenanceCard
+    // (property-360/router.js) keeps status: 'ok' whenever a real note
+    // exists even with no ticket/spend data — so this same guard
+    // (status === 'ok') is sufficient, no separate access check needed
+    // here. Deliberately just a label and the raw text — no "unscreened,"
+    // no "verify before relying on this," no caveat of any kind (Peter's
+    // explicit, non-negotiable styling call, unchanged by this move) —
+    // only the visual treatment escalated to red/bold/prominent. Omitted
+    // entirely when null/empty, same as before.
+    // ────────────────────────────────────────────────────────────────
+    function renderHeaderMaintenanceNotes(notes) {
+      if (!notes) return ''; // null/empty — omit entirely, no empty box, no "no notes" placeholder
+      return '<div class="header-maintenance-notes"><span class="fl">Maintenance Notes:</span>' +
+        '<div class="header-maintenance-notes-text">' + escapeHtml(notes) + '</div></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Header — property-360-SPEC.md "What You'll See": name/address/
     // city, real occupancy + nearest upcoming lease-end, owner name/
     // phone/email. Same visual shape as Maintenance History's own
     // Property Overview tab header (that file's ov-header-row /
     // ov-spend-row), reused directly rather than invented fresh.
+    // Maintenance Notes (when present) renders here too, right beside
+    // the owner contact box — this is the area staff already look at
+    // first when pulling up a property (Peter's placement instruction,
+    // 2026-09-08).
     // ────────────────────────────────────────────────────────────────
     function renderHeader(data) {
       const p = data.property;
       const occ = data.occupancy || { occupied: 0, total: 0 };
+      const maintCard = data.cards && data.cards.maintenance;
+      const maintenanceNotes = (maintCard && maintCard.status === 'ok') ? maintCard.data.maintenance_notes : null;
       let html = '<div class="card">';
       html += '<div class="ov-header-row"><div>';
       html += '<div class="ov-header-title">' + escapeHtml(p.name || p.address || 'Unnamed property') + '</div>';
@@ -404,6 +437,7 @@
       } else {
         html += '<div style="font-size:12.5px;color:#9ca3af;">No linked owner on file</div>';
       }
+      html += renderHeaderMaintenanceNotes(maintenanceNotes);
       html += '</div></div>';
       if (data.has_owner_history_gap) {
         html += '<div class="ov-owner-note">Showing current ownership only &mdash; this system does not track ownership history.</div>';
@@ -614,39 +648,10 @@
     // without a matching color added here — should never actually show.
     const MAINTENANCE_CATEGORY_FALLBACK_COLOR = '#9ca3af';
 
-    // Maintenance Notes block — a plain mirror of AppFolio's own
-    // property-level maintenance-notes field (supabase/migrations/
-    // 20260906000000_add_maintenance_notes_to_properties.sql), rendered
-    // next to the pie chart per Peter's explicit placement instruction.
-    // Deliberately just a label and the raw text — no "unscreened," no
-    // "verify before relying on this," no caveat of any kind near it
-    // (Peter's explicit, non-negotiable styling call) — styled exactly
-    // like any other plain fact on this card (.fact/.fl, same as "Last
-    // activity" and "Vendors used" above). white-space: pre-wrap on
-    // .pie-notes-text (CSS above) preserves real line breaks already
-    // present in this AppFolio text (e.g. multi-line vendor contacts)
-    // without needing to inject <br> tags into escaped output.
-    function renderMaintenanceNotesBlock(notes) {
-      if (!notes) return ''; // null/empty — omit entirely, no empty box, no "no notes" placeholder
-      return '<div class="pie-notes"><span class="fl">Maintenance Notes:</span>' +
-        '<div class="pie-notes-text">' + escapeHtml(notes) + '</div></div>';
-    }
-
-    function renderMaintenancePieChart(rows, notes) {
-      const notesBlock = renderMaintenanceNotesBlock(notes);
-      if (!rows || !rows.length) {
-        // No spend data to chart. Maintenance Notes is a separate,
-        // independent field (not derived from spend/ticket data), so it
-        // still renders on its own here rather than disappearing along
-        // with the chart it would otherwise sit beside — same "present
-        // or cleanly omitted, never a placeholder" rule as every other
-        // optional fact on this card.
-        return notesBlock ? '<div class="fact" style="margin-top:12px;">' + notesBlock + '</div>' : '';
-      }
+    function renderMaintenancePieChart(rows) {
+      if (!rows || !rows.length) return ''; // No spend data to chart.
       const total = rows.reduce(function (sum, r) { return sum + r.amount; }, 0);
-      if (!total) {
-        return notesBlock ? '<div class="fact" style="margin-top:12px;">' + notesBlock + '</div>' : '';
-      }
+      if (!total) return '';
 
       const cx = 70, cy = 70, r = 65;
       let slicesSvg = '';
@@ -686,7 +691,6 @@
         '<div class="pie-wrap">' +
         '<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="Maintenance spend by repair type">' + slicesSvg + '</svg>' +
         '<div class="pie-legend">' + legendRows + '</div>' +
-        notesBlock +
         '</div>';
     }
 
@@ -722,7 +726,7 @@
         html += '<div class="fact"><span class="fl">Vendors used:</span> ' + d.vendor_count +
           (d.most_recent_vendor_name ? ', most recent: ' + escapeHtml(d.most_recent_vendor_name) : '') + '</div>';
       }
-      html += renderMaintenancePieChart(d.spend_by_category, d.maintenance_notes);
+      html += renderMaintenancePieChart(d.spend_by_category);
       // AppFolio actual maintenance-category spend — separate from the
       // Latchel-ticket figures above on purpose: it's sourced from
       // AppFolio's own general ledger (can include repair/maintenance

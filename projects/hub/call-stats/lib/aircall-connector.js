@@ -143,9 +143,250 @@ async function listCallsForDateRange(fromUnixSeconds, toUnixSeconds, { maxPages 
   return all;
 }
 
+// ============================================================
+// LINE-TO-USER RING MEMBERSHIP (added 2026-09-10)
+// ============================================================
+// Everything below exists for one reason: to answer "which staff members
+// does this phone line ring?" so that a miss on a line ringing exactly ONE
+// person can be charged to that person (answer-rate-redefinition-SPEC.md
+// Design Decisions 10-12, migration
+// 20260910010000_add_sole_user_attribution_to_call_stats_line_misses.sql).
+//
+// *** THE TRAP — READ THIS BEFORE RE-CHECKING ANY OF IT ***
+// Ring membership is NOT returned by the `GET /v1/numbers` LIST endpoint.
+// The list returns every one of Rincon's 15 lines with its `users` array
+// empty or absent, for ALL 15. Only the per-number DETAIL endpoint,
+// `GET /v1/numbers/:id`, returns the real membership. Trusting the list
+// leads to the confident, wrong conclusion that no line rings anybody —
+// which has already happened once in this project. That is the entire
+// reason listNumbers() below is used ONLY to enumerate line IDs and its
+// `users` field is never read, and why fetchLineRingMembership() spends a
+// GET per line instead of one cheap list call.
+//
+// Cost: ~16 GETs per nightly run (one list page + one detail per line, plus
+// at most one users page if an email needs resolving). Trivial in volume,
+// but note that aircallGet() throws on a 429 with no retry — a rate-limit
+// hit here fails the mapping fetch, which by design fails the line-miss
+// half of the sync loudly and leaves the day re-runnable rather than
+// writing an attribution nobody can distinguish from "this line rang
+// nobody."
+//
+// These functions follow this file's CRITICAL header rule: each new Aircall
+// read is its own narrowly-named function issuing one fixed GET shape
+// through aircallGet(). fetchLineRingMembership() at the bottom makes no
+// request of its own at all — it only composes the three GET functions
+// above it — so no new way to reach Aircall is introduced here, and in
+// particular nothing that could carry an HTTP method in from outside this
+// file. If a future change needs another Aircall read, add another function
+// like these; do not generalise them.
+// ============================================================
+
+/**
+ * Every phone line on the account, used ONLY to enumerate line IDs (and to
+ * carry each line's name for logging). The `users` array on these list
+ * results is deliberately never read — see THE TRAP above.
+ *
+ * Pagination follows meta.next_page_link the same way listCallsForDateRange
+ * does (LIVE VERIFICATION #1: it is a complete, ready-to-fetch URL that
+ * already carries the original query params). Rincon has 15 lines, so one
+ * page is expected; the loop is here so a future 60-line account doesn't
+ * silently lose lines 51+.
+ */
+async function listNumbers({ maxPages = 50 } = {}) {
+  let all = [];
+  let url = `${AIRCALL_BASE}/numbers?per_page=50`;
+  let pages = 0;
+  while (url && pages < maxPages) {
+    const body = await aircallGet(url);
+    // Throw rather than treat a missing array as "this account has no
+    // lines." An empty-looking success here would flow straight through to
+    // "no line rings anybody," which is exactly the confidently-wrong
+    // answer this whole feature has to avoid.
+    if (!body || !Array.isArray(body.numbers)) {
+      throw new Error('Aircall GET /numbers returned no `numbers` array — refusing to read that as "this account has no phone lines."');
+    }
+    all = all.concat(body.numbers);
+    url = (body.meta && body.meta.next_page_link) || null;
+    pages++;
+  }
+  if (url && pages >= maxPages) {
+    throw new Error(`Aircall numbers fetch hit the ${maxPages}-page safety cap without reaching the last page — aborting rather than silently returning a partial line list.`);
+  }
+  return all;
+}
+
+/**
+ * ONE line's full detail, including the `users` array this whole feature
+ * depends on. The only endpoint that reports real ring membership.
+ */
+async function getNumberDetail(numberId) {
+  const body = await aircallGet(`/numbers/${encodeURIComponent(String(numberId))}`);
+  // Aircall wraps a single resource in a named envelope (`{ number: {...} }`).
+  // If that envelope is missing, throw instead of falling back to the raw
+  // body: a raw body has no `users` key either, so the fallback would read
+  // as "this line rings nobody" — a silent, confidently wrong answer, on
+  // the exact endpoint this feature's correctness rests on.
+  if (!body || typeof body.number !== 'object' || body.number === null) {
+    throw new Error(`Aircall GET /numbers/${numberId} returned no \`number\` object — refusing to guess at this line's ring membership.`);
+  }
+  return body.number;
+}
+
+/**
+ * Every Aircall user on the account (id, name, email). Fetched ONLY when a
+ * line's detail response gives a sole user with no email on it — the
+ * fallback path described in the migration's NOTES FOR Q #2. Emails are
+ * this design's join key to call_stats.staff_email and users.email; storing
+ * an Aircall user ID on a line-keyed row instead would be a second
+ * identifier that nothing keys or joins on, which Neo explicitly rejected.
+ */
+async function listUsers({ maxPages = 50 } = {}) {
+  let all = [];
+  let url = `${AIRCALL_BASE}/users?per_page=50`;
+  let pages = 0;
+  while (url && pages < maxPages) {
+    const body = await aircallGet(url);
+    if (!body || !Array.isArray(body.users)) {
+      throw new Error('Aircall GET /users returned no `users` array — refusing to read that as "this account has no users."');
+    }
+    all = all.concat(body.users);
+    url = (body.meta && body.meta.next_page_link) || null;
+    pages++;
+  }
+  if (url && pages >= maxPages) {
+    throw new Error(`Aircall users fetch hit the ${maxPages}-page safety cap without reaching the last page — aborting rather than silently returning a partial user list.`);
+  }
+  return all;
+}
+
+/**
+ * The mapping the nightly sync snapshots onto each line-miss row.
+ *
+ * @returns {Promise<Map<string, {
+ *   line_name: string,
+ *   ring_user_count: number,
+ *   sole_user_email: string|null,
+ *   sole_user_name: string|null,
+ * }>>} keyed by the line's Aircall number ID as a STRING, matching the way
+ *   lib/sync.js keys call_stats_line_misses rows (String(call.number.id)).
+ *
+ * `sole_user_email` is non-null ONLY when ring_user_count === 1 and that one
+ * user's email could actually be resolved, always lower-cased (NOTES FOR Q
+ * #3 — call_stats.staff_email is stored lower-cased, and a capitalised
+ * Aircall seat would make the two halves of the Answer Rate fraction fail
+ * to join, silently, for that one person). ring_user_count === 1 with a
+ * null email is a real, self-describing data-quality state the caller must
+ * log loudly and treat as unattributed — it is NOT the dangerous ambiguity
+ * the design warns about, precisely because ring_user_count is sitting
+ * right there saying the line did ring exactly one person.
+ *
+ * This function THROWS on any failure rather than returning a partial map.
+ * That is deliberate and it is the whole failure design: a NULL attribution
+ * on a stored row means "this line had no sole user that day" and must
+ * never also mean "we could not find out." A partial map here would produce
+ * exactly that second meaning, permanently, with nothing on the row to say
+ * so. The caller's contract is to fail the line-miss half of the sync and
+ * leave the day re-runnable. An EMPTY map counts as a partial map and is
+ * refused for the same reason — see below.
+ */
+async function fetchLineRingMembership() {
+  const numbers = await listNumbers();
+
+  // An EMPTY line list is refused, not accepted as "this account has no
+  // lines." listNumbers() above already throws when the `numbers` key is
+  // missing, but `{ "numbers": [] }` is a well-formed success response and
+  // sails through it — reachable in real life from a token scoped down to
+  // no lines, a mid-reconfiguration account, or an Aircall-side change.
+  // Left unguarded it produces a Map(0), every line then misses the mapping,
+  // and every row for the day is written with sole_user_email NULL and
+  // ring_user_count NULL while the sync route returns 200. That is the
+  // permanent, silent, self-concealing undercount the whole failure design
+  // exists to prevent: the day looks like a day on which no line rang
+  // anybody, understating real people's misses forever, with nothing on the
+  // row saying otherwise. Throwing here routes it into the caller's existing
+  // fail-loud path instead — line-miss upserts skipped entirely, 502, day
+  // re-runnable.
+  //
+  // This is also why the users-array safety net below no longer tests
+  // `numbers.length > 0`: that condition was the escape hatch the empty case
+  // slipped through, and the empty case is now handled here on its own.
+  if (numbers.length === 0) {
+    throw new Error('Aircall GET /numbers returned an empty line list. Refusing to read that as "this account has no phone lines" — an empty mapping would write every line-miss row with no attribution, which is indistinguishable from "this line rang nobody." See lib/aircall-connector.js.');
+  }
+
+  const membership = new Map();
+
+  // Collected across all lines, then resolved in ONE extra GET at the end
+  // if needed, rather than a users fetch per line.
+  const soleUsersNeedingEmail = []; // { numberId, userId }
+  // The safety net for THE TRAP above, in code rather than in a comment:
+  // if not a single line's DETAIL response carries a `users` ARRAY, that is
+  // the signature of reading the list endpoint by mistake, or of Aircall
+  // changing this endpoint's shape. Concluding "no line rings anybody" from
+  // that would silently switch this whole feature off and leave every
+  // percentage back at 100%, with no error anywhere. Throw instead.
+  let anyLineReportedAUsersArray = false;
+
+  for (const listedNumber of numbers) {
+    const numberId = String(listedNumber.id);
+    const detail = await getNumberDetail(numberId);
+    const users = Array.isArray(detail.users) ? detail.users : null;
+    if (users) anyLineReportedAUsersArray = true;
+
+    const ringUserCount = users ? users.length : 0;
+    const entry = {
+      line_name: detail.name || listedNumber.name || '',
+      ring_user_count: ringUserCount,
+      sole_user_email: null,
+      sole_user_name: null,
+    };
+
+    if (ringUserCount === 1) {
+      const soleUser = users[0] || {};
+      entry.sole_user_name = soleUser.name || null;
+      const email = String(soleUser.email || '').trim().toLowerCase();
+      if (email) {
+        entry.sole_user_email = email;
+      } else if (soleUser.id != null) {
+        // The detail endpoint returned only id/name for this user — the
+        // fork the redefinition spec's Open Item 10 flagged. Resolve it
+        // through Aircall's own users endpoint below; do NOT store the ID
+        // instead (migration NOTES FOR Q #2).
+        soleUsersNeedingEmail.push({ numberId, userId: String(soleUser.id) });
+      }
+    }
+
+    membership.set(numberId, entry);
+  }
+
+  if (!anyLineReportedAUsersArray) {
+    throw new Error(
+      'Aircall returned no `users` array on ANY line detail response. That is the signature of reading GET /v1/numbers (the LIST endpoint, which omits ring membership for every line) instead of GET /v1/numbers/:id, or of the detail endpoint changing shape. Refusing to conclude that no line rings anybody — see THE TRAP in lib/aircall-connector.js.'
+    );
+  }
+
+  if (soleUsersNeedingEmail.length > 0) {
+    const allUsers = await listUsers();
+    const emailByUserId = new Map();
+    for (const u of allUsers) {
+      if (u && u.id != null && u.email) emailByUserId.set(String(u.id), String(u.email).trim().toLowerCase());
+    }
+    for (const { numberId, userId } of soleUsersNeedingEmail) {
+      const email = emailByUserId.get(userId);
+      // Left null on purpose when the id resolves to nothing (an Aircall
+      // seat with no email at all). The caller logs that loudly and treats
+      // the line as unattributed; it is NOT invented, and it is NOT allowed
+      // to look like "this line rang nobody" — ring_user_count stays 1.
+      if (email) membership.get(numberId).sole_user_email = email;
+    }
+  }
+
+  return membership;
+}
+
 /** Read-only connectivity check, same purpose as latchel-connector's implicit ping via listProperties(). */
 async function ping() {
   return aircallGet('/ping');
 }
 
-module.exports = { listCallsForDateRange, ping };
+module.exports = { listCallsForDateRange, fetchLineRingMembership, ping };

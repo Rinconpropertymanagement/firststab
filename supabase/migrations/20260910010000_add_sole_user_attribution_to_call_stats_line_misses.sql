@@ -1,0 +1,591 @@
+-- ============================================================
+-- Migration: 20260910010000_add_sole_user_attribution_to_call_stats_line_misses
+-- Created:   2026-09-10
+-- Author:    Neo (database specialist)
+--
+-- Two nullable columns on the existing `call_stats_line_misses` table
+-- (20260904000000_call_stats_line_misses.sql), implementing Design
+-- Decision 12 of
+-- projects/hub/call-stats/answer-rate-redefinition-SPEC.md (Oracle,
+-- 2026-09-10; build approved by Peter 2026-09-10).
+--
+-- Purely additive. No new table. `call_stats` is not touched — not its
+-- columns, not its grain, not its UNIQUE constraint, not its sync path.
+-- `call_stats_line_misses`'s own grain and its
+-- UNIQUE (aircall_number_id, call_date, direction) constraint are also
+-- untouched, so Q's existing upsert path keeps working unchanged.
+--
+-- No application code ships from this file. The nightly-sync change
+-- that populates these columns, the one-time backfill described below,
+-- the router rollup, and the dashboard changes are all Q's and Tron's
+-- next steps — see "WHAT THIS MIGRATION DELIBERATELY DOES NOT DO".
+-- This migration is NOT applied here: Peter applies it himself by
+-- pasting it into Supabase's SQL Editor, per this project's standing
+-- convention (no CLI and no database URL in this environment). Every
+-- statement below is idempotent and safe to run twice.
+--
+-- ============================================================
+-- WHY THESE COLUMNS EXIST — the bug they fix, stated plainly
+-- ============================================================
+-- The Call Stats dashboard's "Answer Rate" and "Missed" columns are
+-- structurally incapable of showing anything but 100% and 0. Not an
+-- edge case, not a data gap — arithmetic. The chain, confirmed rather
+-- than assumed:
+--
+--   1. In Aircall, an inbound call that nobody answers arrives with
+--      `call.user === null`. There is no person on the record at all,
+--      only the line. (lib/aircall-connector.js LIVE VERIFICATION #3,
+--      2026-08-20, against a real 600-call sample: every inbound call
+--      with a `user` attached had been answered by that user — 0 of 183
+--      had a null answered_at. The "nobody picked up" population is
+--      carried ENTIRELY by user:null rows.)
+--   2. lib/sync.js's buildDailyAggregates() skips those calls outright
+--      (`if (!call.user) { ...; continue; }`), so a missed inbound call
+--      never reaches a `call_stats` row. It lands in THIS table
+--      instead, keyed on `call.number.id`.
+--   3. TARS confirmed the consequence against Rincon's live database on
+--      2026-09-10: `missed_calls` is 0 on every inbound `call_stats`
+--      row, all-time.
+--   4. router.js computes answer_rate = answered / (answered + missed)
+--      where missed is therefore always 0. The denominator can never
+--      exceed the numerator.
+--
+-- Peter's rule, approved 2026-09-10: a miss on a line that rings
+-- EXACTLY ONE person counts against that one person. A miss on a line
+-- that rings nobody, or rings several people, stays where it is today —
+-- counted at the line, charged to no individual.
+--
+-- These two columns are how that rule is recorded. `sole_user_email`
+-- says who (if anyone) the line rang on the day of the miss;
+-- `ring_user_count` says how many people it rang, which is what
+-- separates "unattributed because nobody" from "unattributed because
+-- several."
+--
+-- ============================================================
+-- WHY THE ANSWER IS SNAPSHOTTED ONTO THE MISS ROW, NOT LOOKED UP LATER
+-- (Design Decision 11 — the load-bearing choice in this file)
+-- ============================================================
+-- Dio Lopes is the sole user of "Property Manager - Solimar," which
+-- accounted for 35 misses between 2026-08-15 and 2026-09-09. Suppose
+-- that line changes hands in November. If attribution were computed by
+-- looking up the line's CURRENT sole user, then on the day Aircall is
+-- reconfigured, all 35 of Dio's August misses would silently become
+-- someone else's. That person's August answer rate drops. A number
+-- Peter read out in a weekly staff meeting in September would now be a
+-- different number, with nothing in this system recording that it
+-- changed or why.
+--
+-- That is not a rounding error — it is a performance metric about a
+-- named employee rewriting itself retroactively because of an unrelated
+-- phone-system change. So: membership is captured at sync time, written
+-- onto the miss row itself, and never recomputed. A miss on 2026-08-20
+-- is attributed to whoever the line rang on 2026-08-20, permanently.
+--
+-- Options considered and rejected, with what breaks under each:
+--
+--   * Live lookup at query time (rejected). Nothing to store, no
+--     migration, no backfill. What breaks: every historical number
+--     silently changes whenever a line changes hands, forever, with no
+--     signal. For a metric whose entire purpose is comparing a person
+--     to themselves week over week, that is disqualifying. It would
+--     also couple a dashboard that is currently a pure Supabase read to
+--     Aircall's uptime and rate limit, on a page that gets reloaded
+--     repeatedly with different date ranges during a meeting.
+--
+--   * A versioned membership table with valid_from/valid_to (rejected
+--     for v1). Genuinely correct, and the textbook answer. What breaks:
+--     it requires detecting membership changes nightly, closing and
+--     opening rows, and as-of joins in the dashboard query — real
+--     complexity, for an identical result on the only query pattern
+--     that exists. The miss row is ALREADY per-line, per-day, so the
+--     row itself is the natural place to record the as-of answer.
+--     Named here so nobody thinks it was overlooked. It becomes the
+--     right answer only if something else in the Hub ever needs "who
+--     was on which line on date X" independently of a miss count.
+--
+--   * A separate `call_stats_line_members` snapshot table (rejected for
+--     v1). Would store membership for the zero-user and three-user
+--     lines too, which nothing asks for. Right only alongside the
+--     versioned design already rejected above.
+--
+--   * Folding attributed misses into `call_stats` at sync time
+--     (rejected). It would mean writing a row keyed on a PERSON for a
+--     call Aircall never attributed to a person — precisely the
+--     invention both existing call-stats migrations went out of their
+--     way to avoid. It destroys the line-level view the Shared Line
+--     Misses section already ships. And it is irreversible: if the
+--     phone-tree question (SPEC.md Open Item 7 / redefinition spec Open
+--     Item 9) resolves differently, or Peter changes the rule, undoing
+--     it needs a full re-sync from Aircall rather than an UPDATE in
+--     place. Keeping the attribution as a COLUMN on a line-keyed row is
+--     what makes that question cheap to close later.
+--
+--   * Two nullable columns on the existing table (CHOSEN). The table's
+--     grain is already exactly right — one row per (line, day,
+--     direction). The attribution is an attribute of that row, not a
+--     new dimension.
+--
+-- Note on the apparent inconsistency with call_stats.sql's pod handling
+-- (which deliberately does NOT snapshot pod and looks it up live):
+-- different case, not a contradiction. Pod decides which TABLE a person
+-- is listed in — a re-slicing of the same numbers under a different
+-- heading. Line membership decides WHOSE NUMBER IT IS — it moves a miss
+-- out of one person's denominator and into another's. Re-grouping is
+-- cosmetic; re-attributing is not.
+--
+-- ============================================================
+-- WHERE THE MEMBERSHIP DATA COMES FROM — AND THE TRAP
+-- ============================================================
+-- Source: `GET /v1/numbers/:id`, one call per line, after
+-- `GET /v1/numbers` to enumerate the line IDs.
+--
+--   *** READ THIS BEFORE RE-CHECKING ANYTHING BELOW ***
+--   Ring membership is NOT returned by the `GET /v1/numbers` LIST
+--   endpoint. The list returns every one of Rincon's 15 lines with its
+--   `users` array empty or absent — for ALL 15. Only the per-number
+--   DETAIL endpoint, `GET /v1/numbers/:id`, returns the real
+--   membership. Trusting the list leads to the confident, wrong
+--   conclusion that no line rings anybody. That has already happened
+--   once in this project. Anyone verifying this later must fetch each
+--   line's detail endpoint individually.
+--
+-- ============================================================
+-- RING MEMBERSHIP AS OF 2026-09-10 — the provenance record for the
+-- backfill (Design Decision 13 asks that the mapping used and the date
+-- it was applied be recorded in the migration; this block is that
+-- record)
+-- ============================================================
+-- Confirmed live via `GET /v1/numbers/:id` on 2026-09-10, per this
+-- build's task brief. Recorded as reported to Neo, not independently
+-- re-fetched in this session — same "confirmed vs. needs live
+-- verification" discipline the two sibling migrations use.
+--
+--   Rings exactly one person (11 lines) — these are the lines whose
+--   misses become attributable:
+--     Office Line +1 805-288-1119 ................ Kristen Rau
+--     Business Development Coordinator
+--       +1 805-288-1209 .......................... Kristen Rau
+--     Property Manager - Solimar ................. Dio Lopes
+--     Property Manager - Faria ................... Marci Gray
+--     Transaction Coordinator .................... Shane Muir
+--     Maintenance Coordinator-Solimar ............ Leo O'Gorman
+--     RSC Solimar Team ........................... Leo O'Gorman
+--     RSC Faria Team ............................. Liz Otero
+--     Marketing Coordinator ...................... Jackie Rodriguez
+--     Quick Turn Project Manager
+--       +1 805-288-1194 .......................... Caylee Andrade
+--     Quick Turn Admin Assistant ................. Regina Franco Mendez
+--
+--   Rings nobody (2 lines) — misses stay charged to no individual:
+--     Maintenance Hotline +1 800-525-5883
+--     Leasing Line +1 805-288-1198
+--
+--   Rings three people (2 lines) — misses stay charged to no
+--   individual, because the rule only covers sole-user lines:
+--     "Office Line Phone Tree - Outside Office Hours"
+--       (Liz Otero, Marci Gray, Dio Lopes)
+--     "Z.DO NOT USE - PHONE TREE TEMPLATE ONLY"
+--       (Kristen Rau, Marci Gray, Dio Lopes)
+--
+--   Names, not emails, are what this record carries — the brief
+--   confirmed names come back from the detail endpoint. Q must derive
+--   the email that goes into `sole_user_email` from Aircall itself at
+--   sync time, NOT by transcribing this comment. See "NOTES FOR Q"
+--   below for what to do if the detail endpoint returns no email.
+--
+--   Real miss volume in the sampled window (2026-08-15..2026-09-09):
+--   118 line misses across 12 distinct lines. Largest three: Property
+--   Manager - Solimar (35), Office Line (31), Office Line Phone Tree -
+--   Outside Office Hours (19). 97 of the 118 become attributable under
+--   this change and 21 stay charged to nobody; the 21 must remain
+--   visible on the dashboard as such. (Measured against real data on
+--   2026-09-10, after this migration was applied. It corrects the
+--   estimate of "roughly 66" this block carried when it was written —
+--   that figure was never verified, and it happened to equal the two
+--   largest sole-user lines exactly, 35 + 31, which is what made it
+--   look plausible. The nine smaller sole-user lines contribute far
+--   more than the estimate assumed. Comment text only — no statement
+--   in this migration changed.)
+--
+-- ============================================================
+-- BACKFILL: retroactive attribution IS approved, and its basis is
+-- recorded here (this supersedes the redefinition spec's Design
+-- Decision 13, which left it gated on a question Peter had not yet
+-- answered)
+-- ============================================================
+-- Backfilling means stamping TODAY's mapping onto PAST rows — the one
+-- thing the snapshot design above exists to prevent. It is safe here
+-- for exactly one reason, and the reason is a fact, not a convenience:
+--
+--   *** Peter confirmed on 2026-09-10 that NO Aircall line changed
+--   hands in the last six months. ***
+--
+-- If no line changed hands, then today's mapping IS the historical
+-- mapping over that window, and applying it retroactively rewrites
+-- nothing. So the metric gets roughly six months of real history on day
+-- one instead of starting from zero.
+--
+-- The boundary that follows from that, and it is a hard one:
+--
+--   * Rows with call_date on or after 2026-03-10 may be stamped with
+--     the 2026-09-10 mapping recorded above. Peter's confirmation
+--     covers that window.
+--   * Rows with call_date BEFORE 2026-03-10 must NOT be stamped. His
+--     confirmation does not reach back that far, and Aircall is not
+--     expected to expose any history of a line's ring membership
+--     (Open Item 12), so there is no way to check it from this side.
+--     Leave both columns NULL there and let the dashboard say those
+--     misses were not attributed. A quietly wrong number is worse than
+--     an honestly missing one — that principle is the whole reason this
+--     change exists.
+--
+-- Mechanics, worth stating because the obvious assumption is wrong: the
+-- mapping is per-LINE, not per-call, so the backfill needs NO re-fetch
+-- of Aircall call data at all. It is a single UPDATE pass over rows
+-- already in Supabase, setting the two columns from the mapping. (This
+-- is a sharp contrast with SPEC.md Design Decision 8's per-line
+-- outbound idea, which was dropped partly because it needed a schema
+-- change PLUS a full re-sync from Aircall. That cost does not apply
+-- here.) The backfill script is Q's, not this migration's — see below
+-- for why.
+--
+-- Honest limitation, named rather than papered over: after the backfill
+-- runs, a row does not itself say whether its attribution was
+-- snapshotted on the night it happened or stamped on 2026-09-10. No
+-- provenance column is added for this (that would be a third column
+-- ahead of a proven need, and the redefinition spec explicitly names
+-- the migration as an acceptable place for this record). THIS FILE is
+-- that record: the boundary is 2026-09-10, the mapping is the block
+-- above, and the basis is Peter's confirmation of that date.
+--
+-- ============================================================
+-- THE `?date=` RE-RUN HAZARD — document it at the route, Q
+-- ============================================================
+-- router.js's existing manual `POST /api/call-stats/internal/sync
+-- ?date=` escape hatch becomes a small, sharp tool once these columns
+-- are live: re-running an old day re-reads the CURRENT mapping and
+-- stamps it onto that day's misses. That is the exact history-rewrite
+-- the snapshot design prevents, now available as a one-line manual
+-- command. It is acceptable because it is an explicit, rare operator
+-- action rather than something that happens on its own — but it must be
+-- documented at the route, not left as a surprise.
+--
+-- ============================================================
+-- DATA INVENTORY CORRECTION (GOVERNANCE.md Rule 4) — MANDATORY, AND
+-- THIS IS THE PART A READER MOST NEEDS TO SEE
+-- ============================================================
+-- 20260904000000_call_stats_line_misses.sql's own inventory currently
+-- reads:
+--
+--   "pii_fields: NONE, by construction — and unlike call_stats, this
+--    holds for a structural reason, not an aggregation choice: every row
+--    in this table exists BECAUSE Aircall itself recorded no individual
+--    user for that call."
+--
+-- *** THAT ENTRY STOPS BEING TRUE THE MOMENT sole_user_email EXISTS. ***
+-- It was honest when written and it is wrong now. This table will
+-- identify a named Rincon employee and attach missed-call counts to
+-- them — the same category of employee-performance personal data that
+-- `call_stats` carries. The corrected entry for this table, which
+-- supersedes that block in full and mirrors call_stats.sql's own:
+--
+--   pii_fields:          call_stats_line_misses.sole_user_email — a
+--                         direct identifier, a named Rincon employee's
+--                         real email — plus, for any row where it is
+--                         populated, the missed_calls/total_calls counts
+--                         beside it, which are then performance data
+--                         about that identified person. NULL on rows
+--                         where the line rang nobody or rang several;
+--                         those rows remain genuinely person-free, the
+--                         way every row in this table used to be.
+--                         aircall_number_id/line_name/line_digits still
+--                         identify a company phone line, not a person.
+--                         Still deliberately NOT stored: the caller's
+--                         own phone number/raw_digits — this change does
+--                         not reopen that, and must not.
+--   agents_with_access:  unchanged — the nightly Aircall sync process
+--                         (system, service-role key, read-only Aircall
+--                         API calls only); any Hub user holding a role
+--                         for tool='call_stats' in
+--                         team_member_tool_roles. This change adds no
+--                         new reader, no new tool value, no new role.
+--   privacy_category:    CHANGED from "N/A — no personal data" to
+--                         employee performance / call-activity
+--                         metadata, matching call_stats.sql's own
+--                         entry. Not tenant or applicant data, not Fair
+--                         Housing-relevant. Governed by California
+--                         employment-privacy law and CCPA, not
+--                         GOVERNANCE.md's tenant-facing rules.
+--   retention_policy:    unchanged — indefinite, matching Peter's
+--                         explicit 2026-08-20 decision for call_stats
+--                         and the default used elsewhere in this schema.
+--   ccpa_exportable:     CHANGED from N/A to TRUE, same reasoning and
+--                         same answer as call_stats.sql gives:
+--                         California's CCPA employee-data exemption
+--                         expired 2023-01-01, and a staff member asking
+--                         "what do you hold about me" would reasonably
+--                         expect rows attributed to them included.
+--   ccpa_deletable:      CHANGED from N/A to TRUE mechanically — a
+--                         schema-level read, not a legal one. The same
+--                         redact-in-place pattern used elsewhere in this
+--                         schema applies cleanly and is unusually clean
+--                         here: overwrite sole_user_email and the row is
+--                         once again an anonymous count-of-calls-on-a-
+--                         line row with no person attached.
+--                         ring_user_count survives redaction and stays
+--                         meaningful, because it names no one. Whether
+--                         Rincon is legally REQUIRED to honor such a
+--                         request for this data category is the same
+--                         open employment-law question call_stats.sql
+--                         already flagged, and is not a schema question.
+--   RLS:                 unchanged — enabled on this table since
+--                         creation, no permissive policies. This
+--                         migration adds, changes and removes no policy.
+--                         Adding columns to an RLS-enabled table does
+--                         not alter its posture: access stays denied
+--                         until a tool explicitly grants it, exactly as
+--                         every table in this schema does.
+--   Audit logging:       unchanged — none, by design. A plain sync of a
+--                         fetched-and-counted fact needs no
+--                         confidence/review workflow.
+--
+-- 20260904000000's file is NOT edited — migrations are never modified
+-- after the fact in this repo. This file is the correction, and a
+-- COMMENT ON TABLE is set below so the corrected PII status is readable
+-- from the database itself rather than only from whichever migration
+-- file a reader happens to open first.
+--
+-- Governance path: unchanged and confirmed rather than assumed. Still
+-- NOT a compliance build under CLAUDE.md's definition — no message is
+-- sent to anyone, no decision about a tenant or applicant is made or
+-- influenced, and GOVERNANCE.md's Rules and Fair Housing Standard
+-- address tenant/applicant/housing-decision risk, none of which is
+-- present. No Asimov gate, no Mason gate. Rule 4 applies in full, which
+-- is why the inventory correction above is mandatory rather than
+-- optional. Peter's approval of this build (2026-09-10) satisfies Rule
+-- 6 Standard tier.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO
+-- ============================================================
+--   - It does not populate either column. Every existing row gets NULL
+--     in both until Q's sync change and one-time backfill run.
+--   - It does not run the backfill. The backfill needs the live Aircall
+--     mapping, which a pasted SQL file cannot fetch; hardcoding the
+--     eleven line IDs and emails into SQL would put a second, silently
+--     drifting copy of the mapping in the schema. Q's script reads the
+--     mapping from Aircall, applies the 2026-03-10 floor above, and
+--     leaves this file as the provenance record.
+--   - It does not touch lib/sync.js, router.js, the connectors, or the
+--     dashboard. Q owns those next; Tron owns the Shared Line Misses
+--     split.
+--   - It adds no index. The existing
+--     idx_call_stats_line_misses_date_range (call_date,
+--     aircall_number_id) already leads on the date-range filter every
+--     dashboard query uses, and this table is small by construction
+--     (~12 lines x 2 directions x 1 row per day). An index on
+--     sole_user_email would be a column added ahead of a proven need —
+--     revisit only if a real query gets slow, which Hermes would be the
+--     one to confirm.
+--   - It adds no new `tool` value and no team_member_tool_roles change.
+--     This is presented inside the Call Stats section that already
+--     exists and reuses its existing access gate.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist, run before this
+-- is handed to Peter to apply)
+-- ============================================================
+--   [x] Rollback exists — see the DROP section at the bottom of this
+--       file.
+--   [x] Does this break any existing data? No. ADD COLUMN IF NOT EXISTS
+--       on two brand-new nullable columns with no default — every
+--       existing row gets NULL in both. Nothing is read, moved,
+--       overwritten or deleted. No existing column, constraint, index,
+--       trigger or policy is altered.
+--   [x] Does this touch a table other code depends on? Yes —
+--       call_stats_line_misses is read by router.js's Shared Line
+--       Misses section and written by lib/sync.js's
+--       buildLineMissAggregates() upsert. That is exactly why nothing
+--       but two nullable columns is added: the UNIQUE
+--       (aircall_number_id, call_date, direction) key the upsert uses is
+--       untouched, so the existing sync keeps working unchanged after
+--       this applies and before Q's change lands. An existing SELECT *
+--       caller gains two NULL-valued columns; nothing breaks by getting
+--       an extra column back.
+--   [x] Additive or destructive? Purely additive. No column dropped, no
+--       type changed, no existing constraint tightened, no default that
+--       could alter existing INSERT/UPDATE behavior. The one new table
+--       constraint added below can only be violated by a row that sets
+--       sole_user_email, which no existing row does and no current code
+--       path can write.
+--   [ ] Tested on a copy of the data first? No — no staging copy of
+--       Supabase exists in this project (the standing caveat every
+--       migration in this repo carries). Mitigated here by: both
+--       columns being nullable with no default, so no existing row is
+--       rewritten; the new constraint being unsatisfiable-to-violate by
+--       any row that exists today; and the column shapes coming from a
+--       live 2026-09-10 check of `GET /v1/numbers/:id` rather than
+--       guessed field names. Peter should still run it against a
+--       Supabase branch/copy first if one is available.
+--
+-- ============================================================
+
+
+-- ============================================================
+-- THE CHANGE
+-- ============================================================
+
+ALTER TABLE call_stats_line_misses
+  ADD COLUMN IF NOT EXISTS sole_user_email TEXT,
+  ADD COLUMN IF NOT EXISTS ring_user_count INTEGER
+    CHECK (ring_user_count IS NULL OR ring_user_count >= 0);
+
+-- Consistency guard: an attribution may only exist on a row that also
+-- records that the line rang exactly one person. It stops the one
+-- mistake that would quietly corrupt the metric — a name written onto a
+-- row whose line rang three people, or rang nobody — at the schema
+-- level, where it cannot be forgotten in application code.
+--
+-- Note what it deliberately does NOT forbid: ring_user_count = 1 with a
+-- NULL sole_user_email. That is a real, self-describing state ("the
+-- line rang exactly one person, but their email could not be resolved")
+-- and it is NOT the dangerous ambiguity Design Decision 10 warns about,
+-- precisely because ring_user_count is sitting right there saying so.
+-- Turning it into a constraint violation would crash a nightly sync
+-- mid-run over a data-quality problem that should be logged and skipped
+-- instead. Q must treat such a row as UNATTRIBUTED for every dashboard
+-- number and log it loudly — see NOTES FOR Q below.
+--
+-- Added in a DO block because Postgres has no ADD CONSTRAINT IF NOT
+-- EXISTS; this keeps the whole file safe to paste and run twice.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'call_stats_line_misses_sole_user_requires_one_ringer'
+  ) THEN
+    ALTER TABLE call_stats_line_misses
+      ADD CONSTRAINT call_stats_line_misses_sole_user_requires_one_ringer
+      CHECK (sole_user_email IS NULL OR ring_user_count = 1);
+  END IF;
+END $$;
+
+
+COMMENT ON COLUMN call_stats_line_misses.sole_user_email IS
+  'The ONE staff member this Aircall line rang on this call_date, or NULL if it rang nobody or rang several people. Snapshotted at sync time from GET /v1/numbers/:id (the DETAIL endpoint — the LIST endpoint GET /v1/numbers returns an empty users array for every line and will produce a confidently wrong answer) and NEVER recomputed afterwards, so a line changing hands in Aircall can never retroactively rewrite an earlier day''s attribution (answer-rate-redefinition-SPEC.md Design Decision 11). Joins to users.email and to call_stats.staff_email at query time, same convention as call_stats.staff_email; not a declared FK, same external-system convention used throughout this schema — an Aircall seat belonging to an external vendor rather than a Rincon employee will never match a users row and must not fail the sync. NULL means "this line had no sole user that day" — it must NEVER be written to mean "the mapping fetch failed." If the mapping fetch fails, the line-miss half of the sync fails loudly and skips its upserts, leaving the day re-runnable; writing NULL there would be a permanent, silent, self-concealing undercount of someone''s misses. Populated by Q''s sync change and one-time backfill, not by the migration that created this column.';
+
+COMMENT ON COLUMN call_stats_line_misses.ring_user_count IS
+  'How many Aircall users this line rang on this call_date — 0, 1 or 3 in Rincon''s data as of 2026-09-10. Snapshotted at sync time from GET /v1/numbers/:id alongside sole_user_email. It earns its place because it is destroyed if not captured that night: without it, a NULL sole_user_email is ambiguous between "this line rang nobody" (Maintenance Hotline, Leasing Line) and "this line rang several people" (the two three-user phone-tree lines, which absorbed 19 misses in the 2026-08-15..2026-09-09 window alone). Peter''s approved rule treats those two cases identically TODAY — neither attributes to anyone — but they are different facts about the phone system, they may be decided differently later, and the distinction is knowable only at sync time. A row with ring_user_count = 1 and a NULL sole_user_email means the line rang exactly one person whose email could not be resolved: a data-quality alarm to log, and still unattributed for every dashboard number. Populated by Q''s sync change and one-time backfill, not by the migration that created this column.';
+
+-- Set on the table itself so the corrected PII status is visible from
+-- the database, not only from whichever migration file a reader opens
+-- first. 20260904000000's "pii_fields: NONE, by construction" entry was
+-- honest when written and is superseded as of 2026-09-10.
+COMMENT ON TABLE call_stats_line_misses IS
+  'One row per Aircall line, per calendar day (America/Los_Angeles business day), per call direction: counts of calls that arrived with no `user` at all on Aircall''s own record — the misses call_stats structurally cannot represent. Synced nightly, read-only. DATA INVENTORY (GOVERNANCE.md Rule 4), CORRECTED 2026-09-10 by migration 20260910010000 — this SUPERSEDES 20260904000000''s "pii_fields: NONE, by construction" entry, which was honest when written and stopped being true when sole_user_email was added: this table now CONTAINS PII. sole_user_email is a direct identifier (a named Rincon employee''s real email), and on any row where it is populated the counts beside it are employee-performance data about that person — the same category call_stats carries. privacy_category: employee performance / call-activity metadata, not tenant or applicant data, not Fair Housing-relevant. ccpa_exportable TRUE; ccpa_deletable TRUE mechanically via redact-in-place (overwrite sole_user_email and the row is anonymous again; ring_user_count survives and names no one). Retention indefinite (Peter, 2026-08-20). RLS enabled, no permissive policies. No audit logging, by design. Rows where sole_user_email IS NULL contain no personal data at all.';
+
+
+-- ============================================================
+-- NOTES FOR Q — read before wiring the sync
+-- ============================================================
+--
+-- 1. FAIL LOUD, NEVER WRITE A NULL ATTRIBUTION. If the
+--    GET /v1/numbers/:id mapping fetch fails for any reason, the
+--    line-miss half of the sync must fail loudly and skip its upserts,
+--    leaving that day re-runnable. It must not fall back to writing
+--    rows with NULL columns. NULL here means "no sole user that day"; if
+--    it is ever overloaded to also mean "we could not find out," the
+--    day looks like a day with no sole-user lines forever, understating
+--    people's misses, with nothing on the row to say otherwise. The
+--    Aircall call fetch and the call_stats upserts happen earlier in
+--    the same route and are unaffected — same failure isolation
+--    router.js already applies to the HubSpot half of the sync.
+--
+-- 2. THE JOIN KEY IS EMAIL, AND YOU MAY HAVE TO GO GET IT. The
+--    redefinition spec's Open Item 10 asks whether GET /v1/numbers/:id
+--    returns an `email` on each user object or only `id` and `name`.
+--    The build brief settles the column shape as email, which this
+--    migration implements. If the detail endpoint turns out to return
+--    only id and name, do NOT change this column and do NOT store the
+--    Aircall user ID here instead — resolve the id to an email through
+--    Aircall's own users endpoint (which call_stats.sql's own live
+--    verification confirmed carries id/name/email) and write the email.
+--    Two identifiers for the same person on a line-keyed row would be
+--    exactly the ahead-of-need column this project avoids. If you find
+--    that email genuinely cannot be obtained at sync time, stop and
+--    come back to Neo — that is a schema conversation, not a workaround.
+--
+-- 3. NORMALIZE CASE. Write sole_user_email lower-cased, matching
+--    whatever call_stats.staff_email already stores, or the two halves
+--    of the Answer Rate fraction will silently fail to join for anyone
+--    whose Aircall seat has a capitalized address.
+--
+-- 4. THE ROLLUP. A person's missed inbound calls =
+--    SUM(call_stats.missed_calls) for them  (always 0 today, and that
+--    is fine — leave it in rather than assuming it stays 0 forever)
+--    + SUM(call_stats_line_misses.missed_calls) WHERE direction =
+--      'inbound' AND sole_user_email = their email AND call_date in
+--      range.
+--    The two populations are disjoint by construction and verifiable in
+--    lib/sync.js: a call with `user` set goes to call_stats and is
+--    skipped by buildLineMissAggregates(); a call with `user === null`
+--    goes here and is skipped by buildDailyAggregates(). No call can
+--    appear in both halves, so the sum does not double-count. Answer
+--    Rate and the Missed column must both read this same combined
+--    number — fixing only one leaves the page contradicting itself.
+--
+-- 5. NOTHING IS ALLOWED TO GO MISSING BETWEEN THE TWO SECTIONS.
+--    attributed misses + unattributed misses must equal the total line
+--    misses for the range. Treat a row with a NULL sole_user_email as
+--    unattributed ALWAYS, including the ring_user_count = 1 case in the
+--    constraint note above (and log that case loudly — it means an
+--    attributable miss is going uncharged).
+--
+-- 6. THE BACKFILL FLOOR IS 2026-03-10. Peter's confirmation that no
+--    line changed hands covers the last six months and no further. Do
+--    not stamp the mapping onto any row with call_date before
+--    2026-03-10; leave those NULL and let the dashboard say so.
+--    The backfill must NOT touch synced_at — that column means "last
+--    confirmed by the nightly sync" and the backfill is not a sync.
+--    updated_at will move on its own via the existing
+--    trg_call_stats_line_misses_updated_at trigger, which is correct
+--    and is the only trace the backfill leaves on the row.
+--
+-- 7. DOCUMENT THE ?date= HAZARD AT THE ROUTE. See the section above.
+--
+-- 8. EVERY PERCENTAGE THIS PRODUCES IS AN UPPER BOUND. Aircall reports
+--    which users a line RINGS, not where it FORWARDS (SPEC.md Open Item
+--    7, still open). Unmodelled forwarding can only ever ADD misses to
+--    someone's denominator, never remove them. Tron is putting that
+--    caveat on the page; it belongs in the code's comments too, so the
+--    next reader of the rollup query knows the number is deliberately
+--    conservative rather than complete.
+--
+-- ============================================================
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE call_stats_line_misses
+--   DROP CONSTRAINT IF EXISTS call_stats_line_misses_sole_user_requires_one_ringer;
+-- ALTER TABLE call_stats_line_misses DROP COLUMN IF EXISTS sole_user_email;
+-- ALTER TABLE call_stats_line_misses DROP COLUMN IF EXISTS ring_user_count;
+-- COMMENT ON TABLE call_stats_line_misses IS NULL;
+--
+-- WARNING, because this rollback is not as free as the two sibling
+-- migrations' were: dropping sole_user_email DESTROYS every snapshotted
+-- attribution, including the backfilled six months. The snapshots
+-- cannot be rebuilt from Aircall — the detail endpoint reports CURRENT
+-- ring membership only, with no history (Open Item 12). Rolling back
+-- after the backfill has run and any line has since changed hands means
+-- that history is gone for good. Roll back before the backfill, or
+-- export the two columns with their (aircall_number_id, call_date,
+-- direction) key first.
+--
+-- Note: the table, its index, its trigger and set_updated_at() are NOT
+-- dropped here — this migration did not create them, and they are
+-- shared with the rest of this schema.
+--
+-- ============================================================

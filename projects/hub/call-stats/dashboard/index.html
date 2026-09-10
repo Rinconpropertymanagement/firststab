@@ -92,6 +92,7 @@
         <div id="as-of-note" class="as-of-note"></div>
 
         <div id="pod-tables"></div>
+        <div id="hubspot-native-section"></div>
         <div id="line-misses-section"></div>
       </div>
 
@@ -217,6 +218,23 @@
       return m + 'm ' + String(s).padStart(2, '0') + 's';
     }
 
+    // Answer rate arrives from the API as a raw 0–1 fraction (or null) and
+    // is turned into a percent here — same split of responsibilities as
+    // formatDuration above, which takes plain seconds and renders "3m 05s".
+    //
+    // null renders as the SAME em dash formatDuration uses for its own null
+    // case, deliberately, rather than "0%" or a new empty-state of its own:
+    // a null means this person had no inbound calls in the selected range,
+    // which is not the same as answering none of them.
+    //
+    // Rounded to a whole percent on purpose — this column is read off a
+    // scorecard in a weekly meeting, where "94%" is the useful number and
+    // "93.75%" is noise.
+    function formatAnswerRate(rate) {
+      if (rate == null) return '<span class="muted">&mdash;</span>';
+      return Math.round(rate * 100) + '%';
+    }
+
     async function loadStats(from, to) {
       currentFrom = from;
       currentTo = to;
@@ -265,49 +283,262 @@
         html += '<div class="pod-title">Not in a Pod</div>';
         html += '<div class="card" style="padding:0;">' + renderStaffTable(otherRows) + '</div>';
       }
+      // ── Notes under the pod tables ────────────────────────────────────
+      // The first one is new and Peter asked for it directly: with an
+      // "Outbound" column sitting next to "Calls," a reader can reasonably
+      // assume "Calls" means inbound. It doesn't, it never has, and the two
+      // are not meant to be added together.
+      html += '<p class="sub" style="margin-top:8px;"><strong>"Calls" is the blended total &mdash; inbound and outbound together.</strong> The "Outbound" column beside it is the outbound half OF that number, not a separate total to add on. Inbound is the subtraction: Calls minus Outbound.</p>';
+      // Rewritten 2026-09-10. The previous version of this note said calls
+      // to a shared line are not counted against anyone's answer rate. That
+      // stopped being true with this change and would now be actively
+      // misleading next to a number that dropped.
+      html += '<p class="sub" style="margin-top:8px;">"Answer Rate" is the share of that person\'s inbound calls they picked up &mdash; answered divided by answered plus missed, inbound only. Outbound calls are not counted either way. <strong>A missed call on a line that rings only one person now counts against that person</strong> (for example, the Office Line rings only Kristen). Misses on lines that ring nobody, or ring several people, are still charged to no individual and are listed under "Shared Line Misses" below. A dash means that person had no inbound calls at all in this range, which is not the same as answering none of them.</p>';
       html += '<p class="sub" style="margin-top:8px;">"Missed" and "Avg. Speed to Answer" cover inbound calls only — calls that came IN and nobody picked up. "Outbound, No Answer" is a different thing: calls a staff member PLACED where the other person didn\'t pick up (e.g. calling a vendor who doesn\'t answer). That\'s not a missed call in the same sense — it isn\'t a sign of a staff responsiveness problem — so it\'s shown as its own separate column rather than folded into "Missed."</p>';
+      // The upper-bound caveat (redefinition spec Design Decision 15) and
+      // the Aircall-only caveat (Design Decision 16). Both belong on the
+      // page rather than only in a spec document, because this is the screen
+      // the number is read off in a weekly meeting.
+      html += '<p class="sub" style="margin-top:8px;">Two things to read these percentages with. <strong>They cover Aircall calls only</strong> — anyone who also takes calls on a HubSpot line has those counted separately, further down, and not included here. And <strong>each one is a best case</strong>: Aircall tells us which people a line rings, not where a line forwards to after hours or through a menu, so a forwarded call that should count against someone currently doesn\'t. The real figure is this or lower, never higher. This number tells you where to ask a question, not what the answer is &mdash; different people\'s lines are set up differently, and time off lands entirely on whoever a one-person line rings.</p>';
       podTables.innerHTML = html;
 
-      renderLineMisses(data.line_misses || []);
+      renderHubspotNative(data.hubspot_native || [], data.hubspot_native_synced_at);
+      renderLineMisses(data.line_misses || [], data.line_miss_totals, data.line_miss_attribution_alarms || []);
     }
 
-    // Shared lines (e.g. Maintenance Hotline, Leasing Line) that nobody in
-    // particular picked up — calls with no staff member attached at all,
-    // so they can't appear in any of the tables above. Same "don't render
-    // a section with nothing in it" convention as the "Not in a Pod" table
-    // above: skipped entirely when there's no shared-line activity in the
-    // selected range, rather than shown empty.
-    function renderLineMisses(lines) {
+    // A SECOND, SEPARATE phone system (HubSpot's own native built-in
+    // calling feature — no Aircall involved) — its own section, its own
+    // "HubSpot line" badge (reusing the existing .badge-gray style already
+    // defined in this file's CSS, not a new visual style) so it reads as
+    // clearly distinct from that same person's Aircall row in the pod
+    // tables above, without inventing a second color scheme. There's no
+    // "Avg. Speed to Answer" column here — HubSpot doesn't expose the
+    // separate started/answered timestamps Aircall does, so that number
+    // can't be computed for this table (see the migration's own header) —
+    // simply omitted, not shown as a permanent placeholder. Same "skip the
+    // whole section when there's nothing tracked yet" convention as
+    // Shared Line Misses below: an empty allowlist (no rows yet in
+    // call_stats_hubspot_native_numbers) means this section hasn't been
+    // set up at all yet, so there's nothing useful to show.
+    function renderHubspotNative(lines, syncedAt) {
+      const section = document.getElementById('hubspot-native-section');
+      if (!lines.length) {
+        section.innerHTML = '';
+        return;
+      }
+      let html = '<div class="pod-title">HubSpot Native Lines</div>';
+      html += '<p class="sub" style="margin:0 0 8px;">Staff who take calls on HubSpot\'s own built-in phone feature instead of (or in addition to) Aircall — tracked separately, never blended into that person\'s Aircall numbers above.</p>';
+      html += '<div class="card" style="padding:0;">';
+      html += '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Outbound, No Answer</th></tr></thead><tbody>';
+      lines.forEach(l => {
+        html += '<tr>' +
+          '<td>' + escapeHtml(l.name) +
+            ' <span class="badge badge-gray">HubSpot &middot; ' + escapeHtml(l.phone_number) + '</span>' +
+            (l.notes ? '<br><span class="muted" style="font-size:12px;">' + escapeHtml(l.notes) + '</span>' : '') +
+          '</td>' +
+          '<td class="num">' + l.total_calls + '</td>' +
+          '<td class="num">' + formatDuration(l.avg_length_seconds) + '</td>' +
+          '<td class="num ' + (l.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + l.inbound_missed_calls + '</td>' +
+          '<td class="num ' + (l.outbound_not_answered > 0 ? 'missed-nonzero' : 'muted') + '">' + l.outbound_not_answered + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+      // Cross-reference added 2026-09-10 (redefinition spec Design Decision
+      // 16). One table on this page now carries an Answer Rate and this one
+      // doesn't, for the same named person — a reasonable reader would
+      // assume the percentage above covers all of that person's calls. It
+      // doesn't. There is deliberately no Answer Rate column here yet:
+      // HubSpot's call statuses include QUEUED and BUSY, which are neither
+      // answered nor missed, and deciding whether a queued call belongs in
+      // an answer-rate denominator is a real judgment call, not a
+      // five-minute addition. Shipping one without settling that would
+      // repeat exactly the mistake this change is fixing.
+      html += '<p class="sub" style="margin:6px 0 0;">These misses are <strong>not</strong> included in the Answer Rate above &mdash; that percentage covers Aircall calls only. There\'s no answer rate on this table yet because HubSpot records some calls as "queued" or "busy," which are neither answered nor missed, and we haven\'t decided which side of the fraction those belong on.</p>';
+      html += '<div class="as-of-note" style="margin-top:4px;">' +
+        (syncedAt ? 'As of last HubSpot sync: ' + new Date(syncedAt).toLocaleString() : 'No HubSpot sync has run yet for this range.') +
+        '</div>';
+      section.innerHTML = html;
+    }
+
+    // Calls that arrived on a shared line with no staff member attached to
+    // them at all in Aircall's own record — so they can't appear on a
+    // person's row above unless this tool attributes them.
+    //
+    // Split into TWO groups as of 2026-09-10 (redefinition spec Design
+    // Decision 15): lines whose misses are now charged to a person, and
+    // lines whose misses are still charged to nobody, with a running total
+    // of the second. That total is the point of the split — nobody should
+    // be able to read the per-person percentages above without also seeing
+    // how many misses landed on no one at all. In the four weeks to
+    // 2026-09-09 that was 21 of 118 — measured against real data on
+    // 2026-09-10, replacing an earlier estimate of "roughly 52" that was
+    // never checked.
+    //
+    // Same "don't render a section with nothing in it" convention as the
+    // "Not in a Pod" table above: skipped entirely when there's no
+    // shared-line activity in the selected range.
+    function renderLineMisses(lines, totals, alarms) {
       const section = document.getElementById('line-misses-section');
       if (!lines.length) {
         section.innerHTML = '';
         return;
       }
+      const charged = lines.filter(l => l.attributed_missed_calls > 0);
+      const notCharged = lines.filter(l => !l.attributed_missed_calls);
+      const t = totals || { missed_calls: 0, attributed_missed_calls: 0, unattributed_missed_calls: 0, after_hours_missed_calls: 0 };
+
       let html = '<div class="pod-title">Shared Line Misses</div>';
-      html += '<p class="sub" style="margin:0 0 8px;">Calls to a shared line (like the Maintenance Hotline or Leasing Line) that came in with no staff member picking up — so there\'s no one person to show these under above.</p>';
-      html += '<div class="card" style="padding:0;">';
-      html += '<table><thead><tr><th>Line</th><th class="num">Missed</th><th class="num">Total Calls</th></tr></thead><tbody>';
-      lines.forEach(l => {
-        html += '<tr>' +
-          '<td>' + escapeHtml(l.line_name) + '<br><span class="muted" style="font-size:12px;">' + escapeHtml(l.line_digits) + '</span></td>' +
-          '<td class="num ' + (l.missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + l.missed_calls + '</td>' +
-          '<td class="num">' + l.total_calls + '</td>' +
-          '</tr>';
-      });
-      html += '</tbody></table></div>';
+      html += '<p class="sub" style="margin:0 0 8px;">Calls that came in on a line with nobody picking up, where Aircall recorded no individual staff member at all &mdash; only the line. A line that rings exactly one person has its misses charged to that person (and they are already counted in that person\'s numbers above). A line that rings nobody, or rings several people, is charged to no one.</p>';
+
+      if (charged.length) {
+        html += '<div style="font-weight:600;font-size:13px;margin:14px 0 6px;">Charged to a person</div>';
+        html += '<p class="sub" style="margin:0 0 8px;">Already counted in that person\'s "Missed" and "Answer Rate" above &mdash; shown here so you can see where those misses came from. Not additional misses on top of the tables above.</p>';
+        html += '<div class="card" style="padding:0;">';
+        html += '<table><thead><tr><th>Line</th><th>Charged to</th><th class="num">Missed</th><th class="num">Not charged</th><th class="num">Total Calls</th></tr></thead><tbody>';
+        charged.forEach(l => {
+          const who = (l.attributed_to || []).map(a => escapeHtml(a.name) + ' (' + a.missed_calls + ')').join(', ');
+          html += '<tr>' +
+            '<td>' + escapeHtml(l.line_name) + afterHoursBadge(l) + '<br><span class="muted" style="font-size:12px;">' + escapeHtml(l.line_digits) + '</span></td>' +
+            '<td>' + (who || '<span class="muted">&mdash;</span>') + '</td>' +
+            '<td class="num missed-nonzero">' + l.attributed_missed_calls + '</td>' +
+            // A line can have both: inbound misses charged to its one
+            // person, and outbound calls the other party didn't pick up,
+            // which are charged to nobody. Shown rather than hidden so the
+            // two columns still add up to this line's real miss count.
+            '<td class="num ' + (l.unattributed_missed_calls > 0 ? '' : 'muted') + '">' + l.unattributed_missed_calls + '</td>' +
+            '<td class="num">' + l.total_calls + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+
+      html += '<div style="font-weight:600;font-size:13px;margin:14px 0 6px;">Charged to nobody</div>';
+      html += '<p class="sub" style="margin:0 0 8px;">These misses are <strong>not</strong> in anyone\'s Answer Rate above. They happened on lines that ring nobody in particular, or ring several people at once, so there is genuinely no one person whose phone rang.</p>';
+      if (notCharged.length) {
+        html += '<div class="card" style="padding:0;">';
+        html += '<table><thead><tr><th>Line</th><th>Why nobody</th><th class="num">Missed</th><th class="num">Total Calls</th></tr></thead><tbody>';
+        notCharged.forEach(l => {
+          html += '<tr>' +
+            '<td>' + escapeHtml(l.line_name) + afterHoursBadge(l) + '<br><span class="muted" style="font-size:12px;">' + escapeHtml(l.line_digits) + '</span></td>' +
+            '<td><span class="muted" style="font-size:12px;">' + whyNobody(l) + '</span></td>' +
+            '<td class="num ' + (l.unattributed_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + l.unattributed_missed_calls + '</td>' +
+            '<td class="num">' + l.total_calls + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table></div>';
+      } else {
+        html += '<div class="card empty">Every shared-line miss in this range is charged to a person.</div>';
+      }
+
+      // The running total. Deliberately stated as a share of the range's
+      // whole line-miss count, so the two halves are visibly exhaustive —
+      // nothing quietly disappears between the two tables.
+      html += '<p class="sub" style="margin-top:8px;"><strong>' + t.unattributed_missed_calls + ' of ' + t.missed_calls + '</strong> shared-line misses in this range are charged to nobody. The other ' + t.attributed_missed_calls + ' are already counted in the per-person numbers above.';
+      if (t.after_hours_missed_calls > 0) {
+        // Peter accepted that after-hours misses belong to nobody "as long
+        // as it's obvious they were after hours." This sentence plus the
+        // badge on the line itself is that obviousness.
+        html += ' <strong>' + t.after_hours_missed_calls + '</strong> of them came in after office hours, on the after-hours phone tree.';
+      }
+      html += '</p>';
+
+      if (alarms && alarms.length) {
+        // Not a cosmetic warning: each of these is a miss that SHOULD be
+        // charged to someone and isn't, which makes at least one person's
+        // Answer Rate above look better than it is.
+        html += '<div class="card" style="border-color:#fecaca;background:#fef2f2;margin-top:10px;">';
+        html += '<div style="font-weight:600;font-size:13px;color:#991b1b;margin-bottom:6px;">Some misses could not be charged to anyone</div>';
+        html += '<p class="sub" style="margin:0 0 6px;">These lines ring exactly one person, but that person could not be matched to a Rincon staff account &mdash; so their misses are sitting in "charged to nobody" above and are missing from someone\'s Answer Rate. Worth telling whoever set up the Aircall account.</p>';
+        html += '<ul style="margin:0 0 0 18px;font-size:12.5px;color:#6b7280;">';
+        alarms.forEach(a => {
+          html += '<li>' + escapeHtml(a.line_name || a.aircall_number_id) + ' &mdash; ' + a.missed_calls + ' missed</li>';
+        });
+        html += '</ul></div>';
+      }
+
       section.innerHTML = html;
+    }
+
+    // Peter accepted that after-hours misses are charged to nobody on one
+    // condition: that it's obvious they were after hours. The badge is that.
+    //
+    // The flag comes from the server, which reads it off Aircall's OWN name
+    // for the line ("Office Line Phone Tree - Outside Office Hours"). It is
+    // NOT a computed time of day and cannot be — the stored data is one row
+    // per line per DAY, so no clock time survives the nightly sync. See
+    // router.js's isAfterHoursLine() for why matching the name is the right
+    // trade and what it fails safe to.
+    function afterHoursBadge(line) {
+      if (!line.after_hours) return '';
+      return ' <span class="badge badge-amber">After hours</span>';
+    }
+
+    // Why a line's misses are charged to nobody, in plain language. Reads
+    // the ring_user_counts the nightly sync snapshotted onto each row.
+    //
+    // The null case is deliberately worded as "not recorded" rather than
+    // "rings nobody": a null means that day's row has no attribution
+    // snapshot at all — either it predates this feature, or the line wasn't
+    // in Aircall's line list when the sync ran. Saying "rings nobody" there
+    // would state a fact nobody actually checked, which is the exact kind of
+    // quietly-wrong number this whole change exists to remove.
+    function whyNobody(line) {
+      const counts = (line.ring_user_counts || []).filter(c => c != null);
+      const hasUnknown = (line.ring_user_counts || []).some(c => c == null);
+      const parts = [];
+      if (counts.some(c => c === 0)) parts.push('Rings nobody directly');
+      const several = counts.filter(c => c > 1);
+      if (several.length) parts.push('Rings ' + Math.max.apply(null, several) + ' people at once');
+      if (counts.some(c => c === 1)) parts.push('Rings one person, but they could not be matched to a staff account');
+      // Both causes are named because this row genuinely cannot tell them
+      // apart, and picking one to state as fact would be asserting something
+      // nobody checked — on the one page whose entire premise is not doing
+      // that. The wording says what IS known (nothing was recorded) and
+      // offers the two possibilities as possibilities.
+      if (hasUnknown) parts.push('Not recorded &mdash; either these misses predate the change that started tracking who each line rings, or the line wasn\'t in Aircall\'s line list when the sync ran');
+      return parts.length ? parts.join('; ') : 'Not recorded';
     }
 
     // Same table shape/columns for every group — Solimar, Faria, and the
     // "Not in a Pod" group all render identically.
     function renderStaffTable(rows) {
-      let html = '<table><thead><tr><th>Staff</th><th class="num">Calls</th><th class="num">Avg. Length</th><th class="num">Missed</th><th class="num">Avg. Speed to Answer</th><th class="num">Outbound, No Answer</th></tr></thead><tbody>';
+      // ── COLUMN ORDER, changed 2026-09-10 ──────────────────────────────
+      // "Answer Rate" was moved from sixth position to second, directly
+      // after the staff member's name — Peter asked for it further left, and
+      // as of this change it is the headline number of the scorecard rather
+      // than a column that read 100% for everyone.
+      //
+      // "Missed" moved with it, and stays immediately beside it on purpose.
+      // The two are now two views of the same fact — Answer Rate's
+      // denominator is answered plus exactly this Missed count — and they
+      // move together and must always agree. Side by side, anyone in the
+      // weekly meeting can check one against the other without scanning
+      // across the row. Splitting them would reintroduce the failure this
+      // change fixes, where an answer rate and a miss count on the same row
+      // told different stories.
+      //
+      // "Calls" and "Outbound" stay adjacent, further right. "Calls" is
+      // still the blended inbound+outbound total it has always been, and
+      // "Outbound" is its outbound half — a reader gets inbound volume by
+      // subtracting the two side-by-side numbers, which is why they must not
+      // be separated either. Note "Calls" now includes shared-line misses
+      // charged to this person, so that subtraction still gives their real
+      // inbound total; the note under the tables says so.
+      //
+      // Outbound is rendered as a plain integer with no em-dash empty state,
+      // unlike every null-able column beside it — 0 here means "placed no
+      // outbound calls," a real answer, not missing data. Per-PERSON, never
+      // per-line: per-line outbound was considered and dropped on 2026-09-10
+      // because call_stats stores no line identifier to break it down by.
+      let html = '<table><thead><tr><th>Staff</th><th class="num">Answer Rate</th><th class="num">Missed</th><th class="num">Calls</th><th class="num">Outbound</th><th class="num">Avg. Length</th><th class="num">Avg. Speed to Answer</th><th class="num">Outbound, No Answer</th></tr></thead><tbody>';
       rows.forEach(r => {
         html += '<tr>' +
           '<td>' + escapeHtml(r.name) + '</td>' +
-          '<td class="num">' + r.total_calls + '</td>' +
-          '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
+          '<td class="num">' + formatAnswerRate(r.answer_rate) + '</td>' +
           '<td class="num ' + (r.inbound_missed_calls > 0 ? 'missed-nonzero' : 'muted') + '">' + r.inbound_missed_calls + '</td>' +
+          '<td class="num">' + r.total_calls + '</td>' +
+          '<td class="num">' + r.outbound_total_calls + '</td>' +
+          '<td class="num">' + formatDuration(r.avg_length_seconds) + '</td>' +
           '<td class="num">' + formatDuration(r.avg_speed_to_answer_seconds) + '</td>' +
           '<td class="num ' + (r.outbound_not_answered > 0 ? 'missed-nonzero' : 'muted') + '">' + r.outbound_not_answered + '</td>' +
           '</tr>';

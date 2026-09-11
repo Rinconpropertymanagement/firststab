@@ -33,11 +33,19 @@
 -- line that rings only them, and real Aircall data proves that lumps
 -- three genuinely different things into one number.
 --
--- Kristen Rau's two lines, 2026-09-01..2026-09-10, 41 missed calls
+-- Kristen Rau's two lines, 2026-09-01..2026-09-09, 41 missed calls
 -- (live Aircall figures reported in this build's brief; recorded as
 -- reported to Neo, not independently re-fetched in this session — same
 -- "confirmed vs. needs live verification" discipline the three sibling
 -- migrations use):
+--
+-- WINDOW CORRECTED 2026-09-10 (was ..2026-09-10). These figures were taken
+-- while 2026-09-10 was still in progress, and a partly-elapsed day moves
+-- them by the hour — three different answer rates (55%, 70%, 71%) were
+-- recorded for this same person on this same day. TARS re-measured over
+-- WHOLE days only and settled it: 2026-09-01..2026-09-09 is the window that
+-- produces the 53% / 69% pair below. The COUNTS and the PERCENTAGES are
+-- unchanged and correct; only the end date was wrong.
 --
 --   missed_call_reason      count   left voicemail   median duration
 --   ---------------------   -----   --------------   ---------------
@@ -538,6 +546,29 @@ BEGIN
 END $$;
 
 
+-- ── CORRECTION, 2026-09-10 — COMMENT TEXT ONLY, NO STATEMENT CHANGED ──────
+-- The COLUMN COMMENT below labels Kristen Rau's figures
+-- "2026-09-01..2026-09-10". That window is WRONG. 2026-09-10 was still in
+-- progress when they were measured, which is why three different rates (55%,
+-- 70%, 71%) were recorded for the same person on the same day depending on
+-- the hour. TARS re-measured over whole days only and settled it: the correct
+-- window for these numbers is 2026-09-01..2026-09-09. The 41 = 21 + 16 + 4
+-- breakdown and the 53% / 69% pair are CORRECT as written — only the end date
+-- is wrong, and it should read 2026-09-09 wherever this comment says 09-10.
+-- The same applies to the voicemails_left comment further down, which cites
+-- the same 12-of-21 / 6-of-16 / 0-of-4 measurement over the same window.
+--
+-- The COMMENT ON COLUMN statement itself is deliberately NOT edited. This
+-- migration is already applied to the live database, so editing the string
+-- would leave the file claiming a correction the database's own comment never
+-- received — the file and the database would disagree, silently, which is
+-- worse than a dated note beside the statement.
+--
+-- Considered and rejected: a follow-on migration that re-issues this COMMENT
+-- with the corrected window. It is a nine-day label in a comment no
+-- arithmetic reads, and every migration costs Peter a hand-applied run in the
+-- Supabase SQL editor. Not worth one on its own. Fold this correction in if
+-- this column ever needs a real migration for another reason.
 COMMENT ON COLUMN call_stats_line_misses.missed_calls_agents_did_not_answer IS
   'How many of this row''s missed_calls carried Aircall''s missed_call_reason = ''agents_did_not_answer'' — somebody was available and the phone rang out. THE ONLY MISS REASON THAT COUNTS AGAINST A PERSON, per Peter''s decision of 2026-09-10. On a row where sole_user_email is populated, THIS is the number that goes into that named employee''s Answer Rate denominator; missed_calls as a whole must NOT be used for that any more. The other observed reasons are deliberately not charged to anyone: ''no_available_agent'' means nobody was logged in (confirmed by Peter as Kristen manually switching to the phone tree for lunch, plus her 9am start — a schedule, not a performance failure) and ''short_abandoned'' means the caller hung up after a median of NINE seconds, which nobody could have answered. Real figures behind the rule, Kristen Rau''s two lines 2026-09-01..2026-09-10: 41 misses = 21 agents_did_not_answer + 16 no_available_agent + 4 short_abandoned; her rate is 53% counting all of them and 69% counting only this column. Denormalized on purpose from missed_calls_by_reason so the load-bearing figure has a real integer type and a real range CHECK instead of living inside an untyped blob where an absent key would SUM to a silent undercount. It MUST equal COALESCE(missed_calls_by_reason->>''agents_did_not_answer'', 0). NULL means THIS ROW WAS NEVER MEASURED — a sync run that did not look at missed_call_reason at all — and is the OPPOSITE convention to sole_user_email''s NULL; it must never be read as zero. Populated by Q''s sync change, not by the migration that created this column.';
 

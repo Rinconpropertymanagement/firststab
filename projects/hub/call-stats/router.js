@@ -22,7 +22,18 @@ const { createClient } = require('@supabase/supabase-js');
 
 const aircall = require('./lib/aircall-connector');
 const hubspot = require('./lib/hubspot-connector');
-const { buildDailyAggregates, buildLineMissAggregates, buildHubspotDailyAggregates } = require('./lib/sync');
+const {
+  buildDailyAggregates,
+  buildLineMissAggregates,
+  buildHubspotDailyAggregates,
+  // The ONE implementation of "which ownership-history entry governs this line
+  // on this day" — the algorithm in lib/line-ownership-history.js's header.
+  // Imported, never re-implemented: a second copy of that boundary is how a
+  // departed employee's calls quietly land back on their replacement, and the
+  // file's own header spends a page arguing there must be exactly one copy of
+  // this fact. See the ownership_periods block in the stats route below.
+  lineOwnershipRuleFor,
+} = require('./lib/sync');
 // Every per-person number this route returns is computed in lib/metrics.js,
 // never inline here — TREND-VIEW-SPEC.md Design Decision 3 makes that a
 // build requirement, so that the trend route landing next shares this
@@ -33,6 +44,7 @@ const {
   createPersonAccumulator,
   foldCallStatsRow,
   foldAttributedLineMissRow,
+  isAttributableLineMissRow,
   computePersonMetrics,
   emptyPersonMetrics,
 } = require('./lib/metrics');
@@ -65,12 +77,72 @@ const supabase = createClient(
 // 1000 rows by default, silently (no error). Same fix, same reasoning, as
 // security-deposit/router.js's and maintenance-history/router.js's
 // fetchAllRows.
+//
+// ============================================================
+// WHY THIS TAKES A REQUIRED `uniqueOrderColumn` — read before simplifying
+// ============================================================
+// This helper pages with OFFSET. An OFFSET page is only meaningful if the
+// query has a TOTAL order, i.e. an ORDER BY that can never tie. Postgres
+// makes no promise about the relative order of rows that tie — it is free to
+// return them differently on each of the two or three requests this helper
+// makes, and under concurrent load it does, because a plan change or a
+// synchronised sequential scan can start reading the same table at a
+// different point. When that happens, a row that sat at the end of page 1
+// on the first request sits at the start of page 2 on the second: it is
+// fetched TWICE, and some other row is never fetched at ALL.
+//
+// This was a live bug, found by TARS on 2026-09-11 (call-stats):
+//
+//   * It was INVISIBLE until the tables crossed one page. Both paged
+//     queries below had shipped without a unique sort key — `call_stats`
+//     ordered by `call_date` alone (not unique), `call_stats_line_misses`
+//     with no .order() at all — and were correct the whole time, because
+//     with fewer than 1000 rows this helper makes exactly one request and
+//     there is no second page to disagree with. The six-month backfill
+//     pushed both tables past 1000 rows and the bug switched on. Any table
+//     read through this helper is one growth spurt away from the same
+//     thing.
+//   * Measured: one fetch of 1427 rows returned only 1225 distinct — 202
+//     rows duplicated, 202 rows silently lost. Under 24 simultaneous
+//     identical requests, 8 came back with different numbers.
+//   * THE PAGE CANNOT DETECT IT. Every self-check this tool has —
+//     buckets_reconcile, the three-term identity — passed on the corrupted
+//     responses, because a corrupted row set is still internally
+//     consistent: it reconciles perfectly against itself. There is no error
+//     state, no warning, nothing in a log. It just quietly shows a
+//     different Answer Rate for a named employee on each page load, in a
+//     number read out in a weekly staff meeting.
+//
+// So the ordering is NOT optional and NOT the caller's to remember. A
+// helper that silently accepts an unsafe query is exactly how this got
+// shipped, and "add .order() at the call site" only protects the six call
+// sites that exist today — the seventh one someone writes next year
+// reintroduces it by omission, silently, and nothing fails. Making it a
+// required argument moves the failure from "wrong numbers forever" to "this
+// throws the first time you run it," which is the whole point.
+//
+// Pass the table's PRIMARY KEY (`id` on all of these). Any .order() the
+// caller applies itself still wins — this one is appended as the final
+// tiebreaker, so a caller that wants rows by call_date still gets them by
+// call_date, just with the ties broken the same way every time.
 const SUPABASE_PAGE_SIZE = 1000;
-async function fetchAllRows(buildPage) {
+async function fetchAllRows(uniqueOrderColumn, buildPage) {
+  if (typeof uniqueOrderColumn !== 'string' || !uniqueOrderColumn.trim()) {
+    throw new Error(
+      'fetchAllRows requires a unique ordering column as its first argument ' +
+      "(the table's primary key, e.g. 'id'). Offset pagination without a " +
+      'total order duplicates and drops rows. See the comment above this function.'
+    );
+  }
+  if (typeof buildPage !== 'function') {
+    throw new Error('fetchAllRows requires a buildPage(rangeFrom, rangeTo) function as its second argument.');
+  }
+
   const rows = [];
   let from = 0;
   for (;;) {
-    const { data, error } = await buildPage(from, from + SUPABASE_PAGE_SIZE - 1);
+    const { data, error } = await buildPage(from, from + SUPABASE_PAGE_SIZE - 1)
+      .order(uniqueOrderColumn, { ascending: true });
     if (error) throw error;
     for (const row of data || []) rows.push(row);
     if (!data || data.length < SUPABASE_PAGE_SIZE) break;
@@ -229,57 +301,15 @@ router.get('/api/call-stats/auth/me', requireCallStatsAccess, (req, res) => {
 // still open). Unmodelled forwarding can only ever ADD misses to someone's
 // denominator, never remove them, so the true figure is this or lower. The
 // dashboard states that on the page.
-/**
- * The ONE gate that decides whether a shared-line row is charged to a
- * person. Peter's rule, approved 2026-09-10: an inbound call on a line that
- * rings EXACTLY ONE person counts toward that person; a call on a line that
- * rings nobody, or rings several people, stays charged to no individual.
- *
- * IT IS ONE GATE FOR BOTH HALVES, AND THAT IS THE POINT (Open Item 11).
- * A row that passes here contributes its misses to the person's denominator
- * AND its answered calls to their numerator. There is deliberately no
- * second, looser or stricter test for the answered side: two tests would be
- * two things to keep in step, and the asymmetry this function's callers
- * exist to remove is exactly what happens when they fall out of step.
- *
- * All four conditions are load-bearing:
- *
- *   direction === 'inbound' — an outbound call the other party didn't pick
- *     up is not a staff responsiveness signal (SPEC.md Design Decision 2),
- *     and an outbound call a shared line placed and connected is not a
- *     responsiveness signal either, so neither half of an outbound row is
- *     read back into anyone's numbers. The attribution columns are stamped
- *     onto outbound rows too, because "who did this line ring" is a fact
- *     about the line, but they are never read back into anyone's Answer
- *     Rate. In the 2026-08-15..2026-09-09 window this is not hypothetical:
- *     13 answered user-less OUTBOUND calls sit in this table, all on the
- *     Maintenance Hotline, and this condition is what keeps them out of a
- *     person's numerator.
- *
- *   ring_user_count === 1 — the entire justification for adding a
- *     LINE-keyed count into a PERSON-keyed denominator. It does not
- *     generalise to the two lines that ring three people each.
- *
- *   sole_user_email is set — a row with ring_user_count === 1 and a NULL
- *     email means the line rang exactly one person whose email could not be
- *     resolved. Neo's column comment is explicit: log it loudly, treat it as
- *     unattributed. A real miss going uncharged is bad; guessing who it
- *     belongs to would be worse.
- *
- *   the email matches a known Rincon user — without this, a miss attributed
- *     to an external vendor's Aircall seat would vanish from BOTH sections:
- *     it would count as attributed here, while the person's row is never
- *     rendered (the pods loop skips emails with no `users` match). Nothing
- *     is allowed to go missing between the two sections (migration NOTES FOR
- *     Q #5), so an unmatched email falls back to unattributed and stays
- *     visible in Shared Line Misses.
- */
-function isAttributableLineMissRow(row, soleEmail, usersByEmail) {
-  return row.direction === 'inbound'
-    && row.ring_user_count === 1
-    && !!soleEmail
-    && usersByEmail.has(soleEmail);
-}
+// isAttributableLineMissRow() — the ONE gate that decides whether a
+// shared-line row is charged to a person — now lives in lib/metrics.js, next
+// to the arithmetic it gates, and is imported at the top of this file. It
+// MOVED rather than being copied, on 2026-09-10: backfill-six-months.js's
+// dry-run report has to answer "how many of these misses will land on a named
+// person" with the SAME rule this route applies, and that report is what
+// Peter reads to decide whether to run the backfill. A second copy of a
+// four-condition rule is how the report came to overstate attribution in the
+// first place. Behaviour here is unchanged.
 
 /**
  * Whether a line is Rincon's after-hours phone tree, for labelling only.
@@ -334,7 +364,11 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
 
   let rows;
   try {
-    rows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    // 'id' is the unique tiebreaker fetchAllRows appends after call_date —
+    // call_date alone is NOT unique (one person, one date, two directions,
+    // and a dozen people on the same date), and paging on a non-unique
+    // order duplicates and drops rows. See fetchAllRows' header.
+    rows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats')
       .select('aircall_user_id, staff_email, call_date, direction, total_calls, answered_calls, missed_calls, total_talk_seconds, total_ring_seconds, synced_at')
       .gte('call_date', from)
@@ -407,7 +441,9 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
   // not retroactively move an earlier day's misses onto a different person.
   let lineMissRows;
   try {
-    lineMissRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    // 'id' — this query had NO .order() at all, which is where the 202
+    // duplicated / 202 lost rows in fetchAllRows' header were measured.
+    lineMissRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats_line_misses')
       .select('aircall_number_id, line_name, line_digits, call_date, direction, total_calls, missed_calls, sole_user_email, ring_user_count, missed_calls_agents_did_not_answer, missed_calls_by_reason, voicemails_left')
       .gte('call_date', from)
@@ -508,7 +544,14 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     // row's missed_calls_by_reason map. Includes any value Aircall invents
     // that nobody has seen yet, verbatim and unbucketed — the map has no key
     // CHECK precisely so a new value shows up here instead of vanishing.
-    missed_calls_by_reason: {},
+    //
+    // Object.create(null) for the same reason lib/sync.js uses it on the
+    // write side: these keys come from Aircall, and on a plain {} a reason of
+    // `__proto__` makes the += below a no-op while `constructor` makes it
+    // read back as a function. Either one silently corrupts the range's
+    // reason totals on a page Peter reads in a staff meeting. Serializes
+    // identically through res.json().
+    missed_calls_by_reason: Object.create(null),
   };
   // Data-quality alarms, surfaced in the API response rather than only in a
   // server log, because each one means a real, chargeable miss is going
@@ -550,12 +593,20 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
         unmeasured_rows: 0,
         voicemails_left: 0,
         measured_missed_calls: 0,
-        missed_calls_by_reason: {},
+        // Object.create(null) — Aircall owns these keys. See the identical
+        // note on lineMissTotals.missed_calls_by_reason above.
+        missed_calls_by_reason: Object.create(null),
         // Distinct ring_user_count values seen across the range. Usually one
         // value; more than one means the line's membership changed mid-range,
         // which the snapshot design handles correctly per day and which is
         // worth being able to see rather than flattening away.
         ring_user_counts: new Set(),
+        // Which lib/line-ownership-history.js period each of this line's rows
+        // falls in, keyed by the governing entry's `from`. Empty for the
+        // normal case — a line with no entries in that file, which is almost
+        // every line. See the ownership_periods block further down for the
+        // whole reasoning and for what an empty array does and does not mean.
+        ownership_periods: new Map(),
         after_hours: isAfterHoursLine(r.line_name),
       };
       lineMissesByNumber.set(r.aircall_number_id, agg);
@@ -637,19 +688,66 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     // misses and credits its answered calls to the same person in the same
     // call — the whole point of the Open Item 11 fix is that there is no
     // branch here where one moves without the other.
-    //
-    // TWO conditions now, not one. `measured` joins the gate because an
-    // unmeasured row cannot be charged to anyone: nobody can say how many of
-    // its misses were `agents_did_not_answer`, and both guesses are wrong in
-    // a direction that matters (0 under-charges everybody; missed_calls
-    // over-charges Kristen by the 16 lunchtime no_available_agent misses
-    // Peter explicitly excluded). It has to match lib/metrics.js exactly —
-    // foldAttributedLineMissRow() returns early on the same test — or this
-    // section would say a row was charged to someone while their Answer Rate
-    // never saw it.
     const attributable = isAttributableLineMissRow(r, soleEmail, usersByEmail);
+
+    // ============================================================
+    // THE FOLD IS GATED ON `attributable` ALONE — fixed 2026-09-10
+    // ============================================================
+    // This call used to sit inside the `attributable && measured` branch
+    // below. That made lib/metrics.js's unmeasured early-return branch
+    // UNREACHABLE from this route: a row that was attributable but unmeasured
+    // never reached the fold at all, so foldAttributedLineMissRow() never got
+    // to count it. The consequence was measured live — every person's
+    // has_unmeasured_line_misses read false and their three
+    // inbound_unmeasured_line_* counters read zero, in every range, while
+    // line_miss_totals.unmeasured_missed_calls correctly reported the real
+    // figure a few lines up. lib/metrics.js computes those per-person fields
+    // with a comment saying they exist "so the page can SAY SO," and the page
+    // could not.
+    //
+    // *** NO ARITHMETIC MOVES. *** foldAttributedLineMissRow() returns early
+    // on an unmeasured row BEFORE touching any of the numbers: the row still
+    // enters neither half of the Answer Rate and still stays out of
+    // acc.total_calls, so the three-term identity in lib/metrics.js's header
+    // (Calls − Outbound === answered + charged misses + misses charged to
+    // nobody) closes exactly as it did before. All that changes is that the
+    // row is now COUNTED as excluded instead of being silently dropped.
+    // Excluded and counted-as-excluded are different things, and it was the
+    // second one that was broken.
+    //
+    // The `measured` half of the old gate is still enforced, in the only
+    // place it was ever a question about arithmetic: the display and bucket
+    // accounting below, which is unchanged. An unmeasured row still lands
+    // wholly in the unattributed half of this line's figures and in bucket 4,
+    // exactly as before — see the else branch.
+    //
+    // *** THE PER-PERSON UNMEASURED COUNTERS AND BUCKET 4 COUNT DIFFERENT
+    // POPULATIONS. DO NOT ADD THEM UP AGAINST EACH OTHER. *** A person's
+    // inbound_unmeasured_line_* fields can only ever see rows that are
+    // ATTRIBUTABLE — a row has to name exactly one resolvable Rincon user
+    // before there is a person to count it against at all. bucket 4
+    // (line_miss_totals.unmeasured_missed_calls) counts EVERY unmeasured row,
+    // attributable or not. So summing the per-person figures across `pods`
+    // gives a number that is correctly SMALLER than the range total, and the
+    // difference is unmeasured misses on lines that ring nobody or ring
+    // several. Both numbers are right; they answer different questions ("whose
+    // Answer Rate is computed over less than the whole story" versus "how many
+    // misses in this range cannot be split by reason at all"), and presenting
+    // either as the other would be a new quietly wrong number in place of the
+    // one this fix removes. On the live table today the gap is the whole 118,
+    // because not one row in it carries an attribution snapshot yet.
+    if (attributable) foldAttributedLineMissRow(accumulatorFor(soleEmail), r);
+
+    // TWO conditions here, not one, and this is where `measured` is
+    // load-bearing: an unmeasured row cannot be CHARGED to anyone, because
+    // nobody can say how many of its misses were `agents_did_not_answer`, and
+    // both guesses are wrong in a direction that matters (0 under-charges
+    // everybody; missed_calls over-charges Kristen by the 16 lunchtime
+    // no_available_agent misses Peter explicitly excluded). This test has to
+    // agree with lib/metrics.js exactly — foldAttributedLineMissRow() returns
+    // early on the same condition — or this section would say a row was
+    // charged to someone while their Answer Rate never saw it.
     if (attributable && measured) {
-      foldAttributedLineMissRow(accumulatorFor(soleEmail), r);
       // *** attributed_missed_calls IS NOW THE CHARGED SUBSET, not the row's
       // whole missed_calls. *** The remainder goes to unattributed below, so
       // attributed + unattributed still equals this line's missed_calls
@@ -698,6 +796,107 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
       // Unmeasured rows are already counted into bucket 4 above and are
       // deliberately in none of the other three.
     }
+
+    // ============================================================
+    // OWNERSHIP PERIODS — added 2026-09-10 so the page can NAME why a row is
+    // unattributed instead of listing three possibilities
+    // ============================================================
+    // An unattributed row writes sole_user_email NULL and ring_user_count
+    // NULL, and THREE different things produce that identical pair:
+    //
+    //   1. the row predates the attribution feature (migration
+    //      20260910010000) — no sync run ever stamped it;
+    //   2. the line was missing from Aircall's mapping when the sync ran —
+    //      lib/sync.js's lines_missing_from_mapping branch;
+    //   3. lib/line-ownership-history.js deliberately HELD THE ATTRIBUTION
+    //      BACK, because somebody else worked that line at the time.
+    //
+    // Only the third has a name attached to it, and it is the only one where
+    // the page can say something useful rather than something hedged. This
+    // block recovers it.
+    //
+    // *** WHY THIS IS NOT A SECOND COPY OF THE OWNERSHIP FACT. *** Tron was
+    // right to refuse to put LINE_OWNERSHIP_HISTORY in the dashboard, and for
+    // the reason that file's own header gives at length: a second copy goes
+    // stale on the next departure. What is returned here is not a copy of the
+    // list — it is a PROJECTION of it, computed per request, clipped to the
+    // rows actually on the page, through lineOwnershipRuleFor(), which is the
+    // single implementation of that file's boundary algorithm and the same one
+    // the sync and the backfill use. Add an entry to that file and this
+    // response changes on the next page load with no edit here and none in the
+    // dashboard. Nothing is cached and nothing is duplicated.
+    //
+    // The alternative Q was asked to weigh — a per-row exclusion flag written
+    // at sync time — was rejected, and not only on the stated cost that it
+    // needs a schema change against a live database where Peter applies every
+    // migration by hand. The deeper problem is that it would answer the
+    // question for rows written AFTER the column exists and leave every
+    // already-written row exactly as ambiguous as it is today, which is the
+    // population this whole request is about. A column would also have to be
+    // backfilled to be useful, and backfilling it means re-deriving the same
+    // projection this block computes for free — so it buys a write, a
+    // migration and a second durable copy of a fact, to answer a question that
+    // is already answerable at read time from the file the sync consulted.
+    //
+    // PERIODS ARE ONLY RETURNED WHERE THERE ARE ROWS IN THEM. A period that
+    // governs no row in the selected range explains nothing on the page, so it
+    // is absent rather than rendered against an empty span. Consequently
+    // first_call_date/last_call_date describe what is ON THE PAGE, while
+    // period_from is the authoritative boundary from the file.
+    //
+    // Returns null, and this whole block is a no-op, for any line with no
+    // entries in that file — rule 1 of its algorithm, and the case almost
+    // every Rincon line is in.
+    const ownership = lineOwnershipRuleFor(r.aircall_number_id, r.call_date);
+    if (ownership) {
+      // Rule 2 of the algorithm — a date before the line's earliest entry —
+      // has no governing entry at all, so it has no `from` to key on and
+      // nobody is named for it. It still gets its own period, because "this
+      // era predates anything we recorded about the line" is itself one of the
+      // real answers (the Office Line's pre-May phone tree, and RSC Solimar's
+      // pre-April rows).
+      const key = ownership.from || '(before earliest entry)';
+      let period = agg.ownership_periods.get(key);
+      if (!period) {
+        period = {
+          period_from: ownership.from,
+          line_earliest_from: ownership.earliest_from,
+          excluded: ownership.excluded,
+          // Added 2026-09-11. Non-null means this closed period was charged
+          // BY NAME to that person, so its rows carry a real attribution that
+          // did not come from Aircall's live ring membership. `excluded` and
+          // this are mutually exclusive: a period is withheld, redirected, or
+          // neither. Without it the page cannot tell a named period from an
+          // ordinary 'ring_membership' one — both read excluded: false — and
+          // would describe six months of Leo O'Gorman's calls as "attributed
+          // normally," which is the one thing they are not.
+          attributed_to_email: ownership.attribute_to_email,
+          worked_by: ownership.worked_by,
+          reason: ownership.reason,
+          line_name_in_history: ownership.line_name,
+          first_call_date: r.call_date,
+          last_call_date: r.call_date,
+          rows: 0,
+          total_calls: 0,
+          missed_calls: 0,
+          missed_calls_charged_to_person: 0,
+          missed_calls_charged_to_nobody: 0,
+        };
+        agg.ownership_periods.set(key, period);
+      }
+      if (r.call_date < period.first_call_date) period.first_call_date = r.call_date;
+      if (r.call_date > period.last_call_date) period.last_call_date = r.call_date;
+      period.rows++;
+      period.total_calls += r.total_calls;
+      period.missed_calls += r.missed_calls;
+      // Mirrors the branch above rather than re-deciding anything: a row is
+      // charged to a person on exactly the condition that branch was entered
+      // on, and for exactly the count it added. Kept as one expression here so
+      // the two cannot drift into disagreeing about the same row.
+      const chargedToPerson = (attributable && measured) ? chargeableOnRow : 0;
+      period.missed_calls_charged_to_person += chargedToPerson;
+      period.missed_calls_charged_to_nobody += r.missed_calls - chargedToPerson;
+    }
   }
 
   const lineMisses = Array.from(lineMissesByNumber.values())
@@ -741,6 +940,89 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
       // and the dashboard says so rather than implying the line was checked.
       ring_user_counts: Array.from(l.ring_user_counts),
       after_hours: l.after_hours,
+
+      // ── Why this line's rows are unattributed, where it is knowable ─────
+      // *** NOT WIRED INTO THE DASHBOARD YET — Tron's next pass. *** Returned,
+      // documented and verified here; nothing on the page reads it today.
+      //
+      // The periods of lib/line-ownership-history.js that govern this line's
+      // rows in this range, oldest first, each with the count of this line's
+      // rows that fall in it. See the block above the fold in the row loop for
+      // why this is a projection rather than a second copy of that file, and
+      // for what was rejected in its place.
+      //
+      // *** AN EMPTY ARRAY MEANS "THIS LINE HAS NO OWNERSHIP HISTORY," WHICH
+      // IS THE NORMAL CASE — IT DOES NOT MEAN ATTRIBUTION IS FINE. *** Almost
+      // every Rincon line is in it. A row on such a line that is still
+      // unattributed is unattributed for one of the other two reasons (it
+      // predates the attribution feature, or its line was missing from
+      // Aircall's mapping at sync time), and this response cannot tell those
+      // two apart. The page must keep hedging there; it only stops hedging
+      // where a period below says `excluded: true`.
+      //
+      // Each period:
+      //   period_from        'YYYY-MM-DD' — the governing entry's INCLUSIVE
+      //                      start, straight from the file. null means the
+      //                      row falls BEFORE this line's earliest entry
+      //                      (rule 2 of that file's algorithm): charged to
+      //                      nobody, with nobody named for the era.
+      //   line_earliest_from the line's earliest entry, so the page can word
+      //                      the null case ("before 2026-04-01").
+      //   excluded           TRUE = attribution was deliberately held back
+      //                      for this period; these calls are charged to
+      //                      nobody ON PURPOSE, not for want of data. This is
+      //                      the flag that lets the page stop hedging.
+      //   attributed_to_email  non-null = this closed period was charged BY
+      //                      NAME to that person, from the file rather than
+      //                      from Aircall's live ring membership. Mutually
+      //                      exclusive with `excluded`. null with
+      //                      excluded false is the ordinary
+      //                      'ring_membership' case. The sentence it exists
+      //                      to make possible, for Maintenance
+      //                      Coordinator-Solimar: "Mar–Sep 2026: worked by
+      //                      Leo O'Gorman — charged to him by name, though
+      //                      the line rings Regina Franco Mendez today."
+      //   worked_by          who actually worked the line then, in plain
+      //                      English, e.g. "Aldo Hernandez (Aircall user
+      //                      1906760 — seat deleted...)". null for the
+      //                      before-earliest case. DOCUMENTATION ONLY — never
+      //                      a join key, never parsed, never matched against
+      //                      `users` (that file's NOTES FOR Q #7).
+      //   reason             the entry's full written reason. Long — it is a
+      //                      paragraph, meant for a tooltip or a details
+      //                      panel, not a table cell. null before-earliest.
+      //   line_name_in_history  the file's name for the line. May differ from
+      //                      line_name above, which is Aircall's name today;
+      //                      the sync already logs loudly on a mismatch.
+      //   first_call_date / last_call_date  the oldest and newest row of
+      //                      THIS LINE in THIS RANGE that falls in the
+      //                      period — what the page should render as the
+      //                      span, since it describes the rows actually shown.
+      //   rows, total_calls, missed_calls  this line's figures within the
+      //                      period. Across a line's periods these sum to the
+      //                      line's own rows / total_calls / missed_calls
+      //                      above, exactly — every row of a line that has
+      //                      any history lands in exactly one period.
+      //   missed_calls_charged_to_person / _to_nobody  that period's misses
+      //                      split the way the section above splits them.
+      //                      These two sum to missed_calls. They are
+      //                      DESCRIPTIVE, and deliberately NOT a fifth bucket:
+      //                      the four disjoint buckets are the ones that
+      //                      reconcile against the range total, and these cut
+      //                      the same misses a different way.
+      //
+      // The sentence this exists to make possible, for RSC Solimar Team:
+      //   "Apr–Aug 2026: worked by Aldo Hernandez (departed) — charged to
+      //    nobody."
+      ownership_periods: Array.from(l.ownership_periods.values())
+        // Oldest first, with the before-earliest period (period_from null)
+        // ahead of every dated one, because it is by definition the earliest.
+        .sort((a, b) => {
+          if (a.period_from === b.period_from) return 0;
+          if (a.period_from === null) return -1;
+          if (b.period_from === null) return 1;
+          return a.period_from < b.period_from ? -1 : 1;
+        }),
 
       // ── The four disjoint buckets for this line ──────────────────────
       // These four sum to missed_calls above. Tron needs them to label the
@@ -811,10 +1093,18 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     // in the unattributed half of Shared Line Misses instead of landing on a
     // row nothing renders.
     if (!user) continue;
+    // Inactive staff are not rendered in any of the three tables. The full
+    // reasoning, and the rule this reverses, is in the block above the
+    // placeholder loop below — read it before touching either place. This
+    // check and that one are the same decision applied to the two routes a
+    // person can reach a pod table by (real activity here, a zero-row
+    // placeholder there); they must agree, or a departed employee disappears
+    // from a short range and reappears in a long one.
+    if (!user.is_active) continue;
     const row = { name: user.name, email, ...computePersonMetrics(acc) };
     if (user.pod && pods[user.pod]) {
       pods[user.pod].push(row);
-    } else if (!user.pod && user.is_active) {
+    } else if (!user.pod) {
       // No pod (Business Development / Operations / Executive), but has
       // real call activity in this range — the `Other` bucket. Unlike
       // Solimar/Faria there's no fixed roster of "everyone not in a pod,"
@@ -830,21 +1120,60 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
   // to Solimar/Faria — see the `Other` comment above for why this same
   // placeholder treatment doesn't extend there.)
   //
-  // *** DO NOT ADD AN is_active FILTER TO THIS LOOP. ***
-  // Peter decided on 2026-09-10 that nobody is ever dropped from a pod
-  // table automatically. Removing a person from this scorecard is always a
-  // deliberate, per-person decision he makes, never a side effect of a flag
-  // flipping in the `users` table. Adding `if (!user.is_active) continue;`
-  // here would look like an obvious tidy-up and would quietly delete a
-  // named employee from a report reviewed in a weekly staff meeting — with
-  // no record that the row ever existed. It has been considered and
-  // rejected; leave it out. (The `Other` bucket above is a different case
-  // and does check is_active: it has no fixed roster, so without that check
-  // any departed staff member's leftover activity would resurrect them into
-  // a table they were never listed in.)
+  // ============================================================
+  // is_active IS RESPECTED HERE — CHANGED 2026-09-11, DELIBERATELY, BY PETER.
+  // THIS REVERSES A RULE THAT STOOD IN THIS FILE. READ THE WHOLE BLOCK BEFORE
+  // CHANGING IT BACK OR "TIDYING" IT EITHER WAY.
+  // ============================================================
+  // What this code used to say, and why. On 2026-09-10 Peter said "lets not
+  // drop anyone for inactivity unless we manually decide to," and this loop
+  // was written to ignore `is_active` entirely, with a comment forbidding the
+  // filter in the strongest terms. His concern was real and is worth keeping
+  // in view: a named employee silently vanishing from a scorecard he reads
+  // aloud in a weekly staff meeting, because a flag flipped somewhere, with
+  // nothing on the page recording that the row ever existed.
+  //
+  // What changed on 2026-09-11 — and what did NOT. Peter decided to remove
+  // Aldo Hernandez, who left the company around 2026-08-27, and in doing so
+  // settled what the 2026-09-10 rule had actually been about. It was about
+  // AUTOMATIC removal, not about the mechanism. `users.is_active` is only ever
+  // set by a person making a deliberate, per-person decision — it is the
+  // written form of exactly the manual call his rule reserved to himself, not
+  // a competitor to it. So honouring the flag here IS his rule, carried out;
+  // ignoring it left him with a rule he could not actually exercise. He was
+  // told plainly that the consequence is that anyone marked inactive
+  // disappears from this page, and said yes.
+  //
+  // *** THE PART THAT MUST NOT ERODE: `is_active` IS A HUMAN ACT. ***
+  // Nothing may ever flip that flag on its own — not a sync, not a nightly
+  // job, not an inactivity heuristic, not a "seat deleted in Aircall" signal,
+  // not a tidy-up script. The moment anything automated can set it, this
+  // filter becomes precisely the silent deletion the 2026-09-10 rule existed
+  // to prevent, and the original comment's warning applies again in full
+  // force. If you are here because you want a process to write `is_active`,
+  // the answer is no — take it to Peter first.
+  //
+  // Scope, so nobody reads this as tidier than it is. This hides a PERSON
+  // FROM A DISPLAY. It changes no data: Aldo's `call_stats` and
+  // `call_stats_line_misses` rows keep their attribution exactly as written,
+  // his held-back calls are still charged to nobody and still visible in the
+  // Shared Line Misses section (lib/line-ownership-history.js names him there
+  // from its own text, never from `users`), and `usersByEmail` above is
+  // fetched UNFILTERED on purpose so an inactive person's name still resolves
+  // wherever a historical row or a line-miss attribution renders one. Do not
+  // "optimise" that fetch with an is_active filter — it would turn those
+  // names back into raw email addresses or blanks.
+  //
+  // And note where the same check has to live: the accumulator loop above
+  // gates on `is_active` too. Aldo reached the Solimar table by BOTH routes —
+  // as a zero-row placeholder here in a recent range, and with 39 real calls
+  // from the accumulator loop across the six-month backfill. Filtering only
+  // one of the two would have hidden him from short ranges and shown him in
+  // long ones, which is worse than either answer on its own.
   for (const user of users || []) {
     if (accumulators.has(user.email.toLowerCase())) continue;
     if (!pods[user.pod]) continue;
+    if (!user.is_active) continue;
     // Metric values come from an EMPTY accumulator rather than a
     // hand-written all-zero literal, so this placeholder row can never
     // drift out of step with the real rows beside it when a column is added
@@ -882,12 +1211,17 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
   let hubspotMostRecentSync = null;
   let hubspotNativeError = null;
   try {
-    const hubspotNumberRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    // Both tables are small today (1 row and 4 rows) — these two were never
+    // wrong, and that is exactly the point: nothing about them would start
+    // failing when they cross 1000 rows, they would just start being quietly
+    // wrong the way call_stats_line_misses did. Ordered now, while they are
+    // small enough that it costs nothing.
+    const hubspotNumberRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats_hubspot_native_numbers')
       .select('phone_number, staff_email, notes')
       .range(rangeFrom, rangeTo));
 
-    const hubspotCallRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    const hubspotCallRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats_hubspot_native_calls')
       .select('phone_number, call_date, direction, total_calls, answered_calls, missed_calls, total_talk_seconds, synced_at')
       .gte('call_date', from)
@@ -1227,10 +1561,12 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   // route above.
   let userRows;
   try {
-    userRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    // This call site is where the correct pattern already lived — the
+    // explicit .order('id') that used to be here is now fetchAllRows' job,
+    // so every call site gets it instead of just this one.
+    userRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('users')
       .select('id, email')
-      .order('id', { ascending: true })
       .range(rangeFrom, rangeTo));
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -1290,7 +1626,13 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   let lineMissMappingError = null;
   try {
     const lineRingMembership = await aircall.fetchLineRingMembership();
-    lineMissBuild = buildLineMissAggregates(calls, lineRingMembership);
+    // `usersByEmail` (built above for the call_stats half) is required by the
+    // line-miss half too, as of 2026-09-11: it is what proves every email
+    // named in lib/line-ownership-history.js resolves to a real person before
+    // any row is stamped with one. An unresolvable name throws from inside
+    // this try and lands on the skip-and-502 path below like any other
+    // attribution failure — nothing written, day re-runnable, loud.
+    lineMissBuild = buildLineMissAggregates(calls, lineRingMembership, usersByEmail);
   } catch (err) {
     lineMissMappingError = err.message;
     console.error(`[${ts}] call-stats sync: LINE-MISS HALF SKIPPED — Aircall line-to-user ring membership is unusable: ${err.message}`);
@@ -1317,6 +1659,35 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
     }
     if (lineMissSummary.rows_line_missing_from_mapping > 0) {
       console.error(`[${ts}] call-stats sync: DATA QUALITY ALARM — ${lineMissSummary.rows_line_missing_from_mapping} row(s) are on a line Aircall's own line list doesn't return (deleted line?). Both attribution columns left NULL and those misses stay unattributed. Lines:`, JSON.stringify(lineMissSummary.lines_missing_from_mapping));
+    }
+    // Rows held back by lib/line-ownership-history.js. Logged at INFO, not
+    // error, and deliberately: this is the rule working, not a failure. It is
+    // logged at all because both attribution columns end up NULL on these
+    // rows — the same shape the two alarms above produce — so without a line
+    // saying which rows were held back ON PURPOSE, a reader looking at the
+    // table later cannot tell a correct exclusion from a data-quality
+    // problem. On the nightly sync this should normally print nothing at all:
+    // every current period in that file says 'ring_membership'.
+    if (lineMissSummary.rows_excluded_by_line_ownership_history > 0) {
+      console.log(`[${ts}] call-stats sync: ${lineMissSummary.rows_excluded_by_line_ownership_history} row(s) / ${lineMissSummary.calls_excluded_by_line_ownership_history} call(s) held back by lib/line-ownership-history.js — the line was worked by somebody other than whoever rings it today, so those calls are charged to NOBODY rather than to the current ringer. Both attribution columns NULL; misses stay visible and fully measured. Periods:`, JSON.stringify(lineMissSummary.lines_excluded_by_ownership_history.map(l => ({ line: l.line_name, from: l.from || `(before ${l.before_earliest_from})`, worked_by: l.worked_by, calls: l.calls }))));
+    }
+    // The other half of the same rule, added 2026-09-11: rows the file
+    // REDIRECTED to a named person on a closed period. Also INFO, also not a
+    // failure. Logged for the opposite reason to the line above — those rows
+    // look like every other attributed row, so without this nothing records
+    // that their name came from a file rather than from Aircall's live ring
+    // membership.
+    //
+    // It normally prints nothing on the nightly sync, because that sync runs
+    // on YESTERDAY and yesterday almost always falls in a still-running
+    // period, where naming is illegal. THE EXCEPTION IS THE NIGHT AFTER A
+    // HANDOVER, and it is not hypothetical: the first sync after 2026-09-11
+    // covers 2026-09-10, the last day of Leo O'Gorman's newly-closed named
+    // period, so that one run prints this line for line 848524 and correctly
+    // stamps his name. A period closes the moment the next entry is added,
+    // and one sync run is still looking at a day inside it.
+    if (lineMissSummary.rows_named_by_line_ownership_history > 0) {
+      console.log(`[${ts}] call-stats sync: ${lineMissSummary.rows_named_by_line_ownership_history} row(s) / ${lineMissSummary.calls_named_by_line_ownership_history} call(s) attributed BY NAME from lib/line-ownership-history.js — a closed period charged to the person who actually worked it, not to whoever rings the line today. Stamped sole_user_email + ring_user_count = 1 and attributable like any other row. Periods:`, JSON.stringify(lineMissSummary.lines_named_by_ownership_history.map(l => ({ line: l.line_name, from: l.from, attributed_to: l.attributed_to, calls: l.calls }))));
     }
     // A miss reason nobody has seen before. NOT an error and NOT a reason to
     // fail the sync — the value has already been written into
@@ -1383,7 +1754,7 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   // thrown past this point.
   let hubspotResult;
   try {
-    const trackedNumberRows = await fetchAllRows((rangeFrom, rangeTo) => supabase
+    const trackedNumberRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats_hubspot_native_numbers')
       .select('phone_number')
       .range(rangeFrom, rangeTo));

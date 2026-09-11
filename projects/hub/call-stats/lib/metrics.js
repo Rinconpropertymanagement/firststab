@@ -89,7 +89,11 @@
  * Both the Answer Rate and the Missed column read the new term. Fixing only
  * one would leave the page contradicting itself, which is the precise
  * failure answer-rate-redefinition-SPEC.md exists to correct.
- * Measured effect on Kristen, her two lines 2026-09-01..09-10: 53% -> 69%.
+ * Measured effect on Kristen, her two lines 2026-09-01..09-09: 53% -> 69%.
+ * (WHOLE days only. The window originally recorded here ended 09-10, a day
+ * still in progress at the time, which produced three different rates for the
+ * same person on the same day — 55%, 70%, 71% — depending on the hour it was
+ * measured. TARS settled it on 2026-09-10 over 09-01..09-09: 69% is correct.)
  *
  * *** AND NULL ON THAT COLUMN MEANS "NOT MEASURED," NOT ZERO. *** It is the
  * opposite convention to sole_user_email's NULL, and conflating the two
@@ -158,6 +162,66 @@
  * denominator — together with the fact that the line rang exactly one
  * person, which is the entire content of Peter's rule and why it does NOT
  * generalise to the two lines that ring three people each.
+ *
+ * ============================================================
+ * THE PAGE'S OWN ARITHMETIC — THE IDENTITY HAS THREE TERMS, NOT TWO
+ * (corrected 2026-09-10 after TARS measured it on backfilled data)
+ * ============================================================
+ * This file used to claim, in two places, that
+ *
+ *     Calls - Outbound === inbound answered + inbound missed
+ *
+ * closes exactly. It does not, and it has not since the denominator narrowed
+ * to `agents_did_not_answer` earlier the same day. The missing term is the
+ * misses Peter's rule charges to nobody. TARS measured the gap on real
+ * backfilled data — 7 of 8 people, and in every case the gap equals
+ * inbound_missed_calls_not_charged_reason to the call: Dio 1600 vs 1166 (gap
+ * 434), Leo 1950 vs 1558 (392), Kristen 1510 vs 1139 (371), Caylee 123,
+ * Liz 99, Shane 91, Marci 61.
+ *
+ * THE TRUE IDENTITY, and it closes exactly:
+ *
+ *     Calls - Outbound
+ *       === inbound_answered_calls
+ *         + inbound_missed_calls                      (charged)
+ *         + inbound_missed_calls_not_charged_reason   (charged to nobody)
+ *
+ * with unmeasured attributed rows in NONE of the four terms — they are out of
+ * total_calls as well as out of the fraction, which is why
+ * has_unmeasured_line_misses has to be shown beside these numbers.
+ *
+ * *** THE FIX WAS TO THE CLAIM, NOT TO total_calls. NO DISPLAYED NUMBER
+ * MOVES. *** The alternative was to stop folding uncharged misses into
+ * total_calls so the two-term identity closed again. It was considered
+ * properly and rejected, for three reasons:
+ *
+ *   1. It would delete real calls from the "Calls" column — 434 of Dio's,
+ *      392 of Leo's, 371 of Kristen's. Those calls happened. They rang a real
+ *      line and a real caller was on them. Peter's rule about them is
+ *      "visible, charged to NOBODY" — it is a rule about FAULT, not about
+ *      EXISTENCE, and a volume column is not the place to apply it.
+ *   2. It would make a sentence already on the page FALSE. dashboard/index.html
+ *      tells the reader "Inbound is the subtraction: Calls minus Outbound."
+ *      Keep total_calls whole and that stays true. Narrow it and "Calls minus
+ *      Outbound" silently becomes "the calls this person could be held
+ *      responsible for," which no plain-English column label can carry and
+ *      which nobody in a staff meeting would guess.
+ *   3. A person's Calls would stop reconciling against their own line's rows
+ *      in the Shared Line Misses section below it, which counts every miss on
+ *      the line whatever its reason. Two sections of one page would disagree
+ *      about how many calls a line took — the same class of failure this
+ *      whole change exists to remove.
+ *
+ * *** WHAT TRON MUST RENDER AS A CONSEQUENCE (defect E, Tron's to fix, not
+ * fixed here): *** the pod-table note that ends "Inbound is the subtraction:
+ * Calls minus Outbound" must go on to say that the inbound total includes
+ * misses charged to nobody, so answered plus Missed is smaller than it by
+ * exactly inbound_missed_calls_not_charged_reason — a per-person field this
+ * module already returns. Nothing else on the page changes: the Answer Rate's
+ * denominator IS answered plus exactly the Missed column (dashboard
+ * index.html's column-order note is correct and stays), and every number in
+ * every column is unchanged. Both statements stay true; the page just has to
+ * stop implying they add up to each other.
  *
  * OUTBOUND IS STILL EXCLUDED FROM BOTH HALVES. That half of SPEC.md Design
  * Decision 7 was never dependent on the mistaken premise the redefinition
@@ -240,8 +304,10 @@ function createPersonAccumulator() {
     // while withholding its misses from the denominator would push every
     // affected person's rate UP — a flattering, entirely false number, which
     // is the exact failure answer-rate-redefinition-SPEC.md exists to
-    // correct. It also stays out of acc.total_calls so the page's own
-    // arithmetic ("Calls" - "Outbound" === answered + missed) still closes.
+    // correct. It also stays out of acc.total_calls, so an unmeasured row is
+    // in NO term of the page's own arithmetic rather than in one side of it —
+    // see "THE PAGE'S OWN ARITHMETIC" in this file's header for the identity
+    // as it actually stands (three terms, not two).
     //
     // These counts exist so the page can SAY SO. An honestly missing number
     // is better than a quietly wrong one, but only if the gap is on the
@@ -301,6 +367,85 @@ function foldCallStatsRow(acc, row) {
 }
 
 /**
+ * The ONE gate that decides whether a shared-line row is charged to a
+ * person. Peter's rule, approved 2026-09-10: an inbound call on a line that
+ * rings EXACTLY ONE person counts toward that person; a call on a line that
+ * rings nobody, or rings several people, stays charged to no individual.
+ *
+ * IT IS ONE GATE FOR BOTH HALVES, AND THAT IS THE POINT (Open Item 11).
+ * A row that passes here contributes its misses to the person's denominator
+ * AND its answered calls to their numerator. There is deliberately no
+ * second, looser or stricter test for the answered side: two tests would be
+ * two things to keep in step, and the asymmetry this function's callers
+ * exist to remove is exactly what happens when they fall out of step.
+ *
+ * IT LIVES HERE, NOT IN router.js, AND THAT IS ALSO THE POINT (moved
+ * 2026-09-10). It is pure — the caller passes the `users` lookup in, so this
+ * module still touches no database and no Express — and it now has TWO
+ * callers that must never disagree: the stats route, and
+ * backfill-six-months.js's dry-run report. That report is what Peter reads
+ * to decide whether to run the six-month backfill, and it has to answer
+ * "how many of these misses will land on a named person" with the rule the
+ * dashboard will actually apply, not with an approximation of it. It
+ * previously used its own: it summed missed_calls_agents_did_not_answer
+ * across EVERY row, including rows charged to nobody, and over six months
+ * printed 1,661 where the true charged figure was 1,441. A second copy of
+ * this rule is exactly how that happens, so there is one copy.
+ *
+ * A NOTE ON WHAT THIS GATE DOES NOT COVER. Callers must ALSO require that
+ * the row is MEASURED (`missed_calls_agents_did_not_answer != null`) before
+ * charging anything to anybody — see foldAttributedLineMissRow() below,
+ * which returns early on exactly that test. That check is deliberately not
+ * folded in here: it is a question about whether a sync ever looked at the
+ * row, not about whose the calls are, and the two have different answers for
+ * different callers. Rows fresh out of buildLineMissAggregates() are always
+ * measured; rows read back from the table may not be.
+ *
+ * All four conditions are load-bearing:
+ *
+ *   direction === 'inbound' — an outbound call the other party didn't pick
+ *     up is not a staff responsiveness signal (SPEC.md Design Decision 2),
+ *     and an outbound call a shared line placed and connected is not a
+ *     responsiveness signal either, so neither half of an outbound row is
+ *     read back into anyone's numbers. The attribution columns are stamped
+ *     onto outbound rows too, because "who did this line ring" is a fact
+ *     about the line, but they are never read back into anyone's Answer
+ *     Rate. In the 2026-08-15..2026-09-09 window this is not hypothetical:
+ *     13 answered user-less OUTBOUND calls sit in this table, all on the
+ *     Maintenance Hotline, and this condition is what keeps them out of a
+ *     person's numerator.
+ *
+ *   ring_user_count === 1 — the entire justification for adding a
+ *     LINE-keyed count into a PERSON-keyed denominator. It does not
+ *     generalise to the two lines that ring three people each.
+ *
+ *   sole_user_email is set — a row with ring_user_count === 1 and a NULL
+ *     email means the line rang exactly one person whose email could not be
+ *     resolved. Neo's column comment is explicit: log it loudly, treat it as
+ *     unattributed. A real miss going uncharged is bad; guessing who it
+ *     belongs to would be worse.
+ *
+ *   the email matches a known Rincon user — without this, a miss attributed
+ *     to an external vendor's Aircall seat would vanish from BOTH sections:
+ *     it would count as attributed here, while the person's row is never
+ *     rendered (the pods loop skips emails with no `users` match). Nothing
+ *     is allowed to go missing between the two sections (migration NOTES FOR
+ *     Q #5), so an unmatched email falls back to unattributed and stays
+ *     visible in Shared Line Misses.
+ *
+ * @param {Object} row  a call_stats_line_misses row, or a row about to be
+ *   written as one by lib/sync.js's buildLineMissAggregates()
+ * @param {string} soleEmail  row.sole_user_email, lower-cased by the caller
+ * @param {Map} usersByEmail  lower-cased email -> `users` row
+ */
+function isAttributableLineMissRow(row, soleEmail, usersByEmail) {
+  return row.direction === 'inbound'
+    && row.ring_user_count === 1
+    && !!soleEmail
+    && usersByEmail.has(soleEmail);
+}
+
+/**
  * Folds one ATTRIBUTED `call_stats_line_misses` row into the same running
  * total — the half that was missing before 2026-09-10. The WHOLE row is
  * folded: its misses into the denominator and its answers into the
@@ -310,9 +455,10 @@ function foldCallStatsRow(acc, row) {
  * The caller decides what "attributed" means and does the checking; this
  * function does not re-check, because the decision needs the `users` table
  * (to confirm the email belongs to a real Rincon staff member) and this
- * module deliberately has no database access. router.js's
- * isAttributableLineMissRow() is that gate, and it is the ONLY place a row
- * may be judged attributable. The rule it enforces:
+ * module deliberately has no database access — the caller reads `users` and
+ * passes the lookup in. isAttributableLineMissRow() directly above is that
+ * gate, and it is the ONLY place a row may be judged attributable. The rule
+ * it enforces:
  *
  *     direction === 'inbound'
  *       AND ring_user_count === 1
@@ -337,10 +483,18 @@ function foldCallStatsRow(acc, row) {
  * "Calls" minus "Outbound" is how a reader gets a person's inbound volume,
  * and Kristen's Missed column would then show 31 misses that her inbound
  * volume says never happened. The two columns have to agree, which is the
- * whole point of fixing them together. Note it is row.total_calls that is
- * added, NOT row.missed_calls: as of the Open Item 11 fix the answered
- * calls on this row are credited too, so the whole row moves and the
- * identity "Calls - Outbound === answered + missed" still holds exactly.
+ * whole point of fixing them together.
+ *
+ * *** THE WHOLE ROW MOVES — row.total_calls, NOT row.missed_calls, AND NOT
+ * total_calls MINUS THE UNCHARGED MISSES EITHER. *** An earlier version of
+ * this comment claimed the identity "Calls - Outbound === answered + missed"
+ * therefore holds exactly. It does not: this row's misses that Peter's rule
+ * charges to nobody are in total_calls and in neither half of the fraction,
+ * which is correct and deliberate — they are real calls on a real line, and
+ * the rule about them is about fault, not existence. The identity has a third
+ * term and closes exactly with it. See "THE PAGE'S OWN ARITHMETIC" in this
+ * file's header for the measured gap, the full statement, and why narrowing
+ * total_calls to make the two-term version true was rejected.
  *
  * ============================================================
  * WHAT THIS FIX DELIBERATELY DOES NOT TOUCH — the two averages, and why
@@ -435,21 +589,33 @@ function foldAttributedLineMissRow(acc, row) {
   // Kristen manually switching to the phone tree for lunch plus her 9am
   // start (a schedule, not a performance failure) and `short_abandoned` is
   // the caller hanging up after a median of NINE seconds, which nobody could
-  // have answered. Measured effect on Kristen, her two lines
-  // 2026-09-01..09-10: 53% -> 69%.
+  // have answered. Measured effect on Kristen, her two lines, WHOLE days
+  // 2026-09-01..09-09: 53% -> 69%.
   //
   // Clamped for the same reason the answered count is: Guard 1 on the table
   // bounds this column to [0, missed_calls], but the clamp costs nothing and
   // the direction of an unclamped error here (charging someone MORE misses
   // than their line took) is the one nobody would question either.
-  const charged = row.missed_calls_agents_did_not_answer;
-  acc.inbound_missed_calls_shared_line += charged > 0 ? charged : 0;
+  //
+  // Clamped at BOTH ends as of 2026-09-10, which is what router.js's
+  // chargeableOnRow already did — the two are the same number computed twice
+  // and had no business disagreeing. The upper clamp is what makes the
+  // header's three-term identity hold unconditionally rather than only on
+  // rows that satisfy Guard 1: without it, a row claiming more charged misses
+  // than it had misses would push `charged` up and `notCharged` down to its
+  // own floor of 0, and the two would stop cancelling.
+  const charged = Math.max(0, Math.min(row.missed_calls, row.missed_calls_agents_did_not_answer));
+  acc.inbound_missed_calls_shared_line += charged;
 
   // The remainder: real misses on this person's own line, for reasons that
   // are not theirs. Never in the fraction; surfaced so the page can explain
   // the difference between this person's Missed column and their line's own
   // miss count instead of leaving a reader to wonder where the rest went.
-  const notCharged = row.missed_calls - (charged > 0 ? charged : 0);
+  //
+  // This is the third term of the header's identity, and the reason it is
+  // returned to the page rather than only accumulated here: it is exactly the
+  // gap TARS measured between "Calls - Outbound" and "answered + missed."
+  const notCharged = row.missed_calls - charged;
   acc.inbound_missed_calls_not_charged_reason += notCharged > 0 ? notCharged : 0;
 
   // Voicemail rate is a share of MISSES — all of them, every reason, not
@@ -514,7 +680,10 @@ function computePersonMetrics(acc) {
     // charges to nobody — a schedule, a nine-second hang-up, an after-hours
     // call. Returned so the page can account for the gap between this
     // person's Missed column and their line's miss count. NOT in the
-    // fraction above, by design and by Peter's explicit decision.
+    // fraction above, by design and by Peter's explicit decision — but it IS
+    // in total_calls, which makes it the third term of the identity in this
+    // file's header and the number the page needs to reconcile "Calls minus
+    // Outbound" against "answered plus Missed."
     inbound_missed_calls_not_charged_reason: acc.inbound_missed_calls_not_charged_reason,
 
     // ── The unmeasured gap. Present so the page can be honest about it. ──
@@ -584,6 +753,10 @@ module.exports = {
   createPersonAccumulator,
   foldCallStatsRow,
   foldAttributedLineMissRow,
+  // The attribution gate. Exported so router.js and backfill-six-months.js
+  // share ONE definition of "charged to a person" rather than two that can
+  // drift — see the function's own header for what drifting cost last time.
+  isAttributableLineMissRow,
   computePersonMetrics,
   emptyPersonMetrics,
 };

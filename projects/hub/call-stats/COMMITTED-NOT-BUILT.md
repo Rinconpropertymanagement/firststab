@@ -101,6 +101,75 @@ same files.
 
 ---
 
+## 1c. Line ownership history — BLOCKS THE BACKFILL
+
+**Approved in principle 2026-09-10.** The backfill must not run until this exists.
+
+### Why
+
+Aircall **destroys attribution when a seat is deleted.** Aldo Hernandez was let go
+~2026-08-27; `GET /v1/users/1906760` now returns 404, and every call he ever handled had
+its `user` field stripped. His history did not disappear — it became anonymous.
+
+Because attribution charges an unnamed call to whoever rings that line *today*, the backfill
+would have credited **1,257 of Aldo's calls to Leo O'Gorman** (363 answered, 683 outbound,
+211 missed). Leo's rate would have moved only 75.9% → 77.0%, so nothing would have looked
+wrong in the meeting.
+
+The 2026-09-10 migration snapshots ring membership specifically to stop history being
+rewritten. It guards a **line changing hands**. It does not guard **a person leaving**,
+which produces the same corruption by a different route. Peter's "no line changed hands in
+six months" confirmation was true and did not cover this.
+
+`backfill-six-months.js` states in its header that "Aircall's record of a call that happened
+in April does not change. These are as good as a row the nightly sync wrote that night."
+**That is false and must be corrected.**
+
+### The real ownership history, measured 2026-09-10
+
+Verified against six months of raw Aircall calls, then confirmed by Peter:
+
+| Line | Period | Who actually worked it |
+|---|---|---|
+| **Office Line** | → Apr 2026 | An office phone tree, exclusively. 365 unnamed outbound in Mar–Apr, then zero. |
+| | May 2026 → | **Kristen Rau.** Moved into Business Development Coordinator Mar/Apr. |
+| **RSC Solimar Team** | → Mar 2026 | **Kristen Rau** (calls correctly named — she is still employed). |
+| | Apr – Aug 2026 | **Aldo Hernandez.** All attribution stripped. 363 answered, 683 outbound. |
+| | Sep 2026 → | **Leo O'Gorman**, who moved into Aldo's role on departure. |
+| **Maintenance Coordinator-Solimar** | → present | **Leo O'Gorman.** No cutoff needed — he owns past and present. |
+
+### What to build
+
+- **Office Line** — attribute unnamed calls only from **2026-05-01**.
+- **RSC Solimar Team** — attribute unnamed calls only from **2026-09-01**.
+- Everything excluded stays **visible and charged to nobody**. Nothing is deleted.
+- Build it as a **dated ownership list**, not two hardcoded dates. The next role change
+  should be one line of config, not a six-month archaeology exercise. This is the third
+  time stale configuration has produced a wrong number in this project.
+
+### Pending, add when it happens
+
+**Regina Franco Mendez takes over Maintenance Coordinator-Solimar.** Agreed but not yet
+done — she is still in training and Aircall still rings Leo (confirmed 2026-09-10). Add a
+dated entry when the handover is real.
+
+Note: Regina is `regina@quickturnmaintenance.com`, an external vendor domain with **no row
+in `users`**. Once she holds a line, her misses will be tracked but charged to nobody.
+Whether an outside vendor belongs on an internal staff performance dashboard is Peter's
+decision, and it has not been made.
+
+### Decided, 2026-09-10 — pod leaders do NOT absorb pod misses
+
+Dio Lopes leads the Solimar pod. Pod membership stays a grouping on the dashboard and
+nothing more. A leader's personal answer rate must not be driven by other people's phones,
+or it stops describing the leader. Pod-level orphan misses are worth showing as a pod-level
+figure beside the individuals — never folded into the lead's own score.
+
+Dio's own data needs no cutoff: consistent activity on Property Manager - Solimar across all
+six months, no role change, no unnamed calls.
+
+---
+
 ## 2. Six-month Aircall backfill
 
 **Approved:** 2026-09-10, after Peter confirmed no Aircall line changed hands in the last
@@ -131,7 +200,22 @@ Peter's decisions, all settled:
 - **No targets** for now (revisit after it has been used a few weeks)
 - 8 periods across by default, dropdown for 4 / 13
 - **Nobody is ever dropped automatically for inactivity** — removal is always a
-  deliberate, per-person decision by Peter
+  deliberate, per-person decision by Peter.
+
+  **Clarified 2026-09-11, and the trend view must follow it.** The concern was never
+  the `is_active` flag itself — it was a named employee vanishing from a page Peter
+  reads aloud in a staff meeting because something flipped without a human deciding.
+  Since `is_active` is only ever set by a person, the pod tables now **do** respect it
+  (`router.js`, both the accumulator loop and the placeholder loop — they are one
+  decision applied twice and are cross-referenced so they cannot drift apart).
+
+  Aldo Hernandez was marked inactive on 2026-09-11 and no longer renders. His
+  historical rows are untouched and his held-back calls are still visible, charged to
+  nobody, under the shared-line section.
+
+  **The standing prohibition is on automation, not on the filter:** nothing automated
+  may ever set `is_active`, or this filter becomes exactly the silent deletion the
+  original rule existed to prevent. Do not read this entry as "ignore the flag."
 
 **Sequenced behind** the answer-rate work, so the trend does not render a broken metric
 across eight weeks. Should also follow the backfill, or it launches nearly empty.
@@ -201,8 +285,49 @@ Peter's hand-tracked scorecard has 11 metrics. Current state:
 | Conversations from outbound sales calls | Needs §4 + a definition of "conversation" (seconds threshold) |
 | Speed to lead | Needs HubSpot cleanup + Aircall SMS history (not built — she texts from both Aircall and HubSpot) |
 | CRM data accuracy & completeness | Needs the field list and a decision on what population it scores |
-| New lead booking rate | Reachable now — runs on meetings, not the junk contacts |
-| Lead follow-up completion rate | Reachable now — runs on tasks |
-| Past lead re-engagement attempts | Reachable now — runs on deals |
-| Past lead conversion rate | Reachable now — runs on deals |
+| New lead booking rate | **Definition approved 2026-09-11.** Leads resolved as Qualified ÷ leads resolved at all, counted in the week they resolve. Measured 70.6% vs Peter's hand-tracked 71.86%. Runs on the LEAD object. |
+| Lead follow-up completion rate | **REPLACED, approved by Peter 2026-09-11.** The percentage cannot vary — 423/434 workflow tasks completed, 75 of 81 enrollments at exactly 100%, 12 of 16 weeks at exactly 100.0%, because an unfinished task's due date moves rather than lapsing. Replaced by three plain numbers: **touches** (labelled *activity*, never quality), **sequence depth** (lower is better, said on the page), and **speed to first touch** (8% within 5 min, 31% within 1h, median 2.9h). **Read the warning below before building any of them.** |
+| Past lead re-engagement attempts | Runs on **tasks**, not deals. Sequence- and workflow-sourced tasks carry the process name. |
+| Past lead conversion rate | Runs on **leads**, not deals. **Denominator settled 2026-09-11: the ~105 leads actually contacted that week**, not the 411-lead pool. Chosen on meaning, not arithmetic — it measures something the team controls, where the pool version measures the pool decaying. **Target deliberately unset**: Peter confirmed the 5% "was picked out of the air," so a target gets set from real baseline once the number has run a few weeks. |
+
+---
+
+### ⚠ A trap in the follow-up numbers — read before building them
+
+**More touches means a WORSE outcome, not a better one.** The workflow stops touching a
+lead the moment they respond, so the touch count measures how long someone stayed silent.
+Measured 2026-09-11:
+
+| | Avg. touches |
+|---|---|
+| Leads that became deals | **4.7** |
+| Leads that did not | **7.0** |
+| `Won` | 4.0 |
+| `Back to Marketing for Nurture` | 8.7 |
+
+A naive "follow-up touches" performance metric would have **scored the best weeks lowest**.
+That is why touches ships labelled *activity* and sequence depth ships with "lower is
+better" stated on the page. Do not let a later tidy-up turn either into a quality score.
+
+Two more facts that will bite whoever builds this:
+
+- **Name matching is already broken.** Tasks store a frozen snapshot of the workflow name
+  and **no workflow ID at all**. PMW's 9 tasks are split across "- Testing Phase" (6) and
+  "- Active" (3) because of a rename; matching today's name finds 3 and silently loses 6.
+  Same on APM and Geek Leads. Key the config on the **v4 flow id**, keep an alias list, and
+  surface an unmatched count. Note v3 and v4 use *different ids for the same workflow*
+  (`36143443` = v4 `4259746541`).
+- **PMW and the 11-touch workflow are chained, not parallel.** PMW creates exactly one
+  task, then sets `hs_lead_status = NEW`, which is the 11-touch workflow's enrollment
+  trigger. 4 of its 5 contacts appear in both. Measuring them as separate funnels
+  double-counts. The workflows in scope, per Peter 2026-09-11: **11-touch (`36143443`),
+  PMW (`31570873`), APM (`36585716`)**. Geek Leads and PPC "still need work."
+
+### ⚠ Several scorecard targets were picked arbitrarily
+
+Peter confirmed on 2026-09-11 that the 5% conversion target "was picked out of the air."
+Booking rate at 100% and follow-up completion at 100% look like the same — aspirations
+rather than measurements; nobody books every lead. A target nobody can reach stops being a
+target and becomes noise in the meeting. Worth revisiting once each number is real. Not
+raised as a build task — it is Peter's to decide.
 | Lost deals added to sequence | Permanently approximate — HubSpot exposes only "last sequence enrolled date," not enrollment counts |

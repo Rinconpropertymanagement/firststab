@@ -4,7 +4,50 @@
 is a maybe — each item was explicitly agreed. Delete an item only when it ships and
 passes TARS.
 
-Last updated: 2026-09-10
+Last updated: 2026-09-12
+
+---
+
+## ✅ SHIPPED 2026-09-12 — answer rate, miss reasons, backfill
+
+**Live on Sally.** Deployed 2026-09-12 after all ten Hub routers were smoke-tested for
+startup failures (the deploy pushes the whole `projects/hub/` tree, including other
+sessions' in-progress work — check this every time, it took the Hub down once before).
+
+Final verified state: **185 days, 2026-03-10..2026-09-11, zero unmeasured rows**,
+1,845 `call_stats` rows, 1,435 `call_stats_line_misses` rows, 3,631 misses, 1,350 voicemails.
+
+| | Answered | Missed | Rate |
+|---|---|---|---|
+| Regina Franco Mendez | 302 | 31 | 90.69% |
+| Shane Muir | 264 | 49 | 84.35% |
+| Kristen Rau | 871 | 247 | **77.91%** |
+| Leo O'Gorman | 849 | 260 | 76.56% |
+| Liz Otero | 225 | 75 | 75.00% |
+| Dio Lopes | 890 | 315 | 73.86% |
+| Caylee Andrade | 823 | 306 | 72.90% |
+| Marci Grey | 384 | 208 | 64.86% |
+
+Every one of these read **100%** before this work.
+
+**The deployment itself was the last bug.** Sally had been running a pre-2026-09-10 build,
+so the nightly sync wrote 2026-09-11 with every attribution and measurement column NULL —
+making the dashboard's default "Yesterday" view show all eight staff at 100% with 0 missed,
+while Aircall had recorded 29 misses that day. Re-synced after deploy via
+`POST /api/call-stats/internal/sync?date=2026-09-11`. **Lesson: an undeployed fix is not a
+safe state — it was actively producing bad data nightly while we verified.**
+
+**Judge was skipped**, deliberately, at Peter's call on 2026-09-12. TARS passed everything
+substantive; Judge reviews code quality, not correctness. Worth running some quiet day.
+
+**Still unexplained:** Kristen's hand-tracked 78.28% vs the measured 77.91%. TARS confirmed
+it does not reconcile at any date window, and her 11 HubSpot-native calls do not close it.
+0.37pp. Small, but nobody has accounted for it.
+
+**Cosmetic, will be noticed in a meeting:** RSC Solimar Team renders "Leo O'Gorman
+(0 answered, 2 missed)" against 1,317 total calls — correct, since 1,257 are Aldo's held-back
+calls, but it reads badly at a glance. "Stephen" appears at 100% on a single call, and
+`Z.DO NOT USE - PHONE TREE TEMPLATE ONLY` appears in Shared Line Misses.
 
 ---
 

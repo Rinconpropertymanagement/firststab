@@ -24,6 +24,19 @@
  * If a future metric needs a new HubSpot read, add a new narrowly-named
  * function with its own fixed shape. Never add a way to pass an HTTP method,
  * an endpoint, or a raw filter body in from outside this file.
+ *
+ * Metric 10 (lost deals added to sequence, 2026-09-12) followed exactly
+ * that instruction rather than starting a sibling module:
+ * `listTasksForSequenceIds()` below reads the SAME object (tasks), through
+ * the SAME infra (searchAllPages, TASK_PROPERTIES, the rate-limit and
+ * pagination handling) that listTasksCompletedBetween() and
+ * listAutomationTasksCreatedSince() already use one screen up — it differs
+ * from them only in its filter. A sibling module would duplicate all of
+ * that machinery for a metric that lands on the same Scoreboard page as
+ * the other five and needs no isolation from them. Design Decision 37's
+ * separation from call-stats/lib/hubspot-connector.js is a separation
+ * between two DIFFERENT domains (call data vs. leads/deals/tasks); this is
+ * one more narrow read inside the domain this file already owns.
  * ============================================================
  *
  * ============================================================
@@ -122,6 +135,11 @@ const TASK_PROPERTIES = [
   'hs_object_source_detail_1',
   'hs_object_source_id',
   'hs_task_sequence_id',
+  // Metric 10's per-PERSON key. NOT hs_object_source_id's enrollment id
+  // (used elsewhere in this file for workflow enrollments) — that one is
+  // per-TASK and overcounts a multi-touch sequence enrollment as several
+  // enrollments. Confirmed live 2026-09-12.
+  'hs_task_sequence_step_enrollment_contact_id',
   'hubspot_owner_id',
 ];
 
@@ -339,6 +357,36 @@ async function listAutomationTasksCreatedSince(sinceIso) {
 }
 
 /**
+ * Every task belonging to one of the given HubSpot sequences
+ * (`hs_task_sequence_id` IN sequenceIds), across the sequence's whole life —
+ * metric 10, lost deals added to sequence.
+ *
+ * Unbounded by date, on purpose and unlike the other task reads in this
+ * file: the three tracked sequences hold roughly 1,300 tasks combined
+ * (measured 2026-09-12), comfortably inside one bounded page walk, and the
+ * metric's own rule — count a contact once across ALL tracked sequences,
+ * keyed on the week they were FIRST seen — requires comparing every task
+ * against every earlier one for the same contact. A windowed read risks
+ * missing the earlier appearance and double-counting a later week as a
+ * fresh enrollment.
+ *
+ * Filtered on `hs_task_sequence_id`, never on a sequence's display name —
+ * see TRACKED_SEQUENCES in config.js: sequence 646033139 carried two names
+ * across its life ("Lost Leads - Kristen's", then "Old Lost Leads Sequence
+ * - do not use") with the same id throughout, the identical trap already
+ * hit twice today on workflows.
+ */
+async function listTasksForSequenceIds(sequenceIds) {
+  return searchAllPages(
+    TASKS_SEARCH_PATH,
+    'sequence-tasks search',
+    [{ propertyName: 'hs_task_sequence_id', operator: 'IN', values: sequenceIds }],
+    TASK_PROPERTIES,
+    'hs_createdate'
+  );
+}
+
+/**
  * Every lead currently sitting in one of the given pipeline stages.
  * Used for the past-lead population (stages 201593994 "Back to Marketing for
  * Nurture" and 201593995 "No Response" — 411 leads as of 2026-09-12).
@@ -458,6 +506,7 @@ module.exports = {
   listDealsCreatedBetween,
   listTasksCompletedBetween,
   listAutomationTasksCreatedSince,
+  listTasksForSequenceIds,
   listLeadsInStages,
   listQualifiedLeads,
   listContactIdsForTasks,

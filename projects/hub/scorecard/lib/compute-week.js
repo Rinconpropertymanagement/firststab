@@ -17,7 +17,7 @@
  * covered — see buildRollingWindow() in router.js.
  * ============================================================
  *
- * TWO WEEKS, NOT ONE. The five fast metrics publish the week that just
+ * TWO WEEKS, NOT ONE. The six fast metrics publish the week that just
  * closed. Sequence depth holds 7 days so every enrollment has finished
  * before its median is computed, which means its row refers to an EARLIER
  * week than the others. Each row therefore carries its own `week_start` and
@@ -38,6 +38,7 @@ const {
   computeSequenceDepth,
   computePastLeadConversions,
   computeReengagementAttempts,
+  computeLostDealsAddedToSequence,
   checkWorkflowNameDrift,
 } = require('./metrics');
 const { latestPublishableWeek, weekBoundsIso, mondayOf } = require('./week');
@@ -132,6 +133,7 @@ async function computeAll({ fastWeek, depthWeek, today } = {}) {
     ['followup_sequence_depth', depth, () => computeSequenceDepth(hubspot, depth)],
     ['past_lead_conversions', fast, () => computePastLeadConversions(hubspot, fast)],
     ['past_lead_reengagement_attempts', fast, () => computeReengagementAttempts(hubspot, fast)],
+    ['lost_deals_added_to_sequence', fast, () => computeLostDealsAddedToSequence(hubspot, fast)],
   ];
 
   for (const [name, weekStart, run] of attempts) {

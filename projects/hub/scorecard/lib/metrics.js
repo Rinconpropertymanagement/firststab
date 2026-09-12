@@ -1,6 +1,6 @@
 /**
  * scorecard/lib/metrics.js
- * The six metric computations, one function each.
+ * The seven metric computations, one function each.
  *
  * Every one of them takes a week and returns the RAW PARTS the figure was
  * built from — never a finished percentage. That is the property the whole
@@ -29,6 +29,7 @@ const {
   workflowForTaskSourceName,
   SEQUENCE_DEPTH_WEEK_RULE,
   ENROLLMENT_LOOKBACK_DAYS,
+  TRACKED_SEQUENCE_IDS,
 } = require('./config');
 const { weekBoundsIso } = require('./week');
 
@@ -373,6 +374,90 @@ async function computeReengagementAttempts(hubspot, weekStart) {
   };
 }
 
+// ─── Metric 10 — lost deals added to sequence ─────────────────────────────
+/**
+ * Distinct contacts newly entering a lost-leads re-engagement sequence in
+ * the week. A `count`.
+ *
+ * No snapshotting concern here, unlike sequence depth or the tenant/vendor
+ * exclusion: an enrollment either happened in the week or it did not, and
+ * nothing about "current state" can drift out from under a past week — Q
+ * confirmed this rather than assuming it, per the build instructions.
+ *
+ * KEYED ON hs_task_sequence_step_enrollment_contact_id, THE PER-PERSON KEY —
+ * never hs_object_source_id's enrollment id (used elsewhere in this file
+ * for workflow enrollments), which is one-per-TASK and overcounts a
+ * multi-touch sequence enrollment as several enrollments. This is the exact
+ * arithmetic mistake already made once today on a different metric.
+ *
+ * An enrollment's date is MIN(hs_createdate) across all of a contact's
+ * tasks in ANY tracked sequence — "only count a contact once across ALL
+ * tracked sequence ids for a given week" from the build instructions. That
+ * rule falls out for free from grouping by contact id over every task this
+ * function reads, since the read itself already spans every tracked
+ * sequence: a contact who appears in two tracked sequences contributes one
+ * entry to the map, not two.
+ *
+ * Sequences are tracked BY ID, never by name — TRACKED_SEQUENCE_IDS in
+ * config.js, and the same trap already hit twice today on workflow names
+ * (sequence 646033139 carried two names across its life with the same id
+ * throughout).
+ *
+ * *** A WEEK-BOUNDARY FINDING, RECORDED RATHER THAN SILENTLY PICKED ***
+ * This function buckets by `weekBoundsIso`/`isInWindow`, exactly like every
+ * other metric in this file — Rincon's business weeks, Monday–Sunday in
+ * America/Los_Angeles. That is a deliberate consistency choice, not an
+ * oversight: three real enrollment batches (47, 27 and 41 contacts) were
+ * created between roughly 04:00–04:06 UTC on a Monday, which is Sunday
+ * evening Pacific — one calendar day and one ISO week earlier. Bucketing
+ * those same tasks by their raw UTC calendar date instead (no Pacific
+ * conversion) reassigns all three batches into the following week and
+ * reproduces a since-superseded hand-measurement exactly for every week
+ * from 2026-05-11 through 2026-08-31. This function intentionally does NOT
+ * do that — a raw-UTC bucket is the exact class of bug week.js's own header
+ * warns against, and every other row on this Scoreboard is Pacific-bucketed
+ * — so a reader comparing this output against an older ad hoc measurement
+ * should expect 2026-05-25, 2026-06-01, 2026-06-08 and 2026-06-15 to differ
+ * from it by tens of contacts while every other week matches exactly. The
+ * total across that span is identical either way (409 contacts): nothing is
+ * gained or lost, only reassigned to the week Rincon's own clock says it
+ * happened in.
+ */
+async function computeLostDealsAddedToSequence(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const tasks = await hubspot.listTasksForSequenceIds(TRACKED_SEQUENCE_IDS);
+
+  const firstSeenByContact = new Map();
+  let tasksMissingContactOrDate = 0;
+  for (const task of tasks) {
+    const contactId = task.properties.hs_task_sequence_step_enrollment_contact_id;
+    const created = task.properties.hs_createdate;
+    if (!contactId || !created) {
+      tasksMissingContactOrDate++;
+      continue;
+    }
+    const existing = firstSeenByContact.get(contactId);
+    if (!existing || created < existing) firstSeenByContact.set(contactId, created);
+  }
+
+  let enrollments = 0;
+  for (const firstCreated of firstSeenByContact.values()) {
+    if (isInWindow(firstCreated, fromIso, toIso)) enrollments++;
+  }
+
+  return {
+    metric_key: 'lost_deals_added_to_sequence',
+    metric_shape: 'count',
+    numerator: enrollments,
+    diagnostics: {
+      trackedSequenceIds: TRACKED_SEQUENCE_IDS,
+      tasksConsidered: tasks.length,
+      tasksMissingContactOrDate,
+      distinctContactsAllTime: firstSeenByContact.size,
+    },
+  };
+}
+
 // ─── The name-drift check ─────────────────────────────────────────────────
 /**
  * Re-reads each configured workflow's CURRENT name from the v4 flows
@@ -408,5 +493,6 @@ module.exports = {
   computeSequenceDepth,
   computePastLeadConversions,
   computeReengagementAttempts,
+  computeLostDealsAddedToSequence,
   checkWorkflowNameDrift,
 };

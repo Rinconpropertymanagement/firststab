@@ -312,7 +312,7 @@ function checkCronSecret(req, res) {
 /**
  * POST /api/scorecard/internal/compute
  *   ?dry=1                      compute and return the rows WITHOUT writing
- *   ?fast_week=YYYY-MM-DD       override which week the five fast metrics cover
+ *   ?fast_week=YYYY-MM-DD       override which week the six fast metrics cover
  *   ?depth_week=YYYY-MM-DD      override the sequence-depth week
  *
  * `dry=1` exists because it is the only safe thing to run until the

@@ -35,6 +35,7 @@ const CACHEABLE_READS = [
   'listDealsCreatedBetween',
   'listTasksCompletedBetween',
   'listAutomationTasksCreatedSince',
+  'listTasksForSequenceIds',
   'listLeadsInStages',
   'listQualifiedLeads',
   'listContactIdsForTasks',

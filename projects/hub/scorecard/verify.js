@@ -56,9 +56,10 @@ const {
   computeSequenceDepth,
   computePastLeadConversions,
   computeReengagementAttempts,
+  computeLostDealsAddedToSequence,
   checkWorkflowNameDrift,
 } = require('./lib/metrics');
-const { METRIC_OWNERS, WORKFLOWS, SEQUENCE_DEPTH_WEEK_RULE, ENROLLMENT_LOOKBACK_DAYS } = require('./lib/config');
+const { METRIC_OWNERS, WORKFLOWS, TRACKED_SEQUENCES, SEQUENCE_DEPTH_WEEK_RULE, ENROLLMENT_LOOKBACK_DAYS } = require('./lib/config');
 const { weeksEndingAt, latestPublishableWeek, mondayOf, weekBoundsIso } = require('./lib/week');
 
 const pad = (v, n) => String(v === null || v === undefined ? '—' : v).padStart(n);
@@ -96,12 +97,13 @@ const pct = (n, d) => (d === 0 ? '—' : ((100 * n) / d).toFixed(1) + '%');
     const depth = await computeSequenceDepth(hubspot, week, { sinceIso: enrollmentSinceIso });
     const conversions = await computePastLeadConversions(hubspot, week);
     const reengagement = await computeReengagementAttempts(hubspot, week);
-    rows.push({ week, rate, worked, automation, depth, conversions, reengagement });
+    const lostDealsSequence = await computeLostDealsAddedToSequence(hubspot, week);
+    rows.push({ week, rate, worked, automation, depth, conversions, reengagement, lostDealsSequence });
     process.stderr.write(`  computed ${week}\r`);
   }
   process.stderr.write('                                   \r');
 
-  console.log('week         deals  leads   rate | worked  auto | depth(med) n | conv | re-eng');
+  console.log('week         deals  leads   rate | worked  auto | depth(med) n | conv | re-eng | lost->seq');
   for (const r of rows) {
     console.log(
       r.week,
@@ -117,7 +119,9 @@ const pct = (n, d) => (d === 0 ? '—' : ((100 * n) / d).toFixed(1) + '%');
       '|',
       pad(r.conversions.numerator, 4),
       '|',
-      pad(r.reengagement.numerator, 6)
+      pad(r.reengagement.numerator, 6),
+      '|',
+      pad(r.lostDealsSequence.numerator, 9)
     );
   }
 
@@ -148,6 +152,11 @@ const pct = (n, d) => (d === 0 ? '—' : ((100 * n) / d).toFixed(1) + '%');
   const reengSeries = rows.map((r) => r.reengagement.numerator);
   console.log(`\nPast-lead conversions in window: ${convTotal}`);
   console.log(`Re-engagement attempts: ${reengSeries.join(', ')}  avg ${(reengSeries.reduce((a, b) => a + b, 0) / reengSeries.length).toFixed(1)}/wk`);
+
+  const lostSeqSeries = rows.map((r) => r.lostDealsSequence.numerator);
+  console.log(`\nLost deals added to sequence: ${lostSeqSeries.join(', ')}`);
+  console.log(`  Tracked sequence ids: ${TRACKED_SEQUENCES.map((s) => s.id).join(', ')}`);
+  console.log(`  Bucketed by Rincon's Pacific business week, same as every other row here.`);
 
   const last = rows[rows.length - 1];
   console.log(`\nResidues and early warnings (most recent week, ${last.week}):`);

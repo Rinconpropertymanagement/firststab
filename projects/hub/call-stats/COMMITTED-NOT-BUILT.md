@@ -124,6 +124,46 @@ dividing tasks by 9 — the real per-person figure is **~38.8/week**; parked lea
 are actually **259, 20.5%**; and "name is the only join key HubSpot gives the task" is
 **false for sequence tasks**, which carry `hs_task_sequence_id`.
 
+### ✅ Metric 10 SHIPPED — lost deals added to sequence
+
+**Built and verified 2026-09-12. No migration needed** — `metric_shape: 'count'` and an
+open `metric_key` (Design Decision F) meant this slotted into the existing `scorecard_weekly`
+table with no schema change.
+
+Distinct contacts newly entering a tracked lost-leads re-engagement sequence, by Pacific
+business week. Tracked by `hs_task_sequence_id`, never by name — the primary sequence
+carried two names over its life ("Lost Leads - Kristen's" then "Old Lost Leads Sequence -
+do not use," same id throughout). Owner hard-assigned to `kristen@rinconmanagement.com`.
+
+**Final weekly series, TARS-confirmed against live HubSpot, 2026-05-25 → 2026-09-07:**
+
+| Week | Enrollments | Week | Enrollments |
+|---|---|---|---|
+| 05-25 | 123 | 07-27 | 0 |
+| 06-01 | 27 | 08-03 | 27 |
+| 06-08 | 83 | 08-10 | 20 |
+| 06-15 | 34 | 08-17 | 47 |
+| 06-22 | 2 | 08-24 | 0 |
+| 06-29 | 0 | 08-31 | 9 |
+| 07-06 | 0 | **09-07** | **5** |
+| 07-13 | 0 | | |
+| 07-20 | 0 | | |
+
+**The collapse is real, not a data artifact.** Peaked at 123/wk in late May; three dead
+weeks at the start of July; **5/wk now.** Peter's hand-tracked average (29.29) sits inside
+the decline; his target (≥150) was never within reach even at the peak.
+
+**A third sequence was caught and removed before shipping — TARS, not a code bug.**
+"Gone Quiet Recovery Run Sequence" (`744027841`, started 2026-09-11) was included on the
+guess that it might replace the winding-down primary sequence. Peter confirmed it is a
+separate initiative. TARS then traced both its enrolled contacts to their deals — the same
+check that validated the real sequences at 96% — and found **neither is a lost deal; both
+are live, open, early-stage prospects.** Including it had inflated the current week from a
+true 5 to a reported 7, a 40% overstatement on exactly the number most likely to be read
+aloud first. Removed entirely, with the finding recorded in `config.js` so nobody re-adds
+it on the same guess. A future "gone quiet" metric, if wanted, needs its own definition —
+it measures open deals going cold, not lost ones, and does not belong in this count.
+
 ### Two live data problems found in passing
 
 - **Name matching would silently lose 49.6% of tasks today.** APM loses **100%** of its 422

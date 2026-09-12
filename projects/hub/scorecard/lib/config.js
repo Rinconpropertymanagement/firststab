@@ -22,7 +22,7 @@
  */
 
 // ─── Metric owners ────────────────────────────────────────────────────────
-// ASSIGNED BY PETER, 2026-09-12: all five keys are Kristen's.
+// ASSIGNED BY PETER, 2026-09-12: all six keys are Kristen's.
 //
 // This is a management decision written down, never a field read out of
 // HubSpot. The migration's Design Decision B explains why HubSpot's
@@ -43,6 +43,10 @@ const METRIC_OWNERS = {
   followup_sequence_depth: 'kristen@rinconmanagement.com',
   past_lead_conversions: 'kristen@rinconmanagement.com',
   past_lead_reengagement_attempts: 'kristen@rinconmanagement.com',
+  // Metric 10, approved 2026-09-12. All Scoreboard metrics are Kristen's —
+  // Peter's 2026-09-12 instruction, hard-assigned the same way the other
+  // five are. Not looked up anywhere; this is the assignment.
+  lost_deals_added_to_sequence: 'kristen@rinconmanagement.com',
 };
 
 // ─── The metric registry ──────────────────────────────────────────────────
@@ -130,6 +134,20 @@ const METRICS = [
     // bought by leaving metric_key out of the CHECK set.
     note: 'Completed tasks against leads sitting in a past-lead stage. Counts attempts a PERSON made — automated nurture emails create no task and are invisible to this number.',
   },
+  {
+    key: 'lost_deals_added_to_sequence',
+    shape: 'count',
+    label: 'Lost deals added to sequence',
+    display: 'count',
+    higherIsBetter: true,
+    aggregable: true,
+    numeratorLabel: 'contacts enrolled',
+    // Approved 2026-09-12 (COMMITTED-NOT-BUILT.md §0a, "Metric 10"). No
+    // ambiguity about "current state" here — an enrollment either happened
+    // in the week or it didn't, so unlike sequence depth there is no
+    // snapshotting concern and no held week.
+    note: 'Distinct contacts newly entering a lost-leads re-engagement sequence. 24 of 25 traced enrollees had a genuinely lost deal, confirming the population. The real trend has collapsed from 47–80/week in May–June to single digits by September — say so plainly, do not smooth it over.',
+  },
 ];
 
 const METRIC_KEYS = METRICS.map((m) => m.key);
@@ -173,6 +191,58 @@ const LEAD_ENTERED_QUALIFIED_PROPERTY = 'hs_v2_date_entered_qualified_stage_id_2
 // The only deal pipeline in use. Filtered on explicitly; deals found outside
 // it are counted and surfaced rather than silently included or dropped.
 const DEAL_PIPELINE_ID = 'default';
+
+// ─── Tracked sequences — metric 10, lost deals added to sequence ─────────
+// Keyed on `hs_task_sequence_id`, the durable identifier, exactly the
+// pattern WORKFLOWS above and line-ownership-history.js already establish:
+// names are recorded for a human reading this file and are NEVER matched
+// on. HubSpot sequences get renamed mid-life — the same trap already hit
+// twice on workflows today (see WORKFLOWS above) hit sequence
+// `646033139` too: "Lost Leads - Kristen's" through ~July, then "Old Lost
+// Leads Sequence - do not use" through Sept 4, same id throughout.
+//
+// One line to add a fourth sequence later: append an entry below. Do not
+// edit an existing entry's `id` — that changes which historical tasks it
+// matched.
+const TRACKED_SEQUENCES = [
+  {
+    id: '646033139',
+    names_seen: ["Lost Leads - Kristen's", 'Old Lost Leads Sequence - do not use'],
+    notes: '1,178 tasks measured 2026-09-12. Renamed mid-life to a "do not use" label but the id never changed — matching on name would have silently dropped it the day of the rename.',
+    added_on: '2026-09-12',
+    added_by: 'Q, from live HubSpot measurement approved by Peter the same day.',
+  },
+  {
+    id: '713717482',
+    names_seen: ['Kristen Lost Leads 9 Touches'],
+    notes: '136 tasks, Aug 7 – Sept 11 2026, currently active. The main sequence carrying this metric today.',
+    added_on: '2026-09-12',
+    added_by: 'Q, from live HubSpot measurement approved by Peter the same day.',
+  },
+  // EXPLICITLY EXCLUDED, do not add: '644265661' ("New Sequence") — 1 task,
+  // looks like a stray test. Named here so nobody re-adds it believing it
+  // was simply missed.
+  //
+  // EXPLICITLY EXCLUDED, do not add: '744027841' ("Gone Quiet Recovery Run
+  // Sequence"). Added 2026-09-12 on the theory that it might be the
+  // successor to 713717482 as it winds down. Peter confirmed the same day it
+  // is NOT a replacement. TARS then traced both of its enrolled contacts to
+  // their deals — the same check that validated the two sequences above at
+  // 96% — and found neither is a lost deal:
+  //   contact 496451741381 -> deal 328232958660: dealstage
+  //     'decisionmakerboughtin' (this portal's first, OPEN stage —
+  //     "Discovery call complete"), hs_is_closed_lost = false.
+  //   contact 537955507959 -> deal 343127654110: same pipeline, same open
+  //     stage, hs_is_closed_lost = false.
+  // This sequence targets a different population (open deals going cold),
+  // not lost ones. Both enrollments had landed in the then-current week,
+  // overstating it from 5 to 7. Removed 2026-09-12; TARS finding, verified
+  // against live HubSpot, not a judgment call. If a "gone quiet" recovery
+  // metric is ever wanted, it needs its own metric definition — it does not
+  // belong folded into this one.
+];
+
+const TRACKED_SEQUENCE_IDS = TRACKED_SEQUENCES.map((s) => s.id);
 
 // ─── Task source labels ───────────────────────────────────────────────────
 // Measured on the live portal 2026-09-12 over 2026-06-01..2026-09-14: five
@@ -336,6 +406,8 @@ module.exports = {
   PAST_LEAD_STAGE_IDS,
   LEAD_ENTERED_QUALIFIED_PROPERTY,
   DEAL_PIPELINE_ID,
+  TRACKED_SEQUENCES,
+  TRACKED_SEQUENCE_IDS,
   WORKED_TASK_SOURCE_LABELS,
   AUTOMATION_TASK_SOURCE_LABELS,
   WORKFLOWS,

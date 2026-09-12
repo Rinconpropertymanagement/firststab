@@ -38,6 +38,7 @@ const CACHEABLE_READS = [
   'listTasksForSequenceIds',
   'listLeadsInStages',
   'listQualifiedLeads',
+  'listContactsCreatedBetween',
   'listContactIdsForTasks',
   'resolveOwnerIdByEmail',
   'readWorkflowName',

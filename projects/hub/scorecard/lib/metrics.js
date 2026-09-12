@@ -32,6 +32,16 @@ const {
   TRACKED_SEQUENCE_IDS,
 } = require('./config');
 const { weekBoundsIso } = require('./week');
+const {
+  CRM_COMPLETENESS_POPULATION_START_ISO,
+  IMPORT_TYPE_DEPRECATED_VALUES,
+  OWNER_PERSONA_DEPRECATED_VALUES,
+} = require('./crm-completeness-config');
+// Reused, not redeclared — see crm-completeness-config.js's header. This is
+// the same list call-stats/lib/hubspot-connector.js already uses to decide
+// "did a human do something deliberate with this contact," which is exactly
+// the population test metric 11 needs: a real prospect, not exhaust.
+const { PROSPECT_LIFECYCLE_STAGES } = require('../../call-stats/lib/sales-classification-config');
 
 // ─── Small helpers ────────────────────────────────────────────────────────
 
@@ -458,6 +468,177 @@ async function computeLostDealsAddedToSequence(hubspot, weekStart) {
   };
 }
 
+// ─── Metric 11 — CRM data completeness (two rows, not one blended score) ──
+/**
+ * Two `rate` metrics built strictly from Rincon's own written SOP for
+ * `import_type`, `owner_persona` and `hs_lead_status`, and for the deal-side
+ * line "After a Lead Is Finished: Set the Deal as Lost or Won, Add clear
+ * notes." Approved by Peter 2026-09-12 as TWO Scoreboard rows —
+ * `crm_contact_completeness` and `crm_deal_completeness` — because they
+ * measure different objects with different population sizes, and blending
+ * them into one score would hide which side is actually weak (measured
+ * 2026-09-12: contacts 81.6%, the weak field inside it being owner_persona
+ * at 82.9%; deals 88.4%, dragged down entirely by the closed side at 85.4%
+ * against open deals' 100%).
+ *
+ * POPULATION START, BOTH METRICS: contacts/deals created on or after
+ * 2026-04-01 — see crm-completeness-config.js for why. `computeAll()` only
+ * ever calls these for the current week, so the population-start clamp
+ * below matters only when this function is called directly for an earlier
+ * week (verify.js reproducing the all-time measured figures) — a week
+ * entirely before 2026-04-01 has a legitimately empty population, not a
+ * failure, so it returns a 0/0 rate rather than throwing or skipping.
+ *
+ * SNAPSHOT AT COMPUTE TIME, SAME AS EVERY OTHER SCOREBOARD METRIC. This is a
+ * data-hygiene measurement, not a performance-attribution one — there is no
+ * tenant/departure-style drift risk here the way line-ownership-history.js
+ * guards against for Call Stats, because nothing about "did this contact
+ * ever get filled in correctly" can be rewritten by someone leaving. So a
+ * week is computed once and never recomputed, exactly like the other six
+ * metrics, rather than inventing a live-recompute path this table has no
+ * precedent for and gains nothing from.
+ *
+ * DEAL COMPLETENESS DOES NOT JOIN BACK TO A CONTACT. Deals are measured
+ * directly as their own population, exactly as Peter's 2026-09-12
+ * measurement did — a contact without a deal yet is not a defect on either
+ * row, it simply has not reached metric 2's denominator yet.
+ */
+
+/** Pure scoring over an already-fetched contact list. No network calls. */
+function scoreCrmContacts(contacts) {
+  let importTypeValid = 0;
+  let ownerPersonaValid = 0;
+  let leadStatusPresent = 0;
+  let allThree = 0;
+
+  for (const contact of contacts) {
+    const importType = (contact.properties.import_type || '').trim();
+    const ownerPersona = (contact.properties.owner_persona || '').trim();
+    const leadStatus = (contact.properties.hs_lead_status || '').trim();
+
+    const importOk = importType !== '' && !IMPORT_TYPE_DEPRECATED_VALUES.includes(importType);
+    const personaOk = ownerPersona !== '' && !OWNER_PERSONA_DEPRECATED_VALUES.includes(ownerPersona);
+    const statusOk = leadStatus !== '';
+
+    if (importOk) importTypeValid++;
+    if (personaOk) ownerPersonaValid++;
+    if (statusOk) leadStatusPresent++;
+    if (importOk && personaOk && statusOk) allThree++;
+  }
+
+  return { population: contacts.length, allThree, importTypeValid, ownerPersonaValid, leadStatusPresent };
+}
+
+/**
+ * Pure scoring over an already-fetched deal list. No network calls.
+ *
+ * Open vs. closed is decided by hs_is_closed_won/hs_is_closed_lost, NEVER
+ * the raw dealstage id — see LIVE VERIFICATION point 8 in
+ * hubspot-leads-connector.js for the "Onsite Consultation Complete" trap
+ * (dealstage id `closedlost`, hs_is_closed_lost correctly `false`) that
+ * makes the id unsafe to use here.
+ */
+function scoreCrmDeals(deals) {
+  let openTotal = 0;
+  let openComplete = 0;
+  let closedTotal = 0;
+  let closedComplete = 0;
+
+  for (const deal of deals) {
+    const isClosedWon = String(deal.properties.hs_is_closed_won).trim().toLowerCase() === 'true';
+    const isClosedLost = String(deal.properties.hs_is_closed_lost).trim().toLowerCase() === 'true';
+    const closed = isClosedWon || isClosedLost;
+
+    const hasName = Boolean((deal.properties.dealname || '').trim());
+    const amount = Number(deal.properties.amount);
+    const hasPositiveAmount = Number.isFinite(amount) && amount > 0;
+
+    if (closed) {
+      closedTotal++;
+      const numNotes = Number(deal.properties.num_notes || 0);
+      if (hasName && hasPositiveAmount && numNotes > 0) closedComplete++;
+    } else {
+      openTotal++;
+      if (hasName && hasPositiveAmount) openComplete++;
+    }
+  }
+
+  return {
+    population: openTotal + closedTotal,
+    complete: openComplete + closedComplete,
+    openTotal,
+    openComplete,
+    closedTotal,
+    closedComplete,
+  };
+}
+
+async function computeCrmContactCompleteness(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const clampedFromIso = fromIso < CRM_COMPLETENESS_POPULATION_START_ISO ? CRM_COMPLETENESS_POPULATION_START_ISO : fromIso;
+
+  // A week that falls entirely before 2026-04-01 has a legitimately EMPTY
+  // population, not a failure — same "denominator 0 is legal" rule metric 1
+  // relies on. Only reachable when this is called directly for a week
+  // outside computeAll()'s "current week only" usage.
+  if (clampedFromIso >= toIso) {
+    return {
+      metric_key: 'crm_contact_completeness',
+      metric_shape: 'rate',
+      numerator: 0,
+      denominator: 0,
+      diagnostics: { skippedReason: 'week entirely precedes the 2026-04-01 population start' },
+    };
+  }
+
+  const { contacts } = await hubspot.listContactsCreatedBetween(clampedFromIso, toIso, PROSPECT_LIFECYCLE_STAGES);
+  const score = scoreCrmContacts(contacts);
+
+  return {
+    metric_key: 'crm_contact_completeness',
+    metric_shape: 'rate',
+    numerator: score.allThree,
+    denominator: score.population,
+    diagnostics: {
+      importTypeValid: score.importTypeValid,
+      ownerPersonaValid: score.ownerPersonaValid,
+      leadStatusPresent: score.leadStatusPresent,
+    },
+  };
+}
+
+async function computeCrmDealCompleteness(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const clampedFromIso = fromIso < CRM_COMPLETENESS_POPULATION_START_ISO ? CRM_COMPLETENESS_POPULATION_START_ISO : fromIso;
+
+  if (clampedFromIso >= toIso) {
+    return {
+      metric_key: 'crm_deal_completeness',
+      metric_shape: 'rate',
+      numerator: 0,
+      denominator: 0,
+      diagnostics: { skippedReason: 'week entirely precedes the 2026-04-01 population start' },
+    };
+  }
+
+  const { deals, outsideDefaultPipeline } = await hubspot.listDealsCreatedBetween(clampedFromIso, toIso);
+  const score = scoreCrmDeals(deals);
+
+  return {
+    metric_key: 'crm_deal_completeness',
+    metric_shape: 'rate',
+    numerator: score.complete,
+    denominator: score.population,
+    diagnostics: {
+      openTotal: score.openTotal,
+      openComplete: score.openComplete,
+      closedTotal: score.closedTotal,
+      closedComplete: score.closedComplete,
+      dealsOutsideDefaultPipeline: outsideDefaultPipeline,
+    },
+  };
+}
+
 // ─── The name-drift check ─────────────────────────────────────────────────
 /**
  * Re-reads each configured workflow's CURRENT name from the v4 flows
@@ -494,5 +675,9 @@ module.exports = {
   computePastLeadConversions,
   computeReengagementAttempts,
   computeLostDealsAddedToSequence,
+  computeCrmContactCompleteness,
+  computeCrmDealCompleteness,
+  scoreCrmContacts,
+  scoreCrmDeals,
   checkWorkflowNameDrift,
 };

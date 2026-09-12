@@ -47,6 +47,11 @@ const METRIC_OWNERS = {
   // Peter's 2026-09-12 instruction, hard-assigned the same way the other
   // five are. Not looked up anywhere; this is the assignment.
   lost_deals_added_to_sequence: 'kristen@rinconmanagement.com',
+  // Metric 11, the eleventh and final Scoreboard metric, approved
+  // 2026-09-12. Two rows, same owner, same hard-assignment rule as every
+  // metric above.
+  crm_contact_completeness: 'kristen@rinconmanagement.com',
+  crm_deal_completeness: 'kristen@rinconmanagement.com',
 };
 
 // ─── The metric registry ──────────────────────────────────────────────────
@@ -147,6 +152,28 @@ const METRICS = [
     // in the week or it didn't, so unlike sequence depth there is no
     // snapshotting concern and no held week.
     note: 'Distinct contacts newly entering a lost-leads re-engagement sequence. 24 of 25 traced enrollees had a genuinely lost deal, confirming the population. The real trend has collapsed from 47–80/week in May–June to single digits by September — say so plainly, do not smooth it over.',
+  },
+  {
+    key: 'crm_contact_completeness',
+    shape: 'rate',
+    label: 'CRM completeness — contacts',
+    display: 'rate',
+    higherIsBetter: true,
+    aggregable: true,
+    numeratorLabel: 'contacts complete',
+    denominatorLabel: 'contacts created',
+    note: 'A contact counts as complete only if import_type, owner_persona and hs_lead_status are ALL filled in correctly (deprecated dropdown values do not count) — see crm-completeness-config.js. Population: contacts created since 2026-04-01, when Kristen took over the role this SOP governs. Weekly rate is genuinely volatile (roughly 20–100%) — that is real signal, not a broken metric.',
+  },
+  {
+    key: 'crm_deal_completeness',
+    shape: 'rate',
+    label: 'CRM completeness — deals',
+    display: 'rate',
+    higherIsBetter: true,
+    aggregable: true,
+    numeratorLabel: 'deals complete',
+    denominatorLabel: 'deals created',
+    note: "A deal counts as complete if it has a name and an amount > 0; a CLOSED deal (hs_is_closed_won or hs_is_closed_lost — never the raw dealstage id) additionally needs num_notes > 0, matching the SOP's \"add clear notes\" after a lead is finished. Measured separately from contact completeness on purpose — a contact without a deal yet is not a defect on this row, it just hasn't reached this population yet.",
   },
 ];
 

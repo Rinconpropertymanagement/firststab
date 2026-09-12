@@ -86,6 +86,27 @@
  *   6. /crm/v3/owners?email= resolves kristen@rinconmanagement.com to owner
  *      id 384054033. Resolved at run time, never hardcoded — see
  *      resolveOwnerIdByEmail().
+ *   7. Metric 11 (CRM data completeness, 2026-09-12) reads the CONTACTS
+ *      object for the first time in this file — leads, deals and tasks were
+ *      already here, and a contact is the same funnel this file already
+ *      partly reads via `hs_primary_contact_id` joins, so this is one more
+ *      narrow read in scope rather than a new domain (Design Decision 37 is
+ *      about call data vs. leads/deals/tasks/contacts, not a wall inside
+ *      that group). `import_type` and `owner_persona` (Rincon's two custom
+ *      contact fields) and `hs_lead_status` came back populated on real
+ *      contacts created since 2026-04-01, confirmed live 2026-09-12.
+ *   8. Metric 11's deal side reuses listDealsCreatedBetween() rather than a
+ *      new function — same object, same date-range filter, same
+ *      pipeline-membership split it already computes. DEAL_PROPERTIES grew
+ *      five fields (dealname, amount, hs_is_closed_won, hs_is_closed_lost,
+ *      num_notes) to carry them. `hs_is_closed_won`/`hs_is_closed_lost` are
+ *      booleans that come back as the strings "true"/"false" — confirmed
+ *      live 2026-09-12. THE TRAP THIS PORTAL HAS: the dealstage labeled
+ *      "Onsite Consultation Complete" carries the internal id `closedlost`
+ *      but `hs_is_closed_lost` correctly reads `false` for it — a real,
+ *      open deal that a dealstage-id check would silently misclassify as
+ *      closed. Everything in this file that needs open-vs-closed reads
+ *      these two booleans and never the raw `dealstage`/`pipeline` id.
  * ============================================================
  */
 
@@ -94,6 +115,7 @@ const HUBSPOT_BASE = process.env.HUBSPOT_API_BASE || 'https://api.hubapi.com';
 const LEADS_SEARCH_PATH = '/crm/v3/objects/leads/search';
 const DEALS_SEARCH_PATH = '/crm/v3/objects/deals/search';
 const TASKS_SEARCH_PATH = '/crm/v3/objects/tasks/search';
+const CONTACTS_SEARCH_PATH = '/crm/v3/objects/contacts/search';
 const TASK_CONTACT_ASSOCIATIONS_PATH = '/crm/v4/associations/tasks/contacts/batch/read';
 const OWNERS_PATH = '/crm/v3/owners';
 const FLOW_PATH_PREFIX = '/automation/v4/flows/';
@@ -125,7 +147,35 @@ const LEAD_PROPERTIES = [
   'hs_v2_date_entered_qualified_stage_id_233247981',
 ];
 
-const DEAL_PROPERTIES = ['hs_object_id', 'createdate', 'pipeline'];
+// Metric 1 needs only the first three. Metric 11's deal-completeness side
+// (2026-09-12) added the other five so listDealsCreatedBetween() could be
+// reused whole rather than duplicated for one more filter — see LIVE
+// VERIFICATION point 8 above for why hs_is_closed_won/hs_is_closed_lost,
+// never the raw dealstage id, decide open vs. closed.
+const DEAL_PROPERTIES = [
+  'hs_object_id',
+  'createdate',
+  'pipeline',
+  'dealname',
+  'amount',
+  'hs_is_closed_won',
+  'hs_is_closed_lost',
+  'num_notes',
+];
+
+// Metric 11 (CRM contact completeness). `import_type` and `owner_persona`
+// are Rincon's two custom "set once" contact fields; `hs_lead_status` is
+// HubSpot's native field, "updated as activity occurs" per the SOP. See
+// crm-completeness-config.js for the deprecated-value lists these are
+// checked against.
+const CONTACT_PROPERTIES = [
+  'hs_object_id',
+  'createdate',
+  'lifecyclestage',
+  'import_type',
+  'owner_persona',
+  'hs_lead_status',
+];
 
 const TASK_PROPERTIES = [
   'hs_object_id',
@@ -422,6 +472,42 @@ async function listQualifiedLeads(qualifiedStageId) {
 }
 
 /**
+ * Contacts CREATED in [fromIso, toIso) whose `lifecyclestage` is in
+ * `lifecycleStageIds` — the population for metric 11's contact-completeness
+ * row.
+ *
+ * The stage filter is pushed down to HubSpot as an IN filter, exactly like
+ * listLeadsInStages() above, rather than fetched unfiltered and checked in
+ * memory — cheaper, and it keeps the caller from ever needing to see a
+ * non-prospect contact at all. `lifecycleStageIds` is a parameter, never a
+ * constant declared in this file: the caller passes
+ * PROSPECT_LIFECYCLE_STAGES imported from
+ * call-stats/lib/sales-classification-config.js, so this file does not hold
+ * a second, driftable copy of that list.
+ *
+ * No tenant/vendor exclusion here — that rule (dropExcludedLeads, above) is
+ * defined on the LEADS object's `hs_lead_disqualification_reason`, a
+ * property contacts in this portal do not carry. Metric 11 was not scoped to
+ * apply it, and there is nothing to apply it to.
+ *
+ * @returns {Promise<{contacts: Array}>}
+ */
+async function listContactsCreatedBetween(fromIso, toIso, lifecycleStageIds) {
+  const contacts = await searchAllPages(
+    CONTACTS_SEARCH_PATH,
+    'contacts-created search',
+    [
+      { propertyName: 'createdate', operator: 'GTE', value: fromIso },
+      { propertyName: 'createdate', operator: 'LT', value: toIso },
+      { propertyName: 'lifecyclestage', operator: 'IN', values: lifecycleStageIds },
+    ],
+    CONTACT_PROPERTIES,
+    'createdate'
+  );
+  return { contacts };
+}
+
+/**
  * Contact ids associated with each of `taskIds`.
  * A batch READ — HubSpot's own endpoint name — never batch/create.
  *
@@ -509,6 +595,7 @@ module.exports = {
   listTasksForSequenceIds,
   listLeadsInStages,
   listQualifiedLeads,
+  listContactsCreatedBetween,
   listContactIdsForTasks,
   resolveOwnerIdByEmail,
   readWorkflowName,

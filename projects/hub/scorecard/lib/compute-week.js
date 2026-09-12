@@ -39,6 +39,8 @@ const {
   computePastLeadConversions,
   computeReengagementAttempts,
   computeLostDealsAddedToSequence,
+  computeCrmContactCompleteness,
+  computeCrmDealCompleteness,
   checkWorkflowNameDrift,
 } = require('./metrics');
 const { latestPublishableWeek, weekBoundsIso, mondayOf } = require('./week');
@@ -134,6 +136,13 @@ async function computeAll({ fastWeek, depthWeek, today } = {}) {
     ['past_lead_conversions', fast, () => computePastLeadConversions(hubspot, fast)],
     ['past_lead_reengagement_attempts', fast, () => computeReengagementAttempts(hubspot, fast)],
     ['lost_deals_added_to_sequence', fast, () => computeLostDealsAddedToSequence(hubspot, fast)],
+    // Metric 11, both rows. Snapshot at compute time like the six metrics
+    // above it — confirmed straightforward (crm-completeness-config.js
+    // header and metrics.js's metric-11 header both say why): a
+    // data-hygiene measurement has no tenant/departure-style drift risk to
+    // guard against, so this is `fast`, not a held week.
+    ['crm_contact_completeness', fast, () => computeCrmContactCompleteness(hubspot, fast)],
+    ['crm_deal_completeness', fast, () => computeCrmDealCompleteness(hubspot, fast)],
   ];
 
   for (const [name, weekStart, run] of attempts) {

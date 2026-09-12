@@ -399,6 +399,16 @@ and conversation figures all reproduced within 1–3%). No alternate definition 
 Use ~393/wk as the real figure. This is exactly why every number here gets an independent
 second measurement before it's trusted, including the ones that look uncontroversial.
 
+**Asimov's scoped pre-check declined by Peter, 2026-09-12.** The spec called for one before
+shipping, on the grounds that this is the first Call Stats build to read real prospect
+records (names, numbers, deal stages) rather than only staff phone activity — the same
+shape Asimov reviewed for the CRM Scoreboard metrics, where the finding was "cleared, on
+condition that 'nothing read is stored' is enforced in code, not just true today." That
+narrower check has not been run here. Not a compliance build under `CLAUDE.md`'s three
+triggers (no message sent, no tenant/applicant decision, and the stored columns are four
+plain integers with no identifier) — recorded as Peter's decision, not an oversight, per
+GOVERNANCE.md Rule 6.
+
 **Outbound sales calls lands at 88% of Peter's figure portfolio-wide** — exactly the
 "sales is a floor" under-report the design predicts. That one is a genuine pass.
 

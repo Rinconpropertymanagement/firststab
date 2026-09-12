@@ -33,7 +33,18 @@ const {
   // file's own header spends a page arguing there must be exactly one copy of
   // this fact. See the ownership_periods block in the stats route below.
   lineOwnershipRuleFor,
+  // The night's distinct outside-party numbers, Rincon's own lines already
+  // removed. Pure and network-free, so the sync route can see the lookup
+  // volume before spending a HubSpot request on it.
+  collectOutsideNumberKeys,
+  // The HubSpot-native-line analogue of the above, added 2026-09-12 to
+  // extend sales classification to Kristen Rau's third number
+  // (+18054101625) — a separate pipeline with no raw_digits field, so
+  // "the outside party" is derived from hs_call_from_number/
+  // hs_call_to_number instead. See lib/sync.js's header on that function.
+  collectHubspotNativeOutsideNumberKeys,
 } = require('./lib/sync');
+const { buildOwnNumberKeySet } = require('./lib/phone-key');
 // Every per-person number this route returns is computed in lib/metrics.js,
 // never inline here — TREND-VIEW-SPEC.md Design Decision 3 makes that a
 // build requirement, so that the trend route landing next shares this
@@ -370,7 +381,11 @@ router.get('/api/call-stats/stats', requireCallStatsAccess, async (req, res) => 
     // order duplicates and drops rows. See fetchAllRows' header.
     rows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
       .from('call_stats')
-      .select('aircall_user_id, staff_email, call_date, direction, total_calls, answered_calls, missed_calls, total_talk_seconds, total_ring_seconds, synced_at')
+      // The four classification columns are NULLABLE and NULL means "this
+      // row was never classified," not zero — lib/metrics.js's
+      // foldCallStatsRow() routes such a row into the unclassified pair
+      // instead of folding it in as zeros. See that file.
+      .select('aircall_user_id, staff_email, call_date, direction, total_calls, answered_calls, missed_calls, total_talk_seconds, total_ring_seconds, sales_calls, unmatched_calls, unknown_calls, sales_conversations, synced_at')
       .gte('call_date', from)
       .lte('call_date', to)
       .order('call_date', { ascending: true })
@@ -1531,6 +1546,56 @@ function checkCronSecret(req, res) {
  * 2026-03-10 is what makes the backfill safe over that window and nothing
  * older.
  * ============================================================
+ *
+ * ============================================================
+ * ?date= HAS A THIRD EFFECT AS OF 2026-09-12, AND IT IS SHARP
+ * ============================================================
+ * This route now also snapshots the SALES CLASSIFICATION onto each
+ * call_stats row (sales_calls / unmatched_calls / unknown_calls /
+ * sales_conversations). That snapshot is the whole reason a prospect
+ * signing a contract in October cannot retroactively turn September's
+ * sales calls into operational ones — see the migration
+ * 20260912010000_add_sales_classification_to_call_stats.sql on why
+ * recomputation would make success in sales erase the record of the sales
+ * work that produced it.
+ *
+ * RE-RUNNING AN OLD DAY READS TODAY'S HUBSPOT and re-stamps that day's
+ * classification with it. That is precisely the history rewrite the
+ * snapshot design exists to prevent, available as a one-line manual
+ * command — the same shape as the ring-membership hazard above, and it
+ * arrives through the same single command.
+ *
+ * Concretely: every prospect who has SIGNED since the day being re-run has
+ * likely moved off a prospect lifecycle stage. Re-running an old day will
+ * therefore report FEWER sales calls for that day than the night itself
+ * did — and the better the sales team did in the interval, the bigger the
+ * drop. A number Peter already read out in a meeting would move downward
+ * for a reason that has nothing to do with that week's work.
+ *
+ * *** SO THE THREE EFFECTS NOW DISAGREE WITH EACH OTHER. *** Re-running an
+ * old day fixes its miss reasons CORRECTLY (immutable facts off the call
+ * objects), re-stamps its line attribution with TODAY's ring membership,
+ * and re-stamps its classification with TODAY's HubSpot. You cannot ask
+ * for one without the other two. Before re-running any day that has
+ * already been classified, understand that its sales figures will be
+ * recomputed against a CRM that has moved on. Re-running a day whose
+ * classification columns are still NULL is the safe and intended case —
+ * there is no snapshot to overwrite.
+ *
+ * ============================================================
+ * AS OF 2026-09-12, THIS HAZARD ALSO APPLIES TO
+ * call_stats_hubspot_native_calls
+ * ============================================================
+ * The HubSpot-native-line block further down in this route (Kristen Rau's
+ * third number, +18054101625) now snapshots the identical four columns the
+ * same way, using the same ?date= parameter and the same fromIso/toIso
+ * range. Re-running an old day re-classifies THAT table's rows against
+ * today's HubSpot too — same rewrite, same reason, same fix (don't, unless
+ * the day's classification columns are still NULL). The two tables'
+ * classifications are computed independently (see that block's own
+ * comment) but obey the same rule, so re-running a day re-stamps both if
+ * both were previously classified.
+ * ============================================================
  */
 internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   if (!checkCronSecret(req, res)) return;
@@ -1573,7 +1638,70 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   }
   const usersByEmail = new Map((userRows || []).map(u => [u.email.toLowerCase(), u]));
 
-  const { rows, summary } = buildDailyAggregates(calls, usersByEmail);
+  // ─── Sales-vs-operational classification input ──────────────────────────
+  // (SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md.) Runs over the SAME
+  // `calls` array already fetched above — no second Aircall call fetch. The
+  // one extra Aircall GET is the line list, which is per-line not per-call.
+  //
+  // *** FAIL LOUD, LEAVE NULL, NEVER WRITE A GUESS. ***
+  // (Design Decision 20.) If anything here fails — HubSpot down, a 429, the
+  // token missing, Aircall's line list unusable — `classificationInput`
+  // stays null, buildDailyAggregates() leaves all four classification
+  // columns NULL, and the day stays re-runnable. It does NOT fall back to
+  // zeros, and unclassified calls are NOT swept into unmatched_calls.
+  // A stored value meaning "we could not find out" that looks identical to
+  // "we looked and found nothing" is a permanent, silent, self-concealing
+  // error — and here it would specifically understate sales and inflate
+  // Peter's operational-call count, in the flattering direction for
+  // neither number.
+  //
+  // Isolation matches the two halves below it: a failure here costs only
+  // the classification columns. The call_stats counts, the line-miss half
+  // and the HubSpot-native half are all unaffected. Unlike the line-miss
+  // half, this does NOT return 502 — the row is still written and is still
+  // correct in every pre-existing column, and the NULLs are themselves the
+  // honest, visible record that classification did not run. The dashboard
+  // renders them as unclassified, not as zero.
+  let classificationInput = null;
+  let classificationError = null;
+  let classificationStats = null;
+  try {
+    // Rincon's own numbers are excluded BEFORE any lookup. This is
+    // load-bearing, not tidiness: two HubSpot contacts currently hold
+    // Rincon's own "Property Manager - Faria" line at `opportunity` stage
+    // (verified 2026-09-12), so without this every internal call on that
+    // line would be counted as an outbound sales call. See lib/phone-key.js.
+    const ownLineDigits = await aircall.listOwnLineDigits();
+    const nativeNumberRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
+      .from('call_stats_hubspot_native_numbers')
+      .select('phone_number')
+      .range(rangeFrom, rangeTo));
+    const ownNumberKeys = buildOwnNumberKeySet([
+      ...ownLineDigits,
+      ...(nativeNumberRows || []).map(r => r.phone_number),
+    ]);
+
+    const { keys, stats } = collectOutsideNumberKeys(calls, ownNumberKeys);
+    classificationStats = { ...stats, own_line_numbers_excluded: ownNumberKeys.size };
+
+    // One HubSpot request per 100 distinct numbers (HubSpot's measured
+    // IN-list cap), so a typical night is one or two — not ninety.
+    const qualifyingKeys = await hubspot.listQualifyingPhoneKeys(keys);
+    classificationStats.distinct_keys_qualifying = qualifyingKeys.size;
+    classificationInput = { qualifyingKeys, ownNumberKeys };
+  } catch (err) {
+    classificationError = err.message;
+    console.error(`[${ts}] call-stats sync: SALES CLASSIFICATION SKIPPED — ${err.message}`);
+    console.error(`[${ts}] call-stats sync: the four classification columns are left NULL for ${dateStr} (NOT zero — zero would mean "no sales calls that day"). Every other column is unaffected. Re-run this day once the lookup works: POST /api/call-stats/internal/sync?date=${dateStr}`);
+  }
+
+  // NOTE the deliberate asymmetry in what is LOGGED here: counts only,
+  // never the numbers looked up and never the contacts matched (Design
+  // Decision 23). Logging the numbers would quietly reintroduce, in the log
+  // files, exactly the outside-person data this design keeps out of the
+  // tables — and log files are the one place nobody re-reads a governance
+  // decision before grepping.
+  const { rows, summary } = buildDailyAggregates(calls, usersByEmail, classificationInput);
 
   let upserted = 0;
   const upsertErrors = [];
@@ -1734,6 +1862,12 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
     rows_upserted: upserted,
     upsert_errors: upsertErrors,
     line_misses: lineMissResult,
+    sales_classification: classificationError
+      ? {
+        skipped: true,
+        error: `Sales classification skipped — the four classification columns were deliberately left NULL (not zero) so this day stays re-runnable. ${classificationError}`,
+      }
+      : { ...classificationStats },
   };
   console.log(`[${ts}] call-stats sync done:`, JSON.stringify(result));
 
@@ -1752,6 +1886,21 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
   // a working Aircall sync into a failed nightly job. Per this build's task
   // instructions: a HubSpot-side failure is recorded and returned, never
   // thrown past this point.
+  //
+  // ============================================================
+  // AS OF 2026-09-12, THIS BLOCK ALSO CLASSIFIES — extending
+  // SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md to Kristen Rau's third
+  // number (+18054101625), which the original classification build never
+  // touched. Deliberately its OWN classification input, built independently
+  // below rather than reusing the `classificationInput`/`ownNumberKeys`
+  // computed in the Aircall block above — same isolation the two pipelines
+  // already keep everywhere else (each re-reads
+  // call_stats_hubspot_native_numbers on its own; see that block's own
+  // comment). A failure building it costs only these four columns on
+  // call_stats_hubspot_native_calls; it can never fail the Aircall sync
+  // above (already committed by this point) or the native call counts in
+  // this same block (computed either way, classified or not).
+  // ============================================================
   let hubspotResult;
   try {
     const trackedNumberRows = await fetchAllRows('id', (rangeFrom, rangeTo) => supabase
@@ -1774,7 +1923,50 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
 
       const hubspotCalls = await hubspot.listVoipCallsForNumbers(trackedPhoneNumbers, fromIso, toIso);
       const trackedPhoneNumberSet = new Set(trackedPhoneNumbers);
-      const { rows: hubspotRows, summary: hubspotSummary } = buildHubspotDailyAggregates(hubspotCalls, trackedPhoneNumberSet);
+
+      // ── Sales-vs-operational classification input (native line) ────────
+      // Runs over the SAME `hubspotCalls` array already fetched above — no
+      // second HubSpot calls fetch. FAIL LOUD, LEAVE NULL, NEVER WRITE A
+      // GUESS — identical discipline to the Aircall classification block:
+      // if anything here fails, `nativeClassificationInput` stays null,
+      // buildHubspotDailyAggregates() leaves all four classification
+      // columns NULL, and the day stays re-runnable. The native call counts
+      // above (total_calls, answered_calls, missed_calls,
+      // total_talk_seconds) are entirely unaffected either way.
+      let nativeClassificationInput = null;
+      let nativeClassificationError = null;
+      let nativeClassificationStats = null;
+      try {
+        // Rincon's own numbers, excluded BEFORE any lookup — same load-
+        // bearing reason as the Aircall block (lib/phone-key.js): without
+        // it, a hand-advanced HubSpot contact holding one of Rincon's own
+        // numbers would classify an internal call as sales. The exclusion
+        // set here is built the SAME way (Aircall's 15 lines plus every row
+        // in call_stats_hubspot_native_numbers, which is `trackedPhoneNumbers`
+        // itself) — a fresh, independent build rather than the Aircall
+        // block's own `ownNumberKeys`, per this block's isolation note
+        // above. In practice this is the identical set of digits, since
+        // both are built from the same two real sources.
+        const ownLineDigits = await aircall.listOwnLineDigits();
+        const ownNumberKeys = buildOwnNumberKeySet([...ownLineDigits, ...trackedPhoneNumbers]);
+
+        const { keys, stats } = collectHubspotNativeOutsideNumberKeys(hubspotCalls, trackedPhoneNumberSet, ownNumberKeys);
+        nativeClassificationStats = { ...stats, own_line_numbers_excluded: ownNumberKeys.size };
+
+        // Same lib/hubspot-connector.js function the Aircall side calls —
+        // reused unchanged, not re-implemented, so a given outside number
+        // gets the identical answer regardless of which pipeline it arrived
+        // through.
+        const qualifyingKeys = await hubspot.listQualifyingPhoneKeys(keys);
+        nativeClassificationStats.distinct_keys_qualifying = qualifyingKeys.size;
+        nativeClassificationInput = { qualifyingKeys, ownNumberKeys };
+      } catch (err) {
+        nativeClassificationError = err.message;
+        console.error(`[${ts}] call-stats sync: HUBSPOT-NATIVE SALES CLASSIFICATION SKIPPED for ${dateStr} — ${err.message}`);
+        console.error(`[${ts}] call-stats sync: the four classification columns are left NULL on call_stats_hubspot_native_calls (NOT zero). Native call counts (total_calls, answered_calls, missed_calls, total_talk_seconds) are unaffected.`);
+      }
+
+      const { rows: hubspotRows, summary: hubspotSummary } = buildHubspotDailyAggregates(hubspotCalls, trackedPhoneNumberSet, nativeClassificationInput);
 
       let hubspotUpserted = 0;
       const hubspotUpsertErrors = [];
@@ -1793,6 +1985,12 @@ internalRouter.post('/api/call-stats/internal/sync', async (req, res) => {
         ...hubspotSummary,
         rows_upserted: hubspotUpserted,
         upsert_errors: hubspotUpsertErrors,
+        sales_classification: nativeClassificationError
+          ? {
+            skipped: true,
+            error: `Sales classification skipped — the four classification columns were deliberately left NULL (not zero) so this day stays re-runnable. ${nativeClassificationError}`,
+          }
+          : { ...nativeClassificationStats },
       };
     }
   } catch (err) {

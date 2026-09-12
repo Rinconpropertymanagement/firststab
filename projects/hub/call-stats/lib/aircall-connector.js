@@ -384,9 +384,44 @@ async function fetchLineRingMembership() {
   return membership;
 }
 
+/**
+ * Rincon's OWN line numbers, as Aircall reports them — e.g.
+ * "+1 805-427-9358". Used to build the exclusion set the sales
+ * classification applies BEFORE any HubSpot lookup (see lib/phone-key.js,
+ * which explains why that exclusion is load-bearing rather than tidiness:
+ * two contacts holding Rincon's Property Manager - Faria line currently sit
+ * at `opportunity` in HubSpot, so without it every call on that line would
+ * be counted as an outbound sales call).
+ *
+ * Reads the LIST endpoint, and that is correct here — unlike ring
+ * membership (THE TRAP above), `digits` IS returned by the list endpoint,
+ * on every line. One GET per night, not fifteen.
+ *
+ * Fetched fresh each run rather than hardcoded anywhere: lines get added
+ * and retired in Aircall, and a stale literal list would silently stop
+ * excluding a new line, which shows up as that line's internal calls
+ * turning into "sales."
+ *
+ * THROWS rather than returning a partial or empty list, for the same
+ * reason fetchLineRingMembership() does. A short exclusion set does not
+ * fail loudly on its own — it quietly reclassifies Rincon's internal calls
+ * as sales calls, which is a wrong number that looks like a good week.
+ */
+async function listOwnLineDigits() {
+  const numbers = await listNumbers();
+  if (numbers.length === 0) {
+    throw new Error('Aircall GET /numbers returned an empty line list. Refusing to build an empty own-number exclusion set — that would let Rincon\'s own internal calls be looked up in HubSpot and counted as sales. See lib/phone-key.js.');
+  }
+  const digits = numbers.map(n => n && n.digits).filter(Boolean).map(String);
+  if (digits.length === 0) {
+    throw new Error(`Aircall returned ${numbers.length} line(s) but not one carried a \`digits\` field — refusing to build an empty own-number exclusion set. See lib/phone-key.js.`);
+  }
+  return digits;
+}
+
 /** Read-only connectivity check, same purpose as latchel-connector's implicit ping via listProperties(). */
 async function ping() {
   return aircallGet('/ping');
 }
 
-module.exports = { listCallsForDateRange, fetchLineRingMembership, ping };
+module.exports = { listCallsForDateRange, fetchLineRingMembership, listOwnLineDigits, ping };

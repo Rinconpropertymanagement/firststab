@@ -363,18 +363,99 @@ across eight weeks. Should also follow the backfill, or it launches nearly empty
 
 ---
 
-## 4. Sales vs. operational classification
+## 4. Sales vs. operational classification — BUILT 2026-09-12, NOT DEPLOYED
 
-**Approved:** 2026-09-10. Spec in progress.
+**Approved:** 2026-09-10 (spec), build approved 2026-09-12. **Code written and verified
+against 13 weeks of real data. The migration is NOT applied and nothing is deployed.**
 
 Matches the caller's phone number against HubSpot: a prospect-stage contact or one with a
-deal means sales; no match means operational. Chosen specifically because it needs no call
-content — Aircall's transcription endpoints return 403 on this account, and `SPEC.md`
-permanently ring-fences call content pending separate Mason and Asimov review.
+deal means sales; anything else is **"not matched"** — never silently "operational."
+Chosen specifically because it needs no call content — Aircall's transcription endpoints
+return 403 on this account, and `SPEC.md` permanently ring-fences call content pending
+separate Mason and Asimov review.
 
-**Hard dependency:** HubSpot is roughly 93% junk (see §6). Every unknown caller already
-has an auto-created contact carrying their phone number, so naive matching classifies
-nearly everything as sales. The design must survive that.
+### What was built
+
+`lib/sales-classification-config.js` (the two lists + threshold, dated change log),
+`lib/phone-key.js` (normalizer + own-number exclusion), `listQualifyingPhoneKeys()` in
+`lib/hubspot-connector.js`, `listOwnLineDigits()` in `lib/aircall-connector.js`, the
+classification folded into `buildDailyAggregates()`, route wiring with a fail-loud
+leave-NULL path, four counters through `lib/metrics.js`, the migration
+`20260912010000_add_sales_classification_to_call_stats.sql`, and
+`diagnose-sales-classification.js`.
+
+### Measured against Peter's three figures — 13 full weeks, 8,925 real calls
+
+| Metric | Peter's hand-kept | Measured portfolio-wide | Measured, Kristen only |
+|---|---|---|---|
+| Operational calls | 74.29/wk | **~393/wk** | **41.2/wk** |
+| Outbound sales calls | 85.27/wk | **74.7/wk** | **40.2/wk** |
+| Conversations (≥60s) | 5.2/wk | **26.5/wk** | **8.3/wk** |
+
+**Corrected 2026-09-12.** Q's own report cited 559.5/wk portfolio-wide; TARS independently
+re-ran the identical code over the identical window and got ~393/wk (Kristen-only, sales,
+and conversation figures all reproduced within 1–3%). No alternate definition of
+"operational" reconciles to 559.5 — this was an error in Q's summary, not a code defect.
+Use ~393/wk as the real figure. This is exactly why every number here gets an independent
+second measurement before it's trusted, including the ones that look uncontroversial.
+
+**Outbound sales calls lands at 88% of Peter's figure portfolio-wide** — exactly the
+"sales is a floor" under-report the design predicts. That one is a genuine pass.
+
+**The other two do not reconcile at any single scope, and that is the open question.**
+Peter's operational (74.29) + outbound sales (85.27) = 159.6/wk, which is *more than
+Kristen's entire call volume* (91.2/wk), so both cannot be Kristen-only. Portfolio-wide,
+operational is off by 7.5×. **Nobody knows what population Peter has been hand-counting.**
+Ask him which row of the per-person table he has been counting before trusting any
+comparison. Do not tune the code to close the gap.
+
+### The premise holds — re-verified 2026-09-12
+
+Of 483 contacts still named "Aircall new contact," **zero** sit at a prospect stage, and
+**zero** prospect-stage contacts carry the auto-generated name pattern. The exhaust matches
+nothing, as designed. 55.8% of called numbers match *some* HubSpot contact; only 23.9%
+carry qualifying evidence — that gap is the 93% junk being correctly ignored.
+
+**The `"+18058866848 Aircall new contact"` exception in the brief is not a contact-level
+case at all.** That number resolves to one contact, "Mai Shin," a real human-entered name
+at `opportunity` with a deal, created 2024-09-05 — before the exhaust started. The Qualified
+record is a **LEAD object**, a different HubSpot object with its own pipeline stages that
+this rule never reads. **So no auto-name refusal was added**, deliberately: it would match
+nothing today, and refusing on name would discard a human's deliberate stage advancement —
+the exact signal the rule is built on. The diagnostic surfaces it if it ever starts happening.
+
+### Three things the spec got wrong, corrected in code
+
+1. **The batched-`IN` plan does not work as written.** An `IN` against raw `phone` matches
+   the stored string literally, so a normalized key returns **zero**. The fix — and Open
+   Item 19's answer is **yes** — is HubSpot's calculated searchable phone properties, which
+   are filterable here and normalize better than we can (they correctly reduce
+   `(805) 749-2638 ext. 2204`). Built as specced, this would have reported "no prospect
+   calls" every night, indistinguishably from a quiet day.
+2. **Open Item 20 answered: the `IN` cap is exactly 100**, stated by HubSpot's own 400.
+3. **The portal has 16 lifecycle stages, not 21, and 3 are "DO NOT USE," not 9.**
+
+### The own-number exclusion was already load-bearing before it shipped
+
+Design Decision 18 argued it defensively. **It is live today:** two HubSpot contacts holding
+Rincon's own *Property Manager - Faria* line (805-427-9358) sit at `opportunity`. Without
+the exclusion, every call on that line would have counted as an outbound sales call.
+
+### Still open
+
+- **What population is Peter counting?** Blocks metrics 1 and 3. Ask him.
+- **The conversation threshold is 60s and does NOT reproduce his 5.2/wk.** It is set just
+  above a 30–50s mode that carries 29% of prospect calls and is absent from the control
+  group — most likely outbound voicemail, though Aircall exposes no flag to confirm it
+  (`voicemail` is inbound-only). Landing on 5.2 would need ~85s, where the distribution has
+  no feature at all. Not tuned; see the config module's reasoning.
+- **Open Items 16 and 17** — marketing manager has still not ratified the stage list, and
+  Rincon has not ruled on pipelines. Deal evidence is currently "any pipeline," justified by
+  a measured 1,631 / 0 / 5 / 0 split across the four.
+- **Asimov's scoped pre-check has not been run** and the spec asks for it before this ships.
+- **Tron has not built the dashboard columns.** Nothing is visible to Peter yet.
+- **Leasing Line misses stay unclassified** and **Mason reviews that before it is ever
+  built** — those callers are prospective tenants.
 
 ---
 

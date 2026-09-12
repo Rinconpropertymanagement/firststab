@@ -30,6 +30,8 @@ const { pacificDateOf } = require('./timezone');
 // OWNERSHIP HISTORY section further down for why it is applied here rather
 // than in backfill-six-months.js.
 const { LINE_OWNERSHIP_HISTORY } = require('./line-ownership-history');
+const { phoneKey } = require('./phone-key');
+const { CONVERSATION_MIN_TALK_SECONDS } = require('./sales-classification-config');
 
 // hs_createdate arrives as an ISO-8601 UTC string (e.g.
 // "2026-09-08T22:46:19.824Z" — confirmed live, see the migration header),
@@ -47,9 +49,31 @@ function pacificDateOfIso(isoString) {
  *   users.email -> {id, email} lookup, built by the caller from a fresh
  *   `users` table read (name/pod are looked up again at DASHBOARD read
  *   time per Design Decision 1, not needed here)
+ * @param {Object|null} classification - OPTIONAL sales-vs-operational
+ *   classification input (SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md).
+ *   `{ qualifyingKeys: Set<string>, ownNumberKeys: Set<string> }`. Omit it
+ *   — or pass null — and the four classification columns come back NULL on
+ *   every row, which is the correct representation of "this day was never
+ *   classified." NEVER pass an empty Set to mean "the lookup failed":
+ *   empty means "looked up, nothing qualified," which is a completely
+ *   different claim. The caller's failure path leaves this argument out
+ *   entirely (see router.js).
+ *
+ * *** WHY THE CLASSIFICATION IS FOLDED IN HERE RATHER THAN RUN AS ITS OWN
+ * PASS. *** The migration's CHECK constraint requires the three counters to
+ * sum EXACTLY to total_calls. A separate pass over the same `calls` array
+ * would have to re-implement all four skip rules above it — null ended_at,
+ * null user, unmatched email, unexpected direction — and stay in step with
+ * them forever. The first time the two drifted, the database would reject
+ * the write; the constraint would catch it, which is the point of the
+ * constraint, but it would catch it at 3am in production. Incrementing the
+ * counters inside the SAME `bucket.total_calls++` block makes the identity
+ * true by construction instead, and there is no second copy of the skip
+ * rules to drift.
+ *
  * @returns {{ rows: Array, summary: Object }}
  */
-function buildDailyAggregates(calls, usersByEmail) {
+function buildDailyAggregates(calls, usersByEmail, classification = null) {
   const buckets = new Map(); // key: aircall_user_id|call_date|direction
   const unmatchedEmails = new Map(); // email (lowercased) -> count, for the sync log
   const summary = {
@@ -59,6 +83,14 @@ function buildDailyAggregates(calls, usersByEmail) {
     calls_skipped_in_progress: 0, // ended_at still null at fetch time
     calls_aggregated: 0,
     unmatched_emails: [], // filled in below, distinct + counted
+    // ── Sales classification, all zero when `classification` is absent ──
+    classified: !!classification,
+    calls_sales: 0,
+    calls_unmatched_prospect: 0,
+    calls_unknown_number: 0,
+    calls_own_line_excluded: 0, // an internal call, counted as UNKNOWN — see below
+    calls_no_usable_key: 0,     // withheld / international / malformed raw_digits
+    sales_conversations: 0,
   };
 
   for (const call of calls) {
@@ -101,11 +133,82 @@ function buildDailyAggregates(calls, usersByEmail) {
         missed_calls: 0,
         total_talk_seconds: 0,
         total_ring_seconds: 0,
+        // NULL, not 0, when this run is not classifying. NULL means "never
+        // classified" and 0 means "classified, and none were sales" — the
+        // migration's CHECK enforces that all four move together, and
+        // Design Decision 24 is built on the two never being confused.
+        sales_calls: classification ? 0 : null,
+        unmatched_calls: classification ? 0 : null,
+        unknown_calls: classification ? 0 : null,
+        sales_conversations: classification ? 0 : null,
       };
       buckets.set(key, bucket);
     }
 
     bucket.total_calls++;
+
+    // ── Sales classification, incremented in lockstep with total_calls ──
+    // Exactly one of the three counters is incremented for every call that
+    // reaches this point. That is what makes `sales + unmatched + unknown
+    // = total_calls` true by construction rather than by agreement between
+    // two functions. See this function's header.
+    if (classification) {
+      const { qualifyingKeys, ownNumberKeys } = classification;
+      // raw_digits is the OUTSIDE party. call.number.digits is RINCON'S OWN
+      // LINE, and confusing the two produces a classifier that looks up
+      // Rincon's own phone numbers all night — Design Decision 18 names
+      // this as the real trap in this build. Live-verified 2026-09-12:
+      // raw_digits was populated on 50/50 sampled real calls, formatted
+      // "+1 805-870-8815".
+      const key = phoneKey(call.raw_digits);
+      if (!key) {
+        // Withheld caller ID, an international number HubSpot's calculated
+        // property cannot be matched against, or malformed digits. UNKNOWN,
+        // never "not matched" — we did not find out, and a column that
+        // means "we could not find out" must not look like "we looked and
+        // found nothing." Design Decision 24.
+        bucket.unknown_calls++;
+        summary.calls_unknown_number++;
+        summary.calls_no_usable_key++;
+      } else if (ownNumberKeys.has(key)) {
+        // An internal call: staff to one of Rincon's own 15 lines, which
+        // happens routinely (a manager ringing the Maintenance Hotline).
+        // Counted as NOT MATCHED, not Unknown, and the distinction is
+        // deliberate: Unknown means "could not find out," and here we did
+        // find out — positively — that the counterparty is Rincon itself
+        // and therefore definitively not a prospect. Folding these into
+        // Unknown would corrupt the health figure the Unknown column
+        // exists to carry.
+        //
+        // Whether an internal staff-to-staff call belongs in Peter's
+        // "operational calls" line at all is HIS call, not this file's, so
+        // it is counted separately in the summary and reported rather than
+        // buried. Never looked up in HubSpot — see lib/phone-key.js on why
+        // that exclusion is load-bearing.
+        bucket.unmatched_calls++;
+        summary.calls_unmatched_prospect++;
+        summary.calls_own_line_excluded++;
+      } else if (qualifyingKeys.has(key)) {
+        bucket.sales_calls++;
+        summary.calls_sales++;
+        // Metric 3: a "conversation" is an outbound sales call that
+        // actually connected and lasted past the threshold. Talk time is
+        // computed from the raw timestamps, never from Aircall's own
+        // `duration` field (aircall-connector.js LIVE VERIFICATION #4).
+        // Inbound prospect calls are deliberately not counted here: the
+        // scorecard line is "conversations from OUTBOUND sales calls."
+        if (call.direction === 'outbound' && call.answered_at != null) {
+          const talk = call.ended_at - call.answered_at;
+          if (talk >= CONVERSATION_MIN_TALK_SECONDS) {
+            bucket.sales_conversations++;
+            summary.sales_conversations++;
+          }
+        }
+      } else {
+        bucket.unmatched_calls++;
+        summary.calls_unmatched_prospect++;
+      }
+    }
     if (call.answered_at != null) {
       bucket.answered_calls++;
       // Computed directly from the three raw timestamps, never from
@@ -1321,9 +1424,51 @@ function buildLineMissAggregates(calls, lineRingMembership, usersByEmail) {
  *   join through call_stats_hubspot_native_numbers -> users), not needed
  *   here — same "look it up live, don't copy it onto the row" discipline
  *   buildDailyAggregates() already uses for staff pod.
+ * @param {Object|null} classification - OPTIONAL sales-vs-operational
+ *   classification input, added 2026-09-12 to extend
+ *   SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md to this second, separate
+ *   phone system (Kristen Rau's third number, +18054101625). Same shape
+ *   buildDailyAggregates() takes: `{ qualifyingKeys: Set<string>,
+ *   ownNumberKeys: Set<string> }`. Omit it — or pass null — and the four
+ *   classification columns come back NULL on every row. Never pass an
+ *   empty Set to mean "the lookup failed" — see buildDailyAggregates's own
+ *   warning; the same distinction applies here.
+ *
+ * *** THE ONE REAL DIFFERENCE FROM THE AIRCALL SIDE: WHAT "THE OTHER
+ * PARTY" MEANS HERE. *** Aircall hands this codebase a `raw_digits` field
+ * that already names the outside party directly. HubSpot's native CALL
+ * object does not — it gives one hs_call_from_number and one
+ * hs_call_to_number per call, and this table's grain is per TRACKED
+ * NUMBER (not per staff member), so for a call attributed to tracked
+ * number T, the outside party is WHICHEVER of hs_call_from_number /
+ * hs_call_to_number is NOT T. See the per-touchedNumber loop below and
+ * collectHubspotNativeOutsideNumberKeys()'s own header. Getting this
+ * backwards classifies every call by Kristen's own number — the same
+ * class of bug Design Decision 18's raw_digits-vs-call.number.digits
+ * warning exists to prevent on the Aircall side.
+ *
+ * The rule itself (Design Decision 17), the config
+ * (lib/sales-classification-config.js), the normalization
+ * (lib/phone-key.js), and the HubSpot lookup functions
+ * (listQualifyingPhoneKeys / searchContactsByPhoneKeys / contactQualifies)
+ * are all reused UNCHANGED from the Aircall side — the classification
+ * decision for a given outside number must be identical whichever pipeline
+ * the call arrived through.
+ *
+ * The conversation threshold is the SAME CONVERSATION_MIN_TALK_SECONDS
+ * (60s), reused rather than re-derived: only 11 historical calls exist on
+ * +18054101625 as of 2026-09-12 — far too small a sample to justify its
+ * own cutoff, and the 60s figure was itself derived from 8,925 real
+ * Aircall calls. Talk time here comes from durationSeconds (computed
+ * below from hs_call_duration), the same figure total_talk_seconds is
+ * already built from — HubSpot's native CALL object does not expose the
+ * separate started/answered/ended timestamps Aircall's does, so there is
+ * no independent talk-time signal to prefer over it (see this table's own
+ * migration header, LIVE VERIFICATION #2).
+ *
  * @returns {{ rows: Array, summary: Object }}
  */
-function buildHubspotDailyAggregates(calls, trackedPhoneNumbers) {
+function buildHubspotDailyAggregates(calls, trackedPhoneNumbers, classification = null) {
   const buckets = new Map(); // key: phone_number|call_date|direction
   const summary = {
     calls_seen: calls.length,
@@ -1333,6 +1478,14 @@ function buildHubspotDailyAggregates(calls, trackedPhoneNumbers) {
     calls_status_missed: 0,
     calls_status_other: 0, // BUSY / QUEUED / any future value — see "OPEN ITEM: QUEUED / BUSY" in this function's own header comment above
     rows_contributed: 0, // number of (number, date, direction) bucket contributions written below — can exceed calls_seen if a call touches two tracked numbers (see the "two tracked numbers" OPEN ITEM above)
+    // ── Sales classification, all zero when `classification` is absent ──
+    classified: !!classification,
+    calls_sales: 0,
+    calls_unmatched_prospect: 0,
+    calls_unknown_number: 0,
+    calls_own_line_excluded: 0, // internal Rincon-to-Rincon call (Aircall line or another HubSpot-native line) — counted as UNMATCHED, never UNKNOWN, same reasoning as the Aircall side
+    calls_no_usable_key: 0,     // withheld / international / malformed outside number
+    sales_conversations: 0,
   };
 
   for (const call of calls) {
@@ -1379,6 +1532,14 @@ function buildHubspotDailyAggregates(calls, trackedPhoneNumbers) {
           answered_calls: 0,
           missed_calls: 0,
           total_talk_seconds: 0,
+          // NULL, not 0, when this run is not classifying — same
+          // distinction as buildDailyAggregates: NULL means "never
+          // classified," 0 means "classified, and none were sales." The
+          // migration's CHECK enforces that all four move together.
+          sales_calls: classification ? 0 : null,
+          unmatched_calls: classification ? 0 : null,
+          unknown_calls: classification ? 0 : null,
+          sales_conversations: classification ? 0 : null,
         };
         buckets.set(key, bucket);
       }
@@ -1387,6 +1548,66 @@ function buildHubspotDailyAggregates(calls, trackedPhoneNumbers) {
       // same reasoning call_stats_line_misses.total_calls already uses
       // relative to its own missed_calls (see this function's header).
       bucket.total_calls++;
+
+      // ── Sales classification, incremented in lockstep with total_calls ──
+      // Exactly one of the three counters is incremented for every call
+      // that reaches this point, for the SAME reason buildDailyAggregates
+      // does this inline rather than as a separate pass: it is what makes
+      // `sales + unmatched + unknown = total_calls` true by construction
+      // instead of by agreement between two functions that could drift.
+      if (classification) {
+        const { qualifyingKeys, ownNumberKeys } = classification;
+        // THE OUTSIDE PARTY IS WHICHEVER SIDE IS NOT phoneNumber — never
+        // unconditionally "from" or "to." phoneNumber is THIS bucket's
+        // tracked number (the one this contribution is being counted
+        // against), which for an inbound call is the "to" side and for an
+        // outbound call is the "from" side — so the correct outside field
+        // flips with direction, and picking one side unconditionally would
+        // get inbound and outbound backwards. See this function's own
+        // header and collectHubspotNativeOutsideNumberKeys()'s header for
+        // why this is the real trap on this pipeline.
+        const outsideNumber = call.hs_call_from_number === phoneNumber
+          ? call.hs_call_to_number
+          : call.hs_call_from_number;
+        const key = phoneKey(outsideNumber);
+        if (!key) {
+          // Withheld caller ID, an international number, or malformed
+          // digits. UNKNOWN, never "not matched" — same Design Decision 24
+          // distinction as the Aircall side.
+          bucket.unknown_calls++;
+          summary.calls_unknown_number++;
+          summary.calls_no_usable_key++;
+        } else if (ownNumberKeys.has(key)) {
+          // The other side is ALSO one of Rincon's own numbers — either
+          // another Aircall line, or another HubSpot-native tracked
+          // number (e.g. two Rincon staff members both on HubSpot-native
+          // lines, calling each other). Positively known not to be a
+          // prospect, so it is UNMATCHED, not UNKNOWN, never looked up in
+          // HubSpot.
+          bucket.unmatched_calls++;
+          summary.calls_unmatched_prospect++;
+          summary.calls_own_line_excluded++;
+        } else if (qualifyingKeys.has(key)) {
+          bucket.sales_calls++;
+          summary.calls_sales++;
+          // Same conversation definition as the Aircall side, reusing the
+          // same CONVERSATION_MIN_TALK_SECONDS threshold — see this
+          // function's header on why 60s is reused here rather than
+          // re-derived from 11 rows. durationSeconds (from hs_call_duration)
+          // is the closest available equivalent to Aircall's
+          // ended_at - answered_at talk time; HubSpot's native CALL object
+          // does not expose the separate timestamps that would let this be
+          // computed independently (see this table's migration header).
+          if (direction === 'outbound' && status === 'COMPLETED' && durationSeconds >= CONVERSATION_MIN_TALK_SECONDS) {
+            bucket.sales_conversations++;
+            summary.sales_conversations++;
+          }
+        } else {
+          bucket.unmatched_calls++;
+          summary.calls_unmatched_prospect++;
+        }
+      }
+
       if (status === 'COMPLETED') {
         bucket.answered_calls++;
         bucket.total_talk_seconds += durationSeconds;
@@ -1403,10 +1624,145 @@ function buildHubspotDailyAggregates(calls, trackedPhoneNumbers) {
   return { rows: Array.from(buckets.values()), summary };
 }
 
+/**
+ * The night's DISTINCT outside-party phone keys, with Rincon's own lines
+ * removed — i.e. exactly the set that needs looking up in HubSpot, and
+ * nothing more.
+ *
+ * Pure, no network, so the caller can see the volume before spending a
+ * request. Design Decision 20's whole argument rests on this set being
+ * small: ~90 calls a night collapse to meaningfully fewer distinct
+ * numbers, because a repeat caller, a callback and a text thread are one
+ * number. At HubSpot's measured IN-list cap of 100, a typical night is one
+ * or two requests.
+ *
+ * The exclusion happens HERE, before the lookup, not after it — Design
+ * Decision 18. Rincon's own numbers are never sent to HubSpot at all, so
+ * there is no path by which a hand-advanced contact holding one of them
+ * (two exist today, at `opportunity`) can classify an internal call as
+ * sales.
+ *
+ * @param {Array} calls - the same raw Aircall array the aggregations use
+ * @param {Set<string>} ownNumberKeys - from buildOwnNumberKeySet()
+ * @returns {{ keys: string[], stats: Object }}
+ */
+function collectOutsideNumberKeys(calls, ownNumberKeys) {
+  const keys = new Set();
+  const stats = {
+    calls_seen: calls.length,
+    calls_with_usable_key: 0,
+    calls_without_usable_key: 0, // withheld / international / malformed
+    calls_on_own_line: 0,
+    distinct_keys_to_look_up: 0,
+  };
+  for (const call of calls) {
+    const key = phoneKey(call.raw_digits);
+    if (!key) {
+      stats.calls_without_usable_key++;
+      continue;
+    }
+    stats.calls_with_usable_key++;
+    if (ownNumberKeys.has(key)) {
+      stats.calls_on_own_line++;
+      continue;
+    }
+    keys.add(key);
+  }
+  stats.distinct_keys_to_look_up = keys.size;
+  return { keys: Array.from(keys), stats };
+}
+
+/**
+ * The HubSpot-native-line analogue of collectOutsideNumberKeys() above —
+ * added 2026-09-12 to extend SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md to
+ * Kristen Rau's third phone number (+18054101625), a completely separate
+ * call-tracking pipeline the original classification build never touched.
+ * Same purpose (see the everything-the-night's-lookup-needs batching
+ * argument above, Design Decision 20), same normalization
+ * (lib/phone-key.js), same own-number exclusion rule — different shape of
+ * "outside party," because this pipeline has no `raw_digits` field naming
+ * the other party directly.
+ *
+ * *** THE TRAP THIS FUNCTION EXISTS TO AVOID. *** For a call attributed to
+ * tracked number T, the outside party is WHICHEVER of hs_call_from_number /
+ * hs_call_to_number is NOT T — never unconditionally "from," never
+ * unconditionally "to." Getting this backwards would collect Kristen's own
+ * number as if it were every caller's number and classify every native-line
+ * call by looking up Rincon's own line — the exact class of bug Design
+ * Decision 18's raw_digits-vs-call.number.digits warning exists to prevent
+ * on the Aircall side. buildHubspotDailyAggregates() applies the identical
+ * "whichever side is not this bucket's tracked number" rule when actually
+ * classifying, so the set collected here always matches what that function
+ * will look for.
+ *
+ * A call that touches TWO tracked numbers at once (two Rincon staff members
+ * both on HubSpot-native lines, calling each other) contributes an outside
+ * key ONCE PER touched tracked number, mirroring
+ * buildHubspotDailyAggregates()'s own per-touched-number loop: for tracked
+ * number A, the outside party is tracked number B — which is itself in
+ * ownNumberKeys (the caller builds that set from every row in
+ * call_stats_hubspot_native_numbers, not just the one being synced), so it
+ * is excluded rather than sent to HubSpot. This is the HubSpot-native
+ * analogue of an Aircall call to Rincon's own line.
+ *
+ * @param {Array} calls - flattened HubSpot call records (same shape
+ *   listVoipCallsForNumbers() returns)
+ * @param {Set<string>} trackedPhoneNumbers - the E.164 strings this sync
+ *   run is tracking (same set buildHubspotDailyAggregates() takes)
+ * @param {Set<string>} ownNumberKeys - from buildOwnNumberKeySet(), built by
+ *   the caller from Rincon's 15 Aircall lines PLUS every row in
+ *   call_stats_hubspot_native_numbers (the tracked number itself included,
+ *   so an internal HubSpot-native-to-HubSpot-native call is excluded too)
+ * @returns {{ keys: string[], stats: Object }}
+ */
+function collectHubspotNativeOutsideNumberKeys(calls, trackedPhoneNumbers, ownNumberKeys) {
+  const keys = new Set();
+  const stats = {
+    calls_seen: calls.length,
+    // Counted per CONTRIBUTION (one per touched tracked number), not per
+    // call, matching buildHubspotDailyAggregates()'s own rows_contributed
+    // convention — a call touching two tracked numbers contributes twice.
+    contributions_with_usable_key: 0,
+    contributions_without_usable_key: 0, // withheld / international / malformed
+    contributions_on_own_line: 0, // internal Rincon-to-Rincon call
+    distinct_keys_to_look_up: 0,
+  };
+  for (const call of calls) {
+    const from = call.hs_call_from_number;
+    const to = call.hs_call_to_number;
+    const touchedTracked = [];
+    if (from && trackedPhoneNumbers.has(from)) touchedTracked.push(from);
+    if (to && trackedPhoneNumbers.has(to) && to !== from) touchedTracked.push(to);
+    // Neither side matched a tracked number — shouldn't happen, the
+    // connector's own search filter already required it, but (same
+    // discipline as buildHubspotDailyAggregates's own
+    // calls_skipped_no_tracked_number) this function doesn't trust that
+    // blindly. Nothing to collect either way.
+    for (const tracked of touchedTracked) {
+      const outside = from === tracked ? to : from;
+      const key = phoneKey(outside);
+      if (!key) {
+        stats.contributions_without_usable_key++;
+        continue;
+      }
+      stats.contributions_with_usable_key++;
+      if (ownNumberKeys.has(key)) {
+        stats.contributions_on_own_line++;
+        continue;
+      }
+      keys.add(key);
+    }
+  }
+  stats.distinct_keys_to_look_up = keys.size;
+  return { keys: Array.from(keys), stats };
+}
+
 module.exports = {
   buildDailyAggregates,
   buildLineMissAggregates,
   buildHubspotDailyAggregates,
+  collectOutsideNumberKeys,
+  collectHubspotNativeOutsideNumberKeys,
   // Exported so the backfill script and any test reuse the SAME strings this
   // aggregation uses rather than retyping them. A second copy of
   // 'agents_did_not_answer' that drifts by one character would not fail — it

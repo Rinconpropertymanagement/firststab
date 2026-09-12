@@ -335,6 +335,44 @@ function createPersonAccumulator() {
     // own name everywhere, never folded into "Missed."
     outbound_total_calls: 0,
     outbound_not_answered: 0,
+
+    // ── Sales vs. operational classification ────────────────────────────
+    // (SALES-VS-OPERATIONAL-CLASSIFICATION-SPEC.md.) Three of Peter's
+    // eleven scorecard lines read off these.
+    //
+    // *** NULL IS NOT ZERO, AND HERE THAT IS AN ARITHMETIC HAZARD, NOT
+    // ONLY A LABELLING ONE. *** Every row written before this feature's
+    // first night carries NULL in all four classification columns, and so
+    // does any night whose HubSpot lookup failed. Such a row contributes
+    // to NONE of the four counters below — it is counted in the
+    // unclassified pair instead.
+    //
+    // If an unclassified row's calls were folded in as zeros, a date range
+    // reaching back before the changeover would report a real, specific,
+    // confidently-wrong number: "you made 3 outbound sales calls that
+    // week." That is worse than a gap, because it looks like an answer.
+    // The unclassified counters exist so the page can say the range is
+    // partly unclassified rather than quietly averaging a wall of zeros
+    // into it. Same discipline as the unmeasured-line-miss pair above.
+    sales_calls: 0,
+    unmatched_calls: 0,
+    unknown_calls: 0,
+    sales_conversations: 0,
+
+    // Metric 2 is "number of OUTBOUND sales calls" and metric 3 is
+    // "conversations from OUTBOUND sales calls," so the outbound halves
+    // are accumulated separately rather than derived later — the blended
+    // figure cannot be split back apart once summed.
+    outbound_sales_calls: 0,
+    outbound_unmatched_calls: 0,
+    outbound_sales_conversations: 0,
+
+    // The denominator that makes the three counters above interpretable:
+    // how many of this person's calls in range were actually classified,
+    // and how many were not.
+    classified_total_calls: 0,
+    unclassified_rows: 0,
+    unclassified_total_calls: 0,
   };
 }
 
@@ -363,6 +401,38 @@ function foldCallStatsRow(acc, row) {
     // problem, so it never reaches the Answer Rate or the Missed column.
     acc.outbound_not_answered += row.missed_calls;
     acc.outbound_total_calls += row.total_calls;
+  }
+
+  // ── Classification, folded only when the row was actually classified ──
+  // The test is on sales_calls being non-null. The migration's CHECK
+  // guarantees all four columns move together, so one test is enough and
+  // testing all four would imply they can disagree — they cannot, by
+  // constraint.
+  //
+  // A row from before the changeover date, or from a night whose HubSpot
+  // lookup failed, lands in the unclassified pair and in NO other counter.
+  // It is deliberately NOT treated as three zeros: see the accumulator's
+  // own comment on why a confidently-wrong zero is worse than a visible
+  // gap.
+  if (row.sales_calls == null) {
+    acc.unclassified_rows++;
+    acc.unclassified_total_calls += row.total_calls;
+    return;
+  }
+  acc.classified_total_calls += row.total_calls;
+  acc.sales_calls += row.sales_calls;
+  acc.unmatched_calls += row.unmatched_calls;
+  acc.unknown_calls += row.unknown_calls;
+  acc.sales_conversations += row.sales_conversations;
+  if (row.direction === 'outbound') {
+    acc.outbound_sales_calls += row.sales_calls;
+    acc.outbound_unmatched_calls += row.unmatched_calls;
+    // sales_conversations is outbound-only by definition (see the
+    // migration's column comment), so on an inbound row it is always 0 —
+    // added here anyway rather than assumed, so that if the definition
+    // ever widens to inbound this split stays correct instead of silently
+    // dropping half of it.
+    acc.outbound_sales_conversations += row.sales_conversations;
   }
 }
 
@@ -731,6 +801,49 @@ function computePersonMetrics(acc) {
       : null,
 
     outbound_not_answered: acc.outbound_not_answered,
+
+    // ── The three scorecard lines this classification exists to serve ───
+    // Raw counts, never a rate, and never pre-divided — same rule as every
+    // other number in this file.
+    //
+    // *** "unmatched" IS PETER'S OPERATIONAL-CALL COUNT AND IT IS NOT
+    // NAMED THAT. *** Design Decision 24: the tool has positive evidence
+    // for exactly one of the three buckets. Sales is a finding — a human
+    // at Rincon marked this number as a prospect. Unmatched is the ABSENCE
+    // of a finding, and it holds at least three different things: genuine
+    // tenant and vendor calls, prospects nobody advanced in HubSpot, and
+    // personal or wrong-number calls. Renaming it "operational" here would
+    // assert a fact about all three, on a page read out in a meeting.
+    // The dashboard must label it "Not matched."
+    sales_calls: acc.sales_calls,
+    unmatched_calls: acc.unmatched_calls,
+    unknown_calls: acc.unknown_calls,
+    sales_conversations: acc.sales_conversations,
+    outbound_sales_calls: acc.outbound_sales_calls,
+    outbound_unmatched_calls: acc.outbound_unmatched_calls,
+    outbound_sales_conversations: acc.outbound_sales_conversations,
+
+    // ── The gap, so the page can be honest about it ─────────────────────
+    // Non-zero means the requested range reaches back before this feature's
+    // first night, or includes a night whose lookup failed. Those calls are
+    // in NO classification counter above. A range like that must render as
+    // partly unclassified — NOT as a smaller sales number, which is what it
+    // would look like otherwise.
+    classified_total_calls: acc.classified_total_calls,
+    unclassified_rows: acc.unclassified_rows,
+    unclassified_total_calls: acc.unclassified_total_calls,
+    // One boolean so Tron does not have to pick which of the three above is
+    // the right test, and so the answer is the same everywhere on the page.
+    has_unclassified_calls: acc.unclassified_rows > 0,
+
+    // The portfolio-level health figure Design Decision 24 asks for, per
+    // person: what share of this person's classified calls carried a usable
+    // number at all. Null rather than 1 when nothing was classified —
+    // "no classified calls" and "100% usable" are different facts. Raw
+    // 0–1 fraction; the dashboard formats it.
+    usable_number_rate: acc.classified_total_calls > 0
+      ? (acc.classified_total_calls - acc.unknown_calls) / acc.classified_total_calls
+      : null,
   };
 }
 

@@ -117,6 +117,11 @@ GET  /content-review           Content Review — the draft queue, approve/
                               content-review/router.js; approve/reject/
                               publish/legal-claim-decisions/brand-guide-edits
                               additionally require role='admin')
+GET  /scorecard               Scoreboard — the business's weekly metrics,
+                              one row per metric with its owner (requires
+                              login + a role in tool='scorecard' — see
+                              scorecard/router.js)
+     /api/scorecard/*         Scoreboard API routes
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -173,6 +178,18 @@ actually needs it, same "checked lazily" pattern as the credentials above):
   ANTHROPIC_API_KEY             Drafting, revision, chat, and caption
                               generation (content-engine/lib/anthropic.js).
 
+Required (Scoreboard — checked lazily, only by the weekly compute route, so
+a missing key cannot take down the rest of the Hub):
+  SUPABASE_SERVICE_ROLE_KEY    (shared with the other tools above — reads/
+                              writes scorecard_weekly)
+  HUBSPOT_PRIVATE_APP_TOKEN    Read access to leads, deals, tasks and
+                              automation. GET-only in effect in this
+                              codebase's own code — see
+                              scorecard/lib/hubspot-leads-connector.js.
+  CRON_SECRET                   Same shared secret as the other tools'
+                              internal/cron routes — protects
+                              internal/compute (the weekly HubSpot pull).
+
 Optional (Content Engine's two discovery-scan buttons only — degrade
 gracefully otherwise, see .env.example):
   LEGISCAN_API_KEY               "Check for legal updates" button
@@ -189,6 +206,7 @@ const express = require('express');
 const session = require('express-session');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { createClient } = require('@supabase/supabase-js');
 
 const { signInWithPassword, requestPasswordReset, updatePasswordWithToken, AuthTimeoutError } = require('./lib/auth');
 const { requireLogin } = require('./lib/middleware');
@@ -204,6 +222,9 @@ const { router: contentEngineRouter, internalRouter: contentEngineInternalRouter
 const { router: contentReviewRouter } = require('./content-review/router');
 const { router: approvalBriefingRouter, internalRouter: approvalBriefingInternalRouter } = require('./approval-briefing/router');
 const { internalRouter: emailIntakeInternalRouter } = require('./email-intake/router');
+const { router: complaintTrackingRouter, internalRouter: complaintTrackingInternalRouter } = require('./complaint-tracking/router');
+const { router: archiveSearchRouter, internalRouter: archiveSearchInternalRouter } = require('./archive-search/router');
+const { router: scorecardRouter, internalRouter: scorecardInternalRouter } = require('./scorecard/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -211,6 +232,7 @@ const PORT = process.env.HUB_PORT || 3500;
 const missing = [];
 if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
 if (!process.env.SUPABASE_ANON_KEY) missing.push('SUPABASE_ANON_KEY');
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
 if (!process.env.SESSION_SECRET) missing.push('SESSION_SECRET');
 
 if (missing.length > 0) {
@@ -218,6 +240,13 @@ if (missing.length > 0) {
   console.error('[ERROR] Set these in the shared .env at the project root (see .env.example).');
   process.exit(1);
 }
+
+// Service-role client, used only for the team_members upsert in POST /login
+// below (see that route for why this exists) — every other tool already
+// creates its own service-role client the same way (e.g. insurance/router.js,
+// call-stats/router.js), this is just the first thing in server.js itself
+// that needs one.
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ─── Process-level safety net ──────────────────────────────────────────────
 // Real-world incident: the security-deposit B2 photo-indexing cron route
@@ -390,6 +419,21 @@ function page({ title, body, search = false }) {
     .section-link:hover { background: #fafaf9; border-color: #d6d3d1; }
     .section-link strong { display: block; font-size: 0.9375rem; }
     .section-link span { display: block; font-size: 0.8125rem; color: #78716c; margin-top: 2px; font-weight: 400; }
+
+    /* ── Complaint Tracking home-page tile (Tron's addition) ──────────
+       Unlike every other .section-link above, this one is NOT always
+       shown — product doc Section 5: "visible to Peter and the DO...
+       Not visible more broadly." It starts absent from the page
+       entirely and is only ever inserted by the inline script at the
+       bottom of the home route's own body (below), after that script's
+       own GET /api/complaint-tracking/auth/me check succeeds — the same
+       "check first, mount only on success, no hint it exists otherwise"
+       discipline this build uses everywhere else (Property 360's Issues
+       section, complaint-tracking/dashboard's own /auth/me gate). No
+       role check happens in this file — team_member_tool_roles is never
+       queried here; the already-built, already-gated route does that. */
+    .ct-tile-count { display: inline-block; min-width: 1.4em; text-align: center; background: #dc2626; color: #fff; font-size: 0.6875rem; font-weight: 700; border-radius: 999px; padding: 1px 6px; margin-left: 6px; }
+    .ct-tile-count.ct-tile-count-zero { background: #a8a29e; }
   </style>
 </head>
 <body>
@@ -450,6 +494,47 @@ app.post('/login', authLimiter, async (req, res) => {
   }
   try {
     const { user, session: supaSession } = await signInWithPassword(email, password);
+
+    // Real bug found and fixed 2026-09-09: every one of the hub's per-tool
+    // "grant access" screens (insurance, security-deposit, maintenance-
+    // history, call-stats) has always required a matching team_members row
+    // to exist before a role can be granted — and told the admin to "ask
+    // them to log in once, then try granting access again" as the fix. But
+    // nothing anywhere in this codebase ever actually created that row —
+    // lib/middleware.js's requireLogin only ever checked whether someone
+    // was logged in, it never wrote to team_members (see its own "FUTURE:
+    // role/permission enforcement" comment, which flagged this as not-yet-
+    // built and was never followed up on). Confirmed live: Peter had a real
+    // team member log in successfully, and team_members still had zero rows
+    // for them. This means NO ONE could ever actually be granted a role
+    // through any of these screens, ever — the exact promise in that error
+    // message was never true. Fixed here, at the one real place every login
+    // already passes through, rather than in requireLogin (which runs on
+    // every page load, not just login — this only needs to happen once per
+    // login, and only ever needs an insert the FIRST time, so the extra
+    // write is worth confining to this route). Upsert on auth_user_id so a
+    // returning person's row is reused, not duplicated; full_name comes
+    // from whatever Supabase Auth has on file (often nothing — nullable by
+    // design in the migration), never guessed at here.
+    const { error: teamMemberErr } = await supabase
+      .from('team_members')
+      .upsert(
+        {
+          auth_user_id: user.id,
+          email: user.email.toLowerCase(),
+          full_name: user.user_metadata && user.user_metadata.full_name ? user.user_metadata.full_name : null,
+        },
+        { onConflict: 'auth_user_id' }
+      );
+    if (teamMemberErr) {
+      // Never block a real, successful Supabase Auth login over this — a
+      // person who can prove who they are should not be locked out because
+      // a bookkeeping row failed to write. Logged so it doesn't fail
+      // silently forever, same reasoning as every other "log, don't throw"
+      // spot in this codebase's own sync jobs.
+      console.error('[login] team_members upsert failed for', user.email, '-', teamMemberErr.message);
+    }
+
     // Regenerate the session now, at the moment of successful login, instead
     // of reusing whatever session already existed on this browser (which may
     // have been created before login — or planted by someone else — "session
@@ -678,6 +763,40 @@ app.use(approvalBriefingInternalRouter);
 // into an unattended schedule; see email-intake/router.js's file header.
 app.use(emailIntakeInternalRouter);
 
+// ─── Complaint Tracking — internal/cron routes, no login required ─────────
+// Two endpoints (process-pending — the ingestion pipeline; check-aging —
+// the stalled-big-deal-item aging job), both authenticated with the same
+// x-cron-secret header as every other tool's internal router. Must also be
+// registered before requireLogin, for the same reason. Manually triggered
+// only for now, matching Design Decision 16 and the shadow-mode posture in
+// compliance/complaint-tracking-ai-risk-assessment.md — no crontab entry
+// exists yet; see complaint-tracking/router.js's file header.
+app.use(complaintTrackingInternalRouter);
+
+// ─── Archive Search — internal/cron route, no login required ──────────────
+// One endpoint (process-pending — the screening pass, run in resumable
+// chunks; see archive-search/lib/screening-pass.js), authenticated with
+// the same x-cron-secret header as every other tool's internal router.
+// Must also be registered before requireLogin, for the same reason.
+// Manually triggered only, matching Design Decision 16's precedent — no
+// crontab entry exists yet, and running it against real data is a
+// separate, later, explicitly-gated step (see that file's own header and
+// archive-search-technical-spec.md's "Before Any of This Runs For Real").
+app.use(archiveSearchInternalRouter);
+
+// ─── Scoreboard — internal/cron route, no login required ──────────────────
+// One endpoint (internal/compute — the weekly HubSpot pull that turns a
+// closed week into rows in scorecard_weekly), authenticated with the same
+// x-cron-secret header as every other tool's internal router. Must also be
+// registered before requireLogin, for the same reason.
+//
+// Manually triggered only, and for now only in its ?dry=1 mode: the
+// migration (supabase/migrations/20260912000000_scorecard_weekly.sql) is
+// applied by Peter by hand and a real write before that lands would fail on
+// a missing table. No crontab entry exists yet — the intended schedule is
+// Monday morning, after the week has closed.
+app.use(scorecardInternalRouter);
+
 // ─── Everything below this line requires a valid, logged-in session ───────
 app.use(requireLogin);
 
@@ -723,8 +842,49 @@ app.get('/', (req, res) => {
             <strong>Content</strong>
             <span>Draft, review, and approve content — legal updates, trending topics, and the approval queue</span>
           </a>
+          <a class="section-link" href="/scorecard">
+            <strong>Scoreboard</strong>
+            <span>The business's weekly numbers, one row per metric, with the person accountable for each</span>
+          </a>
+          <span id="complaint-tracking-tile-slot"></span>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
+        <script>
+          // Complaint Tracking's home-page tile (Tron's addition, product
+          // doc Section 5: "a live count on the Hub's home page — visible
+          // to Peter and the DO... Not visible more broadly"). Every
+          // other tile above is a plain, unconditional static link — the
+          // hub's own convention (this file's header) is that access is
+          // enforced by each destination tool, not gated on this page.
+          // This one tile is the one deliberate exception the product
+          // doc calls for, so it's the one tile built to check first and
+          // only ever appear on success — calling complaint-tracking/
+          // router.js's own already-built, already-gated
+          // GET /api/complaint-tracking/auth/me and .../home-count
+          // directly. No role lookup happens in server.js itself.
+          (function () {
+            fetch('/api/complaint-tracking/auth/me', { credentials: 'include' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (me) {
+                if (!me) return; // no access — tile never appears, no hint it exists
+                return fetch('/api/complaint-tracking/home-count', { credentials: 'include' })
+                  .then(function (r) { return r.ok ? r.json() : { count: 0 }; })
+                  .then(function (body) {
+                    var count = body.count || 0;
+                    var slot = document.getElementById('complaint-tracking-tile-slot');
+                    if (!slot) return;
+                    var countHtml = '<span class="ct-tile-count' + (count === 0 ? ' ct-tile-count-zero' : '') + '">' + count + '</span>';
+                    var el = document.createElement('a');
+                    el.className = 'section-link';
+                    el.href = '/complaint-tracking';
+                    el.innerHTML = '<strong>Complaint Tracking' + countHtml + '</strong>' +
+                      '<span>Every complaint gets a real record — big-deal items surfaced, routine items still tracked</span>';
+                    slot.replaceWith(el);
+                  });
+              })
+              .catch(function () { /* role lookup or count failed — tile stays absent, rest of the home page still works */ });
+          })();
+        </script>
       `,
     })
   );
@@ -833,6 +993,46 @@ app.use(contentReviewRouter);
 // touching this mounting order again, same reasoning as Content Engine's
 // internal router above.
 app.use(approvalBriefingRouter);
+
+// ─── Complaint Tracking section ────────────────────────────────────────
+// projects/hub/email-intake/complaint-tracking-technical-spec.md. Same
+// shape again: requireLogin already ran; complaint-tracking/router.js does
+// its own additional, binary check — 'admin' or 'director_of_operations'
+// for tool='complaint_tracking', no tier system (Design Decision 15). No
+// dashboard page mounted here yet — this pass ships the API only (Tron's
+// pass adds dashboard/index.html and a Hub home-page tile calling the
+// already-built GET /api/complaint-tracking/home-count).
+app.use(complaintTrackingRouter);
+
+// ─── Archive Search section ────────────────────────────────────────────
+// projects/hub/email-intake/archive-search-technical-spec.md. Same shape
+// again: requireLogin already ran; archive-search/router.js does its own
+// additional check — 'searcher' or 'admin' for tool='archive_search'
+// (ARCHIVE_SEARCH_SEARCH_ROLES). No seed/grant row exists yet for this
+// tool (Peter's own call, made only after the Finding 5 validation sample
+// passes with zero confirmed misses), so nobody actually has access
+// through this mount point today regardless. No dashboard page or Hub
+// home-page tile mounted here — this pass ships the schema, screening
+// pass, and API only (Asimov's own review: "the schema + screening-pass +
+// API build — not Tron's dashboard"); the real search-results and
+// message-view routes the spec names are themselves deliberately not
+// built in this pass either (see archive-search/router.js's own header).
+app.use(archiveSearchRouter);
+
+// ─── Scoreboard section ────────────────────────────────────────────────
+// supabase/migrations/20260912000000_scorecard_weekly.sql, and the final
+// metric definitions in call-stats/COMMITTED-NOT-BUILT.md §0a. Same shape
+// again: requireLogin already ran; scorecard/router.js does its own
+// additional check — 'admin' or 'director_of_operations' for
+// tool='scorecard', the pair Peter and his Director of Operations already
+// hold elsewhere. The migration adds the 'scorecard' tool value but no role
+// value and no grant row, so until Peter grants somebody that role nobody
+// reaches this page regardless.
+//
+// This section does not touch call_stats or call_stats_line_misses in any
+// way. Call Stats shipped 2026-09-12 and is live; it can feed the Scoreboard
+// later, once this shape has proven itself.
+app.use(scorecardRouter);
 
 // ─── Central error handler — must be registered last ──────────────────────
 // Catches errors a route handler throws synchronously (e.g. destructuring

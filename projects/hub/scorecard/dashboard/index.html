@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scoreboard — Rincon Management</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    #access-denied { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px; padding: 14px; }
+
+    .range-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .range-preset { font-size: 12.5px; padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #374151; cursor: pointer; }
+    .range-preset:hover { background: #f3f4f6; }
+    .range-preset.range-active { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+
+    .scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 760px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px 6px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+    th.num, td.num { text-align: right; }
+    td { padding: 9px 6px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    tr.metric-row td { border-bottom: none; padding-bottom: 2px; }
+    tr.note-row td { padding-top: 0; padding-bottom: 12px; border-bottom: 1px solid #f3f4f6; }
+
+    .metric-label { font-weight: 600; }
+    .owner { display: block; color: #9ca3af; font-size: 11.5px; font-weight: 400; margin-top: 2px; }
+    .metric-note { color: #6b7280; font-size: 11.5px; line-height: 1.5; max-width: 640px; }
+    .parts { display: block; color: #9ca3af; font-size: 11px; margin-top: 1px; }
+    .muted { color: #9ca3af; }
+    .avg-col { background: #f9fafb; font-weight: 600; }
+    .week-label { display: block; color: #9ca3af; font-size: 10.5px; font-weight: 400; }
+
+    .flag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em; }
+    .flag-lower { background: #eef2ff; color: #3730a3; }
+    .flag-activity { background: #f3f4f6; color: #4b5563; }
+    .flag-partial { background: #fffbeb; color: #92400e; }
+
+    .callout { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 12px 14px; font-size: 12.5px; line-height: 1.6; margin-bottom: 16px; }
+    .footnote { color: #9ca3af; font-size: 12px; line-height: 1.7; margin-top: 12px; }
+    .empty { color: #9ca3af; padding: 28px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Scoreboard</h1>
+    <p class="sub">
+      The business's weekly numbers, one row per metric, with the person accountable for each.
+      Every figure is counted straight out of HubSpot and stored as the raw parts it was built from,
+      so any period can be worked out later without asking HubSpot again.
+    </p>
+
+    <div id="access-denied">
+      Your Rincon Hub account does not have access to the Scoreboard yet. Ask an admin to grant you access.
+    </div>
+
+    <div id="main" style="display:none">
+      <div class="range-row" id="range-row">
+        <span class="muted" style="font-size:12.5px">Weeks shown:</span>
+        <button class="range-preset" data-weeks="4" type="button">4</button>
+        <button class="range-preset range-active" data-weeks="8" type="button">8</button>
+        <button class="range-preset" data-weeks="13" type="button">13</button>
+      </div>
+
+      <div id="callouts"></div>
+
+      <div class="card">
+        <div class="scroll">
+          <table id="board">
+            <thead><tr id="head-row"></tr></thead>
+            <tbody id="body-rows"></tbody>
+          </table>
+        </div>
+        <div class="footnote" id="footnotes"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // Every control is wired with addEventListener and never an inline
+      // onclick: the Hub's Content-Security-Policy sets script-src-attr
+      // 'none', which kills inline handlers silently — no error, the button
+      // just does nothing.
+      var state = { weeks: 8 };
+
+      function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = text;
+        return node;
+      }
+
+      var DASH = '—'; // em-dash: "this number does not exist", never "zero"
+
+      function formatPercent(value) {
+        return value === null || value === undefined ? DASH : (value * 100).toFixed(0) + '%';
+      }
+      function formatNumber(value) {
+        if (value === null || value === undefined) return DASH;
+        return Number.isInteger(value) ? String(value) : String(Math.round(value * 10) / 10);
+      }
+      function shortWeek(week) {
+        var parts = week.split('-');
+        return parts[1] + '/' + parts[2];
+      }
+
+      function renderHead(weeks) {
+        var row = document.getElementById('head-row');
+        row.innerHTML = '';
+        row.appendChild(el('th', '', 'Metric'));
+        weeks.forEach(function (week) {
+          var th = el('th', 'num', shortWeek(week));
+          th.title = 'Week beginning ' + week + ' (Monday to Sunday)';
+          row.appendChild(th);
+        });
+        row.appendChild(el('th', 'num avg-col', 'Average'));
+      }
+
+      function renderCell(metric, cell) {
+        var td = el('td', 'num');
+
+        // A missing week is BLANK, not zero. A week that could not be
+        // computed writes no row at all, and showing 0 there would be a
+        // number nobody measured.
+        if (!cell.present) {
+          td.appendChild(el('span', 'muted', DASH));
+          return td;
+        }
+
+        if (metric.display === 'rolling_rate') {
+          var rolling = cell.rolling || {};
+          td.appendChild(el('span', '', formatPercent(rolling.rate)));
+          var parts = el('span', 'parts',
+            rolling.numerator + ' of ' + rolling.denominator +
+            ' · ' + rolling.weeksCovered + 'wk');
+          if (!rolling.complete) {
+            parts.className = 'parts';
+            parts.textContent += ' (of ' + rolling.weeksRequested + ')';
+            td.appendChild(parts);
+            var flag = el('span', 'flag flag-partial', 'partial');
+            flag.title = 'This window covers ' + rolling.weeksCovered + ' week(s), not ' +
+              rolling.weeksRequested + '. Either the Scoreboard has not been running that long, ' +
+              'or a week could not be computed and wrote no row.';
+            td.appendChild(flag);
+          } else {
+            td.appendChild(parts);
+          }
+          return td;
+        }
+
+        if (metric.shape === 'statistic') {
+          td.appendChild(el('span', '', formatNumber(cell.valueNumeric)));
+          td.appendChild(el('span', 'parts', 'n=' + cell.sampleSize));
+          return td;
+        }
+
+        td.appendChild(el('span', '', formatNumber(cell.numerator)));
+        return td;
+      }
+
+      function renderAverage(metric) {
+        var td = el('td', 'num avg-col');
+        var average = metric.average || {};
+
+        // Driven off metric_shape, never off a metric's name: a median of
+        // four weeks is not the average of four weekly medians, and no
+        // arithmetic on the stored values recovers it.
+        if (!metric.aggregable || metric.shape === 'statistic') {
+          var dash = el('span', 'muted', DASH);
+          dash.title = average.reason || 'This figure cannot be combined across weeks.';
+          td.appendChild(dash);
+          return td;
+        }
+        if (metric.shape === 'rate') {
+          td.appendChild(el('span', '', formatPercent(average.value)));
+          td.appendChild(el('span', 'parts', average.numerator + ' of ' + average.denominator));
+          return td;
+        }
+        td.appendChild(el('span', '', formatNumber(average.value)));
+        td.appendChild(el('span', 'parts', 'per week'));
+        return td;
+      }
+
+      function renderBody(payload) {
+        var body = document.getElementById('body-rows');
+        body.innerHTML = '';
+
+        payload.metrics.forEach(function (metric) {
+          var row = el('tr', 'metric-row');
+
+          var labelCell = el('td');
+          var label = el('span', 'metric-label', metric.label);
+          labelCell.appendChild(label);
+
+          // LOWER IS BETTER is a measured finding, not a display preference,
+          // and the migration requires the page to say so.
+          if (metric.higherIsBetter === false) {
+            labelCell.appendChild(document.createTextNode(' '));
+            var lower = el('span', 'flag flag-lower', 'LOWER IS BETTER');
+            labelCell.appendChild(lower);
+          }
+          if (metric.higherIsBetter === null) {
+            labelCell.appendChild(document.createTextNode(' '));
+            labelCell.appendChild(el('span', 'flag flag-activity', 'ACTIVITY'));
+          }
+
+          var owner = el('span', 'owner', metric.ownerEmail
+            ? ('Owned by ' + (metric.ownerName || metric.ownerEmail))
+            : 'No rows yet');
+          labelCell.appendChild(owner);
+
+          // Each row carries its OWN most recent week. Sequence depth
+          // publishes an earlier week than the rest because it waits for
+          // enrollments to finish, so rows are never stacked under one date.
+          if (metric.latestWeek) {
+            labelCell.appendChild(el('span', 'week-label', 'Latest complete week: ' + metric.latestWeek));
+          }
+          row.appendChild(labelCell);
+
+          metric.cells.forEach(function (cell) { row.appendChild(renderCell(metric, cell)); });
+          row.appendChild(renderAverage(metric));
+          body.appendChild(row);
+
+          var noteRow = el('tr', 'note-row');
+          var noteCell = el('td');
+          noteCell.colSpan = payload.weeks.length + 2;
+          noteCell.appendChild(el('div', 'metric-note', metric.note));
+          noteRow.appendChild(noteCell);
+          body.appendChild(noteRow);
+        });
+
+        if (!payload.metrics.length) {
+          var empty = el('tr');
+          var cell = el('td', 'empty', 'Nothing has been computed yet.');
+          cell.colSpan = payload.weeks.length + 2;
+          empty.appendChild(cell);
+          body.appendChild(empty);
+        }
+      }
+
+      function renderCallouts(payload) {
+        var box = document.getElementById('callouts');
+        box.innerHTML = '';
+
+        var anyRows = payload.metrics.some(function (m) { return m.latestWeek; });
+        if (!anyRows) {
+          var waiting = el('div', 'callout');
+          waiting.textContent = 'No weeks have been computed yet. The Scoreboard starts from the first ' +
+            'Monday it runs — earlier weeks cannot be reconstructed, because HubSpot does not keep the ' +
+            'history a past week would have to be rebuilt from.';
+          box.appendChild(waiting);
+          return;
+        }
+
+        if (payload.countedFrom) {
+          var counted = el('div', 'callout');
+          counted.textContent = 'Counted from ' + payload.countedFrom + '. There is no history before that date ' +
+            'and there cannot be — a past week would have to be rebuilt from stage history HubSpot does not keep. ' +
+            'Peter’s hand-kept figures stay separate; they measure something slightly different and must not ' +
+            'be joined onto this line.';
+          box.appendChild(counted);
+        }
+      }
+
+      function renderFootnotes(payload) {
+        var box = document.getElementById('footnotes');
+        box.innerHTML = '';
+        [
+          'Weeks run Monday to Sunday, Pacific time, and are labelled by their Monday.',
+          'Rates are worked out by adding up the parts across the window and dividing once — never by averaging weekly percentages, which gives a different and wrong answer.',
+          'A dash means the figure does not exist for that week: either nothing was computed, or there was nothing to divide by. It never means zero.',
+          'Sequence depth is a median and shows a dash in the Average column, because medians cannot be combined. It covers the week ending ' +
+            payload.sequenceDepth.holdDays + ' days or more ago, so that every lead’s follow-up has finished before its number is worked out — which is why its week is earlier than the others’.',
+          'Follow-up touches are a count of activity, not a score. More touches has measured WORSE outcomes, not better: leads that became deals averaged 4.7 touches, leads that went nowhere 6.5.'
+        ].forEach(function (line) {
+          box.appendChild(el('div', '', '· ' + line));
+        });
+      }
+
+      function load() {
+        fetch('/api/scorecard/metrics?weeks=' + state.weeks, { credentials: 'include' })
+          .then(function (response) {
+            if (response.status === 403) { throw new Error('forbidden'); }
+            if (!response.ok) { throw new Error('failed'); }
+            return response.json();
+          })
+          .then(function (payload) {
+            document.getElementById('main').style.display = '';
+            renderHead(payload.weeks);
+            renderCallouts(payload);
+            renderBody(payload);
+            renderFootnotes(payload);
+          })
+          .catch(function (err) {
+            if (err.message === 'forbidden') {
+              document.getElementById('access-denied').style.display = 'block';
+              document.getElementById('main').style.display = 'none';
+              return;
+            }
+            document.getElementById('body-rows').innerHTML =
+              '<tr><td class="empty">Could not load the Scoreboard. Try again in a moment.</td></tr>';
+            document.getElementById('main').style.display = '';
+          });
+      }
+
+      Array.prototype.forEach.call(document.querySelectorAll('.range-preset'), function (button) {
+        button.addEventListener('click', function () {
+          Array.prototype.forEach.call(document.querySelectorAll('.range-preset'), function (other) {
+            other.classList.remove('range-active');
+          });
+          button.classList.add('range-active');
+          state.weeks = Number(button.getAttribute('data-weeks'));
+          load();
+        });
+      });
+
+      load();
+    })();
+  </script>
+</body>
+</html>

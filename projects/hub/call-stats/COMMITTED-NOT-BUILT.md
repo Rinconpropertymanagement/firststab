@@ -82,6 +82,104 @@ because all three touch `call_stats_line_misses` and the sync. Not blocked on an
 
 ---
 
+## 0a. FINAL metric definitions, 2026-09-12 — these supersede CRM-SCORECARD-METRICS-SPEC.md
+
+A read-only Phase 0 measurement against live HubSpot found that **two of the four metrics as
+specced could not be built**, and corrected several of Oracle's figures. Build from this
+table, not from the spec's definitions.
+
+| Metric | Final definition | Measured |
+|---|---|---|
+| **Lead → discovery call** | Deals created ÷ leads created, **rolling 4 weeks**. A deal only exists once a discovery call has happened — "Discovery call complete" is the first stage of the only pipeline in use. | **62.8%** overall; rolling 50–64% |
+| **Follow-up touches** | Count, labelled *activity*, split worked vs automation | worked flat 15–19/wk; automation 35–397 |
+| **Sequence depth** | Median touches before a lead responds. **Lower is better, and the page must say so.** | deal 4.7 avg / no deal 6.5 |
+| **Re-engagement attempts** | **Peter chose 2026-09-12:** completed tasks against leads in a past-lead stage — the strictest of three candidate readings (28 / 82 / 105 per week). | **28.5/wk**, 24.3 over last 8 |
+| **Past-lead conversions** | **A count per quarter, not a percentage.** | **9 in the entire history since 2024-06-21** |
+
+### Dropped, with reasons — do not reinstate without re-measuring
+
+- **Booking rate as "Qualified ÷ resolved"** — arithmetically fine, but its denominator moved
+  on *housekeeping*, not performance. Dead leads get written off in batches (6 in one
+  afternoon). All three weeks it printed **100%** were simply weeks nobody did the clean-up.
+  Weekly range 25–100% with a numerator that barely moved.
+- **"First touch within 1 hour"** — measured, and it is the one cut of the latency
+  distribution with **no outcome separation at all** (33% deal vs 29% no-deal, pointing the
+  wrong way). The median does separate; the 1-hour threshold does not.
+- **Past-lead conversion as a percentage** — 13 of the last 15 weeks have a numerator of
+  zero. No denominator rescues it. The Open Item debating which denominator to use was the
+  wrong question.
+
+### Targets will look worse, and that is correct
+
+Re-engagement's ≥25 target was set against a hand-count of ~105. The chosen definition
+measures ~28 and dips below 25 in roughly a third of weeks. Peter confirmed the 5%
+conversion target "was picked out of the air." **Reset every target from real baseline after
+a few weeks of running** rather than carrying over targets set against different questions.
+
+### Corrections to Oracle's spec figures — fix before anyone reads it as fact
+
+Booking rate 70.6% (actual **64.5%** on the same window); the "520 lost-lead tasks" were
+**two sequences**, not one; "~6 people/week re-engaged" was an arithmetic artifact of
+dividing tasks by 9 — the real per-person figure is **~38.8/week**; parked leads "125, ~10%"
+are actually **259, 20.5%**; and "name is the only join key HubSpot gives the task" is
+**false for sequence tasks**, which carry `hs_task_sequence_id`.
+
+### Two live data problems found in passing
+
+- **Name matching would silently lose 49.6% of tasks today.** APM loses **100%** of its 422
+  tasks, PMW 80%. There is a **third** PMW name with a **trailing space**, and eight workflow
+  and sequence names in live data carry leading or trailing whitespace. Match on **id**,
+  trim, and surface an unmatched count. DD 41's weekly name-drift check is **blind to this
+  failure** — it compares today's config to today's live name and reports "no drift" while
+  APM loses everything.
+- **The DD 34 tenant exclusion is currently inert.** All 53 flagged leads are already
+  Unqualified; the most recent resolved 2026-04-22; across 15 weeks it removed **zero** leads
+  from **zero** denominators. Keep it as forward protection, but the governance write-up
+  calling it "load-bearing" is wrong. Separately, it misses real junk — an Aircall-exhaust
+  lead named `"+18058866848 Aircall new contact"` is sitting **in the Qualified numerator**.
+
+---
+
+## 0. Decisions 2026-09-12 — the scorecard becomes a business-wide Scoreboard
+
+**Peter, 2026-09-12: this is for the business, not just Kristen's metrics.** Vacancy days,
+collections, maintenance turnaround and the rest eventually live here too.
+
+The design already accommodates that and should not be redesigned for it:
+`(metric_key, week_start, owner_scope, numerator, denominator)` stores a **function** not a
+person (`owner_scope` = `business_development`, not an email), and stores the **two raw parts**
+rather than a computed percentage — so any metric that is "this over that" fits, and any
+period can be re-derived later. Same discipline that made Call Stats survivable.
+
+**Build the four CRM metrics as the first four rows of a Scoreboard, not as a Kristen page.
+Do not design for metrics nobody has seen yet** — the general shape should earn its
+generality from the second and third batch.
+
+**It absorbs the trend-view work.** `TREND-VIEW-SPEC.md` describes metrics down the left,
+periods across, an average column — which is the Scoreboard layout. Building a Call Stats
+trend view *and* a Scoreboard means building the same thing twice.
+
+**Call Stats stays where it is for now.** It shipped 2026-09-12 after two days of work and is
+live. It can feed the Scoreboard once the shape has proven itself; moving working software
+into a new structure on day one is how a week disappears.
+
+### HubSpot credential scope change — recorded here because nowhere else records it
+
+**2026-09-11, Peter widened the production `HUBSPOT_PRIVATE_APP_TOKEN`** to add read access
+for **leads, deals, tasks, meetings and automation** (workflows). Sequences remained
+unavailable (403).
+
+**This is a shared credential.** Every Hub tool holding that token gained the same reach,
+including tools whose security review predates the change. Asimov also noted the automation
+endpoints return workflow definitions containing internal staff notification email addresses
+— staff personal data that was not readable before.
+
+**Sentinel review declined by Peter, 2026-09-12.** Recorded as his decision, not an oversight.
+The exposure is live and unreviewed; this entry exists so that fact is written down somewhere
+findable, per GOVERNANCE.md Rule 6.
+
+---
+
 ## 1b. Working-hours window — the "layered" approach
 
 **Approved:** 2026-09-10.

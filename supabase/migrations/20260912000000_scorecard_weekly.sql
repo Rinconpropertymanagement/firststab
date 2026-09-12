@@ -1,0 +1,1046 @@
+-- ============================================================
+-- Migration: 20260912000000_scorecard_weekly
+-- Created:   2026-09-12
+-- Author:    Neo (database specialist)
+--
+-- The storage layer for a new Hub section, the **Scoreboard**
+-- (projects/hub/scorecard/). Build approved by Peter 2026-09-12.
+--
+-- Two changes, both additive:
+--   1. One new table, `scorecard_weekly`.
+--   2. One value added to the shared `team_member_tool_roles.tool`
+--      CHECK: 'scorecard'. No role value is added.
+--
+-- *** call_stats AND call_stats_line_misses ARE NOT TOUCHED. ***
+-- Not their columns, not their grain, not their UNIQUE constraints,
+-- not their sync path, not their indexes. Call Stats shipped
+-- 2026-09-12 and is live on Sally; this file must be safe to apply
+-- while it is running. It is: nothing below names either table.
+-- (COMMITTED-NOT-BUILT.md §0: "Call Stats stays where it is for now.
+-- It can feed the Scoreboard once the shape has proven itself; moving
+-- working software into a new structure on day one is how a week
+-- disappears.")
+--
+-- No application code ships from this file. The weekly compute job,
+-- the HubSpot read module (projects/hub/scorecard/lib/), router.js and
+-- the dashboard are Q's and Tron's next steps — see "WHAT THIS
+-- MIGRATION DELIBERATELY DOES NOT DO" near the bottom, and the
+-- handover notes for Q at the very bottom, which are the part of this
+-- file most likely to be needed by somebody who is not Neo.
+--
+-- This migration is NOT applied here: Peter applies it himself by
+-- pasting it into Supabase's SQL Editor, per this project's standing
+-- convention (no CLI and no database URL in this environment). Every
+-- statement below is idempotent and safe to run twice.
+--
+-- ============================================================
+-- WHAT THIS IS FOR — one plain sentence, then the detail
+-- ============================================================
+-- It stores one row per business metric per week, holding the raw
+-- parts the number was built from rather than the finished
+-- percentage, so that any period — a week, a month, a rolling
+-- four-week window — can be worked out later without going back to
+-- HubSpot and asking again.
+--
+-- Peter, 2026-09-12: **"this scorecard will be for the business, not
+-- just Kristen's metrics"** and **"each metric will be assigned to a
+-- person."** So this is a business-wide weekly scoreboard. Today it
+-- holds four business-development metrics. Vacancy days, collections,
+-- maintenance turnaround and owner reporting are expected to live here
+-- eventually — but per the same conversation and this project's
+-- standing rule, **this migration designs for the four metrics that
+-- exist and no others.** Where a choice below buys generality, it is
+-- because the four metrics in hand already need it, not because a
+-- fifth might.
+--
+-- ============================================================
+-- THE FOUR METRICS THIS TABLE IS BUILT AROUND
+-- (as finally defined 2026-09-12 — these differ materially from
+-- CRM-SCORECARD-METRICS-SPEC.md, whose versions were measured against
+-- live data and several of which did not survive. The definitions
+-- here win. Where a spec Design Decision is cited below it is cited
+-- for its reasoning, not for its definition.)
+-- ============================================================
+--
+-- 1. LEAD-TO-DISCOVERY-CALL RATE — a rate.
+--    Numerator:   deals created in the period. A deal only exists once
+--                 a discovery call has happened, because "Discovery
+--                 call complete" is literally the first stage of the
+--                 only pipeline in use (`default`). 76 deals / 15 wks.
+--    Denominator: leads created in the period (`hs_createdate` — the
+--                 LEAD object uses `hs_createdate`, NOT `createdate`).
+--                 121 over the same 15 weeks.
+--    Measured 62.8% overall, but weekly swings of 20–114% purely from
+--    cohort mismatch (a lead arriving Friday books the following
+--    week), so it DISPLAYS as a rolling 4-week rate and is STORED
+--    weekly. See "ROLLING WINDOWS" below — that split is the whole
+--    reason the grain is weekly and the parts are stored separately.
+--
+--    This REPLACES the spec's Design Decision 27 booking rate
+--    entirely. That definition (Qualified ÷ resolved) was abandoned
+--    because its denominator moved on housekeeping — dead leads
+--    written off in batches — and all three weeks it printed 100%
+--    were weeks nobody did the clean-up.
+--
+-- 2. FOLLOW-UP TOUCHES — a count, split worked vs automation.
+--    Worked touches sit flat at 15–19/week; automation swings 35–397.
+--    Labelled *activity*, never quality. Stored as TWO rows, not one
+--    — see "WHY THE SPLIT IS TWO KEYS AND NOT A COLUMN" below.
+--
+-- 3. SEQUENCE DEPTH — the median touches before a lead responds.
+--    **LOWER IS BETTER AND THE PAGE MUST SAY SO.** Leads that became
+--    deals averaged 4.7 touches; leads that went nowhere averaged 6.5.
+--    Any framing of touches as diligence is backwards on real data.
+--    This is a median. It is NOT a ratio, and this migration does not
+--    pretend it is — see "THE MEDIAN DOES NOT FIT, AND IS NOT FORCED
+--    TO" below, which is the load-bearing decision in this file.
+--
+-- 4. PAST-LEAD CONVERSIONS — a COUNT, not a percentage.
+--    9 in the entire history of the lead object since 2024-06-21. 2
+--    this year. 13 of the last 15 weeks are zero. A weekly percentage
+--    would print 0.0% almost every week, which is why the spec's
+--    Design Decision 31 rate — and its unresolved 411-pool vs.
+--    ~105-attempts denominator question, Open Item 24 — is not built.
+--    The denominator question is not answered here; it is DELETED,
+--    because there is no denominator any more.
+--
+-- TWO THINGS DELIBERATELY NOT INCLUDED, both measured before being
+-- dropped rather than dropped on taste:
+--   * "First touch within 1 hour" — no outcome separation at all
+--     (33% deal vs 29% no-deal, pointing the WRONG way). The spec's
+--     proposed `followup_first_touch_1h` metric_key does not exist in
+--     this design and must not be revived without new measurement.
+--   * Past-lead conversion as a rate — see metric 4 above.
+--
+-- STILL UNDECIDED, AND DELIBERATELY NOT MODELLED: re-engagement
+-- attempts. Three candidate definitions give 28, 82 and 105 per week
+-- and Peter has not chosen. This table leaves room for it in the only
+-- way that costs nothing — when Peter picks a definition it becomes
+-- one more `count`-shaped key and **needs no migration at all** (see
+-- "WHY metric_key IS NOT A CLOSED CHECK SET"). No column, no key and
+-- no placeholder row is created for it now.
+--
+-- ============================================================
+-- DESIGN DECISION A — STORE THE PARTS, NEVER THE PERCENTAGE
+-- (this is the property that makes the rest of the table worth
+-- having, and it was the brief's first question)
+-- ============================================================
+-- `call_stats` SPEC.md Design Decision 2's rule, applied to a case
+-- that needs it more. Storing 62.8% loses the "76 of 121" that the
+-- page is required to show, and makes every roll-up silently wrong:
+-- averaging four weekly percentages with different denominators is
+-- not the four-week rate. Metric 1's own numbers prove it — weekly
+-- rates of 114% and 20% average to 67%, while the honest four-week
+-- rate over the same rows is whatever SUM(num)/SUM(den) says, and
+-- those are not the same figure.
+--
+-- **CONFIRMED FOR A PLAIN COUNT (metric 4), which is what the brief
+-- asked.** The discipline holds, but the WORDS do not: for a count
+-- there is no denominator, and "denominator = NULL" has to mean "this
+-- metric is not a rate" and never "we could not find out." A NULL
+-- that has two possible meanings is exactly the self-concealing error
+-- this project keeps having. So the meaning is not left to a comment
+-- — `metric_shape` below makes it a declared, CHECK-enforced fact,
+-- and the CHECK makes a count-with-a-denominator and a
+-- rate-with-half-its-parts both physically unstorable.
+--
+-- That last point does a second job worth stating on its own. The
+-- spec's Design Decision 36 failure rule — **write nothing rather
+-- than write a guess**; if HubSpot cannot be read, no row is written
+-- and the week stays re-runnable — stops being a convention Q has to
+-- remember and becomes something the database enforces. A half-read
+-- week cannot produce a row, because a `rate` row with a numerator
+-- and no denominator violates the CHECK and the INSERT fails loudly.
+--
+-- ============================================================
+-- DESIGN DECISION B — `owner_scope` BECOMES `owner_email`, IT IS AN
+-- ASSIGNMENT RATHER THAN A MEASUREMENT, AND IT IS FROZEN ON THE ROW
+-- ============================================================
+-- The spec's Design Decision 36 proposed `owner_scope`, holding a
+-- FUNCTION (`business_development`), and Design Decision 33 argued at
+-- length that per-person attribution was impossible. **Peter has now
+-- said every metric is assigned to a person.** That is a change of
+-- requirement, not a discovery of new data, and it resolves the
+-- column cleanly — but only if the reason Design Decision 33 gave is
+-- respected rather than overturned by accident.
+--
+-- OPTION 1 — keep `owner_scope` as a function. *** REJECTED. *** It
+-- describes a thing Peter has said he does not want. A business-wide
+-- Scoreboard whose rows are owned by `business_development`,
+-- `operations` and `leasing` is a scoreboard nobody is accountable
+-- for, which is the failure mode Peter's instruction exists to avoid.
+--
+-- OPTION 2 — `owner_email`, populated from HubSpot's
+-- `hubspot_owner_id`. *** REJECTED, AND THIS ONE IS A TRAP. *** The
+-- spec's Design Decision 33 measured it on real records:
+-- `hubspot_owner_id` on a lead "defaults to the owner of the primary
+-- associated contact," so it records who happens to own the contact,
+-- not who did the work. The Irsula Castillo pair is the proof — the
+-- failed August lead is Kristen's and the successful September lead
+-- is Kenya's, **for the same human being.** Deriving the owner from
+-- HubSpot would systematically credit one person with another's
+-- conversions. Design Decision 33's evidence is still valid; only its
+-- conclusion ("so count the function") is superseded.
+--
+-- OPTION 3 — `owner_email`, assigned by Peter, carried in the
+-- compute job's config, written onto the row. *** CHOSEN. ***
+-- The owner is a management decision written down, not a fact read
+-- out of a CRM. Q gets it from a dated constant alongside the query
+-- (see "WHERE METRIC DEFINITIONS LIVE") and never from an API field.
+--
+-- **CAN A METRIC HAVE NO OWNER? No — `owner_email` is NOT NULL.**
+-- Two reasons, and the second is mechanical rather than a matter of
+-- taste. First, Peter's rule is the design: a metric nobody owns does
+-- not belong on a scoreboard, and the right answer to "who owns
+-- vacancy days" is to decide, not to write NULL. Second, a nullable
+-- owner would eventually be wanted in the UNIQUE key, and Postgres
+-- treats NULLs as distinct there, so a nullable owner in a unique
+-- constraint silently permits duplicate rows for the same metric-week
+-- — a real bug bought for no benefit.
+--
+-- **THE OWNER IS STORED ON EVERY ROW, NOT LOOKED UP AT READ TIME.**
+-- This is the Aldo Hernandez lesson from COMMITTED-NOT-BUILT.md §1c,
+-- applied before it can happen again rather than after. Aircall
+-- destroyed attribution when a seat was deleted, and a backfill that
+-- attributed history to "whoever rings that line today" would have
+-- credited 1,257 of Aldo's calls to Leo O'Gorman. A scoreboard whose
+-- owner lives only in a current-assignments lookup has the identical
+-- defect: the day Peter reassigns a metric, every past week silently
+-- becomes the new person's history. Storing the owner on the row the
+-- week it was computed means week 12 keeps saying whose number it was.
+--
+--   *** STANDING PROHIBITION FOR Q, AND FOR ANY LATER TIDY-UP: ***
+--   when Peter reassigns a metric, the new owner applies to weeks
+--   computed FROM THAT POINT ON. Historical rows are NOT rewritten.
+--   There is no "backfill owner_email" job, and an UPDATE that sets
+--   owner_email across past weeks is the bug this paragraph exists to
+--   prevent, not a convenience.
+--
+-- No foreign key to `users` or `team_members`. Same convention every
+-- person-identifying column in this schema already uses
+-- (`call_stats.staff_email`, and its reasoning: an external vendor
+-- seat, `regina@quickturnmaintenance.com`, is a real live value with
+-- no `users` row). A weekly compute must never fail because an owner
+-- has not been onboarded into a lookup table yet. The join to
+-- `users.email` for a display name happens at read time and tolerates
+-- a miss.
+--
+-- Note also COMMITTED-NOT-BUILT.md §3's standing rule, which reaches
+-- this table through that read-time join: **nothing automated may set
+-- `users.is_active`**, and a named person must never vanish from a
+-- page Peter reads aloud in a staff meeting because something flipped
+-- without a human deciding. If the Scoreboard's read-time join
+-- respects `is_active`, an owner going inactive hides their metric
+-- rows. Q: render the row with the stored e-mail rather than dropping
+-- it. The row is the record; the join is only decoration.
+--
+-- ============================================================
+-- DESIGN DECISION C — THE GRAIN IS WEEKLY, AND IT IS WHAT MAKES THE
+-- ROLLING WINDOW FREE (the brief's third question)
+-- ============================================================
+-- **CONFIRMED: the grain supports it, and it is the reason the window
+-- can change without a re-sync.**
+--
+-- Metric 1 displays as a rolling four-week rate
+-- (75/60/56/54/64/60/58/61/50/64/55/59). It is STORED weekly, one row
+-- per week, holding that week's own deals-created and leads-created.
+-- The rolling figure is then
+--
+--     SUM(numerator) / SUM(denominator) over the last N week rows
+--
+-- and N is a number in a query. Changing four weeks to six, or adding
+-- a monthly view, is a query edit with no re-sync, no backfill and no
+-- migration — because the parts for every week are already sitting
+-- there. Had the rate been stored pre-divided, changing the window
+-- would mean re-reading HubSpot for periods whose lead stages have
+-- since moved, which is the history-rewrite the spec's Design
+-- Decision 32 exists to forbid.
+--
+-- Week runs **Monday to Sunday**, matching COMMITTED-NOT-BUILT.md §3
+-- and the spec's Design Decision 32. `week_start` is the Monday, in
+-- **America/Los_Angeles**, and there is a CHECK below that enforces
+-- Monday-ness so a UTC-truncated Sunday cannot get in. This is the
+-- same hazard `call_stats.call_date` carries a warning about
+-- (started_at/answered_at/ended_at all arrive as UTC unix timestamps)
+-- and it is worse here, because a week boundary off by one shifts a
+-- whole week's worth of records, not one late-evening call.
+--
+--   *** TWO ROLLING-WINDOW TRAPS Q MUST HANDLE — neither is a schema
+--   problem and both produce a confidently wrong number: ***
+--   (a) The first three weeks of the Scoreboard's life have no
+--       four-week window. Label the window with the number of weeks
+--       actually summed; do not quietly divide by whatever exists.
+--   (b) A failed week writes NO row (Design Decision A above). So
+--       "the last 4 rows" and "the last 4 weeks" are not the same
+--       thing, and a window can be computed over 3 rows while the
+--       page claims 4. **Count the rows, show the count.**
+--
+-- ============================================================
+-- DESIGN DECISION D — THE MEDIAN DOES NOT FIT, AND IS NOT FORCED TO
+-- (the brief asked for this said plainly; here it is said plainly)
+-- ============================================================
+-- **A median is not a ratio, and numerator/denominator cannot hold
+-- one honestly.** The tempting shape — numerator = the median,
+-- denominator = the sample size — looks fine and destroys the one
+-- property the whole design exists for. Parts are stored so that any
+-- period can be re-derived. Medians do not combine: the median of
+-- four weeks is not the average of four weekly medians, and no
+-- arithmetic on the four stored pairs recovers it. Writing a median
+-- into a column called `numerator` would mean the table's central
+-- promise was true for three metrics and quietly false for the
+-- fourth, discoverable only by someone reading the query.
+--
+-- OPTION 1 — store the median in `numerator`. *** REJECTED,
+-- above. ***
+--
+-- OPTION 2 — redefine metric 3 as a MEAN (store sum of touches and
+-- count of leads; the mean combines perfectly and needs no new
+-- columns). *** REJECTED. *** It is the tidiest schema and it is a
+-- silent change to Peter's metric. The 4.7 / 6.5 figures behind this
+-- metric are averages, so the temptation is real — but the metric as
+-- agreed on 2026-09-12 is a median, and the spec's Design Decision 38
+-- exists precisely because definitional changes get discovered on the
+-- page rather than beforehand. If a mean is wanted, that is Peter's
+-- call to make knowingly, and it is then a `rate`-shaped row with no
+-- migration needed.
+--
+-- OPTION 3 — store the full distribution (touch depth is bounded at
+-- 12 by the workflow's ceiling, per the spec's Design Decision 39),
+-- from which any period's exact median is recoverable. *** REJECTED
+-- FOR NOW, and this is the only rejection here with a real cost. ***
+-- It is the answer that keeps the re-derivation promise intact for
+-- all four metrics. It also means a JSONB histogram or a second
+-- table, for one metric out of four, to serve a rolling median nobody
+-- has asked for. This project's standing rule is not to invent
+-- structure ahead of a proven need, and a bounded histogram remains
+-- cheap to add later — it is an additive migration on a table with
+-- roughly 600 rows a year.
+--
+-- OPTION 4 — a declared `statistic` shape: store the computed value
+-- in its own column with the sample size beside it, and mark it in
+-- the schema as something that must not be aggregated. *** CHOSEN. ***
+--
+--   *** THE COST, STATED SO NOBODY DISCOVERS IT LATER: a weekly
+--   median can NEVER be combined into a month, a rolling window or an
+--   average column. TREND-VIEW-SPEC.md's layout — metrics down the
+--   left, periods across, AN AVERAGE COLUMN — is the Scoreboard's
+--   layout, so this will come up on day one. For a `statistic` row
+--   the average column must render an em-dash, not a mean of medians.
+--   `metric_shape` is the flag that lets the renderer refuse
+--   generically instead of Tron hard-coding one metric's name. ***
+--
+--   `sample_size` is stored alongside because a median of 4 leads and
+--   a median of 40 are different claims and the page should be able
+--   to say which it has — and because a later exact recomputation
+--   needs to know what it is comparing against.
+--
+-- ============================================================
+-- DESIGN DECISION E — WHY THE WORKED/AUTOMATION SPLIT IS TWO KEYS AND
+-- NOT A COLUMN
+-- ============================================================
+-- Metric 2 is one metric with two numbers. Two ways to store it.
+--
+-- OPTION 1 — a `segment` column ('worked' / 'automation'), NULL on
+-- every other metric, added to the UNIQUE key. *** REJECTED, on a
+-- mechanical fault rather than a preference. *** Postgres treats
+-- NULLs in a unique constraint as distinct, so a NULL `segment` on
+-- the other three metrics means the constraint stops deduplicating
+-- them and a re-run inserts a second row instead of overwriting the
+-- first. `NULLS NOT DISTINCT` exists to fix that and would work here,
+-- but it makes correctness depend on a modifier most readers of this
+-- schema have never met, for one metric's benefit.
+--
+-- OPTION 2 — two keys, `followup_touches_worked` and
+-- `followup_touches_automation`. *** CHOSEN. *** It uses the
+-- mechanism the table already has, keeps the contract
+-- one-row-is-one-number, and costs the page a `+` to show a total —
+-- which it should rarely want, since the whole point of the split is
+-- that 15–19 worked touches and 35–397 automated ones are not the
+-- same kind of event and summing them hides the only half a human
+-- controls.
+--
+-- ============================================================
+-- DESIGN DECISION F — WHY `metric_key` IS **NOT** A CLOSED CHECK SET
+-- (a deliberate divergence from the spec's Design Decision 36)
+-- ============================================================
+-- Design Decision 36 proposed `metric_key TEXT NOT NULL` with a
+-- CHECK-constrained closed set, and justified the keyed-table shape
+-- by promising "the remaining seven scorecard metrics need no schema
+-- change when their turn comes." **Those two statements contradict
+-- each other.** A CHECK on `metric_key` means every new metric is a
+-- migration — the exact per-line migration cost the keyed table was
+-- chosen to avoid. The contradiction is easy to miss because both
+-- halves sound careful.
+--
+-- So the CHECK on `metric_key` is dropped, and the enforcement budget
+-- is spent on `metric_shape` instead. The reasoning is about which
+-- failure each one actually prevents:
+--   * A wrong or misspelled `metric_key` produces an orphan row that
+--     renders nowhere. Visible, harmless, fixable with a DELETE.
+--   * A wrong `metric_shape` produces a number on the page that is
+--     wrong — a count divided by something, a median averaged.
+--     Invisible, and read aloud in a meeting.
+-- Enforce the one that produces a wrong number.
+--
+-- `metric_key` keeps a format CHECK (lowercase snake_case) so a
+-- display label or a stray space can never be written into it, and
+-- the authoritative key list lives in code beside the query that
+-- computes each metric — where both the writer and the reader take it
+-- from one constant, which is stronger protection against a typo than
+-- a CHECK that the writer would have to violate deliberately.
+--
+-- The payoff is immediate and not hypothetical: re-engagement
+-- attempts (still undecided, 28 vs 82 vs 105) becomes one more
+-- `count`-shaped key on the day Peter chooses, with no migration.
+--
+--   *** DO NOT REUSE THE OLD KEY NAMES. *** The spec's
+--   `new_lead_booking_rate` measured leads resolved as Qualified ÷
+--   leads resolved. This build's `lead_to_discovery_call_rate`
+--   measures deals created ÷ leads created. They are different
+--   measurements of different populations that happen to sit on the
+--   same page, and writing the new one under the old key would splice
+--   two incompatible lines into one trend — the same mistake as
+--   splicing Peter's hand-kept history onto the automated figures,
+--   which the spec's Design Decision 32 already forbids.
+--
+-- ============================================================
+-- WHERE METRIC DEFINITIONS LIVE: IN CODE, NOT IN THIS TABLE
+-- (target, direction, display format, owner assignment, label)
+-- ============================================================
+-- **Decision: in code, as one dated exported constant per metric,
+-- beside the query that computes it. No `scorecard_metric_definitions`
+-- table in v1.** Same pattern as the spec's Design Decision 34
+-- (tenant/vendor exclusion list) and Design Decision 41 (workflow
+-- id/alias config), and rejected for the same reasons they rejected a
+-- config table, plus two specific to this build.
+--
+-- **Direction and display format are consequences of the query, so
+-- they belong next to it.** "Lower is better" on sequence depth is
+-- not a display preference — it is the finding that leads which
+-- became deals took 4.7 touches and leads that went nowhere took 6.5.
+-- A direction stored in a table can be edited into agreement with
+-- intuition by anyone with SQL access, and intuition says more
+-- follow-up is more diligence, which is backwards on this data.
+-- COMMITTED-NOT-BUILT.md is explicit: "Do not let a later tidy-up
+-- turn either into a quality score." In code, that tidy-up is a diff
+-- somebody reviews. In a row, it is a Tuesday afternoon.
+--
+-- **The argument FOR the table is real and is about targets only.** A
+-- target Peter can change without an engineer is a genuine advantage,
+-- and it is the one definition field that is purely his. It still
+-- loses for v1, on three counts:
+--   1. **There is no UI, and there is not going to be one in v1.**
+--      "Peter can change it himself" today means Peter typing an
+--      UPDATE into the Supabase SQL Editor. That is not easier than
+--      asking for a one-line change; it is the same request with more
+--      ways to go wrong.
+--   2. **A single current target silently rewrites history.** Change
+--      the target and every past week re-renders as pass or fail
+--      against a standard that did not exist at the time. A target
+--      table that is honest needs `effective_from` and a date-ranged
+--      read — real structure, for a field v1 does not display.
+--   3. **The targets are not ready to be stored.** Peter's own words:
+--      the 5% conversion target "was picked out of the air," and
+--      booking rate at 100% and follow-up completion at 100% are
+--      aspirations rather than measurements. COMMITTED-NOT-BUILT.md
+--      §3 already records his decision for the trend view — **"No
+--      targets for now (revisit after it has been used a few weeks)"**
+--      — and that decision covers this page, which is the same page.
+--      Storing numbers that are known to be wrong and are scheduled
+--      to be replaced from real baselines is the worst version of
+--      both options.
+--
+-- **So v1 ships no targets at all**, which is also why no `target`
+-- column appears below. When Peter wants to set and edit targets
+-- himself — after the four numbers have run a few weeks and real
+-- baselines exist — the right build is named here so it does not get
+-- reinvented: a small `scorecard_metric_targets` table keyed
+-- (metric_key, effective_from) so a week is always judged against the
+-- target that was live when it was measured, plus a small edit form.
+-- That is a deliberate follow-on, not a gap in this migration.
+--
+-- ============================================================
+-- WHY THIS DOESN'T GO THROUGH `claims`
+-- ============================================================
+-- Same reasoning as `call_stats` and `appfolio_property_actuals`: a
+-- row here is a structured fact counted out of HubSpot's own API and
+-- arithmetically summed, not an AI interpretation of messy source
+-- material. Nothing is ambiguous, nothing needs a human to confirm or
+-- correct, so no confidence/extracted_by/review_status columns.
+--
+-- ============================================================
+-- DATA INVENTORY (GOVERNANCE.md Rule 4)
+-- *** WRITTEN HONESTLY, AND IT CONTRADICTS THE SPEC IT CAME FROM ***
+-- ============================================================
+-- CRM-SCORECARD-METRICS-SPEC.md's governance section states: "Stores
+-- someone's personal information — **No, by construction.** Only
+-- `metric_key`, `week_start`, `owner_scope`, and two integers are
+-- written." **That claim was true of `owner_scope` and is FALSE of
+-- `owner_email`.** Peter's 2026-09-12 instruction that every metric
+-- is assigned to a person is exactly what breaks it. It is recorded
+-- here rather than quietly inherited, because inheriting a "no PII"
+-- claim through a change that introduced PII is how a data inventory
+-- becomes decorative.
+--
+--   pii_fields:          scorecard_weekly.owner_email — a direct
+--                        identifier, a named Rincon employee's real
+--                        e-mail. Every value column on the same row
+--                        (numerator, denominator, value_numeric,
+--                        sample_size) is performance data ABOUT that
+--                        named person. That is the point of the
+--                        table, per Peter's instruction, not an
+--                        incidental side effect. Same category and
+--                        same honesty as call_stats.staff_email.
+--
+--                        **WHAT IS STILL NOT STORED, and must stay
+--                        that way** — this half of the spec's claim
+--                        does hold and is load-bearing: no lead ID,
+--                        no contact ID, no task ID, no enrollment ID,
+--                        no prospect name, e-mail or phone number
+--                        appears in this table or in the sync logs.
+--                        The spec's Design Decision 31 join key
+--                        (`hs_primary_contact_id`) and the enrollment
+--                        grouping key are held in memory for the
+--                        length of one computation and discarded. A
+--                        counted person is not a stored person, and
+--                        nothing below gives one anywhere to live.
+--   agents_with_access:  the weekly Scoreboard compute job (system,
+--                        service-role key, read-only HubSpot calls);
+--                        any Hub user holding a role for
+--                        tool='scorecard' in team_member_tool_roles.
+--   privacy_category:    Employee performance metadata. NOT tenant
+--                        data, NOT applicant data, NOT Fair
+--                        Housing-relevant — no housing decision, no
+--                        applicant and no tenant appears anywhere in
+--                        this design. Governed by California
+--                        employment-privacy law and CCPA, same as
+--                        call_stats, not by GOVERNANCE.md's
+--                        tenant-facing rules.
+--   retention_policy:    PLACEHOLDER — Peter's call, not a technical
+--                        one, and now a slightly sharper question
+--                        than it was, because this is employee
+--                        performance data with a named person on
+--                        every row. Absent a decision it defaults to
+--                        indefinite, matching every other synced
+--                        table here. Carried forward unresolved from
+--                        call_stats's own inventory; the two should
+--                        be decided together rather than separately.
+--   ccpa_exportable:     TRUE. Same reasoning as call_stats: the CCPA
+--                        employee-data exemption expired 2023-01-01,
+--                        and a Rincon employee asking "what do you
+--                        hold about me" would reasonably expect their
+--                        Scoreboard rows included.
+--   ccpa_deletable:      TRUE mechanically — a schema read, not a
+--                        legal one. Overwrite owner_email in place
+--                        ('[REDACTED]', the pattern already used for
+--                        claims.claim_text; it satisfies NOT NULL)
+--                        and what remains is an anonymous weekly
+--                        count with no person attached. Whether
+--                        Rincon is REQUIRED to honour such a request
+--                        for this data category is an employment-law
+--                        judgment, not Neo's and not this file's.
+--   RLS:                 enabled, no permissive policies at creation
+--                        — matches every table in this schema.
+--   Audit logging:       none, by design — matches call_stats and
+--                        appfolio_property_actuals. A plain weekly
+--                        compute of a counted fact has no review
+--                        workflow to log.
+--
+-- ------------------------------------------------------------
+-- GOVERNANCE PATH — recorded, not decided here
+-- ------------------------------------------------------------
+-- **Peter has explicitly said this build needs no governance review**,
+-- on the basis that assigning a metric to a named person is ordinary
+-- management oversight. That is recorded as his decision, per
+-- GOVERNANCE.md Rule 6, and this migration proceeds on it.
+--
+-- Independently of that, the substantive test lands the same way
+-- call_stats's did: no message is sent to anyone, no decision about a
+-- tenant or applicant is made or influenced, and no tenant or
+-- applicant data is stored or counted. Asimov's and Mason's lanes are
+-- not engaged by employee-performance metadata. Rule 4 still applies
+-- in full and is discharged above.
+--
+--   *** TWO THINGS FLAGGED UP, NOT RESOLVED BY NEO — both for Peter
+--   and Jarvis, and the first is not cosmetic: ***
+--
+--   1. **Mason's "no" was CONDITIONAL, and the condition sits on a
+--      definition that has since changed.** The spec's Design
+--      Decision 34 removes leads disqualified as `Tenants` or
+--      `Vendor` from every count, and Mason's clearance says in
+--      terms: "If the tenant/vendor exclusion is dropped, weakened,
+--      or made optional, that answer changes and Mason reviews before
+--      it ships." Nobody has dropped it — but metric 1's denominator
+--      moved from **leads RESOLVED** to **leads CREATED**, and a lead
+--      created this week has usually not been triaged yet, so it
+--      carries no disqualification reason for the rule to match on.
+--      The exclusion therefore catches strictly fewer tenants than it
+--      did under the definition Mason cleared. **The rule must still
+--      ship and must still be applied to both halves of metric 1 —
+--      and somebody other than Neo should decide whether "weakened by
+--      a denominator change" trips Mason's own condition.** Raising
+--      it is the point; answering it is not Neo's lane.
+--   2. The retention decision above, shared with call_stats.
+--
+-- ============================================================
+-- QUERY PATTERN (and why there is deliberately NO index)
+-- ============================================================
+-- One query per page load: "every metric, last N weeks" —
+--   SELECT metric_key, metric_shape, week_start, owner_email,
+--          numerator, denominator, value_numeric, sample_size
+--     FROM scorecard_weekly
+--    WHERE week_start >= ?
+-- — then grouped in router.js into the trend layout (metrics down the
+-- left, periods across), joined to `users` on e-mail for a display
+-- name, with rates divided at read time and rolling windows summed
+-- from the weekly parts.
+--
+-- **No secondary index, and that is a decision rather than an
+-- oversight.** `call_stats` added `(call_date, staff_email)` because
+-- it holds thousands of rows a month and its UNIQUE index leads with
+-- the wrong column. This table holds ONE ROW PER METRIC PER WEEK:
+-- five rows a week today, roughly 600 a year if all eleven scorecard
+-- lines are eventually automated. Every query reads essentially the
+-- whole table, which Postgres does instantly at that size, and the
+-- UNIQUE constraint's own index already serves the upsert. An index
+-- here would be structure added for a load that will not arrive this
+-- decade. If the Scoreboard ever grows a per-person split across
+-- dozens of owners, revisit — it is one additive statement.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO
+-- ============================================================
+--   * No router.js, no lib/, no dashboard, no compute job — Q and
+--     Tron build next. This file is storage only.
+--   * No seed rows. **In particular it does not guess who owns which
+--     metric.** Peter names the owner of each of the four before the
+--     first weekly compute runs; see the handover notes below, where
+--     it is listed as the one hard blocker.
+--   * No target column and no targets — see above.
+--   * No re-engagement-attempts key — Peter has not chosen a
+--     definition, and when he does it needs no migration.
+--   * No backfill, and none is possible: the spec's Design Decision
+--     32 establishes that historical weeks cannot be reconstructed,
+--     because stage-exit history for leads that have since moved on
+--     does not survive. **The Scoreboard starts from the first Monday
+--     it runs and the page says so.** Peter's hand-kept history stays
+--     his; the two must not be spliced into one line on a chart,
+--     because they are not the same measurement.
+--   * No change to `call_stats`, `call_stats_line_misses`, `users`,
+--     `team_members`, or any other existing table except the single
+--     `tool` CHECK widening in Section 2.
+--
+-- Rollback: see the ROLLBACK section at the bottom of this file.
+-- ============================================================
+
+
+-- ============================================================
+-- SECTION 1 — TABLE: scorecard_weekly
+--
+-- What it stores: one row per business metric, per week (Monday to
+-- Sunday, America/Los_Angeles), holding the raw parts that week's
+-- figure was computed from, plus the named person accountable for it.
+-- Written once, after the week closes. Never recomputed.
+-- RLS: enabled, locked by default.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS scorecard_weekly (
+  id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Which metric this row is. Deliberately NOT a closed CHECK set —
+  -- see Design Decision F above. The authoritative list lives in one
+  -- exported constant in projects/hub/scorecard/, read by both the
+  -- compute job and the page, so writer and reader cannot disagree.
+  -- The format CHECK only stops a display label, a stray space or a
+  -- capital letter being written into a key.
+  --
+  -- The five keys in use at first ship (four metrics, five rows —
+  -- metric 2 is split; see Design Decision E):
+  --   'lead_to_discovery_call_rate'     rate
+  --   'followup_touches_worked'         count
+  --   'followup_touches_automation'     count
+  --   'followup_sequence_depth'         statistic  (LOWER IS BETTER)
+  --   'past_lead_conversions'           count
+  --
+  -- NOT 'new_lead_booking_rate' and NOT 'followup_first_touch_1h' —
+  -- both are the spec's keys for measurements this build does not
+  -- make. See Design Decision F on why reusing a key would splice two
+  -- different measurements into one trend line.
+  metric_key     TEXT          NOT NULL CHECK (metric_key ~ '^[a-z][a-z0-9_]{2,63}$'),
+
+  -- What KIND of number this row holds, and therefore which columns
+  -- must be filled and which must be empty. Enforced by the CHECK at
+  -- the bottom of this table — the single most useful constraint in
+  -- this file, because it is what stops a keyed table from meaning
+  -- whatever the last person to write to it assumed.
+  --
+  --   'rate'      numerator over denominator. Divide at READ time,
+  --               never store the percentage. Roll up across weeks by
+  --               SUM(numerator)/SUM(denominator) — never by
+  --               averaging weekly percentages.
+  --   'count'     a plain number with no denominator. There is
+  --               nothing to divide by and nothing missing.
+  --   'statistic' a figure that cannot be re-derived from parts —
+  --               today, a median. *** MUST NOT BE AGGREGATED ACROSS
+  --               WEEKS BY ANY MEANS. *** The average column on the
+  --               trend layout renders an em-dash for these rows. See
+  --               Design Decision D.
+  metric_shape   TEXT          NOT NULL CHECK (metric_shape IN ('rate', 'count', 'statistic')),
+
+  -- The Monday that starts the week this row covers, in Rincon's own
+  -- business timezone (America/Los_Angeles) — NOT a UTC truncation.
+  -- The CHECK enforces Monday-ness (ISO day-of-week 1) so a week
+  -- boundary that slipped a day cannot be written at all; getting
+  -- this wrong shifts an entire week of records, not one call.
+  -- Week = Monday..Sunday, per COMMITTED-NOT-BUILT.md §3.
+  week_start     DATE          NOT NULL CHECK (EXTRACT(ISODOW FROM week_start) = 1),
+
+  -- The named person accountable for this metric in this week, as
+  -- ASSIGNED BY PETER — never read from HubSpot's hubspot_owner_id,
+  -- which records who owns the contact rather than who did the work
+  -- (Design Decision B: the Irsula Castillo pair). Lowercase, matching
+  -- team_members.email's own convention.
+  --
+  -- Frozen on the row. When a metric is reassigned, the new owner
+  -- applies to weeks computed from that point on; historical rows are
+  -- never rewritten. This is the Aldo Hernandez lesson
+  -- (COMMITTED-NOT-BUILT.md §1c) applied before it can happen again.
+  --
+  -- NOT NULL: a metric nobody owns does not belong on a scoreboard,
+  -- per Peter 2026-09-12. No FK — same convention as
+  -- call_stats.staff_email; a weekly compute must not fail because an
+  -- owner has no `users` row yet.
+  owner_email    TEXT          NOT NULL CHECK (owner_email = lower(owner_email) AND owner_email <> ''),
+
+  -- The top of the ratio for a 'rate', or the whole figure for a
+  -- 'count'. NULL for a 'statistic'. Never a percentage.
+  --   lead_to_discovery_call_rate  = deals created in the week
+  --   followup_touches_worked      = worked touches logged in the week
+  --   followup_touches_automation  = automation touches in the week
+  --   past_lead_conversions        = past leads converted in the week
+  --                                  (9 in the object's entire history
+  --                                  since 2024-06-21, so a long run
+  --                                  of legitimate zeroes is expected,
+  --                                  and a zero here means zero — a
+  --                                  week that could not be computed
+  --                                  has no row at all)
+  numerator      INTEGER       NULL CHECK (numerator >= 0),
+
+  -- The bottom of the ratio. NULL means "this metric is not a rate",
+  -- and can never mean "we could not find out" — a week that could
+  -- not be computed writes no row. The metric_shape CHECK below is
+  -- what makes that a fact rather than a promise.
+  --   lead_to_discovery_call_rate  = leads created in the week
+  --                                  (LEAD object: hs_createdate, NOT
+  --                                  createdate)
+  --
+  -- Zero is allowed and is a real answer: a week with no leads
+  -- created is not a 0% week, it is a week with no denominator.
+  -- *** Q: guard the division. A denominator of 0 renders as "—". ***
+  denominator    INTEGER       NULL CHECK (denominator >= 0),
+
+  -- For 'statistic' rows only: the computed figure itself, because it
+  -- cannot be expressed as parts. Today this is exactly one thing —
+  -- followup_sequence_depth's median touches before a lead responds,
+  -- where LOWER IS BETTER and the page must say so.
+  -- NUMERIC, not INTEGER: a median of an even-sized sample lands on
+  -- a half.
+  value_numeric  NUMERIC(12,4) NULL,
+
+  -- How many observations the 'statistic' was computed over — a
+  -- median of 4 leads and a median of 40 are different claims. NULL
+  -- for every other shape. Deliberately NOT reusing `denominator`:
+  -- a sample size is not a denominator, nothing divides by it, and
+  -- overloading the column would re-introduce the ambiguity
+  -- metric_shape exists to remove.
+  sample_size    INTEGER       NULL CHECK (sample_size >= 0),
+
+  -- When the weekly compute produced this row. Distinct from
+  -- created_at, which is when the row landed in Postgres — they
+  -- differ if a failed week is re-run later, and the gap is the
+  -- signal that it was. Same purpose as call_stats.synced_at.
+  computed_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+
+  created_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+
+  -- Upsert key for the weekly compute (Supabase on_conflict=, the
+  -- pattern every sync in this project already uses). One row per
+  -- metric per week — a re-run of a week that failed overwrites in
+  -- place rather than adding a second row.
+  --
+  -- owner_email is deliberately NOT in this key. Every metric has
+  -- exactly one owner today, and including the owner would mean a
+  -- reassignment silently produces TWO rows for the same metric-week
+  -- and the page shows the metric twice. If a future batch brings a
+  -- metric genuinely owned by several people at once (e.g. vacancy
+  -- days per property manager), widening this key to include
+  -- owner_email is a one-line additive migration that cannot fail
+  -- against existing rows — the cheap direction, chosen on purpose.
+  UNIQUE (metric_key, week_start),
+
+  -- *** THE SHAPE CONTRACT. ***
+  -- Which columns each shape must fill and must leave empty. This is
+  -- what a keyed table normally cannot enforce, and the spec's Design
+  -- Decision 36 named that as its own accepted cost — it is bought
+  -- back here for the price of one constraint. It also enforces the
+  -- failure rule for free: a half-read week cannot produce a row,
+  -- because a 'rate' missing its denominator fails loudly on INSERT
+  -- instead of quietly storing half a number.
+  CONSTRAINT scorecard_weekly_shape_check CHECK (
+    (metric_shape = 'rate'
+       AND numerator IS NOT NULL AND denominator IS NOT NULL
+       AND value_numeric IS NULL AND sample_size IS NULL)
+    OR
+    (metric_shape = 'count'
+       AND numerator IS NOT NULL AND denominator IS NULL
+       AND value_numeric IS NULL AND sample_size IS NULL)
+    OR
+    (metric_shape = 'statistic'
+       AND value_numeric IS NOT NULL AND sample_size IS NOT NULL
+       AND numerator IS NULL AND denominator IS NULL)
+  )
+);
+
+-- RLS: enabled, no permissive policies — all access denied until a
+-- tool explicitly grants it via a policy scoped to authenticated
+-- users. Matches every other table in this schema.
+ALTER TABLE scorecard_weekly ENABLE ROW LEVEL SECURITY;
+
+DROP TRIGGER IF EXISTS trg_scorecard_weekly_updated_at ON scorecard_weekly;
+CREATE TRIGGER trg_scorecard_weekly_updated_at
+  BEFORE UPDATE ON scorecard_weekly
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- No secondary index, deliberately — see "QUERY PATTERN" above.
+-- ~5 rows a week, ~600 a year at full build-out; every read is a
+-- whole-table read and the UNIQUE index already serves the upsert.
+
+
+-- ============================================================
+-- SECTION 2 — ACCESS: one new value on team_member_tool_roles.tool
+--
+-- The Scoreboard reuses the existing permission mechanism exactly, per
+-- the spec's Design Decision 35: one new `tool` value, the same
+-- DROP-then-ADD CHECK pattern used twelve times already. **No new
+-- role value** — `admin` and `director_of_operations` both already
+-- exist and are the natural pair for a page Peter and his Director of
+-- Operations read in a weekly meeting. Which roles the router
+-- actually gates on is Q's call from the existing list; nothing here
+-- constrains it.
+--
+-- ------------------------------------------------------------
+-- LIVE STATE CHECK — this exact class of mistake (widening a CHECK
+-- against a stale assumption of what is live) caused a real
+-- regression on 2026-08-17/18, fixed in
+-- 20260818000000_fix_role_check_regression.sql. Not repeating it.
+-- ------------------------------------------------------------
+-- Reconstructed by reading every migration that has ever touched
+-- team_member_tool_roles_tool_check, in order. The most recent is
+-- 20260910030000_archive_search_schema.sql (and its identical
+-- _PART1_run_this_first.sql companion), which left `tool` at 12
+-- values:
+--   ('insurance_compliance', 'maintenance_history', 'security_deposit',
+--    'call_stats', 'content_engine', 'leadsimple_application_screening',
+--    'leadsimple_delinquency', 'leadsimple_operations',
+--    'approval_briefing', 'owner_tenant_notes', 'complaint_tracking',
+--    'archive_search')
+--
+-- No file after 20260910030000 touches tool_check. Confirmed by
+-- reading the two later migrations directly:
+-- 20260911000000_search_document_trigger_backfill.sql states in its
+-- own header that every other section of 20260910030000 "already
+-- applied successfully to the live table and is untouched," including
+-- "the team_member_tool_roles CHECK widenings," and alters nothing on
+-- that table itself; 20260911010000_search_document_pending_index.sql
+-- does not mention it at all. The ADD CONSTRAINT below therefore
+-- carries forward all 12 existing values plus 'scorecard' — 13 total.
+-- Not a stale list.
+--
+-- role_check is NOT touched by this migration. Its current state, per
+-- 20260910030000 (the most recent file to touch it), is 10 values:
+-- ('admin', 'director_of_operations', 'property_manager',
+--  'inspection_coordinator', 'pod_lead', 'reviewer', 'contributor',
+--  'leasing_reviewer', 'maintenance_coordinator', 'searcher').
+-- Restated for the record only — no ALTER on role_check appears in
+-- this file, the same convention 20260819020000 and 20260902020000
+-- both used when only one of the two constraints actually changes.
+--
+-- CAVEAT, stated plainly: this environment has no Supabase credential
+-- to confirm the above against live data (the standing limitation on
+-- every migration here since 20260825000000). **Before applying, run
+--     SELECT DISTINCT tool, role FROM team_member_tool_roles;
+-- and confirm no value appears outside the 12-tool / 10-role lists
+-- above. If one does, stop and tell Neo before proceeding.**
+-- ============================================================
+
+ALTER TABLE team_member_tool_roles
+  DROP CONSTRAINT IF EXISTS team_member_tool_roles_tool_check;
+
+ALTER TABLE team_member_tool_roles
+  ADD CONSTRAINT team_member_tool_roles_tool_check
+  CHECK (tool IN (
+    'insurance_compliance',
+    'maintenance_history',
+    'security_deposit',
+    'call_stats',
+    'content_engine',
+    'leadsimple_application_screening',
+    'leadsimple_delinquency',
+    'leadsimple_operations',
+    'approval_briefing',
+    'owner_tenant_notes',
+    'complaint_tracking',
+    'archive_search',
+    'scorecard'
+  ));
+
+-- No seed/grant INSERT. Who gets access to the Scoreboard is Peter's
+-- decision, made through whatever the Hub already uses to grant a
+-- role — not something a migration assigns on his behalf.
+
+
+-- ============================================================
+-- MIGRATION GATE (Neo's own checklist, run before this applies to any
+-- real database)
+-- ============================================================
+--   [x] Rollback exists — see the ROLLBACK section below. Section 2's
+--       rollback carries the usual caveat: it is only safe while no
+--       row uses tool='scorecard'.
+--   [x] Breaks no existing data — Section 1 is a brand-new table.
+--       Section 2 WIDENS a CHECK, which cannot invalidate any
+--       existing row by construction (every currently-valid value
+--       stays valid).
+--   [x] Touches a table other code depends on — YES, and named
+--       rather than glossed: team_member_tool_roles is shared across
+--       twelve Hub tools. The change is purely additive and the live
+--       state was reconstructed from the full migration history
+--       immediately before writing this file. The pre-flight SELECT
+--       above is the belt to that braces.
+--   [x] `call_stats` and `call_stats_line_misses` are not referenced
+--       anywhere in this file — verified by reading it. Call Stats
+--       shipped 2026-09-12 and is live; this migration cannot disturb
+--       its nightly sync, its grain or its constraints.
+--   [x] Additive, not destructive. Nothing is dropped except a CHECK
+--       constraint that is immediately re-added wider, in the same
+--       transaction the SQL Editor runs it in.
+--   [x] Safe to run twice — CREATE TABLE IF NOT EXISTS, DROP TRIGGER
+--       IF EXISTS before CREATE TRIGGER, DROP CONSTRAINT IF EXISTS
+--       before ADD CONSTRAINT. No INSERT, so no duplicate rows are
+--       possible on a second run.
+--   [ ] Tested on a copy of the data first — no staging copy of
+--       Supabase exists in this project (the same caveat every
+--       migration here has carried since the first one). Mitigated
+--       by: a brand-new table with no rows to migrate; a CHECK
+--       widening that cannot fail against existing data; and the
+--       pre-flight SELECT above.
+--
+--   ONE KNOWN LIMIT OF THE IDEMPOTENCY, stated rather than assumed:
+--   if a PARTIAL earlier run somehow left a `scorecard_weekly` table
+--   behind, CREATE TABLE IF NOT EXISTS will skip it silently and its
+--   constraints will not be added. Nothing here has run yet, so this
+--   is hypothetical — but if this file is ever re-run after a failed
+--   attempt, confirm the table's constraints with \d scorecard_weekly
+--   rather than trusting the skip.
+-- ============================================================
+
+
+-- ============================================================
+-- HANDOVER — WHAT Q NEEDS BEFORE WIRING THE QUERIES
+-- (kept in the migration because this is the file that survives; the
+-- session notes are not)
+-- ============================================================
+--
+-- *** ONE HARD BLOCKER: the four owners are not known. ***
+-- owner_email is NOT NULL and is an assignment, not a measurement.
+-- Peter must name the accountable person for each of the five keys
+-- before the first weekly compute runs. Do not default them to
+-- Kristen, do not default them to Peter, and above all do not read
+-- them from HubSpot's hubspot_owner_id — Design Decision B explains
+-- why that field is actively wrong here.
+--
+-- FIELD NAMES AND ASSUMPTIONS, so they are not rediscovered:
+--   * The LEAD object uses **hs_createdate**, not createdate. Getting
+--     this wrong returns nothing, or worse, returns something.
+--   * Metric 1's numerator rests on an assumption that is true TODAY
+--     and is not enforced by anything: a deal implies a discovery
+--     call happened, because "Discovery call complete" is the first
+--     stage of the ONLY pipeline in use (`default`). If a second
+--     pipeline appears, or a stage is inserted before that one, the
+--     metric silently changes meaning while continuing to produce a
+--     plausible number. **Filter explicitly on the `default`
+--     pipeline and surface a count of deals found outside it** — the
+--     same early-warning discipline the spec's Design Decision 41
+--     applies to unmatched workflows, for the same reason.
+--
+-- ONE DEFINITION STILL GENUINELY OPEN — do not guess it:
+--   * Metric 3's week. Is a lead counted in the week it RESPONDED, or
+--     the week its enrollment CLOSED (the spec's Design Decision 42
+--     shape, with its 10-day hold)? These are different weeks and a
+--     different number. The 2026-09-12 definition says "median
+--     touches before a lead responds," which reads as the response
+--     week and needs no hold — but it has not been confirmed, and if
+--     a hold IS needed then the follow-up rows on the page refer to
+--     an older week than the rate row and **each row must be
+--     labelled with its own week, never stacked under one date
+--     header** (Design Decision 42's requirement, which survives
+--     whichever way this lands). Ask Peter; do not pick.
+--
+-- RULES THE SCHEMA CANNOT ENFORCE AND THE PAGE MUST HONOUR:
+--   * **Sequence depth: lower is better, said on the page.** Not a
+--     display preference — a finding. 4.7 touches for leads that
+--     became deals, 6.5 for leads that went nowhere.
+--   * **Touches are labelled *activity*, never quality**, and worked
+--     and automation are shown separately. Summing them hides the
+--     only half a human controls.
+--   * **A 'statistic' row is never averaged or rolled up.** The
+--     average column renders an em-dash. Read metric_shape; do not
+--     special-case a metric name.
+--   * **Rates are divided at read time, and rolling windows are
+--     SUM(numerator)/SUM(denominator)** over the week rows — never a
+--     mean of weekly percentages.
+--   * **A missing week is blank, not zero**, and a rolling window
+--     must report how many weeks it actually found.
+--   * **The tenant/vendor exclusion (spec Design Decision 34) still
+--     ships**, applied to both halves of metric 1. It is the
+--     mechanism behind Mason's conditional clearance, not a tidy-up
+--     detail — see the flag in the Data Inventory above.
+--   * **No lead, contact, task or enrollment ID, name, e-mail or
+--     phone number** is written to this table or to the sync logs.
+--     Join keys are held in memory and discarded.
+--
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- -- Section 1:
+-- DROP TRIGGER IF EXISTS trg_scorecard_weekly_updated_at ON scorecard_weekly;
+-- DROP TABLE IF EXISTS scorecard_weekly;
+--
+-- -- Section 2 — ONLY safe if no row has tool='scorecard' yet;
+-- -- restoring the narrower CHECK will fail against any row that
+-- -- violates it. Check first:
+-- --   SELECT COUNT(*) FROM team_member_tool_roles WHERE tool = 'scorecard';
+-- ALTER TABLE team_member_tool_roles
+--   DROP CONSTRAINT IF EXISTS team_member_tool_roles_tool_check;
+-- ALTER TABLE team_member_tool_roles
+--   ADD CONSTRAINT team_member_tool_roles_tool_check
+--   CHECK (tool IN (
+--     'insurance_compliance',
+--     'maintenance_history',
+--     'security_deposit',
+--     'call_stats',
+--     'content_engine',
+--     'leadsimple_application_screening',
+--     'leadsimple_delinquency',
+--     'leadsimple_operations',
+--     'approval_briefing',
+--     'owner_tenant_notes',
+--     'complaint_tracking',
+--     'archive_search'
+--   ));
+--
+-- Note: set_updated_at() is NOT dropped — it is shared with every
+-- other table in this schema that uses the same trigger pattern.
+--
+-- ============================================================

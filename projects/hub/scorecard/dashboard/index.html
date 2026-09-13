@@ -36,7 +36,7 @@
 
     .metric-label { font-weight: 600; }
     .owner { display: block; color: #9ca3af; font-size: 11.5px; font-weight: 400; margin-top: 2px; }
-    .metric-note { color: #6b7280; font-size: 11.5px; line-height: 1.5; max-width: 640px; }
+    .metric-note { color: #6b7280; font-size: 11.5px; line-height: 1.5; max-width: 640px; margin-top: 5px; }
     .parts { display: block; color: #9ca3af; font-size: 11px; margin-top: 1px; }
     .muted { color: #9ca3af; }
     .avg-col { background: #f9fafb; font-weight: 600; }
@@ -418,9 +418,14 @@
             labelCell.appendChild(el('span', 'flag flag-activity', 'ACTIVITY'));
           }
 
+          // First name only -- the full name (or email, if the name lookup
+          // ever misses) is still on the "Owned by" title attribute for
+          // anyone who needs the whole thing.
+          var ownerFirstName = metric.ownerName ? metric.ownerName.split(' ')[0] : null;
           var owner = el('span', 'owner', metric.ownerEmail
-            ? ('Owned by ' + (metric.ownerName || metric.ownerEmail))
+            ? ('Owned by ' + (ownerFirstName || metric.ownerEmail))
             : 'No rows yet');
+          if (metric.ownerEmail) owner.title = metric.ownerName || metric.ownerEmail;
           labelCell.appendChild(owner);
 
           // Each row carries its OWN most recent week. Sequence depth
@@ -442,7 +447,23 @@
           var noteRow = el('tr', 'note-row');
           var noteCell = el('td');
           noteCell.colSpan = payload.weeks.length + 2;
-          noteCell.appendChild(el('div', 'metric-note', metric.note));
+
+          // The explanation text is collapsed by default -- same pill-button
+          // style as "See what's failing" below it, so both read as one
+          // family of controls rather than one always-on paragraph and one
+          // button. Nothing here fetches anything; it only shows text
+          // already sent with the row.
+          var noteToggle = el('button', 'drilldown-btn', 'About this metric');
+          noteToggle.type = 'button';
+          var noteText = el('div', 'metric-note', metric.note);
+          noteText.hidden = true;
+          noteToggle.addEventListener('click', function () {
+            noteText.hidden = !noteText.hidden;
+            noteToggle.textContent = noteText.hidden ? 'About this metric' : 'Hide';
+          });
+          noteCell.appendChild(noteToggle);
+          noteCell.appendChild(noteText);
+
           var drilldown = renderDrilldown(metric);
           if (drilldown) noteCell.appendChild(drilldown);
           noteRow.appendChild(noteCell);

@@ -241,8 +241,13 @@ router.get('/api/scorecard/metrics', requireScorecardAccess, async (req, res) =>
   const ownerEmails = [...new Set(rows.map((r) => r.owner_email))];
   const namesByEmail = new Map();
   if (ownerEmails.length) {
-    const { data: users } = await supabase.from('users').select('email, full_name').in('email', ownerEmails);
-    for (const u of users || []) namesByEmail.set(u.email, u.full_name);
+    // The users table's name column is `name`, not `full_name` -- this
+    // query asked for a column that has never existed, so it silently
+    // returned no rows and ownerName has been null for every metric since
+    // launch, with the page falling back to the raw email every time.
+    // Found and fixed 2026-09-13.
+    const { data: users } = await supabase.from('users').select('email, name').in('email', ownerEmails);
+    for (const u of users || []) namesByEmail.set(u.email, u.name);
   }
 
   const weeks = weeksEndingAt(lastWeek, weeksShown);

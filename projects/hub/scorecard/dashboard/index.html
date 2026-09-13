@@ -147,9 +147,25 @@
         if (value === null || value === undefined) return DASH;
         return Number.isInteger(value) ? String(value) : String(Math.round(value * 10) / 10);
       }
-      function shortWeek(week) {
-        var parts = week.split('-');
+      function shortDate(iso) {
+        var parts = iso.split('-');
         return parts[1] + '/' + parts[2];
+      }
+
+      // Every stored week is its Monday (week_start) — that value is what
+      // the API takes, what drives every calculation, and it stays that
+      // way everywhere in this file except the three spots below that
+      // exist purely to show a person which days a week actually covers.
+      // Mirrors lib/week.js's addDays (UTC noon, so no DST/timezone edge
+      // case) rather than trusting the browser's local-time Date parsing.
+      function weekEndIso(mondayIso) {
+        var parts = mondayIso.split('-').map(Number);
+        var d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], 12) + 6 * 86400000);
+        return d.toISOString().slice(0, 10);
+      }
+
+      function shortWeek(mondayIso) {
+        return shortDate(mondayIso) + '–' + shortDate(weekEndIso(mondayIso));
       }
 
       function renderHead(weeks) {
@@ -164,7 +180,7 @@
         // read first, without touching the order anything else relies on.
         weeks.slice().reverse().forEach(function (week) {
           var th = el('th', 'num', shortWeek(week));
-          th.title = 'Week beginning ' + week + ' (Monday to Sunday)';
+          th.title = 'Monday ' + week + ' through Sunday ' + weekEndIso(week);
           row.appendChild(th);
         });
         row.appendChild(el('th', 'num avg-col', 'Average'));
@@ -280,8 +296,8 @@
         select.title = 'Choose which week to inspect';
         availableWeeks.forEach(function (week) {
           var option = document.createElement('option');
-          option.value = week;
-          option.textContent = 'Week of ' + week;
+          option.value = week; // stays the raw Monday ISO -- this is what the fetch sends
+          option.textContent = 'Week of ' + shortWeek(week);
           if (week === metric.latestWeek) option.selected = true;
           select.appendChild(option);
         });
@@ -411,7 +427,7 @@
           // publishes an earlier week than the rest because it waits for
           // enrollments to finish, so rows are never stacked under one date.
           if (metric.latestWeek) {
-            labelCell.appendChild(el('span', 'week-label', 'Latest complete week: ' + metric.latestWeek));
+            labelCell.appendChild(el('span', 'week-label', 'Latest complete week: ' + shortWeek(metric.latestWeek)));
           }
           row.appendChild(labelCell);
 

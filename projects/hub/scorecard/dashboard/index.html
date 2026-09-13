@@ -50,6 +50,26 @@
     .callout { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 12px 14px; font-size: 12.5px; line-height: 1.6; margin-bottom: 16px; }
     .footnote { color: #9ca3af; font-size: 12px; line-height: 1.7; margin-top: 12px; }
     .empty { color: #9ca3af; padding: 28px; text-align: center; }
+
+    /* CRM completeness drill-down — reads HubSpot live, nothing is stored. */
+    .drilldown { margin-top: 8px; }
+    .drilldown-btn { font: inherit; font-size: 11.5px; padding: 4px 11px; border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #1d4ed8; cursor: pointer; }
+    .drilldown-btn:hover { background: #eff6ff; }
+    .drilldown-btn:disabled { color: #9ca3af; cursor: default; background: #fff; }
+    .drilldown-panel { margin-top: 8px; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; background: #f9fafb; max-width: 640px; }
+    .drilldown-loading, .drilldown-empty, .drilldown-error { font-size: 12.5px; }
+    .drilldown-loading { color: #6b7280; }
+    .drilldown-empty { color: #166534; }
+    .drilldown-error { color: #991b1b; }
+    .drilldown-item { padding: 7px 0; border-bottom: 1px solid #e5e7eb; font-size: 12.5px; line-height: 1.5; }
+    .drilldown-item:last-child { border-bottom: none; }
+    .drilldown-name { font-weight: 600; }
+    .drilldown-link { color: #1d4ed8; text-decoration: none; margin-left: 6px; font-size: 11.5px; white-space: nowrap; }
+    .drilldown-link:hover { text-decoration: underline; }
+    .drilldown-missing { color: #92400e; font-size: 11.5px; margin-top: 2px; }
+    .drilldown-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
+    .drilldown-badge-open { background: #eef2ff; color: #3730a3; }
+    .drilldown-badge-closed { background: #f3f4f6; color: #4b5563; }
   </style>
 </head>
 <body>
@@ -106,6 +126,15 @@
       }
 
       var DASH = '—'; // em-dash: "this number does not exist", never "zero"
+
+      // The two CRM completeness rows are the only metrics with a live
+      // drill-down — everything else on this page is a stored aggregate with
+      // no underlying record to point at. Keyed by metric_key so a rename or
+      // a new row elsewhere never accidentally gets a drill-down control.
+      var DRILLDOWN_TYPE_BY_METRIC_KEY = {
+        crm_contact_completeness: 'contacts',
+        crm_deal_completeness: 'deals',
+      };
 
       function formatPercent(value) {
         return value === null || value === undefined ? DASH : (value * 100).toFixed(0) + '%';
@@ -196,6 +225,107 @@
         return td;
       }
 
+      // Builds the "See what's failing" control for one CRM completeness
+      // row. Calls the live drill-down endpoint on click — nothing is
+      // fetched, cached, or stored ahead of a click, and nothing it fetches
+      // is kept anywhere once the page is left (no localStorage, nothing
+      // written back to the server). It always asks for the metric's own
+      // latest complete week, matching the note row it lives in.
+      function renderDrilldown(metric) {
+        var type = DRILLDOWN_TYPE_BY_METRIC_KEY[metric.key];
+        if (!type) return null;
+
+        var wrap = el('div', 'drilldown');
+        var button = el('button', 'drilldown-btn', 'See what’s failing');
+        button.type = 'button';
+        var panel = null; // created (and destroyed) on toggle, never pre-fetched
+        var loaded = false;
+
+        if (!metric.latestWeek) {
+          button.disabled = true;
+          button.title = 'No week has been computed yet for this metric.';
+          wrap.appendChild(button);
+          return wrap;
+        }
+
+        button.addEventListener('click', function () {
+          if (panel) {
+            // Collapse. Re-clicking "See what's failing" re-fetches live
+            // rather than reusing what's in the DOM — this is a live-only
+            // view, not a cache.
+            panel.remove();
+            panel = null;
+            loaded = false;
+            button.textContent = 'See what’s failing';
+            return;
+          }
+
+          button.textContent = 'Hide';
+          panel = el('div', 'drilldown-panel');
+          panel.appendChild(el('div', 'drilldown-loading', 'Reading HubSpot live — this can take a few seconds…'));
+          wrap.appendChild(panel);
+
+          var url = '/api/scorecard/crm-completeness/detail?type=' + encodeURIComponent(type) +
+            '&week=' + encodeURIComponent(metric.latestWeek);
+
+          fetch(url, { credentials: 'include' })
+            .then(function (response) {
+              if (!response.ok) {
+                return response.json().catch(function () { return {}; }).then(function (body) {
+                  throw new Error(body.error || 'Could not load HubSpot records for this week.');
+                });
+              }
+              return response.json();
+            })
+            .then(function (data) {
+              loaded = true;
+              panel.innerHTML = '';
+
+              if (!data.failing || data.failing.length === 0) {
+                panel.appendChild(el('div', 'drilldown-empty',
+                  'Everything in this week’s population is complete (' + data.population + ' of ' + data.population + ').'));
+                return;
+              }
+
+              var summary = el('div', 'metric-note',
+                data.failing.length + ' of ' + data.population + ' records for the week of ' +
+                metric.latestWeek + ' are missing something:');
+              summary.style.marginBottom = '6px';
+              panel.appendChild(summary);
+
+              data.failing.forEach(function (record) {
+                var item = el('div', 'drilldown-item');
+                var nameLine = el('span', 'drilldown-name', record.name || '(no name on record)');
+                item.appendChild(nameLine);
+
+                if (type === 'deals') {
+                  var badge = el('span', 'drilldown-badge ' + (record.closed ? 'drilldown-badge-closed' : 'drilldown-badge-open'),
+                    record.closed ? 'CLOSED' : 'OPEN');
+                  item.appendChild(badge);
+                }
+
+                var link = el('a', 'drilldown-link', 'View in HubSpot →');
+                link.href = record.url;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                item.appendChild(link);
+
+                item.appendChild(el('div', 'drilldown-missing', 'Missing: ' + record.missingFields.join(', ')));
+                panel.appendChild(item);
+              });
+            })
+            .catch(function (err) {
+              loaded = true;
+              panel.innerHTML = '';
+              panel.appendChild(el('div', 'drilldown-error',
+                (err.message || 'Could not load HubSpot records for this week.') + ' Try again in a moment.'));
+            });
+        });
+
+        wrap.appendChild(button);
+        return wrap;
+      }
+
       function renderBody(payload) {
         var body = document.getElementById('body-rows');
         body.innerHTML = '';
@@ -240,6 +370,8 @@
           var noteCell = el('td');
           noteCell.colSpan = payload.weeks.length + 2;
           noteCell.appendChild(el('div', 'metric-note', metric.note));
+          var drilldown = renderDrilldown(metric);
+          if (drilldown) noteCell.appendChild(drilldown);
           noteRow.appendChild(noteCell);
           body.appendChild(noteRow);
         });

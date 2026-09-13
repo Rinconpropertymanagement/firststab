@@ -53,6 +53,18 @@ const { METRICS, SCORECARD_TOOL, SCORECARD_READ_ROLES, SEQUENCE_DEPTH_WEEK_RULE,
 const { computeAll, writeRows } = require('./lib/compute-week');
 const { mondayOf, addDays, latestPublishableWeek, weeksEndingAt } = require('./lib/week');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
+const hubspotLeadsConnector = require('./lib/hubspot-leads-connector');
+const { findFailingContactsForWeek, findFailingDealsForWeek } = require('./lib/metrics');
+
+// `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
+// (RangeError) on anything else — a malformed `week` query param must be
+// rejected here, before mondayOf ever sees it, so a bad request 400s instead
+// of throwing past the route's try/catch as an unhandled rejection. A
+// date-shaped-but-wrong-weekday string (e.g. a real Tuesday) is intentionally
+// let through so it still reaches mondayOf's own "must be a Monday" check.
+function isParsableIsoDate(str) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) && !Number.isNaN(new Date(str).getTime());
+}
 
 // ─── Config ─────────────────────────────────────────────────────────────
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -291,6 +303,86 @@ router.get('/api/scorecard/metrics', requireScorecardAccess, async (req, res) =>
   });
 });
 
+// HubSpot's own object-type ids for building a record link — fixed and
+// documented publicly by HubSpot, not something this portal configures.
+const CONTACT_OBJECT_TYPE_ID = '0-1';
+const DEAL_OBJECT_TYPE_ID = '0-3';
+
+function hubspotRecordUrl(portalId, objectTypeId, objectId) {
+  return `https://app.hubspot.com/contacts/${portalId}/record/${objectTypeId}/${objectId}`;
+}
+
+/**
+ * GET /api/scorecard/crm-completeness/detail?type=contacts|deals&week=YYYY-MM-DD
+ *
+ * *** THIS ENDPOINT PUTS REAL PEOPLE'S NAMES AND LIVE HUBSPOT RECORD LINKS
+ * IN THE BROWSER. *** It exists so a human looking at a bad completeness
+ * week can see which records to go fix, without hand-searching HubSpot for
+ * them. Same discipline as the rest of the Scoreboard and the connector's
+ * own CRITICAL header: this reads HubSpot LIVE on every single call and
+ * hands the result straight back in the response. Nothing it returns is
+ * written anywhere — no table, no cache, no log line carrying a name or an
+ * id. That is the exact "no outside-individual identifier persists"
+ * property Asimov's condition on this Scoreboard protects for the stored
+ * weekly rows; here it is kept by never storing this output at all, rather
+ * than by not producing it. If you are the next person to touch this route:
+ * display-only, live-only, never stored.
+ *
+ * Reuses computeCrmContactCompleteness/computeCrmDealCompleteness's own
+ * population query and scoring rule (via findFailingContactsForWeek /
+ * findFailingDealsForWeek in lib/metrics.js) rather than a second
+ * implementation — so the count this returns can never silently disagree
+ * with the percentage stored on the Scoreboard for the same week.
+ */
+router.get('/api/scorecard/crm-completeness/detail', requireScorecardAccess, async (req, res) => {
+  const type = String(req.query.type || '');
+  if (type !== 'contacts' && type !== 'deals') {
+    return res.status(400).json({ error: 'type must be "contacts" or "deals".' });
+  }
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+
+    if (type === 'contacts') {
+      const { population, failing } = await findFailingContactsForWeek(hubspotLeadsConnector, week);
+      return res.json({
+        type: 'contacts',
+        week,
+        population,
+        failingCount: failing.length,
+        failing: failing.map((f) => ({
+          name: f.name,
+          url: hubspotRecordUrl(portalId, CONTACT_OBJECT_TYPE_ID, f.id),
+          missingFields: f.missingFields,
+        })),
+      });
+    }
+
+    const { population, failing } = await findFailingDealsForWeek(hubspotLeadsConnector, week);
+    return res.json({
+      type: 'deals',
+      week,
+      population,
+      failingCount: failing.length,
+      failing: failing.map((f) => ({
+        name: f.name,
+        url: hubspotRecordUrl(portalId, DEAL_OBJECT_TYPE_ID, f.id),
+        closed: f.closed,
+        missingFields: f.missingFields,
+      })),
+    });
+  } catch (err) {
+    console.error('[scorecard] crm-completeness detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
 // ─── Internal route — the weekly compute ────────────────────────────────
 // Authenticated with the same x-cron-secret header as every other tool's
 // internal router, so it must be mounted BEFORE requireLogin in server.js.
@@ -327,7 +419,7 @@ internalRouter.post('/api/scorecard/internal/compute', async (req, res) => {
   const depthWeek = req.query.depth_week ? String(req.query.depth_week) : undefined;
 
   for (const [name, value] of [['fast_week', fastWeek], ['depth_week', depthWeek]]) {
-    if (value && mondayOf(value) !== value) {
+    if (value && (!isParsableIsoDate(value) || mondayOf(value) !== value)) {
       return res.status(400).json({ error: `${name} must be a Monday (Pacific). ${value} is not one.` });
     }
   }

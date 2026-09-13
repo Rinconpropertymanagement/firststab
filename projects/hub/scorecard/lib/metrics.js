@@ -18,6 +18,19 @@
  * `hs_primary_contact_id` join in computePastLeadConversions and the
  * enrollment grouping in computeSequenceDepth are keys held in memory for
  * the length of one computation and dropped when it returns.
+ *
+ * *** ONE NAMED EXCEPTION, ADDED 2026-09-12: `findFailingContacts` and
+ * `findFailingDeals` (metric 11's drill-down helpers, alongside
+ * `scoreCrmContacts`/`scoreCrmDeals`). *** They DO return a contact/deal id
+ * and a name — on purpose, for the Scoreboard's live "see what's failing"
+ * drill-down (GET /api/scorecard/crm-completeness/detail in router.js). That
+ * endpoint reads HubSpot live on every call and hands the result straight to
+ * the browser; nothing it returns is ever written to `scorecard_weekly`, any
+ * other table, or a log line. That is the same "no outside-individual
+ * identifier persists" property Asimov's condition on this Scoreboard
+ * protects for every stored row — it is preserved by never storing this
+ * output, not by never producing it. Every other function in this file keeps
+ * the no-identifier rule exactly as before.
  */
 
 const {
@@ -504,6 +517,63 @@ async function computeLostDealsAddedToSequence(hubspot, weekStart) {
  * row, it simply has not reached metric 2's denominator yet.
  */
 
+/**
+ * Per-contact evaluation against the SOP's three fields. Pure, no network
+ * calls. This is the ONE place the pass/fail rule for a contact is written
+ * down — `scoreCrmContacts` (the stored aggregate) and `findFailingContacts`
+ * (the live drill-down) both call it, so the two can never quietly drift
+ * apart the way two hand-written copies of the same rule eventually do.
+ */
+function evaluateContact(contact) {
+  const importType = (contact.properties.import_type || '').trim();
+  const ownerPersona = (contact.properties.owner_persona || '').trim();
+  const leadStatus = (contact.properties.hs_lead_status || '').trim();
+
+  const importOk = importType !== '' && !IMPORT_TYPE_DEPRECATED_VALUES.includes(importType);
+  const personaOk = ownerPersona !== '' && !OWNER_PERSONA_DEPRECATED_VALUES.includes(ownerPersona);
+  const statusOk = leadStatus !== '';
+
+  return { importOk, personaOk, statusOk, complete: importOk && personaOk && statusOk };
+}
+
+/**
+ * Per-deal evaluation. Pure, no network calls. Same one-definition reasoning
+ * as `evaluateContact` above: `scoreCrmDeals` and `findFailingDeals` both
+ * call this rather than each keeping its own copy of the rule.
+ *
+ * Open vs. closed is decided by hs_is_closed_won/hs_is_closed_lost, NEVER
+ * the raw dealstage id — see LIVE VERIFICATION point 8 in
+ * hubspot-leads-connector.js for the "Onsite Consultation Complete" trap
+ * (dealstage id `closedlost`, hs_is_closed_lost correctly `false`) that
+ * makes the id unsafe to use here.
+ */
+function evaluateDeal(deal) {
+  const isClosedWon = String(deal.properties.hs_is_closed_won).trim().toLowerCase() === 'true';
+  const isClosedLost = String(deal.properties.hs_is_closed_lost).trim().toLowerCase() === 'true';
+  const closed = isClosedWon || isClosedLost;
+
+  const hasName = Boolean((deal.properties.dealname || '').trim());
+  const amount = Number(deal.properties.amount);
+  const hasPositiveAmount = Number.isFinite(amount) && amount > 0;
+  const numNotes = Number(deal.properties.num_notes || 0);
+  const hasNotes = numNotes > 0;
+
+  const complete = closed ? (hasName && hasPositiveAmount && hasNotes) : (hasName && hasPositiveAmount);
+  return { closed, hasName, hasPositiveAmount, hasNotes, complete };
+}
+
+/**
+ * A week that falls entirely before the 2026-04-01 population start has a
+ * legitimately EMPTY population, not a failure — same "denominator 0 is
+ * legal" rule metric 1 relies on. Shared by the two stored aggregates below
+ * and the two drill-down finders so the boundary is checked identically by
+ * both.
+ */
+function clampToPopulationStart(fromIso, toIso) {
+  const clampedFromIso = fromIso < CRM_COMPLETENESS_POPULATION_START_ISO ? CRM_COMPLETENESS_POPULATION_START_ISO : fromIso;
+  return { clampedFromIso, emptyWeek: clampedFromIso >= toIso };
+}
+
 /** Pure scoring over an already-fetched contact list. No network calls. */
 function scoreCrmContacts(contacts) {
   let importTypeValid = 0;
@@ -512,18 +582,11 @@ function scoreCrmContacts(contacts) {
   let allThree = 0;
 
   for (const contact of contacts) {
-    const importType = (contact.properties.import_type || '').trim();
-    const ownerPersona = (contact.properties.owner_persona || '').trim();
-    const leadStatus = (contact.properties.hs_lead_status || '').trim();
-
-    const importOk = importType !== '' && !IMPORT_TYPE_DEPRECATED_VALUES.includes(importType);
-    const personaOk = ownerPersona !== '' && !OWNER_PERSONA_DEPRECATED_VALUES.includes(ownerPersona);
-    const statusOk = leadStatus !== '';
-
-    if (importOk) importTypeValid++;
-    if (personaOk) ownerPersonaValid++;
-    if (statusOk) leadStatusPresent++;
-    if (importOk && personaOk && statusOk) allThree++;
+    const r = evaluateContact(contact);
+    if (r.importOk) importTypeValid++;
+    if (r.personaOk) ownerPersonaValid++;
+    if (r.statusOk) leadStatusPresent++;
+    if (r.complete) allThree++;
   }
 
   return { population: contacts.length, allThree, importTypeValid, ownerPersonaValid, leadStatusPresent };
@@ -531,12 +594,6 @@ function scoreCrmContacts(contacts) {
 
 /**
  * Pure scoring over an already-fetched deal list. No network calls.
- *
- * Open vs. closed is decided by hs_is_closed_won/hs_is_closed_lost, NEVER
- * the raw dealstage id — see LIVE VERIFICATION point 8 in
- * hubspot-leads-connector.js for the "Onsite Consultation Complete" trap
- * (dealstage id `closedlost`, hs_is_closed_lost correctly `false`) that
- * makes the id unsafe to use here.
  */
 function scoreCrmDeals(deals) {
   let openTotal = 0;
@@ -545,21 +602,13 @@ function scoreCrmDeals(deals) {
   let closedComplete = 0;
 
   for (const deal of deals) {
-    const isClosedWon = String(deal.properties.hs_is_closed_won).trim().toLowerCase() === 'true';
-    const isClosedLost = String(deal.properties.hs_is_closed_lost).trim().toLowerCase() === 'true';
-    const closed = isClosedWon || isClosedLost;
-
-    const hasName = Boolean((deal.properties.dealname || '').trim());
-    const amount = Number(deal.properties.amount);
-    const hasPositiveAmount = Number.isFinite(amount) && amount > 0;
-
-    if (closed) {
+    const r = evaluateDeal(deal);
+    if (r.closed) {
       closedTotal++;
-      const numNotes = Number(deal.properties.num_notes || 0);
-      if (hasName && hasPositiveAmount && numNotes > 0) closedComplete++;
+      if (r.complete) closedComplete++;
     } else {
       openTotal++;
-      if (hasName && hasPositiveAmount) openComplete++;
+      if (r.complete) openComplete++;
     }
   }
 
@@ -573,15 +622,68 @@ function scoreCrmDeals(deals) {
   };
 }
 
+/**
+ * The FAILING contacts out of an already-fetched contact list, each with
+ * which field(s) tripped it up. Live drill-down only — see this file's
+ * header for the named exception to the no-identifier rule. Uses the exact
+ * same `evaluateContact` scoreCrmContacts uses, so a contact never appears
+ * here without also being excluded from `allThree` above, or vice versa.
+ */
+function findFailingContacts(contacts) {
+  const failing = [];
+  for (const contact of contacts) {
+    const r = evaluateContact(contact);
+    if (r.complete) continue;
+    const missingFields = [];
+    if (!r.importOk) missingFields.push('import_type');
+    if (!r.personaOk) missingFields.push('owner_persona');
+    if (!r.statusOk) missingFields.push('hs_lead_status');
+    const name = [contact.properties.firstname, contact.properties.lastname]
+      .map((s) => (s || '').trim())
+      .filter(Boolean)
+      .join(' ');
+    failing.push({
+      id: contact.id,
+      name: name || contact.properties.email || null,
+      missingFields,
+    });
+  }
+  return failing;
+}
+
+/**
+ * The FAILING deals out of an already-fetched deal list, each with which
+ * requirement it's missing and whether it's open or closed. Live drill-down
+ * only — see this file's header. Uses the exact same `evaluateDeal`
+ * scoreCrmDeals uses.
+ */
+function findFailingDeals(deals) {
+  const failing = [];
+  for (const deal of deals) {
+    const r = evaluateDeal(deal);
+    if (r.complete) continue;
+    const missingFields = [];
+    if (!r.hasName) missingFields.push('deal name');
+    if (!r.hasPositiveAmount) missingFields.push('amount');
+    if (r.closed && !r.hasNotes) missingFields.push('activity notes (required once closed)');
+    failing.push({
+      id: deal.id,
+      name: (deal.properties.dealname || '').trim() || null,
+      closed: r.closed,
+      missingFields,
+    });
+  }
+  return failing;
+}
+
 async function computeCrmContactCompleteness(hubspot, weekStart) {
   const { fromIso, toIso } = weekBoundsIso(weekStart);
-  const clampedFromIso = fromIso < CRM_COMPLETENESS_POPULATION_START_ISO ? CRM_COMPLETENESS_POPULATION_START_ISO : fromIso;
+  const { clampedFromIso, emptyWeek } = clampToPopulationStart(fromIso, toIso);
 
-  // A week that falls entirely before 2026-04-01 has a legitimately EMPTY
-  // population, not a failure — same "denominator 0 is legal" rule metric 1
-  // relies on. Only reachable when this is called directly for a week
-  // outside computeAll()'s "current week only" usage.
-  if (clampedFromIso >= toIso) {
+  // Only reachable when this is called directly for a week outside
+  // computeAll()'s "current week only" usage (verify.js reproducing older
+  // weeks).
+  if (emptyWeek) {
     return {
       metric_key: 'crm_contact_completeness',
       metric_shape: 'rate',
@@ -609,9 +711,9 @@ async function computeCrmContactCompleteness(hubspot, weekStart) {
 
 async function computeCrmDealCompleteness(hubspot, weekStart) {
   const { fromIso, toIso } = weekBoundsIso(weekStart);
-  const clampedFromIso = fromIso < CRM_COMPLETENESS_POPULATION_START_ISO ? CRM_COMPLETENESS_POPULATION_START_ISO : fromIso;
+  const { clampedFromIso, emptyWeek } = clampToPopulationStart(fromIso, toIso);
 
-  if (clampedFromIso >= toIso) {
+  if (emptyWeek) {
     return {
       metric_key: 'crm_deal_completeness',
       metric_shape: 'rate',
@@ -637,6 +739,32 @@ async function computeCrmDealCompleteness(hubspot, weekStart) {
       dealsOutsideDefaultPipeline: outsideDefaultPipeline,
     },
   };
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/crm-completeness/detail:
+ * the SAME population computeCrmContactCompleteness would score for this
+ * week (reusing listContactsCreatedBetween and PROSPECT_LIFECYCLE_STAGES,
+ * never a second population query), reduced to just the contacts that fail.
+ * Reads HubSpot fresh on every call; returns nothing that gets stored.
+ */
+async function findFailingContactsForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const { clampedFromIso, emptyWeek } = clampToPopulationStart(fromIso, toIso);
+  if (emptyWeek) return { population: 0, failing: [] };
+
+  const { contacts } = await hubspot.listContactsCreatedBetween(clampedFromIso, toIso, PROSPECT_LIFECYCLE_STAGES);
+  return { population: contacts.length, failing: findFailingContacts(contacts) };
+}
+
+/** Same idea as findFailingContactsForWeek, for metric 11's deal side. */
+async function findFailingDealsForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const { clampedFromIso, emptyWeek } = clampToPopulationStart(fromIso, toIso);
+  if (emptyWeek) return { population: 0, failing: [] };
+
+  const { deals } = await hubspot.listDealsCreatedBetween(clampedFromIso, toIso);
+  return { population: deals.length, failing: findFailingDeals(deals) };
 }
 
 // ─── The name-drift check ─────────────────────────────────────────────────
@@ -679,5 +807,9 @@ module.exports = {
   computeCrmDealCompleteness,
   scoreCrmContacts,
   scoreCrmDeals,
+  findFailingContacts,
+  findFailingDeals,
+  findFailingContactsForWeek,
+  findFailingDealsForWeek,
   checkWorkflowNameDrift,
 };

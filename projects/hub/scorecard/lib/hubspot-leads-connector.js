@@ -107,6 +107,16 @@
  *      open deal that a dealstage-id check would silently misclassify as
  *      closed. Everything in this file that needs open-vs-closed reads
  *      these two booleans and never the raw `dealstage`/`pipeline` id.
+ *   9. The completeness drill-down (2026-09-12) added `getPortalId()` and
+ *      three contact properties (`firstname`, `lastname`, `email`) — no new
+ *      domain, same contacts/deals objects this file already reads for
+ *      metric 11. `GET /account-info/v3/details` resolves this portal's id
+ *      as `9021603`, confirmed live 2026-09-12 and stable across repeated
+ *      calls in the same process. Drill-down output was cross-checked
+ *      against the stored aggregate for two real weeks (2026-08-24 and
+ *      2026-08-31): failing-record counts matched the aggregate's
+ *      (population − numerator) exactly on both the contact and deal side,
+ *      including a week with zero failures.
  * ============================================================
  */
 
@@ -119,6 +129,7 @@ const CONTACTS_SEARCH_PATH = '/crm/v3/objects/contacts/search';
 const TASK_CONTACT_ASSOCIATIONS_PATH = '/crm/v4/associations/tasks/contacts/batch/read';
 const OWNERS_PATH = '/crm/v3/owners';
 const FLOW_PATH_PREFIX = '/automation/v4/flows/';
+const ACCOUNT_INFO_PATH = '/account-info/v3/details';
 
 const PAGE_SIZE = 100;
 const ASSOCIATION_BATCH_SIZE = 100;
@@ -168,6 +179,12 @@ const DEAL_PROPERTIES = [
 // HubSpot's native field, "updated as activity occurs" per the SOP. See
 // crm-completeness-config.js for the deprecated-value lists these are
 // checked against.
+//
+// `firstname`/`lastname`/`email` were added 2026-09-12 for the completeness
+// drill-down (GET /api/scorecard/crm-completeness/detail) — they carry no
+// weight in the completeness score itself, they only let the drill-down show
+// which contact a failure belongs to. Nothing about the population filter or
+// the pass/fail rule changes by fetching them.
 const CONTACT_PROPERTIES = [
   'hs_object_id',
   'createdate',
@@ -175,6 +192,9 @@ const CONTACT_PROPERTIES = [
   'import_type',
   'owner_persona',
   'hs_lead_status',
+  'firstname',
+  'lastname',
+  'email',
 ];
 
 const TASK_PROPERTIES = [
@@ -586,6 +606,37 @@ async function readWorkflowName(v4FlowId) {
   }
 }
 
+/**
+ * The portal (account) id, for building a working link to a record —
+ * `https://app.hubspot.com/contacts/{portalId}/record/{objectTypeId}/{id}`.
+ * Added 2026-09-12 for the completeness drill-down; nothing before it needed
+ * a link back into HubSpot's UI.
+ *
+ * Cached at module scope, unlike every population read in this file. That is
+ * deliberate and safe: read-cache.js's per-run cache exists because CRM
+ * record STATE is live and must not be read twice at different moments
+ * within one computation. A portal's own account id is not record state —
+ * it is a fixed account setting that does not change between one Scoreboard
+ * page load and the next — so caching it for the life of the process carries
+ * none of the "history rewrite" risk read-cache.js's header warns against.
+ *
+ * @returns {Promise<string>}
+ */
+let cachedPortalId = null;
+async function getPortalId() {
+  if (cachedPortalId) return cachedPortalId;
+  const body = await hubspotJson(
+    ACCOUNT_INFO_PATH,
+    { method: 'GET', headers: { Authorization: authHeader() } },
+    'account-info read'
+  );
+  if (!body || body.portalId === undefined || body.portalId === null) {
+    throw new Error('HubSpot account-info read did not return a portalId.');
+  }
+  cachedPortalId = String(body.portalId);
+  return cachedPortalId;
+}
+
 module.exports = {
   EXCLUDED_DISQUALIFICATION_REASONS,
   listLeadsCreatedBetween,
@@ -599,4 +650,5 @@ module.exports = {
   listContactIdsForTasks,
   resolveOwnerIdByEmail,
   readWorkflowName,
+  getPortalId,
 };

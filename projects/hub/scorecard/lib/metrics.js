@@ -34,6 +34,8 @@
  *     behind GET /api/scorecard/crm-completeness/detail.
  *   - ADDED 2026-09-13: `findLeadDetailsForWeek` (metric 1's drill-down),
  *     behind GET /api/scorecard/booking-rate/detail.
+ *   - ADDED 2026-09-13: `findFollowupTouchesForWeek` (metrics 2 and 3's
+ *     drill-down), behind GET /api/scorecard/followup-touches/detail.
  */
 
 const {
@@ -231,36 +233,113 @@ async function findLeadDetailsForWeek(hubspot, weekStart) {
  * a 15-week window) lands in neither and is reported as `otherSourceLabels`
  * rather than quietly folded into one side.
  */
-async function computeFollowupTouches(hubspot, weekStart, ownerHubspotId) {
-  const { fromIso, toIso } = weekBoundsIso(weekStart);
-  const tasks = await hubspot.listTasksCompletedBetween(fromIso, toIso);
 
-  let worked = 0;
-  let automation = 0;
+/**
+ * The owner filter and worked/automation split, pulled out so the stored
+ * aggregate (`computeFollowupTouches` below) and the live drill-down
+ * (`findFollowupTouchesForWeek`, further down) run the EXACT SAME population
+ * query rather than two copies that could drift apart. Returns the matching
+ * task objects themselves, not just counts, since the drill-down needs the
+ * tasks and the aggregate only needs their length.
+ */
+function splitFollowupTasksByOwner(tasks, ownerHubspotId) {
+  const worked = [];
+  const automation = [];
   const otherSourceLabels = {};
 
   for (const task of tasks) {
     if (String(task.properties.hubspot_owner_id || '') !== String(ownerHubspotId)) continue;
     const label = (task.properties.hs_object_source_label || '').trim();
-    if (WORKED_TASK_SOURCE_LABELS.includes(label)) worked++;
-    else if (AUTOMATION_TASK_SOURCE_LABELS.includes(label)) automation++;
+    if (WORKED_TASK_SOURCE_LABELS.includes(label)) worked.push(task);
+    else if (AUTOMATION_TASK_SOURCE_LABELS.includes(label)) automation.push(task);
     else otherSourceLabels[label || '(none)'] = (otherSourceLabels[label || '(none)'] || 0) + 1;
   }
+
+  return { worked, automation, otherSourceLabels };
+}
+
+async function computeFollowupTouches(hubspot, weekStart, ownerHubspotId) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const tasks = await hubspot.listTasksCompletedBetween(fromIso, toIso);
+  const { worked, automation, otherSourceLabels } = splitFollowupTasksByOwner(tasks, ownerHubspotId);
 
   return [
     {
       metric_key: 'followup_touches_worked',
       metric_shape: 'count',
-      numerator: worked,
+      numerator: worked.length,
       diagnostics: { otherSourceLabels, tasksConsidered: tasks.length },
     },
     {
       metric_key: 'followup_touches_automation',
       metric_shape: 'count',
-      numerator: automation,
+      numerator: automation.length,
       diagnostics: { otherSourceLabels, tasksConsidered: tasks.length },
     },
   ];
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/followup-touches/detail.
+ *
+ * Runs `splitFollowupTasksByOwner` over the SAME `listTasksCompletedBetween`
+ * call `computeFollowupTouches` makes, so `worked.count` and
+ * `automation.count` below equal the stored numerator for
+ * `followup_touches_worked`/`followup_touches_automation` for this week
+ * EXACTLY, by construction — not by re-deriving the same filter a second
+ * time, which is exactly the kind of drift this file's header warns about.
+ *
+ * CONTACT NAME JOIN, BATCHED ONCE. A task carries no name of its own, only
+ * an association to whichever contact it was worked against. The naive
+ * approach — one `listContactIdsForTasks` call per task — would be N
+ * requests for a week that can hold over a hundred touches; instead this
+ * calls it ONCE for every task in both halves combined (worked concat
+ * automation), exactly the same batching `findLeadDetailsForWeek` above uses
+ * for the booking-rate drill-down (`listContactIdsForDeals` there,
+ * `listContactIdsForTasks` here — same association-batch-read family), then
+ * `getContactsByIds` ONCE more for every contact id that came back. Two
+ * network round-trips total for the whole week, not one per task.
+ *
+ * A task can carry more than one associated contact in principle; this build
+ * has not observed that in practice and takes the first id HubSpot returns.
+ * If a task genuinely has none (a touch logged without an association), its
+ * `contactName` is simply null — the task itself is still listed, since the
+ * touch happened regardless of whether a contact join succeeded.
+ */
+async function findFollowupTouchesForWeek(hubspot, weekStart, ownerHubspotId) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const tasks = await hubspot.listTasksCompletedBetween(fromIso, toIso);
+  const { worked, automation, otherSourceLabels } = splitFollowupTasksByOwner(tasks, ownerHubspotId);
+
+  const relevantTasks = worked.concat(automation);
+  const contactIdsByTask = await hubspot.listContactIdsForTasks(relevantTasks.map((t) => t.id));
+  const allContactIds = new Set();
+  for (const ids of contactIdsByTask.values()) {
+    for (const id of ids) allContactIds.add(id);
+  }
+  const contactsById = await hubspot.getContactsByIds([...allContactIds]);
+
+  function detailFor(task) {
+    const contactIds = contactIdsByTask.get(task.id) || [];
+    const contactId = contactIds[0] || null;
+    const contactProps = contactId ? contactsById.get(contactId) : null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+    return {
+      id: task.id,
+      subject: task.properties.hs_task_subject || null,
+      sourceLabel: (task.properties.hs_object_source_label || '').trim(),
+      completedDate: task.properties.hs_task_completion_date,
+      contactName: name || (contactProps && contactProps.email) || null,
+    };
+  }
+
+  return {
+    worked: { count: worked.length, tasks: worked.map(detailFor) },
+    automation: { count: automation.length, tasks: automation.map(detailFor) },
+    diagnostics: { otherSourceLabels, tasksConsidered: tasks.length },
+  };
 }
 
 // ─── Metric 4 — sequence depth ────────────────────────────────────────────
@@ -895,6 +974,7 @@ module.exports = {
   computeLeadToDiscoveryCallRate,
   findLeadDetailsForWeek,
   computeFollowupTouches,
+  findFollowupTouchesForWeek,
   computeSequenceDepth,
   computePastLeadConversions,
   computeReengagementAttempts,

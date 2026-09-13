@@ -49,12 +49,17 @@ const path = require('path');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 
-const { METRICS, SCORECARD_TOOL, SCORECARD_READ_ROLES, SEQUENCE_DEPTH_WEEK_RULE, SEQUENCE_DEPTH_HOLD_DAYS } = require('./lib/config');
+const { METRICS, METRIC_OWNERS, SCORECARD_TOOL, SCORECARD_READ_ROLES, SEQUENCE_DEPTH_WEEK_RULE, SEQUENCE_DEPTH_HOLD_DAYS } = require('./lib/config');
 const { computeAll, writeRows } = require('./lib/compute-week');
 const { mondayOf, addDays, latestPublishableWeek, weeksEndingAt } = require('./lib/week');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 const hubspotLeadsConnector = require('./lib/hubspot-leads-connector');
-const { findFailingContactsForWeek, findFailingDealsForWeek, findLeadDetailsForWeek } = require('./lib/metrics');
+const {
+  findFailingContactsForWeek,
+  findFailingDealsForWeek,
+  findLeadDetailsForWeek,
+  findFollowupTouchesForWeek,
+} = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
 // (RangeError) on anything else — a malformed `week` query param must be
@@ -329,6 +334,13 @@ function hubspotLeadUrl(portalId, leadId) {
   return `https://app.hubspot.com/contacts/${portalId}/objects/${LEAD_OBJECT_TYPE_ID}/views/all/list?leadId=${leadId}`;
 }
 
+// A task's URL is a THIRD shape, neither the contact/deal record shape nor
+// the lead list-view shape above — confirmed live 2026-09-13 against a real
+// task, see hubspot-leads-connector.js's LIVE VERIFICATION point 12.
+function hubspotTaskUrl(portalId, taskId) {
+  return `https://app.hubspot.com/tasks/${portalId}/view/all/task/${taskId}`;
+}
+
 /**
  * GET /api/scorecard/crm-completeness/detail?type=contacts|deals&week=YYYY-MM-DD
  *
@@ -443,6 +455,67 @@ router.get('/api/scorecard/booking-rate/detail', requireScorecardAccess, async (
     });
   } catch (err) {
     console.error('[scorecard] booking-rate detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/followup-touches/detail?type=worked|automation&week=YYYY-MM-DD
+ *
+ * Same discipline as the two drill-downs above — read this file's header
+ * comment on crm-completeness/detail first, it all applies here unchanged:
+ * reads HubSpot LIVE on every call, nothing it returns is written anywhere,
+ * display-only.
+ *
+ * One route for both metrics, `type` selecting which half of
+ * findFollowupTouchesForWeek's single pass to serve — the same shape
+ * crm-completeness/detail already uses for its `type=contacts|deals`, not
+ * two near-identical route handlers for what is one function's two outputs.
+ *
+ * Every task returned is a legitimate touch, same framing as the
+ * booking-rate drill-down: this is activity, not a defect list, so there is
+ * no "failing" population here.
+ */
+router.get('/api/scorecard/followup-touches/detail', requireScorecardAccess, async (req, res) => {
+  const type = String(req.query.type || '');
+  if (type !== 'worked' && type !== 'automation') {
+    return res.status(400).json({ error: 'type must be "worked" or "automation".' });
+  }
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    // Both metrics share one owner (METRIC_OWNERS — see config.js), resolved
+    // live rather than hardcoded, exactly like compute-week.js does for the
+    // stored aggregate.
+    const ownerHubspotId = await hubspotLeadsConnector.resolveOwnerIdByEmail(METRIC_OWNERS.followup_touches_worked);
+    if (!ownerHubspotId) {
+      return res.status(500).json({ error: 'Could not resolve the metric owner in HubSpot.' });
+    }
+
+    const { worked, automation, diagnostics } = await findFollowupTouchesForWeek(hubspotLeadsConnector, week, ownerHubspotId);
+    const half = type === 'worked' ? worked : automation;
+
+    res.json({
+      type,
+      week,
+      count: half.count,
+      tasks: half.tasks.map((t) => ({
+        subject: t.subject,
+        sourceLabel: t.sourceLabel,
+        completedDate: t.completedDate,
+        contactName: t.contactName,
+        url: hubspotTaskUrl(portalId, t.id),
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] followup-touches detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

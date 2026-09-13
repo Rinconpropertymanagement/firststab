@@ -165,6 +165,18 @@
  *      strongest confirmation available without granting the token a new
  *      scope, not a substitute for a human click-through, and the report
  *      for this build says so plainly.
+ *  12. The follow-up touches drill-down (2026-09-13) added
+ *      `hs_task_subject` to TASK_PROPERTIES — no new domain, tasks were
+ *      already read here for four other metrics, this is one more field on
+ *      an object already in scope. Task record URL confirmed live
+ *      2026-09-13 against a real task: `https://app.hubspot.com/tasks/9021603/view/all/task/{taskId}`
+ *      — a THIRD shape, different from both the contact/deal
+ *      `/record/{typeId}/{id}` shape and the lead
+ *      `/objects/0-136/views/all/list?leadId=...` shape above. Built in
+ *      router.js as `hubspotTaskUrl(portalId, taskId)`, portalId supplied by
+ *      the same `getPortalId()` every other drill-down link already uses —
+ *      never the literal `9021603` hardcoded, even though that is what this
+ *      portal's id happens to be today.
  * ============================================================
  */
 
@@ -255,6 +267,12 @@ const TASK_PROPERTIES = [
   'hs_object_source_detail_1',
   'hs_object_source_id',
   'hs_task_sequence_id',
+  // Added 2026-09-13 for the follow-up touches drill-down (GET
+  // /api/scorecard/followup-touches/detail) — the task's own title, so a
+  // human can tell what the touch actually was without opening HubSpot.
+  // Carries no weight in any metric's count; every existing caller of
+  // TASK_PROPERTIES simply receives one more field it already ignored.
+  'hs_task_subject',
   // Metric 10's per-PERSON key. NOT hs_object_source_id's enrollment id
   // (used elsewhere in this file for workflow enrollments) — that one is
   // per-TASK and overcounts a multi-touch sequence enrollment as several

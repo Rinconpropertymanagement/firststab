@@ -172,6 +172,23 @@
           },
           render: renderBookingRateDrilldownResult,
         },
+        // Same non-"failing" framing as booking rate above, not
+        // completeness's: every task here is a legitimate touch, just split
+        // by who (or what) did it.
+        followup_touches_worked: {
+          buttonLabel: 'See this week’s touches',
+          buildUrl: function (week) {
+            return '/api/scorecard/followup-touches/detail?type=worked&week=' + encodeURIComponent(week);
+          },
+          render: renderFollowupTouchesDrilldownResult,
+        },
+        followup_touches_automation: {
+          buttonLabel: 'See this week’s touches',
+          buildUrl: function (week) {
+            return '/api/scorecard/followup-touches/detail?type=automation&week=' + encodeURIComponent(week);
+          },
+          render: renderFollowupTouchesDrilldownResult,
+        },
       };
 
       // Renders one CRM-completeness drill-down response (`type`: 'contacts'
@@ -270,6 +287,43 @@
 
           var createdShort = typeof lead.createdDate === 'string' ? shortDate(lead.createdDate.slice(0, 10)) : '—';
           item.appendChild(el('div', 'drilldown-meta', 'Created ' + createdShort + ' · Stage: ' + (lead.stage || '—')));
+          panel.appendChild(item);
+        });
+      }
+
+      // Renders one follow-up-touches drill-down response into `panel`.
+      // Every task here is a legitimate touch — there is no pass/fail line
+      // on activity — so, same as the booking-rate renderer above, this
+      // deliberately does not borrow the completeness drill-down's
+      // "failing"/"missing" language. `data.type` ('worked' or 'automation')
+      // only affects wording, never which tasks are shown; the backend
+      // route has already picked the right half.
+      function renderFollowupTouchesDrilldownResult(panel, data, week) {
+        if (!data.tasks || data.tasks.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No touches the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.count + ' touch' + (data.count === 1 ? '' : 'es') + ' the week of ' + week +
+          ' (' + (data.type === 'worked' ? 'worked by a person' : 'created by automation') + '):');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.tasks.forEach(function (task) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', task.subject || '(no subject on task)');
+          item.appendChild(nameLine);
+
+          var link = el('a', 'drilldown-link', 'View in HubSpot →');
+          link.href = task.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+
+          var completedShort = typeof task.completedDate === 'string' ? shortDate(task.completedDate.slice(0, 10)) : '—';
+          item.appendChild(el('div', 'drilldown-meta',
+            'Completed ' + completedShort + (task.contactName ? ' · ' + task.contactName : '')));
           panel.appendChild(item);
         });
       }

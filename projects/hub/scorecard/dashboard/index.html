@@ -53,6 +53,10 @@
 
     /* CRM completeness drill-down — reads HubSpot live, nothing is stored. */
     .drilldown { margin-top: 8px; }
+    .drilldown-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .drilldown-week-select { font: inherit; font-size: 11.5px; padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; color: #374151; cursor: pointer; }
+    .drilldown-week-select:hover { border-color: #9ca3af; }
+    .drilldown-week-select:disabled { color: #9ca3af; cursor: default; }
     .drilldown-btn { font: inherit; font-size: 11.5px; padding: 4px 11px; border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #1d4ed8; cursor: pointer; }
     .drilldown-btn:hover { background: #eff6ff; }
     .drilldown-btn:disabled { color: #9ca3af; cursor: default; background: #fff; }
@@ -229,44 +233,65 @@
       // row. Calls the live drill-down endpoint on click — nothing is
       // fetched, cached, or stored ahead of a click, and nothing it fetches
       // is kept anywhere once the page is left (no localStorage, nothing
-      // written back to the server). It always asks for the metric's own
-      // latest complete week, matching the note row it lives in.
+      // written back to the server). It defaults to the metric's own latest
+      // complete week, matching the note row it lives in, but a <select> lets
+      // the viewer pick any other week that already has a row in the trend
+      // shown on the page today — a week with no row has nothing to drill
+      // into, so it is never offered as an option.
       function renderDrilldown(metric) {
         var type = DRILLDOWN_TYPE_BY_METRIC_KEY[metric.key];
         if (!type) return null;
 
         var wrap = el('div', 'drilldown');
-        var button = el('button', 'drilldown-btn', 'See what’s failing');
-        button.type = 'button';
-        var panel = null; // created (and destroyed) on toggle, never pre-fetched
-        var loaded = false;
 
         if (!metric.latestWeek) {
-          button.disabled = true;
-          button.title = 'No week has been computed yet for this metric.';
-          wrap.appendChild(button);
+          var disabledButton = el('button', 'drilldown-btn', 'See what’s failing');
+          disabledButton.type = 'button';
+          disabledButton.disabled = true;
+          disabledButton.title = 'No week has been computed yet for this metric.';
+          wrap.appendChild(disabledButton);
           return wrap;
         }
 
-        button.addEventListener('click', function () {
-          if (panel) {
-            // Collapse. Re-clicking "See what's failing" re-fetches live
-            // rather than reusing what's in the DOM — this is a live-only
-            // view, not a cache.
-            panel.remove();
-            panel = null;
-            loaded = false;
-            button.textContent = 'See what’s failing';
-            return;
-          }
+        // Only weeks with an actual computed row for THIS metric, taken from
+        // its own trend cells (already fetched for the page currently shown)
+        // — never a free-typed date. Newest first, so the top of the list
+        // matches today's default.
+        var availableWeeks = metric.cells
+          .filter(function (c) { return c.present; })
+          .map(function (c) { return c.week; })
+          .sort(function (a, b) { return a < b ? 1 : (a > b ? -1 : 0); });
+        if (availableWeeks.indexOf(metric.latestWeek) === -1) {
+          // Defensive: latestWeek always has a row by definition, but if the
+          // currently-shown range (4/8/13 weeks) doesn't happen to include it,
+          // make sure the default selection still exists as an option.
+          availableWeeks.unshift(metric.latestWeek);
+        }
 
-          button.textContent = 'Hide';
-          panel = el('div', 'drilldown-panel');
+        var controls = el('div', 'drilldown-controls');
+        var select = document.createElement('select');
+        select.className = 'drilldown-week-select';
+        select.title = 'Choose which week to inspect';
+        availableWeeks.forEach(function (week) {
+          var option = document.createElement('option');
+          option.value = week;
+          option.textContent = 'Week of ' + week;
+          if (week === metric.latestWeek) option.selected = true;
+          select.appendChild(option);
+        });
+
+        var button = el('button', 'drilldown-btn', 'See what’s failing');
+        button.type = 'button';
+        var panel = null; // created (and destroyed) on toggle, never pre-fetched
+        var requestSeq = 0; // guards against a slow response for an old week landing after a newer selection
+
+        function loadWeek(week) {
+          var mySeq = ++requestSeq;
+          panel.innerHTML = '';
           panel.appendChild(el('div', 'drilldown-loading', 'Reading HubSpot live — this can take a few seconds…'));
-          wrap.appendChild(panel);
 
           var url = '/api/scorecard/crm-completeness/detail?type=' + encodeURIComponent(type) +
-            '&week=' + encodeURIComponent(metric.latestWeek);
+            '&week=' + encodeURIComponent(week);
 
           fetch(url, { credentials: 'include' })
             .then(function (response) {
@@ -278,7 +303,7 @@
               return response.json();
             })
             .then(function (data) {
-              loaded = true;
+              if (mySeq !== requestSeq || !panel) return; // a newer week was picked before this one returned
               panel.innerHTML = '';
 
               if (!data.failing || data.failing.length === 0) {
@@ -289,7 +314,7 @@
 
               var summary = el('div', 'metric-note',
                 data.failing.length + ' of ' + data.population + ' records for the week of ' +
-                metric.latestWeek + ' are missing something:');
+                week + ' are missing something:');
               summary.style.marginBottom = '6px';
               panel.appendChild(summary);
 
@@ -315,14 +340,36 @@
               });
             })
             .catch(function (err) {
-              loaded = true;
+              if (mySeq !== requestSeq || !panel) return;
               panel.innerHTML = '';
               panel.appendChild(el('div', 'drilldown-error',
                 (err.message || 'Could not load HubSpot records for this week.') + ' Try again in a moment.'));
             });
+        }
+
+        select.addEventListener('change', function () {
+          if (panel) loadWeek(select.value);
         });
 
-        wrap.appendChild(button);
+        button.addEventListener('click', function () {
+          if (panel) {
+            // Collapse. Re-opening re-fetches live rather than reusing what's
+            // in the DOM — this is a live-only view, not a cache.
+            panel.remove();
+            panel = null;
+            button.textContent = 'See what’s failing';
+            return;
+          }
+
+          button.textContent = 'Hide';
+          panel = el('div', 'drilldown-panel');
+          wrap.appendChild(panel);
+          loadWeek(select.value);
+        });
+
+        controls.appendChild(select);
+        controls.appendChild(button);
+        wrap.appendChild(controls);
         return wrap;
       }
 

@@ -1,0 +1,17 @@
+{
+  "name": "rincon-content-engine",
+  "version": "1.0.0",
+  "description": "Drafts blog posts, FAQs, and reports for Rincon Management, grounded in the Ventura County legal compliance knowledge base. Writes drafts to Supabase for human review — never publishes anywhere.",
+  "main": "draft-content.js",
+  "scripts": {
+    "draft": "node draft-content.js",
+    "captions": "node generate-captions.js",
+    "backfill-posts": "node backfill-published-posts.js",
+    "scan-legal-updates": "node scan-legal-updates.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^16.4.5"
+  }
+}

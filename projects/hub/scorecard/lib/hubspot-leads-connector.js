@@ -117,6 +117,54 @@
  *      2026-08-31): failing-record counts matched the aggregate's
  *      (population − numerator) exactly on both the contact and deal side,
  *      including a week with zero failures.
+ *  10. The booking-rate drill-down (2026-09-13) added `listContactIdsForDeals()`
+ *      (same batch-association read family as `listContactIdsForTasks()`,
+ *      just `/crm/v4/associations/deals/contacts/batch/read` instead of
+ *      `tasks/contacts`) and `getContactsByIds()` (a new batch READ,
+ *      `/crm/v3/objects/contacts/batch/read` — HubSpot's own name, not a
+ *      search, and nothing this file has not already done for tasks). Both
+ *      confirmed working live 2026-09-13.
+ *
+ *      A FINDING FROM THAT VERIFICATION, WORTH RECORDING: joining this
+ *      week's leads to this week's deals by shared primary-contact-id does
+ *      NOT reconstruct the stored numerator. Checked against three real
+ *      weeks: 2026-06-01 (8 leads, 8 deals, only 4 leads' contacts matched
+ *      a deal created that same week), 2026-04-06 (4 leads, 5 deals, 3
+ *      matched) and 2026-08-31 (15 leads, 6 deals, 5 matched). The stored
+ *      numerator counts EVERY deal created in the week regardless of when
+ *      its contact's lead was created — a deal can close in a week its lead
+ *      was created in an earlier (or, rarely, later) week — so a same-week
+ *      contact join is always an undercount relative to the raw deal count,
+ *      never a reconstruction of it. The drill-down route therefore reports
+ *      `population`/`convertedCount` straight from the SAME
+ *      listLeadsCreatedBetween/listDealsCreatedBetween calls metric 1 uses
+ *      (guaranteeing they equal the stored denominator/numerator exactly,
+ *      by construction, not by this join), and shows the join's per-lead
+ *      result as a separate, honestly-labelled, best-effort figure — see
+ *      metrics.js's findLeadDetailsForWeek() header.
+ *  11. Lead object-type id for building a working HubSpot link: `0-136`.
+ *      This portal's HUBSPOT_PRIVATE_APP_TOKEN cannot read
+ *      `/crm/v3/schemas` (403 — permission-gated, not 404/not-found, so the
+ *      object exists but this token cannot list its schema), so it cannot
+ *      be confirmed from inside this file the way portalId is. Confirmed
+ *      instead, live, 2026-09-13, from a DIFFERENT credential against the
+ *      SAME portal (account id 9021603, matching getPortalId() exactly):
+ *      HubSpot's own "Claude for HubSpot" connector returned a lead record
+ *      with a self-describing link embedding the type id twice, in two
+ *      independent tool calls (a search and a direct fetch by id) —
+ *      `https://app.hubspot.com/contacts/9021603/objects/0-136/views/all/list?leadId=849740457666`.
+ *      That is ALSO the confirmation that leads do NOT use the
+ *      `/record/{portalId}/record/{typeId}/{id}` URL shape this file's
+ *      CONTACT_OBJECT_TYPE_ID/DEAL_OBJECT_TYPE_ID use (router.js's
+ *      `hubspotRecordUrl`) — the same connector returned that exact
+ *      `/record/.../0-1/{id}` shape for a contact fetched the same way, so
+ *      the difference is real, not an artifact of the tool. Leads get their
+ *      own URL builder in router.js (`hubspotLeadUrl`) for this reason. Not
+ *      confirmed by actually opening the link in a signed-in browser — this
+ *      build has no access to Peter's HubSpot session — so this is the
+ *      strongest confirmation available without granting the token a new
+ *      scope, not a substitute for a human click-through, and the report
+ *      for this build says so plainly.
  * ============================================================
  */
 
@@ -127,6 +175,8 @@ const DEALS_SEARCH_PATH = '/crm/v3/objects/deals/search';
 const TASKS_SEARCH_PATH = '/crm/v3/objects/tasks/search';
 const CONTACTS_SEARCH_PATH = '/crm/v3/objects/contacts/search';
 const TASK_CONTACT_ASSOCIATIONS_PATH = '/crm/v4/associations/tasks/contacts/batch/read';
+const DEAL_CONTACT_ASSOCIATIONS_PATH = '/crm/v4/associations/deals/contacts/batch/read';
+const CONTACTS_BATCH_READ_PATH = '/crm/v3/objects/contacts/batch/read';
 const OWNERS_PATH = '/crm/v3/owners';
 const FLOW_PATH_PREFIX = '/automation/v4/flows/';
 const ACCOUNT_INFO_PATH = '/account-info/v3/details';
@@ -560,6 +610,74 @@ async function listContactIdsForTasks(taskIds) {
 }
 
 /**
+ * Contact ids associated with each of `dealIds` — the booking-rate
+ * drill-down's join from a deal back to a contact (and from there, in
+ * metrics.js, to whichever lead shares that contact). Same batch READ
+ * family as `listContactIdsForTasks()` above, one line up from it in
+ * HubSpot's own API (deals/contacts instead of tasks/contacts). See LIVE
+ * VERIFICATION point 10 for why this join is informational rather than a
+ * reconstruction of the stored numerator.
+ *
+ * @returns {Promise<Map<string, string[]>>} deal id -> contact ids
+ */
+async function listContactIdsForDeals(dealIds) {
+  const map = new Map();
+  if (!dealIds || dealIds.length === 0) return map;
+
+  for (let i = 0; i < dealIds.length; i += ASSOCIATION_BATCH_SIZE) {
+    const inputs = dealIds.slice(i, i + ASSOCIATION_BATCH_SIZE).map((id) => ({ id: String(id) }));
+    const body = await hubspotJson(
+      DEAL_CONTACT_ASSOCIATIONS_PATH,
+      {
+        method: 'POST', // batch READ — HubSpot exposes it as a POST; nothing is created.
+        headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs }),
+      },
+      'deal-contact associations batch read'
+    );
+    for (const row of body.results || []) {
+      map.set(String(row.from.id), (row.to || []).map((t) => String(t.toObjectId)));
+    }
+  }
+  return map;
+}
+
+/**
+ * `firstname`/`lastname`/`email` for each of `contactIds`, keyed by id. Used
+ * ONLY by the booking-rate drill-down to put a name on a lead, the same way
+ * the completeness drill-down already puts a name on a contact/deal — the
+ * lead object itself carries no name field (LEAD_PROPERTIES above), only
+ * `hs_primary_contact_id`, so the name has to be joined in from the contact.
+ *
+ * A batch READ, HubSpot's own name for it — never a search, and the same
+ * shape as `listContactIdsForTasks()`'s association read one screen up: a
+ * fixed endpoint, ids in, records out, nothing created or changed.
+ *
+ * @returns {Promise<Map<string, object>>} contact id -> properties
+ */
+async function getContactsByIds(contactIds) {
+  const map = new Map();
+  if (!contactIds || contactIds.length === 0) return map;
+
+  for (let i = 0; i < contactIds.length; i += ASSOCIATION_BATCH_SIZE) {
+    const inputs = contactIds.slice(i, i + ASSOCIATION_BATCH_SIZE).map((id) => ({ id: String(id) }));
+    const body = await hubspotJson(
+      CONTACTS_BATCH_READ_PATH,
+      {
+        method: 'POST', // batch READ — HubSpot exposes it as a POST; nothing is created.
+        headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs, properties: ['firstname', 'lastname', 'email'] }),
+      },
+      'contacts batch read'
+    );
+    for (const row of body.results || []) {
+      map.set(String(row.id), row.properties || {});
+    }
+  }
+  return map;
+}
+
+/**
  * The HubSpot owner id for an email address, resolved at run time.
  *
  * Never hardcoded. Note carefully what this is and is not: it resolves an
@@ -648,6 +766,8 @@ module.exports = {
   listQualifiedLeads,
   listContactsCreatedBetween,
   listContactIdsForTasks,
+  listContactIdsForDeals,
+  getContactsByIds,
   resolveOwnerIdByEmail,
   readWorkflowName,
   getPortalId,

@@ -19,23 +19,27 @@
  * enrollment grouping in computeSequenceDepth are keys held in memory for
  * the length of one computation and dropped when it returns.
  *
- * *** ONE NAMED EXCEPTION, ADDED 2026-09-12: `findFailingContacts` and
- * `findFailingDeals` (metric 11's drill-down helpers, alongside
- * `scoreCrmContacts`/`scoreCrmDeals`). *** They DO return a contact/deal id
- * and a name — on purpose, for the Scoreboard's live "see what's failing"
- * drill-down (GET /api/scorecard/crm-completeness/detail in router.js). That
- * endpoint reads HubSpot live on every call and hands the result straight to
- * the browser; nothing it returns is ever written to `scorecard_weekly`, any
- * other table, or a log line. That is the same "no outside-individual
- * identifier persists" property Asimov's condition on this Scoreboard
- * protects for every stored row — it is preserved by never storing this
- * output, not by never producing it. Every other function in this file keeps
- * the no-identifier rule exactly as before.
+ * *** TWO NAMED EXCEPTIONS. *** Both DO return a lead/contact/deal id and a
+ * name — on purpose, for the Scoreboard's live drill-downs. Both read HubSpot
+ * live on every call and hand the result straight to the browser; nothing
+ * either returns is ever written to `scorecard_weekly`, any other table, or a
+ * log line. That is the same "no outside-individual identifier persists"
+ * property Asimov's condition on this Scoreboard protects for every stored
+ * row — it is preserved by never storing this output, not by never producing
+ * it. Every other function in this file keeps the no-identifier rule exactly
+ * as before.
+ *
+ *   - ADDED 2026-09-12: `findFailingContacts` and `findFailingDeals` (metric
+ *     11's drill-down helpers, alongside `scoreCrmContacts`/`scoreCrmDeals`),
+ *     behind GET /api/scorecard/crm-completeness/detail.
+ *   - ADDED 2026-09-13: `findLeadDetailsForWeek` (metric 1's drill-down),
+ *     behind GET /api/scorecard/booking-rate/detail.
  */
 
 const {
   LEAD_STAGES,
   PAST_LEAD_STAGE_IDS,
+  LEAD_STAGE_LABELS,
   LEAD_ENTERED_QUALIFIED_PROPERTY,
   WORKED_TASK_SOURCE_LABELS,
   AUTOMATION_TASK_SOURCE_LABELS,
@@ -107,6 +111,97 @@ async function computeLeadToDiscoveryCallRate(hubspot, weekStart) {
     diagnostics: {
       tenantVendorLeadsExcluded: excludedCount,
       dealsOutsideDefaultPipeline: outsideDefaultPipeline,
+    },
+  };
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/booking-rate/detail.
+ *
+ * Unlike metric 11's drill-downs, this is not "failing records" — a rate has
+ * no pass/fail line. Every lead in the returned list is a legitimate entry;
+ * what a human wants to see is which ones already turned into a deal and
+ * which are still just leads, which is why each one carries a
+ * `convertedToDeal` flag instead of a `missingFields` list.
+ *
+ * `population` and `convertedCount` come STRAIGHT from the same
+ * listLeadsCreatedBetween/listDealsCreatedBetween calls
+ * computeLeadToDiscoveryCallRate makes — never a second population query —
+ * so they equal the stored denominator/numerator for the week EXACTLY, by
+ * construction. That matters because the per-lead join below does NOT add up
+ * to `convertedCount`, and building the totals from the join instead would
+ * have made the drill-down disagree with the Scoreboard's own stored number,
+ * which is the one thing a drill-down must never do.
+ *
+ * *** WHY THE JOIN UNDERCOUNTS, MEASURED RATHER THAN ASSUMED. *** A lead is
+ * marked `convertedToDeal: true` only if its `hs_primary_contact_id` matches
+ * the contact of a deal ALSO created in this same week. `convertedCount` is
+ * every deal created in the week, full stop — and a deal's contact's lead did
+ * not have to be created in that same week. Checked live against three real
+ * weeks (2026-09-13): 2026-06-01 (8 leads, 8 deals, join matches 4),
+ * 2026-04-06 (4 leads, 5 deals, join matches 3) and 2026-08-31 (15 leads, 6
+ * deals, join matches 5). In every one of them the join count is LOWER than
+ * `convertedCount` — sometimes by a lot — because some of the week's deals
+ * belong to contacts whose lead was created a different week. The page must
+ * show both numbers and must not imply the per-lead flags sum to the
+ * headline count.
+ *
+ * Contact names are joined in a single batched call
+ * (`hubspot.getContactsByIds`) over every lead's `hs_primary_contact_id` for
+ * the week — never one lookup per lead — because a lead record itself has no
+ * name field (see LEAD_PROPERTIES in hubspot-leads-connector.js).
+ */
+async function findLeadDetailsForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const { leads, excludedCount } = await hubspot.listLeadsCreatedBetween(fromIso, toIso);
+  const { deals, outsideDefaultPipeline } = await hubspot.listDealsCreatedBetween(fromIso, toIso);
+
+  // Join 1: this week's deals -> their contact ids, so a lead can be checked
+  // against "did one of this week's deals belong to my contact."
+  const contactIdsByDeal = await hubspot.listContactIdsForDeals(deals.map((d) => d.id));
+  const dealContactIds = new Set();
+  for (const ids of contactIdsByDeal.values()) {
+    for (const id of ids) dealContactIds.add(id);
+  }
+
+  // Join 2: every lead's contact id -> that contact's name, batched once
+  // over the whole week rather than once per lead.
+  const contactIds = [...new Set(leads.map((l) => l.properties.hs_primary_contact_id).filter(Boolean))];
+  const contactsById = await hubspot.getContactsByIds(contactIds);
+
+  let matchedToWeekDeal = 0;
+  const leadDetails = leads.map((lead) => {
+    const contactId = lead.properties.hs_primary_contact_id || null;
+    const convertedToDeal = Boolean(contactId && dealContactIds.has(contactId));
+    if (convertedToDeal) matchedToWeekDeal++;
+
+    const contactProps = contactId ? contactsById.get(contactId) : null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+
+    const rawStage = lead.properties.hs_pipeline_stage;
+    return {
+      id: lead.id,
+      name: name || (contactProps && contactProps.email) || null,
+      createdDate: lead.properties.hs_createdate,
+      // Falls back to the raw id for a stage this map hasn't been updated
+      // for yet, rather than showing nothing — see LEAD_STAGE_LABELS.
+      stage: LEAD_STAGE_LABELS[rawStage] || rawStage,
+      convertedToDeal,
+    };
+  });
+
+  return {
+    population: leads.length,
+    convertedCount: deals.length,
+    leads: leadDetails,
+    diagnostics: {
+      tenantVendorLeadsExcluded: excludedCount,
+      dealsOutsideDefaultPipeline: outsideDefaultPipeline,
+      // Informational only — see this function's header for why it will
+      // typically be lower than convertedCount, never a way to derive it.
+      leadsMatchedToASameWeekDeal: matchedToWeekDeal,
     },
   };
 }
@@ -798,6 +893,7 @@ async function checkWorkflowNameDrift(hubspot, workflows) {
 module.exports = {
   median,
   computeLeadToDiscoveryCallRate,
+  findLeadDetailsForWeek,
   computeFollowupTouches,
   computeSequenceDepth,
   computePastLeadConversions,

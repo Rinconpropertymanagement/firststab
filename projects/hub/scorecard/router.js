@@ -54,7 +54,7 @@ const { computeAll, writeRows } = require('./lib/compute-week');
 const { mondayOf, addDays, latestPublishableWeek, weeksEndingAt } = require('./lib/week');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 const hubspotLeadsConnector = require('./lib/hubspot-leads-connector');
-const { findFailingContactsForWeek, findFailingDealsForWeek } = require('./lib/metrics');
+const { findFailingContactsForWeek, findFailingDealsForWeek, findLeadDetailsForWeek } = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
 // (RangeError) on anything else — a malformed `week` query param must be
@@ -312,9 +312,21 @@ router.get('/api/scorecard/metrics', requireScorecardAccess, async (req, res) =>
 // documented publicly by HubSpot, not something this portal configures.
 const CONTACT_OBJECT_TYPE_ID = '0-1';
 const DEAL_OBJECT_TYPE_ID = '0-3';
+// Leads: '0-136', confirmed live 2026-09-13 — see LIVE VERIFICATION point 11
+// in hubspot-leads-connector.js for how, since this portal's own token
+// cannot read the schema endpoint that would confirm it directly.
+const LEAD_OBJECT_TYPE_ID = '0-136';
 
 function hubspotRecordUrl(portalId, objectTypeId, objectId) {
   return `https://app.hubspot.com/contacts/${portalId}/record/${objectTypeId}/${objectId}`;
+}
+
+// Leads do NOT use the `/record/{typeId}/{id}` shape above — confirmed live
+// 2026-09-13 (same source as the type id itself, see LIVE VERIFICATION point
+// 11): a lead opens as `/objects/{typeId}/views/all/list?leadId={id}`, a
+// list view with the record as a side panel, not a standalone record page.
+function hubspotLeadUrl(portalId, leadId) {
+  return `https://app.hubspot.com/contacts/${portalId}/objects/${LEAD_OBJECT_TYPE_ID}/views/all/list?leadId=${leadId}`;
 }
 
 /**
@@ -382,6 +394,55 @@ router.get('/api/scorecard/crm-completeness/detail', requireScorecardAccess, asy
     });
   } catch (err) {
     console.error('[scorecard] crm-completeness detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/booking-rate/detail?week=YYYY-MM-DD
+ *
+ * Same discipline as /api/scorecard/crm-completeness/detail directly above —
+ * read this file's header comment on that route first, it all applies here
+ * unchanged: reads HubSpot LIVE on every call, nothing it returns is written
+ * anywhere, display-only.
+ *
+ * What's different: lead → discovery call is a RATE, not a pass/fail check,
+ * so there is no "failing" population here — every lead returned is a
+ * legitimate record. `findLeadDetailsForWeek` (lib/metrics.js) reuses
+ * computeLeadToDiscoveryCallRate's own population/numerator calls, so
+ * `population` and `convertedCount` below equal the stored denominator and
+ * numerator for the week EXACTLY — see that function's header for why the
+ * per-lead `convertedToDeal` flags do NOT sum to `convertedCount` (a deal
+ * created this week can belong to a lead created a different week) and must
+ * never be presented as if they did.
+ */
+router.get('/api/scorecard/booking-rate/detail', requireScorecardAccess, async (req, res) => {
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    const { population, convertedCount, leads, diagnostics } = await findLeadDetailsForWeek(hubspotLeadsConnector, week);
+
+    res.json({
+      week,
+      population,
+      convertedCount,
+      leads: leads.map((l) => ({
+        name: l.name,
+        createdDate: l.createdDate,
+        stage: l.stage,
+        url: hubspotLeadUrl(portalId, l.id),
+        convertedToDeal: l.convertedToDeal,
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] booking-rate detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

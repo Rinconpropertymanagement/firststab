@@ -73,6 +73,11 @@
     .drilldown-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
     .drilldown-badge-open { background: #eef2ff; color: #3730a3; }
     .drilldown-badge-closed { background: #f3f4f6; color: #4b5563; }
+    /* Booking-rate drill-down badges — a lead is never "failing", so these
+       read as status (converted or not) rather than a problem to fix. */
+    .drilldown-badge-converted { background: #ecfdf5; color: #166534; }
+    .drilldown-badge-lead { background: #f3f4f6; color: #6b7280; }
+    .drilldown-meta { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -130,14 +135,144 @@
 
       var DASH = '—'; // em-dash: "this number does not exist", never "zero"
 
-      // The two CRM completeness rows are the only metrics with a live
-      // drill-down — everything else on this page is a stored aggregate with
-      // no underlying record to point at. Keyed by metric_key so a rename or
-      // a new row elsewhere never accidentally gets a drill-down control.
-      var DRILLDOWN_TYPE_BY_METRIC_KEY = {
-        crm_contact_completeness: 'contacts',
-        crm_deal_completeness: 'deals',
+      // The three metrics below are the only ones with a live drill-down —
+      // everything else on this page is a stored aggregate with no
+      // underlying record to point at. Keyed by metric_key so a rename or a
+      // new row elsewhere never accidentally gets a drill-down control.
+      //
+      // Each entry supplies its own fetch URL and its own renderer for the
+      // fetched JSON, but all three share the same toggle/week-select/panel
+      // scaffolding in renderDrilldown() below — a rate metric (booking
+      // rate) and a pass/fail metric (the two completeness rows) fetch and
+      // render differently, but "click a button, pick a week, see a live
+      // HubSpot list" is the same shape for both, so only the two things
+      // that actually differ are pulled out per metric.
+      var DRILLDOWN_CONFIG_BY_METRIC_KEY = {
+        crm_contact_completeness: {
+          buttonLabel: 'See what’s failing',
+          buildUrl: function (week) {
+            return '/api/scorecard/crm-completeness/detail?type=contacts&week=' + encodeURIComponent(week);
+          },
+          render: renderCompletenessDrilldownResult,
+        },
+        crm_deal_completeness: {
+          buttonLabel: 'See what’s failing',
+          buildUrl: function (week) {
+            return '/api/scorecard/crm-completeness/detail?type=deals&week=' + encodeURIComponent(week);
+          },
+          render: renderCompletenessDrilldownResult,
+        },
+        // Not a pass/fail check — every lead returned is a legitimate
+        // record, so the button and the empty/summary copy below
+        // deliberately do NOT reuse "failing" language.
+        lead_to_discovery_call_rate: {
+          buttonLabel: 'See this week’s leads',
+          buildUrl: function (week) {
+            return '/api/scorecard/booking-rate/detail?week=' + encodeURIComponent(week);
+          },
+          render: renderBookingRateDrilldownResult,
+        },
       };
+
+      // Renders one CRM-completeness drill-down response (`type`: 'contacts'
+      // or 'deals', from the fetched data itself) into `panel`. Unchanged in
+      // behavior from before this file supported more than one kind of
+      // drill-down — only pulled out into its own function so
+      // renderDrilldown() below can stay generic.
+      function renderCompletenessDrilldownResult(panel, data, week) {
+        if (!data.failing || data.failing.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty',
+            'Everything in this week’s population is complete (' + data.population + ' of ' + data.population + ').'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.failing.length + ' of ' + data.population + ' records for the week of ' +
+          week + ' are missing something:');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.failing.forEach(function (record) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', record.name || '(no name on record)');
+          item.appendChild(nameLine);
+
+          if (data.type === 'deals') {
+            var badge = el('span', 'drilldown-badge ' + (record.closed ? 'drilldown-badge-closed' : 'drilldown-badge-open'),
+              record.closed ? 'CLOSED' : 'OPEN');
+            item.appendChild(badge);
+          }
+
+          var link = el('a', 'drilldown-link', 'View in HubSpot →');
+          link.href = record.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+
+          item.appendChild(el('div', 'drilldown-missing', 'Missing: ' + record.missingFields.join(', ')));
+          panel.appendChild(item);
+        });
+      }
+
+      // Renders one booking-rate drill-down response into `panel`. Every
+      // lead here is a legitimate record — the useful distinction is
+      // whether it already became a deal, not whether it's "wrong" — so the
+      // empty state and the summary line say plainly what the list is
+      // rather than borrowing the completeness drill-down's pass/fail
+      // wording.
+      //
+      // THE CAVEAT BELOW IS LOAD-BEARING, NOT BOILERPLATE. `population` and
+      // `convertedCount` are the Scoreboard's own stored denominator and
+      // numerator for the week (guaranteed to match by the backend — see
+      // findLeadDetailsForWeek in scorecard/lib/metrics.js), but the
+      // per-lead "became a deal" badges below are a same-week contact match
+      // and will almost always add up to LESS than convertedCount: a deal
+      // counted in the header can belong to a lead created a different
+      // week. Real weeks checked 2026-09-13: convertedCount 6 vs. 5 leads
+      // matched, and convertedCount 5 vs. 3 matched. Showing the list
+      // without this note would read as the numbers disagreeing, when what
+      // is actually happening is that they are answering two different
+      // questions.
+      function renderBookingRateDrilldownResult(panel, data, week) {
+        if (!data.leads || data.leads.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No leads were created the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.population + ' lead' + (data.population === 1 ? '' : 's') + ' created the week of ' + week +
+          '; ' + data.convertedCount + ' deal' + (data.convertedCount === 1 ? '' : 's') +
+          ' were created that same week.');
+        summary.style.marginBottom = '4px';
+        panel.appendChild(summary);
+
+        var caveat = el('div', 'metric-note',
+          'Below, each lead is marked whether it is linked to one of those deals by a shared contact. Some deals ' +
+          'counted above belong to a lead created a different week, so the badges below will not always add up ' +
+          'to ' + data.convertedCount + ' — that is expected, not an error.');
+        caveat.style.marginBottom = '8px';
+        panel.appendChild(caveat);
+
+        data.leads.forEach(function (lead) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', lead.name || '(no name on record)');
+          item.appendChild(nameLine);
+
+          var badge = el('span', 'drilldown-badge ' + (lead.convertedToDeal ? 'drilldown-badge-converted' : 'drilldown-badge-lead'),
+            lead.convertedToDeal ? 'BECAME A DEAL' : 'LEAD ONLY');
+          item.appendChild(badge);
+
+          var link = el('a', 'drilldown-link', 'View in HubSpot →');
+          link.href = lead.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+
+          var createdShort = typeof lead.createdDate === 'string' ? shortDate(lead.createdDate.slice(0, 10)) : '—';
+          item.appendChild(el('div', 'drilldown-meta', 'Created ' + createdShort + ' · Stage: ' + (lead.stage || '—')));
+          panel.appendChild(item);
+        });
+      }
 
       function formatPercent(value) {
         return value === null || value === undefined ? DASH : (value * 100).toFixed(0) + '%';
@@ -250,23 +385,24 @@
         return td;
       }
 
-      // Builds the "See what's failing" control for one CRM completeness
-      // row. Calls the live drill-down endpoint on click — nothing is
-      // fetched, cached, or stored ahead of a click, and nothing it fetches
-      // is kept anywhere once the page is left (no localStorage, nothing
-      // written back to the server). It defaults to the metric's own latest
-      // complete week, matching the note row it lives in, but a <select> lets
-      // the viewer pick any other week that already has a row in the trend
-      // shown on the page today — a week with no row has nothing to drill
-      // into, so it is never offered as an option.
+      // Builds the drill-down control for one metric row (any key present in
+      // DRILLDOWN_CONFIG_BY_METRIC_KEY above). Calls that config's live
+      // endpoint on click — nothing is fetched, cached, or stored ahead of a
+      // click, and nothing it fetches is kept anywhere once the page is left
+      // (no localStorage, nothing written back to the server). It defaults
+      // to the metric's own latest complete week, matching the note row it
+      // lives in, but a <select> lets the viewer pick any other week that
+      // already has a row in the trend shown on the page today — a week
+      // with no row has nothing to drill into, so it is never offered as an
+      // option.
       function renderDrilldown(metric) {
-        var type = DRILLDOWN_TYPE_BY_METRIC_KEY[metric.key];
-        if (!type) return null;
+        var config = DRILLDOWN_CONFIG_BY_METRIC_KEY[metric.key];
+        if (!config) return null;
 
         var wrap = el('div', 'drilldown');
 
         if (!metric.latestWeek) {
-          var disabledButton = el('button', 'drilldown-btn', 'See what’s failing');
+          var disabledButton = el('button', 'drilldown-btn', config.buttonLabel);
           disabledButton.type = 'button';
           disabledButton.disabled = true;
           disabledButton.title = 'No week has been computed yet for this metric.';
@@ -301,7 +437,7 @@
           select.appendChild(option);
         });
 
-        var button = el('button', 'drilldown-btn', 'See what’s failing');
+        var button = el('button', 'drilldown-btn', config.buttonLabel);
         button.type = 'button';
         var panel = null; // created (and destroyed) on toggle, never pre-fetched
         var requestSeq = 0; // guards against a slow response for an old week landing after a newer selection
@@ -311,10 +447,7 @@
           panel.innerHTML = '';
           panel.appendChild(el('div', 'drilldown-loading', 'Reading HubSpot live — this can take a few seconds…'));
 
-          var url = '/api/scorecard/crm-completeness/detail?type=' + encodeURIComponent(type) +
-            '&week=' + encodeURIComponent(week);
-
-          fetch(url, { credentials: 'include' })
+          fetch(config.buildUrl(week), { credentials: 'include' })
             .then(function (response) {
               if (!response.ok) {
                 return response.json().catch(function () { return {}; }).then(function (body) {
@@ -326,39 +459,7 @@
             .then(function (data) {
               if (mySeq !== requestSeq || !panel) return; // a newer week was picked before this one returned
               panel.innerHTML = '';
-
-              if (!data.failing || data.failing.length === 0) {
-                panel.appendChild(el('div', 'drilldown-empty',
-                  'Everything in this week’s population is complete (' + data.population + ' of ' + data.population + ').'));
-                return;
-              }
-
-              var summary = el('div', 'metric-note',
-                data.failing.length + ' of ' + data.population + ' records for the week of ' +
-                week + ' are missing something:');
-              summary.style.marginBottom = '6px';
-              panel.appendChild(summary);
-
-              data.failing.forEach(function (record) {
-                var item = el('div', 'drilldown-item');
-                var nameLine = el('span', 'drilldown-name', record.name || '(no name on record)');
-                item.appendChild(nameLine);
-
-                if (type === 'deals') {
-                  var badge = el('span', 'drilldown-badge ' + (record.closed ? 'drilldown-badge-closed' : 'drilldown-badge-open'),
-                    record.closed ? 'CLOSED' : 'OPEN');
-                  item.appendChild(badge);
-                }
-
-                var link = el('a', 'drilldown-link', 'View in HubSpot →');
-                link.href = record.url;
-                link.target = '_blank';
-                link.rel = 'noopener noreferrer';
-                item.appendChild(link);
-
-                item.appendChild(el('div', 'drilldown-missing', 'Missing: ' + record.missingFields.join(', ')));
-                panel.appendChild(item);
-              });
+              config.render(panel, data, week);
             })
             .catch(function (err) {
               if (mySeq !== requestSeq || !panel) return;
@@ -378,7 +479,7 @@
             // in the DOM — this is a live-only view, not a cache.
             panel.remove();
             panel = null;
-            button.textContent = 'See what’s failing';
+            button.textContent = config.buttonLabel;
             return;
           }
 

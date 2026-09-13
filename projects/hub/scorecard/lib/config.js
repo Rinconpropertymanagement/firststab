@@ -191,6 +191,26 @@ const LEAD_STAGES = {
 };
 const PAST_LEAD_STAGE_IDS = [LEAD_STAGES.backToMarketingForNurture, LEAD_STAGES.noResponse];
 
+// Every value `hs_pipeline_stage` can hold on this portal, for a human
+// label on the booking-rate drill-down (GET /api/scorecard/booking-rate/detail)
+// — a raw id like "qualified-stage-id" next to a real name in a browser tab
+// is not something to hand a non-technical reader. Confirmed complete and
+// live 2026-09-13 via the lead object's own property definition (all seven
+// enumeration options, matching LEAD_STAGES above exactly for the three ids
+// this file already used). Falls back to the raw id if HubSpot ever adds an
+// eighth stage this map has not been updated for — see
+// findLeadDetailsForWeek in metrics.js — so a new stage shows up oddly
+// rather than silently vanishing from the list.
+const LEAD_STAGE_LABELS = {
+  'new-stage-id': 'New',
+  'attempting-stage-id': 'Contacted',
+  'connected-stage-id': 'Connected',
+  'qualified-stage-id': 'Qualified',
+  'unqualified-stage-id': 'Unqualified',
+  '201593994': 'Back to Marketing for Nurture',
+  '201593995': 'No Response',
+};
+
 // *** A SILENT-ZERO TRAP, FOUND AND FIXED 2026-09-12. READ THIS BEFORE
 // CHANGING THE STRING BELOW. ***
 //
@@ -431,6 +451,7 @@ module.exports = {
   METRIC_OWNERS,
   LEAD_STAGES,
   PAST_LEAD_STAGE_IDS,
+  LEAD_STAGE_LABELS,
   LEAD_ENTERED_QUALIFIED_PROPERTY,
   DEAL_PIPELINE_ID,
   TRACKED_SEQUENCES,

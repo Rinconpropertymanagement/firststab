@@ -59,6 +59,7 @@ const {
   findFailingDealsForWeek,
   findLeadDetailsForWeek,
   findFollowupTouchesForWeek,
+  findReengagementAttemptsForWeek,
 } = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
@@ -516,6 +517,50 @@ router.get('/api/scorecard/followup-touches/detail', requireScorecardAccess, asy
     });
   } catch (err) {
     console.error('[scorecard] followup-touches detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/reengagement/detail?week=YYYY-MM-DD
+ *
+ * Same discipline as the drill-downs above — read this file's header
+ * comment on crm-completeness/detail first, it all applies here unchanged:
+ * reads HubSpot LIVE on every call, nothing it returns is written anywhere,
+ * display-only.
+ *
+ * Every task returned is a legitimate re-engagement attempt, same framing as
+ * the booking-rate and follow-up-touches drill-downs: this is activity, not
+ * a defect list, so there is no "failing" population here.
+ * `findReengagementAttemptsForWeek` (lib/metrics.js) reuses
+ * computeReengagementAttempts's own population/filter calls, so `count`
+ * below equals the stored numerator for the week EXACTLY.
+ */
+router.get('/api/scorecard/reengagement/detail', requireScorecardAccess, async (req, res) => {
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    const { count, tasks, diagnostics } = await findReengagementAttemptsForWeek(hubspotLeadsConnector, week);
+
+    res.json({
+      week,
+      count,
+      tasks: tasks.map((t) => ({
+        subject: t.subject,
+        completedDate: t.completedDate,
+        contactName: t.contactName,
+        url: hubspotTaskUrl(portalId, t.id),
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] reengagement detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

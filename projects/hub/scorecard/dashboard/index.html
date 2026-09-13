@@ -189,6 +189,15 @@
           },
           render: renderFollowupTouchesDrilldownResult,
         },
+        // Same non-"failing" framing as booking rate and follow-up touches
+        // above: every task here is a legitimate attempt, not a defect.
+        past_lead_reengagement_attempts: {
+          buttonLabel: 'See this week’s attempts',
+          buildUrl: function (week) {
+            return '/api/scorecard/reengagement/detail?week=' + encodeURIComponent(week);
+          },
+          render: renderReengagementDrilldownResult,
+        },
       };
 
       // Renders one CRM-completeness drill-down response (`type`: 'contacts'
@@ -307,6 +316,39 @@
         var summary = el('div', 'metric-note',
           data.count + ' touch' + (data.count === 1 ? '' : 'es') + ' the week of ' + week +
           ' (' + (data.type === 'worked' ? 'worked by a person' : 'created by automation') + '):');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.tasks.forEach(function (task) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', task.subject || '(no subject on task)');
+          item.appendChild(nameLine);
+
+          var link = el('a', 'drilldown-link', 'View in HubSpot →');
+          link.href = task.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+
+          var completedShort = typeof task.completedDate === 'string' ? shortDate(task.completedDate.slice(0, 10)) : '—';
+          item.appendChild(el('div', 'drilldown-meta',
+            'Completed ' + completedShort + (task.contactName ? ' · ' + task.contactName : '')));
+          panel.appendChild(item);
+        });
+      }
+
+      // Renders one re-engagement drill-down response into `panel`. Every
+      // task here is a legitimate attempt — same non-"failing" framing as
+      // the booking-rate and follow-up-touches renderers above — so the
+      // empty/summary copy says plainly what the list is.
+      function renderReengagementDrilldownResult(panel, data, week) {
+        if (!data.tasks || data.tasks.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No attempts to re-engage a past lead the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.count + ' attempt' + (data.count === 1 ? '' : 's') + ' to re-engage a past lead the week of ' + week + ':');
         summary.style.marginBottom = '6px';
         panel.appendChild(summary);
 

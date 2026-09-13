@@ -36,6 +36,8 @@
  *     behind GET /api/scorecard/booking-rate/detail.
  *   - ADDED 2026-09-13: `findFollowupTouchesForWeek` (metrics 2 and 3's
  *     drill-down), behind GET /api/scorecard/followup-touches/detail.
+ *   - ADDED 2026-09-13: `findReengagementAttemptsForWeek` (metric 6's
+ *     drill-down), behind GET /api/scorecard/reengagement/detail.
  */
 
 const {
@@ -571,6 +573,82 @@ async function computeReengagementAttempts(hubspot, weekStart) {
   };
 }
 
+/**
+ * The live drill-down behind GET /api/scorecard/reengagement/detail.
+ *
+ * Runs the SAME population computeReengagementAttempts does —
+ * listLeadsInStages(PAST_LEAD_STAGE_IDS) for the past-lead contact set,
+ * listTasksCompletedBetween for the week's completed tasks, and the same
+ * "is any of this task's associated contacts a past-lead contact" test — so
+ * `count` below equals the stored numerator for
+ * `past_lead_reengagement_attempts` for this week EXACTLY, by construction.
+ * Never a second population query.
+ *
+ * Every task returned is a legitimate attempt, same framing as the
+ * booking-rate and follow-up-touches drill-downs: this is activity, not a
+ * defect list.
+ *
+ * CONTACT NAME JOIN, BATCHED ONCE. `listContactIdsForTasks` is already
+ * called once for the whole week (computeReengagementAttempts needs it to
+ * build the filter itself), so no second association call is added for
+ * that. Naming the contact each attempt was against only needs one more
+ * batched call: `getContactsByIds`, once, over the distinct past-lead
+ * contact ids the qualifying tasks matched — not one lookup per task. Same
+ * two-round-trips-for-the-whole-week shape findFollowupTouchesForWeek uses
+ * above.
+ */
+async function findReengagementAttemptsForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+
+  const { leads: pastLeads } = await hubspot.listLeadsInStages(PAST_LEAD_STAGE_IDS);
+  const pastContactIds = new Set(
+    pastLeads.map((l) => l.properties.hs_primary_contact_id).filter(Boolean)
+  );
+
+  const tasks = await hubspot.listTasksCompletedBetween(fromIso, toIso);
+  const contactsByTask = await hubspot.listContactIdsForTasks(tasks.map((t) => t.id));
+
+  // The matched past-lead contact id per qualifying task — a task can carry
+  // more than one associated contact in principle; this takes the first one
+  // that is actually in the past-lead set, since that is the one the reader
+  // wants a name for.
+  const matchedContactIdByTask = new Map();
+  for (const task of tasks) {
+    const contactIds = contactsByTask.get(task.id) || [];
+    const matched = contactIds.find((id) => pastContactIds.has(id));
+    if (matched) matchedContactIdByTask.set(task.id, matched);
+  }
+
+  const attemptTasks = tasks.filter((task) => matchedContactIdByTask.has(task.id));
+  const contactsById = await hubspot.getContactsByIds(
+    [...new Set(matchedContactIdByTask.values())]
+  );
+
+  const attemptDetails = attemptTasks.map((task) => {
+    const contactId = matchedContactIdByTask.get(task.id);
+    const contactProps = contactId ? contactsById.get(contactId) : null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+    return {
+      id: task.id,
+      subject: task.properties.hs_task_subject || null,
+      completedDate: task.properties.hs_task_completion_date,
+      contactName: name || (contactProps && contactProps.email) || null,
+    };
+  });
+
+  return {
+    count: attemptTasks.length,
+    tasks: attemptDetails,
+    diagnostics: {
+      pastLeadPopulation: pastLeads.length,
+      pastLeadContacts: pastContactIds.size,
+      tasksConsidered: tasks.length,
+    },
+  };
+}
+
 // ─── Metric 10 — lost deals added to sequence ─────────────────────────────
 /**
  * Distinct contacts newly entering a lost-leads re-engagement sequence in
@@ -978,6 +1056,7 @@ module.exports = {
   computeSequenceDepth,
   computePastLeadConversions,
   computeReengagementAttempts,
+  findReengagementAttemptsForWeek,
   computeLostDealsAddedToSequence,
   computeCrmContactCompleteness,
   computeCrmDealCompleteness,

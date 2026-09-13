@@ -40,6 +40,10 @@
  *     drill-down), behind GET /api/scorecard/reengagement/detail.
  *   - ADDED 2026-09-13: `findLostDealsAddedToSequenceForWeek` (metric 10's
  *     drill-down), behind GET /api/scorecard/lost-deals-sequence/detail.
+ *   - ADDED 2026-09-13: `findSequenceDepthForWeek` (metric 4's drill-down),
+ *     behind GET /api/scorecard/sequence-depth/detail. The one exception
+ *     among exceptions: it returns an enrollment id too (a workflow-internal
+ *     grouping key, never a HubSpot object id) alongside the contact id/name.
  */
 
 const {
@@ -384,20 +388,23 @@ async function findFollowupTouchesForWeek(hubspot, weekStart, ownerHubspotId) {
  * so what matters is the per-name breakdown and a configured workflow's
  * count dropping off a cliff.
  */
-async function computeSequenceDepth(hubspot, weekStart, { sinceIso } = {}) {
-  const { fromIso, toIso } = weekBoundsIso(weekStart);
-  // `sinceIso` lets a multi-week run pass ONE anchor for every week, so the
-  // automation-task universe is fetched once instead of fifteen times with
-  // fifteen slightly different start dates that share no cache entry.
-  const lookbackFrom = sinceIso || new Date(
-    new Date(fromIso).getTime() - ENROLLMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
-  ).toISOString();
-
-  const tasks = await hubspot.listAutomationTasksCreatedSince(lookbackFrom);
-
-  // Group every in-scope automation task by its enrollment, and count the
-  // unmatched residue by name so a rename is visible.
-  const enrollments = new Map(); // enrollment id -> { count, lastCreated, lastCompleted }
+/**
+ * Groups a lookback window's automation tasks by enrollment, pulled out of
+ * `computeSequenceDepth` so the stored aggregate and the live drill-down
+ * (`findSequenceDepthForWeek`, below) group the EXACT SAME way rather than
+ * two copies that could drift apart — same reasoning
+ * `splitFollowupTasksByOwner`/`earliestTaskByContact` were extracted for
+ * above. Pure, no network calls.
+ *
+ * Each enrollment entry also carries `taskIds` — every in-scope task that
+ * belongs to it, in the order encountered. The stored aggregate never needed
+ * this (only the count and the two dates), but the drill-down does: an
+ * enrollment has no single "record" of its own to join a contact through, so
+ * it has to check its OWN tasks' contact associations, and it can hold more
+ * than one task.
+ */
+function groupAutomationTasksIntoEnrollments(tasks) {
+  const enrollments = new Map(); // enrollment id -> { count, lastCreated, lastCompleted, taskIds }
   const unmatchedByName = {};
   const matchedByWorkflow = {};
 
@@ -415,14 +422,30 @@ async function computeSequenceDepth(hubspot, weekStart, { sinceIso } = {}) {
     const enrollmentId = enrollmentIdOf(task);
     if (!enrollmentId) continue;
 
-    const entry = enrollments.get(enrollmentId) || { count: 0, lastCreated: null, lastCompleted: null };
+    const entry = enrollments.get(enrollmentId) || { count: 0, lastCreated: null, lastCompleted: null, taskIds: [] };
     entry.count++;
+    entry.taskIds.push(task.id);
     const created = task.properties.hs_createdate;
     const completed = task.properties.hs_task_completion_date;
     if (created && (!entry.lastCreated || created > entry.lastCreated)) entry.lastCreated = created;
     if (completed && (!entry.lastCompleted || completed > entry.lastCompleted)) entry.lastCompleted = completed;
     enrollments.set(enrollmentId, entry);
   }
+
+  return { enrollments, unmatchedByName, matchedByWorkflow };
+}
+
+async function computeSequenceDepth(hubspot, weekStart, { sinceIso } = {}) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  // `sinceIso` lets a multi-week run pass ONE anchor for every week, so the
+  // automation-task universe is fetched once instead of fifteen times with
+  // fifteen slightly different start dates that share no cache entry.
+  const lookbackFrom = sinceIso || new Date(
+    new Date(fromIso).getTime() - ENROLLMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  const tasks = await hubspot.listAutomationTasksCreatedSince(lookbackFrom);
+  const { enrollments, unmatchedByName, matchedByWorkflow } = groupAutomationTasksIntoEnrollments(tasks);
 
   const depths = [];
   for (const entry of enrollments.values()) {
@@ -437,6 +460,140 @@ async function computeSequenceDepth(hubspot, weekStart, { sinceIso } = {}) {
     metric_shape: 'statistic',
     value_numeric: median(depths),
     sample_size: depths.length,
+    diagnostics: {
+      weekRule: SEQUENCE_DEPTH_WEEK_RULE,
+      unmatchedAutomationTasks: unmatchedTotal,
+      unmatchedByName,
+      matchedByWorkflow,
+      enrollmentsSeenInLookback: enrollments.size,
+    },
+  };
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/sequence-depth/detail.
+ *
+ * Runs `groupAutomationTasksIntoEnrollments` over the SAME
+ * `listAutomationTasksCreatedSince(lookbackFrom)` call `computeSequenceDepth`
+ * makes — same lookback window, same workflow filter, same `inDepthMetric`
+ * gate, same week-membership rule — so the per-enrollment counts returned
+ * below, and the median computed over them, equal the stored
+ * `sample_size`/`value_numeric` for `followup_sequence_depth` for this week
+ * EXACTLY, by construction. Never a second implementation that could drift.
+ *
+ * *** UNLIKE EVERY OTHER DRILL-DOWN IN THIS FILE, THERE IS NO "FAILING"
+ * POPULATION AND NO SIMPLE ACTIVITY LIST. *** A median has no numerator to
+ * point at — every enrollment belonging to the week is a legitimate data
+ * point, not a subset of interest. So this returns ALL of them, sorted by
+ * touch count ascending, which is the honest drill-down: the median made
+ * visible instead of hidden inside one number.
+ *
+ * *** MARKING THE MEDIAN, DECIDED RATHER THAN ASSUMED. *** With an odd
+ * sample there is one enrollment sitting at the middle RANK once sorted, and
+ * it is marked `isMedian`. With an even sample the median is the AVERAGE of
+ * the two middle values — there is no single enrollment that "is" the
+ * median. Two alternatives were considered and rejected: (a) marking
+ * whichever of the two middle enrollments happens to come first, which would
+ * misrepresent one specific record as "the" answer when it is only half of
+ * it; (b) marking every enrollment that SHARES a touch count with either
+ * middle value, which would over-mark whenever ties are common (they are —
+ * many enrollments share a count) and mark records nowhere near the middle
+ * rank. Instead both of the two middle-RANK enrollments are marked
+ * `isMedianPair`, and the page is expected to label them "the middle two"
+ * rather than pointing at either alone.
+ *
+ * *** WHAT TO LINK TO, DECIDED RATHER THAN ASSUMED. *** An enrollment is a
+ * workflow-internal id with several tasks and no HubSpot record or URL of
+ * its own — there is no single task that is "the" record for it either. The
+ * one durable thing every one of an enrollment's tasks agrees on is the
+ * contact it was run against, so each row here links to that CONTACT
+ * (`hubspotRecordUrl` + `CONTACT_OBJECT_TYPE_ID` in router.js, the same
+ * shape every other drill-down on this page already uses), not to any one
+ * task.
+ *
+ * CONTACT NAME JOIN, BATCHED ONCE — the same two-round-trips-for-the-whole-
+ * week shape every other drill-down in this file uses:
+ * `listContactIdsForTasks` ONCE over every qualifying enrollment's task ids
+ * combined, then `getContactsByIds` ONCE over the distinct contact ids that
+ * came back. An enrollment can hold several tasks; this takes the first
+ * contact id found across its own tasks, checked in the order
+ * `groupAutomationTasksIntoEnrollments` recorded them (i.e. HubSpot's own
+ * paging order) — not observed to disagree across a single enrollment's
+ * tasks in practice, but not assumed either: if a qualifying enrollment's
+ * tasks carry no contact association at all, its `contactId`/`name`/`url`
+ * are simply null and it is still listed, since the touch depth is real
+ * regardless of whether a contact join succeeded.
+ */
+async function findSequenceDepthForWeek(hubspot, weekStart, { sinceIso } = {}) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const lookbackFrom = sinceIso || new Date(
+    new Date(fromIso).getTime() - ENROLLMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  const tasks = await hubspot.listAutomationTasksCreatedSince(lookbackFrom);
+  const { enrollments, unmatchedByName, matchedByWorkflow } = groupAutomationTasksIntoEnrollments(tasks);
+
+  const belonging = [];
+  for (const [enrollmentId, entry] of enrollments.entries()) {
+    const weekKey = SEQUENCE_DEPTH_WEEK_RULE === 'last_task_completed' ? entry.lastCompleted : entry.lastCreated;
+    if (isInWindow(weekKey, fromIso, toIso)) belonging.push({ enrollmentId, entry });
+  }
+
+  // Join: every belonging enrollment's task ids -> their contact ids, in ONE
+  // batched call over the whole week rather than one per enrollment.
+  const allTaskIds = belonging.reduce((ids, b) => ids.concat(b.entry.taskIds), []);
+  const contactIdsByTask = await hubspot.listContactIdsForTasks(allTaskIds);
+
+  const contactIdByEnrollment = new Map();
+  const allContactIds = new Set();
+  for (const { enrollmentId, entry } of belonging) {
+    let contactId = null;
+    for (const taskId of entry.taskIds) {
+      const ids = contactIdsByTask.get(taskId) || [];
+      if (ids.length) { contactId = ids[0]; break; }
+    }
+    if (contactId) {
+      contactIdByEnrollment.set(enrollmentId, contactId);
+      allContactIds.add(contactId);
+    }
+  }
+  const contactsById = await hubspot.getContactsByIds([...allContactIds]);
+
+  const enrollmentDetails = belonging.map(({ enrollmentId, entry }) => {
+    const contactId = contactIdByEnrollment.get(enrollmentId) || null;
+    const contactProps = contactId ? contactsById.get(contactId) : null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+    return {
+      enrollmentId,
+      touchCount: entry.count,
+      contactId,
+      name: name || (contactProps && contactProps.email) || null,
+    };
+  });
+
+  // Sorted ascending by touch count so the low-to-high pattern is visible at
+  // a glance; ties broken by enrollment id for a stable order across
+  // re-fetches (HubSpot's own paging order is not guaranteed stable).
+  enrollmentDetails.sort((a, b) => (a.touchCount - b.touchCount) || (a.enrollmentId < b.enrollmentId ? -1 : 1));
+
+  // The middle RANK(S) once sorted -- see this function's header for why an
+  // even sample marks two entries rather than picking one.
+  const n = enrollmentDetails.length;
+  if (n % 2 === 1) {
+    enrollmentDetails[n >> 1].isMedian = true;
+  } else if (n > 0) {
+    enrollmentDetails[n / 2 - 1].isMedianPair = true;
+    enrollmentDetails[n / 2].isMedianPair = true;
+  }
+
+  const unmatchedTotal = Object.values(unmatchedByName).reduce((a, b) => a + b, 0);
+
+  return {
+    sampleSize: n,
+    median: median(enrollmentDetails.map((e) => e.touchCount)),
+    enrollments: enrollmentDetails,
     diagnostics: {
       weekRule: SEQUENCE_DEPTH_WEEK_RULE,
       unmatchedAutomationTasks: unmatchedTotal,
@@ -1163,6 +1320,7 @@ module.exports = {
   computeFollowupTouches,
   findFollowupTouchesForWeek,
   computeSequenceDepth,
+  findSequenceDepthForWeek,
   computePastLeadConversions,
   computeReengagementAttempts,
   findReengagementAttemptsForWeek,

@@ -61,6 +61,7 @@ const {
   findFollowupTouchesForWeek,
   findReengagementAttemptsForWeek,
   findLostDealsAddedToSequenceForWeek,
+  findSequenceDepthForWeek,
 } = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
@@ -610,6 +611,58 @@ router.get('/api/scorecard/lost-deals-sequence/detail', requireScorecardAccess, 
     });
   } catch (err) {
     console.error('[scorecard] lost-deals-sequence detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/sequence-depth/detail?week=YYYY-MM-DD
+ *
+ * Same discipline as the drill-downs above — read this file's header
+ * comment on crm-completeness/detail first, it all applies here unchanged:
+ * reads HubSpot LIVE on every call, nothing it returns is written anywhere,
+ * display-only.
+ *
+ * UNLIKE EVERY OTHER DRILL-DOWN ON THIS PAGE: sequence depth is a MEDIAN, not
+ * a rate or a count, so there is no "failing" population and no simple
+ * activity list either — every enrollment belonging to the week is a
+ * legitimate data point. `findSequenceDepthForWeek` (lib/metrics.js) reuses
+ * computeSequenceDepth's own grouping (via the shared
+ * groupAutomationTasksIntoEnrollments helper), never a second
+ * implementation, so `sampleSize` below and the median computed from the
+ * returned per-enrollment counts equal the stored
+ * sample_size/value_numeric for `followup_sequence_depth` for this week
+ * EXACTLY. See that function's header for how the median entry (or entries,
+ * for an even sample) is marked and why each row links to a contact rather
+ * than a task.
+ */
+router.get('/api/scorecard/sequence-depth/detail', requireScorecardAccess, async (req, res) => {
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    const { sampleSize, median, enrollments, diagnostics } = await findSequenceDepthForWeek(hubspotLeadsConnector, week);
+
+    res.json({
+      week,
+      sampleSize,
+      median,
+      enrollments: enrollments.map((e) => ({
+        touchCount: e.touchCount,
+        name: e.name,
+        url: e.contactId ? hubspotRecordUrl(portalId, CONTACT_OBJECT_TYPE_ID, e.contactId) : null,
+        isMedian: Boolean(e.isMedian),
+        isMedianPair: Boolean(e.isMedianPair),
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] sequence-depth detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

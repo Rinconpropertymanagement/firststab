@@ -52,14 +52,22 @@
 
     /* CRM completeness drill-down — reads HubSpot live, nothing is stored. */
     .drilldown { margin-top: 8px; }
-    .drilldown-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .drilldown-week-select { font: inherit; font-size: 11.5px; padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; color: #374151; cursor: pointer; }
-    .drilldown-week-select:hover { border-color: #9ca3af; }
-    .drilldown-week-select:disabled { color: #9ca3af; cursor: default; }
     .drilldown-btn { font: inherit; font-size: 11.5px; padding: 4px 11px; border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #1d4ed8; cursor: pointer; }
     .drilldown-btn:hover { background: #eff6ff; }
-    .drilldown-btn:disabled { color: #9ca3af; cursor: default; background: #fff; }
     .drilldown-panel { margin-top: 8px; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; background: #f9fafb; max-width: 640px; }
+    /* The click target IS the week's cell now — no separate button, no week
+       dropdown. A dotted underline on the value marks it clickable even at
+       rest; hover/active states confirm it under the pointer and show which
+       week's panel is currently open, since there's no dropdown to spell
+       that out anymore. Only cells on a metric with a drill-down config,
+       and only ones with cell.present, ever get this class — every other
+       cell on the page is untouched. */
+    td.drilldown-cell { cursor: pointer; border-radius: 4px; }
+    td.drilldown-cell:hover { background: #eff6ff; }
+    td.drilldown-cell:focus-visible { outline: 2px solid #1d4ed8; outline-offset: -2px; }
+    td.drilldown-cell.drilldown-cell-active { background: #dbeafe; }
+    .drilldown-value { text-decoration: underline dotted #93c5fd; text-underline-offset: 3px; }
+    .drilldown-cell-active .drilldown-value { text-decoration-color: #1d4ed8; }
     .drilldown-loading, .drilldown-empty, .drilldown-error { font-size: 12.5px; }
     .drilldown-loading { color: #6b7280; }
     .drilldown-empty { color: #166534; }
@@ -77,6 +85,8 @@
        read as status (converted or not) rather than a problem to fix. */
     .drilldown-badge-converted { background: #ecfdf5; color: #166534; }
     .drilldown-badge-lead { background: #f3f4f6; color: #6b7280; }
+    /* Sequence-depth drill-down — marks the median rank(s), not a status. */
+    .drilldown-badge-median { background: #eef2ff; color: #3730a3; }
     .drilldown-meta { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
   </style>
 </head>
@@ -135,38 +145,38 @@
 
       var DASH = '—'; // em-dash: "this number does not exist", never "zero"
 
-      // The three metrics below are the only ones with a live drill-down —
+      // The metric keys below are the only ones with a live drill-down —
       // everything else on this page is a stored aggregate with no
       // underlying record to point at. Keyed by metric_key so a rename or a
       // new row elsewhere never accidentally gets a drill-down control.
       //
       // Each entry supplies its own fetch URL and its own renderer for the
-      // fetched JSON, but all three share the same toggle/week-select/panel
-      // scaffolding in renderDrilldown() below — a rate metric (booking
-      // rate) and a pass/fail metric (the two completeness rows) fetch and
-      // render differently, but "click a button, pick a week, see a live
-      // HubSpot list" is the same shape for both, so only the two things
-      // that actually differ are pulled out per metric.
+      // fetched JSON, but every metric below shares the same click-the-cell
+      // / panel scaffolding in createDrilldownController() below — a rate
+      // metric (booking rate) and a pass/fail metric (the two completeness
+      // rows) fetch and render differently, but "click a week's number, see
+      // a live HubSpot list" is the same shape for all of them, so only the
+      // two things that actually differ are pulled out per metric. The
+      // trigger is the week's own cell in the trend table now — there is no
+      // button and no week picker; a metric absent from this map renders
+      // its cells exactly as before, untouched.
       var DRILLDOWN_CONFIG_BY_METRIC_KEY = {
         crm_contact_completeness: {
-          buttonLabel: 'See what’s failing',
           buildUrl: function (week) {
             return '/api/scorecard/crm-completeness/detail?type=contacts&week=' + encodeURIComponent(week);
           },
           render: renderCompletenessDrilldownResult,
         },
         crm_deal_completeness: {
-          buttonLabel: 'See what’s failing',
           buildUrl: function (week) {
             return '/api/scorecard/crm-completeness/detail?type=deals&week=' + encodeURIComponent(week);
           },
           render: renderCompletenessDrilldownResult,
         },
         // Not a pass/fail check — every lead returned is a legitimate
-        // record, so the button and the empty/summary copy below
-        // deliberately do NOT reuse "failing" language.
+        // record, so the empty/summary copy below deliberately does NOT
+        // reuse "failing" language.
         lead_to_discovery_call_rate: {
-          buttonLabel: 'See this week’s leads',
           buildUrl: function (week) {
             return '/api/scorecard/booking-rate/detail?week=' + encodeURIComponent(week);
           },
@@ -176,14 +186,12 @@
         // completeness's: every task here is a legitimate touch, just split
         // by who (or what) did it.
         followup_touches_worked: {
-          buttonLabel: 'See this week’s touches',
           buildUrl: function (week) {
             return '/api/scorecard/followup-touches/detail?type=worked&week=' + encodeURIComponent(week);
           },
           render: renderFollowupTouchesDrilldownResult,
         },
         followup_touches_automation: {
-          buttonLabel: 'See this week’s touches',
           buildUrl: function (week) {
             return '/api/scorecard/followup-touches/detail?type=automation&week=' + encodeURIComponent(week);
           },
@@ -192,7 +200,6 @@
         // Same non-"failing" framing as booking rate and follow-up touches
         // above: every task here is a legitimate attempt, not a defect.
         past_lead_reengagement_attempts: {
-          buttonLabel: 'See this week’s attempts',
           buildUrl: function (week) {
             return '/api/scorecard/reengagement/detail?week=' + encodeURIComponent(week);
           },
@@ -201,11 +208,20 @@
         // Same non-"failing" framing as the three drill-downs above: every
         // contact here is a legitimate new enrollment, not a defect.
         lost_deals_added_to_sequence: {
-          buttonLabel: 'See who entered this week',
           buildUrl: function (week) {
             return '/api/scorecard/lost-deals-sequence/detail?week=' + encodeURIComponent(week);
           },
           render: renderLostDealsSequenceDrilldownResult,
+        },
+        // Unlike every entry above, this metric is a MEDIAN, not a rate or a
+        // count — there is no "failing" population and no simple activity
+        // list. Every enrollment belonging to the week is shown; see
+        // renderSequenceDepthDrilldownResult below for why.
+        followup_sequence_depth: {
+          buildUrl: function (week) {
+            return '/api/scorecard/sequence-depth/detail?week=' + encodeURIComponent(week);
+          },
+          render: renderSequenceDepthDrilldownResult,
         },
       };
 
@@ -213,7 +229,7 @@
       // or 'deals', from the fetched data itself) into `panel`. Unchanged in
       // behavior from before this file supported more than one kind of
       // drill-down — only pulled out into its own function so
-      // renderDrilldown() below can stay generic.
+      // createDrilldownController() below can stay generic.
       function renderCompletenessDrilldownResult(panel, data, week) {
         if (!data.failing || data.failing.length === 0) {
           panel.appendChild(el('div', 'drilldown-empty',
@@ -416,6 +432,65 @@
         });
       }
 
+      // Renders one sequence-depth drill-down response into `panel`. Unlike
+      // every other drill-down on this page, this metric is a MEDIAN, not a
+      // rate or a count — there is no "failing" population and no simple
+      // activity list, because a median has no numerator to point at: every
+      // enrollment belonging to the week is a legitimate data point. So this
+      // shows all of them, already sorted low to high by the backend, which
+      // makes the pattern behind the number visible (a few enrollments
+      // needing many touches, most needing few) instead of hiding it inside
+      // one figure.
+      //
+      // LOWER IS BETTER for this metric — the row already carries that flag
+      // — so this deliberately does not celebrate a low count or frame a
+      // high one as a problem to fix: the workflow keeps touching a lead
+      // until they respond, so a high count describes the lead's silence,
+      // not a mistake. No "failing" language, but no "good job" either.
+      //
+      // MEDIAN MARKING. With an odd number of enrollments, one entry sits at
+      // the middle rank and is marked MEDIAN. With an even number the true
+      // median is the average of the two middle values — there is no single
+      // entry that "is" the answer — so both are marked "the middle two"
+      // rather than pointing at one of them as if it were the whole story.
+      function renderSequenceDepthDrilldownResult(panel, data, week) {
+        if (!data.enrollments || data.enrollments.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No enrollments belong to the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.sampleSize + ' enrollment' + (data.sampleSize === 1 ? '' : 's') + ' the week of ' + week +
+          ', median ' + formatNumber(data.median) + ' touch' + (data.median === 1 ? '' : 'es') +
+          '. Sorted from fewest to most touches, lowest first:');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.enrollments.forEach(function (enrollment) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', enrollment.name || '(no contact on record)');
+          item.appendChild(nameLine);
+
+          if (enrollment.isMedian) {
+            item.appendChild(el('span', 'drilldown-badge drilldown-badge-median', 'MEDIAN'));
+          } else if (enrollment.isMedianPair) {
+            item.appendChild(el('span', 'drilldown-badge drilldown-badge-median', 'MIDDLE TWO'));
+          }
+
+          if (enrollment.url) {
+            var link = el('a', 'drilldown-link', 'View contact in HubSpot →');
+            link.href = enrollment.url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            item.appendChild(link);
+          }
+
+          item.appendChild(el('div', 'drilldown-meta',
+            enrollment.touchCount + ' touch' + (enrollment.touchCount === 1 ? '' : 'es')));
+          panel.appendChild(item);
+        });
+      }
+
       function formatPercent(value) {
         return value === null || value === undefined ? DASH : (value * 100).toFixed(0) + '%';
       }
@@ -462,7 +537,13 @@
         row.appendChild(el('th', 'num avg-col', 'Average'));
       }
 
-      function renderCell(metric, cell) {
+      // `controller` is the metric row's drilldown controller (see
+      // createDrilldownController below), or null for a metric with no
+      // entry in DRILLDOWN_CONFIG_BY_METRIC_KEY. It is only ever consulted
+      // for a `cell.present` week — a blank/dash cell has no record to
+      // point at and must stay inert, so the click affordance and listeners
+      // below are never attached to it.
+      function renderCell(metric, cell, controller) {
         var td = el('td', 'num');
 
         // A missing week is BLANK, not zero. A week that could not be
@@ -473,9 +554,11 @@
           return td;
         }
 
+        var valueClass = controller ? 'drilldown-value' : '';
+
         if (metric.display === 'rolling_rate') {
           var rolling = cell.rolling || {};
-          td.appendChild(el('span', '', formatPercent(rolling.rate)));
+          td.appendChild(el('span', valueClass, formatPercent(rolling.rate)));
           var parts = el('span', 'parts',
             rolling.numerator + ' of ' + rolling.denominator +
             ' · ' + rolling.weeksCovered + 'wk');
@@ -491,16 +574,28 @@
           } else {
             td.appendChild(parts);
           }
-          return td;
-        }
-
-        if (metric.shape === 'statistic') {
-          td.appendChild(el('span', '', formatNumber(cell.valueNumeric)));
+        } else if (metric.shape === 'statistic') {
+          td.appendChild(el('span', valueClass, formatNumber(cell.valueNumeric)));
           td.appendChild(el('span', 'parts', 'n=' + cell.sampleSize));
-          return td;
+        } else {
+          td.appendChild(el('span', valueClass, formatNumber(cell.numerator)));
         }
 
-        td.appendChild(el('span', '', formatNumber(cell.numerator)));
+        if (controller) {
+          td.classList.add('drilldown-cell');
+          td.tabIndex = 0;
+          td.setAttribute('role', 'button');
+          td.title = 'Click to see the HubSpot records behind this number';
+          var open = function (e) {
+            e.preventDefault();
+            controller.toggleWeek(cell.week, td);
+          };
+          td.addEventListener('click', open);
+          td.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') open(e);
+          });
+        }
+
         return td;
       }
 
@@ -527,62 +622,44 @@
         return td;
       }
 
-      // Builds the drill-down control for one metric row (any key present in
-      // DRILLDOWN_CONFIG_BY_METRIC_KEY above). Calls that config's live
-      // endpoint on click — nothing is fetched, cached, or stored ahead of a
-      // click, and nothing it fetches is kept anywhere once the page is left
-      // (no localStorage, nothing written back to the server). It defaults
-      // to the metric's own latest complete week, matching the note row it
-      // lives in, but a <select> lets the viewer pick any other week that
-      // already has a row in the trend shown on the page today — a week
-      // with no row has nothing to drill into, so it is never offered as an
-      // option.
-      function renderDrilldown(metric) {
-        var config = DRILLDOWN_CONFIG_BY_METRIC_KEY[metric.key];
-        if (!config) return null;
-
+      // Builds the drill-down controller for one metric row (any key present
+      // in DRILLDOWN_CONFIG_BY_METRIC_KEY above). Returns an object with:
+      //   - `wrap`: the element that lives in the row's note cell and holds
+      //     the panel once one is open (empty otherwise);
+      //   - `toggleWeek(week, cellEl)`: called by renderCell when a viewer
+      //     clicks that week's cell in THIS row.
+      // Calls that config's live endpoint on click — nothing is fetched,
+      // cached, or stored ahead of a click, and nothing it fetches is kept
+      // anywhere once the page is left (no localStorage, nothing written
+      // back to the server). There is no button and no week picker anymore:
+      // the week's own cell in the trend table is the trigger, and only
+      // weeks with a computed row ever get one (renderCell only wires a
+      // click handler onto a `cell.present` cell), so there is nothing to
+      // "offer as an option" the way the old select had to filter for.
+      function createDrilldownController(metric, config) {
         var wrap = el('div', 'drilldown');
-
-        if (!metric.latestWeek) {
-          var disabledButton = el('button', 'drilldown-btn', config.buttonLabel);
-          disabledButton.type = 'button';
-          disabledButton.disabled = true;
-          disabledButton.title = 'No week has been computed yet for this metric.';
-          wrap.appendChild(disabledButton);
-          return wrap;
-        }
-
-        // Only weeks with an actual computed row for THIS metric, taken from
-        // its own trend cells (already fetched for the page currently shown)
-        // — never a free-typed date. Newest first, so the top of the list
-        // matches today's default.
-        var availableWeeks = metric.cells
-          .filter(function (c) { return c.present; })
-          .map(function (c) { return c.week; })
-          .sort(function (a, b) { return a < b ? 1 : (a > b ? -1 : 0); });
-        if (availableWeeks.indexOf(metric.latestWeek) === -1) {
-          // Defensive: latestWeek always has a row by definition, but if the
-          // currently-shown range (4/8/13 weeks) doesn't happen to include it,
-          // make sure the default selection still exists as an option.
-          availableWeeks.unshift(metric.latestWeek);
-        }
-
-        var controls = el('div', 'drilldown-controls');
-        var select = document.createElement('select');
-        select.className = 'drilldown-week-select';
-        select.title = 'Choose which week to inspect';
-        availableWeeks.forEach(function (week) {
-          var option = document.createElement('option');
-          option.value = week; // stays the raw Monday ISO -- this is what the fetch sends
-          option.textContent = 'Week of ' + shortWeek(week);
-          if (week === metric.latestWeek) option.selected = true;
-          select.appendChild(option);
-        });
-
-        var button = el('button', 'drilldown-btn', config.buttonLabel);
-        button.type = 'button';
         var panel = null; // created (and destroyed) on toggle, never pre-fetched
         var requestSeq = 0; // guards against a slow response for an old week landing after a newer selection
+        var activeWeek = null;
+        var activeCellEl = null;
+
+        function markCellActive(cellEl) {
+          if (activeCellEl) {
+            activeCellEl.classList.remove('drilldown-cell-active');
+            activeCellEl.removeAttribute('aria-expanded');
+          }
+          activeCellEl = cellEl;
+          if (activeCellEl) {
+            activeCellEl.classList.add('drilldown-cell-active');
+            activeCellEl.setAttribute('aria-expanded', 'true');
+          }
+        }
+
+        function closePanel() {
+          if (panel) { panel.remove(); panel = null; }
+          markCellActive(null);
+          activeWeek = null;
+        }
 
         function loadWeek(week) {
           var mySeq = ++requestSeq;
@@ -611,30 +688,26 @@
             });
         }
 
-        select.addEventListener('change', function () {
-          if (panel) loadWeek(select.value);
-        });
-
-        button.addEventListener('click', function () {
-          if (panel) {
-            // Collapse. Re-opening re-fetches live rather than reusing what's
-            // in the DOM — this is a live-only view, not a cache.
-            panel.remove();
-            panel = null;
-            button.textContent = config.buttonLabel;
+        // Clicking the week that's already open closes it. Clicking a
+        // different week (open or not) replaces whatever panel is showing
+        // — re-fetched live, never reused from the DOM, since this is a
+        // live-only view and not a cache. Only one panel open per row.
+        function toggleWeek(week, cellEl) {
+          if (activeWeek === week) {
+            closePanel();
             return;
           }
 
-          button.textContent = 'Hide';
-          panel = el('div', 'drilldown-panel');
-          wrap.appendChild(panel);
-          loadWeek(select.value);
-        });
+          activeWeek = week;
+          markCellActive(cellEl);
+          if (!panel) {
+            panel = el('div', 'drilldown-panel');
+            wrap.appendChild(panel);
+          }
+          loadWeek(week);
+        }
 
-        controls.appendChild(select);
-        controls.appendChild(button);
-        wrap.appendChild(controls);
-        return wrap;
+        return { wrap: wrap, toggleWeek: toggleWeek };
       }
 
       function renderBody(payload) {
@@ -672,11 +745,18 @@
 
           row.appendChild(labelCell);
 
+          // One controller per row, shared by every cell in it and by the
+          // note row's panel slot below. null for a metric absent from
+          // DRILLDOWN_CONFIG_BY_METRIC_KEY — renderCell renders those cells
+          // exactly as before, with no click affordance at all.
+          var config = DRILLDOWN_CONFIG_BY_METRIC_KEY[metric.key];
+          var controller = config ? createDrilldownController(metric, config) : null;
+
           // Same reversed-copy-for-display trick as renderHead, and it must
           // match it exactly: cells is built by mapping over the same
           // weeks array (router.js), so reversing both the same way keeps
           // every number under its own week's header.
-          metric.cells.slice().reverse().forEach(function (cell) { row.appendChild(renderCell(metric, cell)); });
+          metric.cells.slice().reverse().forEach(function (cell) { row.appendChild(renderCell(metric, cell, controller)); });
           row.appendChild(renderAverage(metric));
           body.appendChild(row);
 
@@ -685,10 +765,9 @@
           noteCell.colSpan = payload.weeks.length + 2;
 
           // The explanation text is collapsed by default -- same pill-button
-          // style as "See what's failing" below it, so both read as one
-          // family of controls rather than one always-on paragraph and one
-          // button. Nothing here fetches anything; it only shows text
-          // already sent with the row.
+          // style the old drill-down toggle used to have, kept here as its
+          // own separate, unrelated control. Nothing here fetches anything;
+          // it only shows text already sent with the row.
           var noteToggle = el('button', 'drilldown-btn', 'About this metric');
           noteToggle.type = 'button';
           var noteText = el('div', 'metric-note', metric.note);
@@ -700,8 +779,7 @@
           noteCell.appendChild(noteToggle);
           noteCell.appendChild(noteText);
 
-          var drilldown = renderDrilldown(metric);
-          if (drilldown) noteCell.appendChild(drilldown);
+          if (controller) noteCell.appendChild(controller.wrap);
           noteRow.appendChild(noteCell);
           body.appendChild(noteRow);
         });

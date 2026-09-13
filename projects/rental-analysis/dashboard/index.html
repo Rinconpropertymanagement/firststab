@@ -1,0 +1,1564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rental Market Analysis — Rincon Management</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --violet: #41486F;
+      --violet-dark: #30354f;
+      --sienna: #DF8C41;
+      --sienna-dark: #b96f2e;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 900px; margin: 0 auto; padding: 0 16px 64px; }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 20px 0 16px;
+    }
+    .header-left h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.2;
+    }
+    .header-left p {
+      font-size: 13px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    /* ── Cards / Form shell ── */
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px 16px;
+    }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field.span-2 { grid-column: 1 / -1; }
+    .field label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #374151;
+    }
+    .field .hint { font-size: 11px; color: #9ca3af; font-weight: 400; }
+    .field input[type="text"],
+    .field input[type="number"],
+    .field select {
+      padding: 8px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: inherit;
+      color: #111827;
+      background: #fff;
+      width: 100%;
+    }
+    .field input:focus,
+    .field select:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 4px;
+    }
+    .checkbox-row input { width: 16px; height: 16px; }
+    .checkbox-row label { font-size: 13px; color: #374151; font-weight: 500; }
+
+    /* ── Address lookup ── */
+    .address-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .address-input-wrap { position: relative; flex: 1; min-width: 0; }
+    .address-row input { width: 100%; }
+    .address-row .btn-lookup { flex: none; white-space: nowrap; }
+    .btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* Address suggestions dropdown — sits directly under the address input,
+       matches the same border/radius language as the rest of the form. */
+    .address-suggestions {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      margin-top: 4px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.10);
+      max-height: 240px;
+      overflow-y: auto;
+      z-index: 20;
+      display: none;
+    }
+    .address-suggestions.visible { display: block; }
+    .address-suggestion {
+      padding: 9px 12px;
+      font-size: 13.5px;
+      line-height: 1.4;
+      color: #111827;
+      cursor: pointer;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .address-suggestion:last-child { border-bottom: none; }
+    .address-suggestion:hover,
+    .address-suggestion.active {
+      background: #f3f4f6;
+    }
+
+    .lookup-status {
+      font-size: 12px;
+      margin-top: 6px;
+      line-height: 1.4;
+      display: none;
+    }
+    .lookup-status.visible { display: block; }
+    .lookup-status.status-success { color: #15803d; }
+    .lookup-status.status-notfound { color: #6b7280; }
+    .lookup-status.status-error { color: #b91c1c; }
+
+    /* Fields pre-filled by "Look Up Property" get a light highlight until
+       the user edits them or submits — a "found, please confirm" cue. */
+    .field input.autofilled,
+    .field select.autofilled {
+      background: #fff8ee;
+      border-color: var(--sienna);
+    }
+    .autofill-hint {
+      color: var(--sienna-dark) !important;
+      font-weight: 600 !important;
+      display: none;
+    }
+
+    @media (max-width: 480px) {
+      .address-row { flex-direction: column; }
+      .address-row .btn-lookup { width: 100%; }
+    }
+
+    .form-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid #f3f4f6;
+    }
+
+    .btn-primary {
+      background: #3b82f6;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 22px;
+      font-size: 14px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    .btn-secondary {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 9px 18px;
+      font-size: 13px;
+      color: #374151;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-secondary:hover { background: #f3f4f6; }
+
+    /* ── Error / status banners ── */
+    .banner-error {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: none;
+    }
+    .banner-error strong { display: block; margin-bottom: 2px; font-size: 13px; }
+    .banner-error.visible { display: block; }
+
+    /* ── Loading state ── */
+    .loading-wrap {
+      text-align: center;
+      padding: 64px 20px;
+      color: #6b7280;
+    }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      display: inline-block;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-wrap .loading-title { font-size: 15px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    .loading-wrap .loading-sub { font-size: 13px; color: #9ca3af; }
+
+    /* ══════════════════════════════════════════════════════════════
+       REPORT VIEW — Rincon-branded document
+       ══════════════════════════════════════════════════════════════ */
+
+    .report-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .report-doc {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .report-band {
+      background: var(--violet);
+      color: #fff;
+      padding: 22px 28px;
+    }
+    .report-band .eyebrow {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.7);
+      margin-bottom: 6px;
+    }
+    .report-band h2 {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin-bottom: 8px;
+    }
+    .report-band .subject-meta {
+      font-size: 13px;
+      color: rgba(255,255,255,0.85);
+    }
+
+    .report-body { padding: 28px; }
+
+    /* Recommended rent block */
+    .rent-headline {
+      text-align: center;
+      padding: 20px 16px 24px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .rent-headline .label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+    .rent-headline .amount {
+      font-size: 38px;
+      font-weight: 800;
+      color: var(--sienna-dark);
+      line-height: 1.1;
+      margin-bottom: 4px;
+    }
+    .rent-headline .amount .permo { font-size: 18px; font-weight: 600; color: #9ca3af; }
+
+    .stat-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .stat-box {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+    .stat-box .stat-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #6b7280;
+      margin-bottom: 4px;
+    }
+    .stat-box .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--violet);
+    }
+
+    .section-heading {
+      font-size: 15px;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+
+    /* ── Chart legend ── */
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-bottom: 16px;
+      font-size: 11px;
+      color: #6b7280;
+    }
+    .chart-legend .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    .legend-swatch.line {
+      width: 14px; height: 0; border-top: 2px dashed var(--violet); border-radius: 0;
+    }
+    .legend-swatch.band { background: rgba(223,140,65,0.25); border: 1px solid var(--sienna); }
+    .legend-ring {
+      width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--violet);
+      display: inline-block; flex: none; background: #fff;
+    }
+
+    /* ── Chart grid (CSS-grid horizontal bar chart) ── */
+    .chart-scroll { overflow-x: auto; margin-bottom: 32px; }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: minmax(150px, 40%) 1fr;
+      column-gap: 12px;
+      row-gap: 6px;
+      min-width: 480px;
+      position: relative;
+    }
+    .chart-overlay {
+      grid-column: 2;
+      position: relative;
+      pointer-events: none;
+    }
+    .chart-band {
+      position: absolute;
+      top: 0; bottom: 0;
+      background: rgba(223,140,65,0.14);
+      border-left: 1px dashed var(--sienna);
+      border-right: 1px dashed var(--sienna);
+    }
+    .chart-subject-line {
+      position: absolute;
+      top: 0; bottom: 0;
+      border-left: 2px dashed var(--violet);
+    }
+    .chart-label {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 2px;
+      padding: 6px 0;
+      font-size: 12px;
+    }
+    .chart-label .addr { font-weight: 600; color: #111827; }
+    .chart-label .meta { color: #6b7280; font-size: 11px; }
+    .chart-label .price { color: var(--violet); font-weight: 700; font-size: 12px; }
+    .chart-track {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-height: 40px;
+    }
+    .chart-bar {
+      position: absolute;
+      left: 0;
+      height: 16px;
+      border-radius: 0 4px 4px 0;
+      min-width: 3px;
+    }
+    .chart-bar.status-active { background: #3b82f6; }
+    .chart-bar.status-leased { background: #16a34a; }
+    .chart-bar.status-off_market { background: #9ca3af; }
+    .chart-bar.managed-ring { box-shadow: 0 0 0 2px var(--violet); }
+    .chart-axis {
+      grid-column: 2;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #9ca3af;
+      padding-top: 4px;
+      margin-top: 2px;
+      border-top: 1px solid #f3f4f6;
+    }
+
+    /* ── Comp map ── */
+    .map-wrap {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 28px;
+    }
+    #compMap { height: 340px; width: 100%; background: #f3f4f6; }
+    .leaflet-popup-content { font-family: inherit; }
+
+    /* ── Comp cards ── */
+    .comp-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 14px;
+      margin-bottom: 32px;
+    }
+    .comp-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }
+    .comp-card .comp-addr { font-size: 13px; font-weight: 700; color: #111827; margin-bottom: 2px; }
+    .comp-card .comp-city { font-size: 11px; color: #9ca3af; margin-bottom: 8px; }
+    .comp-card .comp-meta { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+    .comp-card .comp-price {
+      font-size: 19px; font-weight: 800; color: var(--sienna-dark); margin-bottom: 8px;
+    }
+    .comp-card .comp-price .est-flag { font-size: 11px; font-weight: 600; color: #9ca3af; margin-left: 4px; }
+    .comp-card .comp-price .orig-price {
+      font-size: 12px; font-weight: 500; color: #9ca3af; text-decoration: line-through; margin-left: 6px;
+    }
+    .comp-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+    .comp-badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .comp-badge.b-active       { background: #dbeafe; color: #1d4ed8; }
+    .comp-badge.b-leased       { background: #dcfce7; color: #15803d; }
+    .comp-badge.b-off_market   { background: #f3f4f6; color: #4b5563; }
+    .comp-badge.b-managed      { background: var(--violet); color: #fff; }
+    .comp-badge.b-cut          { background: #fef3c7; color: #92400e; }
+    .comp-card .comp-narrative {
+      font-size: 12.5px;
+      color: #4b5563;
+      line-height: 1.55;
+      font-style: italic;
+      padding-top: 8px;
+      border-top: 1px solid #f3f4f6;
+    }
+
+    /* ── Market Trends (zip-level area context, distinct from the
+       property-specific comps/recommendation above it) ── */
+    .market-trends-note {
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.5;
+      margin: -6px 0 16px;
+    }
+
+    .trend-chart-scroll { overflow-x: auto; margin-bottom: 28px; }
+    .trend-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      min-width: 480px;
+      height: 150px;
+      padding-top: 22px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .trend-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      flex: 1;
+      min-width: 38px;
+      height: 100%;
+    }
+    .trend-value {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--violet);
+      white-space: nowrap;
+      margin-bottom: 4px;
+    }
+    .trend-track {
+      width: 100%;
+      max-width: 30px;
+      flex: 1;
+      display: flex;
+      align-items: flex-end;
+    }
+    .trend-bar {
+      width: 100%;
+      background: var(--violet);
+      border-radius: 3px 3px 0 0;
+      min-height: 2px;
+    }
+    .trend-label {
+      font-size: 10px;
+      color: #9ca3af;
+      margin-top: 6px;
+      white-space: nowrap;
+    }
+
+    .bedroom-breakdown-heading {
+      font-size: 13px;
+      font-weight: 700;
+      color: #111827;
+      margin: 4px 0 10px;
+    }
+    .bedroom-breakdown {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 28px;
+    }
+    .bedroom-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      font-size: 12.5px;
+    }
+    .bedroom-row.is-subject {
+      background: #fff8ee;
+      border-color: var(--sienna);
+    }
+    .bedroom-row .br-beds { font-weight: 700; color: #111827; min-width: 44px; }
+    .bedroom-row .br-rent { font-weight: 700; color: var(--violet); flex: none; }
+    .bedroom-row .br-diff { font-size: 11px; color: #6b7280; text-align: right; flex: 1; }
+    .bedroom-row.is-subject .br-diff { color: var(--sienna-dark); font-weight: 600; }
+
+    /* ── Rationale ── */
+    .rationale-box {
+      background: #f9fafb;
+      border-left: 3px solid var(--sienna);
+      border-radius: 0 8px 8px 0;
+      padding: 16px 18px;
+      font-size: 13.5px;
+      line-height: 1.7;
+      color: #374151;
+      margin-bottom: 8px;
+    }
+
+    /* ── Footer ── */
+    .report-footer {
+      border-top: 1px solid #e5e7eb;
+      padding: 18px 28px;
+      font-size: 11px;
+      color: #9ca3af;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .report-footer .brand-name { font-weight: 700; color: var(--violet); }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .field-grid { grid-template-columns: 1fr; }
+      .stat-row { grid-template-columns: 1fr; }
+      .rent-headline .amount { font-size: 30px; }
+      .report-band, .report-body { padding: 18px 16px; }
+      .report-footer { padding: 16px; }
+      #compMap { height: 240px; }
+    }
+
+    /* ── Print ── */
+    @media print {
+      body { background: #fff; }
+      .header, .report-toolbar, .form-view { display: none !important; }
+      .page { max-width: 100%; padding: 0; }
+      .report-doc { border: none; }
+      .map-wrap { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div class="header-left">
+      <h1>Rental Market Analysis</h1>
+      <p>Rincon Management</p>
+    </div>
+  </div>
+
+  <!-- ── Error banner (validation / network) ── -->
+  <div class="banner-error" id="errorBanner">
+    <strong>Couldn&rsquo;t run this analysis</strong>
+    <span id="errorBannerText"></span>
+  </div>
+
+  <!-- ── Form View ── -->
+  <div id="formView" class="form-view">
+    <form id="analysisForm" class="card">
+      <div class="field-grid">
+
+        <div class="field span-2">
+          <label for="f_address">Property address</label>
+          <div class="address-row">
+            <div class="address-input-wrap">
+              <input type="text" id="f_address" name="subject_address" placeholder="1895 Dorrit St, Newbury Park, CA 91320" autocomplete="off" required>
+              <div class="address-suggestions" id="addressSuggestions"></div>
+            </div>
+            <button type="button" class="btn-secondary btn-lookup" id="lookupBtn">Look Up Property</button>
+          </div>
+          <div class="lookup-status" id="lookupStatus"></div>
+        </div>
+
+        <div class="field">
+          <label for="f_bedrooms">Bedrooms <span class="hint autofill-hint" id="ah_bedrooms">found &mdash; please confirm</span></label>
+          <input type="number" id="f_bedrooms" name="subject_bedrooms" min="0" step="1" placeholder="4" required>
+        </div>
+
+        <div class="field">
+          <label for="f_bathrooms">Bathrooms <span class="hint autofill-hint" id="ah_bathrooms">found &mdash; please confirm</span></label>
+          <input type="number" id="f_bathrooms" name="subject_bathrooms" min="0" step="0.5" placeholder="2" required>
+        </div>
+
+        <div class="field">
+          <label for="f_sqft">Square feet <span class="hint autofill-hint" id="ah_sqft">found &mdash; please confirm</span></label>
+          <input type="number" id="f_sqft" name="subject_sqft" min="1" step="1" placeholder="1768" required>
+        </div>
+
+        <div class="field">
+          <label for="f_year_built">Year built <span class="hint">(optional)</span> <span class="hint autofill-hint" id="ah_year_built">found &mdash; please confirm</span></label>
+          <input type="number" id="f_year_built" name="subject_year_built" min="1800" max="2100" step="1" placeholder="1965">
+        </div>
+
+        <div class="field">
+          <label for="f_property_type">Property type <span class="hint autofill-hint" id="ah_property_type">found &mdash; please confirm</span></label>
+          <select id="f_property_type" name="subject_property_type" required>
+            <option value="">Select&hellip;</option>
+            <option value="single_family">Single Family</option>
+            <option value="condo">Condo</option>
+            <option value="townhouse">Townhouse</option>
+            <option value="duplex">Duplex</option>
+            <option value="triplex">Triplex</option>
+            <option value="fourplex">Fourplex</option>
+            <option value="apartment">Apartment</option>
+            <option value="manufactured">Manufactured</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="f_lease_term">Lease term (months)</label>
+          <input type="number" id="f_lease_term" name="lease_term_months" min="1" step="1" value="12" required>
+        </div>
+
+        <div class="field span-2">
+          <div class="checkbox-row">
+            <input type="checkbox" id="f_furnished" name="furnished">
+            <label for="f_furnished">Furnished</label>
+          </div>
+        </div>
+
+        <div class="field span-2">
+          <label for="f_run_by">Run by</label>
+          <select id="f_run_by" name="run_by" required>
+            <option value="">Loading users&hellip;</option>
+          </select>
+        </div>
+
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" class="btn-primary" id="submitBtn">Run Analysis</button>
+      </div>
+    </form>
+  </div><!-- /formView -->
+
+  <!-- ── Loading View ── -->
+  <div id="loadingView" style="display:none">
+    <div class="loading-wrap">
+      <div class="spinner"></div>
+      <div class="loading-title">Pulling comps and writing your report&hellip;</div>
+      <div class="loading-sub">This usually takes 10&ndash;30 seconds. Don&rsquo;t close this tab.</div>
+    </div>
+  </div><!-- /loadingView -->
+
+  <!-- ── Report View ── -->
+  <div id="reportView" style="display:none">
+    <div class="report-toolbar">
+      <button class="btn-secondary" id="newAnalysisBtn">&larr; New Analysis</button>
+      <button class="btn-secondary" id="printBtn">Print / Save as PDF</button>
+    </div>
+    <div class="report-doc" id="reportDoc"></div>
+  </div><!-- /reportView -->
+
+</div><!-- /page -->
+
+<script>
+  const API_BASE = 'http://localhost:3457';
+  const RUN_BY_STORAGE_KEY = 'rentalAnalysis.runBy';
+
+  // ── Helpers ──────────────────────────────────────────────────────────
+  function esc(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function fmtMoney(n) {
+    if (n == null || isNaN(n)) return '&#8212;';
+    return '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  }
+
+  function fmtNum(n) {
+    if (n == null || isNaN(n)) return '&#8212;';
+    return Number(n).toLocaleString('en-US');
+  }
+
+  function fmtBath(n) {
+    if (n == null) return '&#8212;';
+    const num = Number(n);
+    return Number.isInteger(num) ? String(num) : num.toFixed(1);
+  }
+
+  // rent / sqft, e.g. "$1.90/sqft" — mirrors the "Per sqft" stat on Blanket's
+  // report. Guards against a missing rent or a zero/missing sqft (never
+  // divide by zero, never show a misleading number from partial data).
+  function pricePerSqft(rent, sqft) {
+    if (rent == null || !sqft) return '&#8212;';
+    return '$' + (rent / sqft).toFixed(2) + '/sqft';
+  }
+
+  // Formats a rent-per-sqft value that's *already* a per-sqft number (e.g.
+  // rental_market_data.median_rent_per_sqft) — unlike pricePerSqft() above,
+  // there's no division to do here, just formatting.
+  function fmtPerSqft(n) {
+    if (n == null || isNaN(n)) return '&#8212;';
+    return '$' + Number(n).toFixed(2) + '/sqft';
+  }
+
+  // "2025-09" (a rental_market_data.history key) -> "Sep '25". Prefers the
+  // entry's own `date` field (an ISO string straight from RentCast) when
+  // present since it's more precise than reparsing the key; falls back to
+  // treating the key itself as the first of that month. timeZone:'UTC' is
+  // required — these dates arrive as midnight UTC, and without pinning the
+  // zone, US timezones roll the display back to the previous month.
+  function fmtMonthLabel(key, dateStr) {
+    const d = dateStr ? new Date(dateStr) : new Date(key + '-01T00:00:00Z');
+    if (isNaN(d)) return esc(key);
+    return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+  }
+
+  function fmtDate(dateStr) {
+    const d = dateStr ? new Date(dateStr) : new Date();
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  }
+
+  function propertyTypeLabel(t) {
+    const map = {
+      single_family: 'Single Family', condo: 'Condo', townhouse: 'Townhouse',
+      duplex: 'Duplex', triplex: 'Triplex', fourplex: 'Fourplex',
+      apartment: 'Apartment', manufactured: 'Manufactured', other: 'Other',
+    };
+    return map[t] || t || '';
+  }
+
+  function showError(msg) {
+    document.getElementById('errorBannerText').textContent = msg;
+    document.getElementById('errorBanner').classList.add('visible');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function hideError() {
+    document.getElementById('errorBanner').classList.remove('visible');
+  }
+
+  function showView(view) {
+    document.getElementById('formView').style.display    = view === 'form'    ? '' : 'none';
+    document.getElementById('loadingView').style.display  = view === 'loading' ? '' : 'none';
+    document.getElementById('reportView').style.display   = view === 'report'  ? '' : 'none';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ── Load users into the "Run by" dropdown ───────────────────────────
+  async function loadUsers() {
+    const select = document.getElementById('f_run_by');
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/users');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const users = await res.json();
+
+      if (!users.length) {
+        select.innerHTML = '<option value="">No users found</option>';
+        return;
+      }
+
+      const lastPicked = localStorage.getItem(RUN_BY_STORAGE_KEY);
+      select.innerHTML = '<option value="">Select&hellip;</option>' +
+        users.map(u => '<option value="' + esc(u.id) + '">' + esc(u.name) + '</option>').join('');
+
+      if (lastPicked && users.some(u => u.id === lastPicked)) {
+        select.value = lastPicked;
+      }
+    } catch (err) {
+      console.error(err);
+      select.innerHTML = '<option value="">Couldn&rsquo;t load users &mdash; refresh to retry</option>';
+    }
+  }
+
+  // ── Property lookup ("confirm only" auto-fill) ──────────────────────
+  // The five property-fact fields the lookup can pre-fill. Keys match both
+  // the `f_<key>` input id and the `ah_<key>` auto-fill-hint span id.
+  const LOOKUP_FIELDS = ['bedrooms', 'bathrooms', 'sqft', 'year_built', 'property_type'];
+
+  function clearAutofillCue(key) {
+    const input = document.getElementById('f_' + key);
+    if (input) input.classList.remove('autofilled');
+    const hint = document.getElementById('ah_' + key);
+    if (hint) hint.style.display = 'none';
+  }
+
+  function markAutofilled(key) {
+    const input = document.getElementById('f_' + key);
+    if (input) input.classList.add('autofilled');
+    const hint = document.getElementById('ah_' + key);
+    if (hint) hint.style.display = 'inline';
+  }
+
+  // The auto-filled cue disappears the moment the user touches that field —
+  // it's a "please confirm" nudge, not a permanent label.
+  LOOKUP_FIELDS.forEach((key) => {
+    const el = document.getElementById('f_' + key);
+    if (!el) return;
+    const evt = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(evt, () => clearAutofillCue(key));
+  });
+
+  function setLookupStatus(text, kind) {
+    const el = document.getElementById('lookupStatus');
+    el.textContent = text;
+    el.className = 'lookup-status' + (text ? ' visible' : '') + (kind ? ' status-' + kind : '');
+  }
+
+  // Shared by the "Look Up Property" button AND by picking a suggestion from
+  // the address-autocomplete dropdown below — one lookup flow, two triggers.
+  async function runPropertyLookup(address) {
+    const addressInput = document.getElementById('f_address');
+    const btn = document.getElementById('lookupBtn');
+
+    LOOKUP_FIELDS.forEach(clearAutofillCue);
+
+    if (!address) {
+      setLookupStatus('Enter an address above first.', 'error');
+      addressInput.focus();
+      return;
+    }
+
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Looking up…';
+    setLookupStatus('');
+
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/property-lookup?address=' + encodeURIComponent(address));
+      const data = await res.json().catch(() => null);
+
+      if (res.ok && data) {
+        let filledAny = false;
+        if (data.bedrooms != null) {
+          document.getElementById('f_bedrooms').value = data.bedrooms;
+          markAutofilled('bedrooms');
+          filledAny = true;
+        }
+        if (data.bathrooms != null) {
+          document.getElementById('f_bathrooms').value = data.bathrooms;
+          markAutofilled('bathrooms');
+          filledAny = true;
+        }
+        if (data.squareFootage != null) {
+          document.getElementById('f_sqft').value = data.squareFootage;
+          markAutofilled('sqft');
+          filledAny = true;
+        }
+        if (data.yearBuilt != null) {
+          document.getElementById('f_year_built').value = data.yearBuilt;
+          markAutofilled('year_built');
+          filledAny = true;
+        }
+        if (data.propertyType) {
+          document.getElementById('f_property_type').value = data.propertyType;
+          markAutofilled('property_type');
+          filledAny = true;
+        }
+
+        setLookupStatus(
+          filledAny
+            ? 'Found it — please confirm the details below.'
+            : 'Found the address, but no property details came back. Please fill in the details below.',
+          'success'
+        );
+      } else if (res.status === 404) {
+        setLookupStatus(
+          (data && data.error) || 'Couldn’t find that address automatically — please fill in the details below.',
+          'notfound'
+        );
+      } else {
+        setLookupStatus(
+          (data && data.error) || 'Something went wrong looking that up. Please fill in the details below.',
+          'error'
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      setLookupStatus('Couldn’t reach the lookup service. Please fill in the details below.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  }
+
+  document.getElementById('lookupBtn').addEventListener('click', () => {
+    const addressInput = document.getElementById('f_address');
+    runPropertyLookup(addressInput.value.trim());
+  });
+
+  // ── Address autocomplete (type-ahead suggestions) ───────────────────
+  // Debounced calls to the address-suggest endpoint, which always returns
+  // 200 + a JSON array (empty array = too-short query or no matches — never
+  // an error shape). So on any failure here we just show no dropdown; the
+  // "Look Up Property" button is always the fallback.
+  (function () {
+    const addressInput = document.getElementById('f_address');
+    const suggestBox = document.getElementById('addressSuggestions');
+
+    let debounceTimer = null;
+    let requestId = 0;
+    let suggestions = [];
+    let activeIndex = -1;
+
+    function closeSuggestions() {
+      suggestBox.innerHTML = '';
+      suggestBox.classList.remove('visible');
+      suggestions = [];
+      activeIndex = -1;
+    }
+
+    function renderSuggestions(items) {
+      suggestions = items;
+      activeIndex = -1;
+      if (!items.length) {
+        closeSuggestions();
+        return;
+      }
+      suggestBox.innerHTML = items.map((item, i) =>
+        '<div class="address-suggestion" data-index="' + i + '">' + esc(item.formattedAddress) + '</div>'
+      ).join('');
+      suggestBox.classList.add('visible');
+    }
+
+    function highlightActive() {
+      const rows = suggestBox.querySelectorAll('.address-suggestion');
+      rows.forEach((row, i) => row.classList.toggle('active', i === activeIndex));
+      if (activeIndex >= 0 && rows[activeIndex]) {
+        rows[activeIndex].scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    function selectSuggestion(index) {
+      const item = suggestions[index];
+      if (!item) return;
+      addressInput.value = item.formattedAddress;
+      closeSuggestions();
+      runPropertyLookup(item.formattedAddress);
+    }
+
+    async function fetchSuggestions(query) {
+      const myRequestId = ++requestId;
+      try {
+        const res = await fetch(API_BASE + '/api/rental-analysis/address-suggest?q=' + encodeURIComponent(query));
+        if (myRequestId !== requestId) return; // a newer keystroke has since fired — drop this stale response
+        if (!res.ok) { closeSuggestions(); return; }
+        const items = await res.json().catch(() => []);
+        if (myRequestId !== requestId) return;
+        renderSuggestions(Array.isArray(items) ? items : []);
+      } catch (err) {
+        if (myRequestId !== requestId) return;
+        closeSuggestions(); // network hiccup — fail silently, never show an error here
+      }
+    }
+
+    addressInput.addEventListener('input', () => {
+      const q = addressInput.value.trim();
+      clearTimeout(debounceTimer);
+      if (q.length < 3) {
+        requestId++; // invalidate any in-flight request so a late response can't reopen the dropdown
+        closeSuggestions();
+        return;
+      }
+      debounceTimer = setTimeout(() => fetchSuggestions(q), 300);
+    });
+
+    addressInput.addEventListener('keydown', (e) => {
+      if (!suggestBox.classList.contains('visible') || !suggestions.length) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIndex = Math.min(activeIndex + 1, suggestions.length - 1);
+        highlightActive();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        highlightActive();
+      } else if (e.key === 'Enter') {
+        if (activeIndex >= 0) {
+          e.preventDefault();
+          selectSuggestion(activeIndex);
+        } else {
+          closeSuggestions();
+        }
+      } else if (e.key === 'Escape') {
+        closeSuggestions();
+      }
+    });
+
+    // Keep focus on the input when a suggestion is clicked (avoids a blur
+    // race that could close the dropdown before the click registers).
+    suggestBox.addEventListener('mousedown', (e) => e.preventDefault());
+
+    suggestBox.addEventListener('click', (e) => {
+      const row = e.target.closest('.address-suggestion');
+      if (!row) return;
+      selectSuggestion(Number(row.dataset.index));
+    });
+
+    // Click anywhere outside the field/dropdown closes it without selecting.
+    document.addEventListener('click', (e) => {
+      if (e.target === addressInput || suggestBox.contains(e.target)) return;
+      closeSuggestions();
+    });
+  })();
+
+  // ── Form submit ──────────────────────────────────────────────────────
+  document.getElementById('analysisForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideError();
+
+    const form = e.target;
+    const runBy = form.run_by.value;
+
+    const payload = {
+      subject_address: form.subject_address.value.trim(),
+      subject_bedrooms: Number(form.subject_bedrooms.value),
+      subject_bathrooms: Number(form.subject_bathrooms.value),
+      subject_sqft: Number(form.subject_sqft.value),
+      subject_property_type: form.subject_property_type.value,
+      lease_term_months: Number(form.lease_term_months.value),
+      furnished: form.furnished.checked,
+      run_by: runBy,
+    };
+
+    const yearBuilt = form.subject_year_built.value;
+    if (yearBuilt !== '') payload.subject_year_built = Number(yearBuilt);
+
+    if (runBy) localStorage.setItem(RUN_BY_STORAGE_KEY, runBy);
+
+    showView('loading');
+
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const msg = (data && data.error) ? data.error : ('The server returned an error (HTTP ' + res.status + ').');
+        showView('form');
+        showError(msg);
+        return;
+      }
+
+      renderReport(data.analysis, data.comps || [], data.marketData || null);
+      showView('report');
+    } catch (err) {
+      console.error(err);
+      showView('form');
+      showError('Couldn’t reach the analysis server. Make sure it’s running (node server.js) and try again.');
+    }
+  });
+
+  document.getElementById('newAnalysisBtn').addEventListener('click', () => {
+    hideError();
+    showView('form');
+  });
+  document.getElementById('printBtn').addEventListener('click', () => window.print());
+
+  // ── Report rendering ─────────────────────────────────────────────────
+  function statusMeta(status) {
+    const map = {
+      active:     { cls: 'active',     label: 'ACTIVE' },
+      leased:     { cls: 'leased',     label: 'JUST LEASED' },
+      off_market: { cls: 'off_market', label: 'OFF MARKET' },
+    };
+    return map[status] || { cls: 'off_market', label: (status || 'UNKNOWN').toUpperCase() };
+  }
+
+  function buildChart(analysis, comps) {
+    const priced = comps.filter(c => c.monthly_rent != null);
+    const values = [];
+    priced.forEach(c => values.push(c.monthly_rent));
+    if (analysis.subject_estimated_rent != null) values.push(analysis.subject_estimated_rent);
+    if (analysis.recommended_rent_low != null)  values.push(analysis.recommended_rent_low);
+    if (analysis.recommended_rent_high != null) values.push(analysis.recommended_rent_high);
+    if (analysis.raw_comp_rent_low != null)  values.push(analysis.raw_comp_rent_low);
+    if (analysis.raw_comp_rent_high != null) values.push(analysis.raw_comp_rent_high);
+
+    if (!values.length) return '';
+
+    let domainMin = Math.min(...values);
+    let domainMax = Math.max(...values);
+    const pad = Math.max((domainMax - domainMin) * 0.15, 150);
+    domainMin = Math.max(0, Math.floor((domainMin - pad) / 50) * 50);
+    domainMax = Math.ceil((domainMax + pad) / 50) * 50;
+    const span = domainMax - domainMin || 1;
+    const pct = (v) => ((v - domainMin) / span) * 100;
+
+    let overlayHtml = '';
+    if (analysis.recommended_rent_low != null && analysis.recommended_rent_high != null) {
+      const left = pct(analysis.recommended_rent_low);
+      const width = pct(analysis.recommended_rent_high) - left;
+      overlayHtml += '<div class="chart-band" style="left:' + left + '%;width:' + width + '%"></div>';
+    }
+
+    let rows = '';
+    priced.forEach((c) => {
+      const sm = statusMeta(c.listing_status);
+      const width = Math.max(pct(c.monthly_rent), 0.5);
+      const managedClass = c.is_rincon_managed ? ' managed-ring' : '';
+      const priceLabel = fmtMoney(c.monthly_rent) + (c.is_estimated_price ? '*' : '');
+      rows +=
+        '<div class="chart-label">' +
+          '<span class="addr">' + esc(c.address || 'Unknown address') + '</span>' +
+          '<span class="meta">' + esc(propertyTypeLabel(c.property_type)) + ' &middot; ' + fmtBath(c.bedrooms) + ' bd / ' + fmtBath(c.bathrooms) + ' ba' + (c.sqft ? ' &middot; ' + fmtNum(c.sqft) + ' sqft' : '') + '</span>' +
+          '<span class="price">' + priceLabel + '</span>' +
+        '</div>' +
+        '<div class="chart-track">' +
+          '<div class="chart-bar status-' + sm.cls + managedClass + '" style="width:' + width + '%"></div>' +
+        '</div>';
+    });
+
+    let lineHtml = '';
+    if (analysis.subject_estimated_rent != null) {
+      lineHtml = '<div class="chart-subject-line" style="left:' + pct(analysis.subject_estimated_rent) + '%"></div>';
+    }
+
+    return (
+      '<div class="chart-legend">' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#3b82f6"></span>Active listing</span>' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span>Just leased</span>' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#9ca3af"></span>Off market</span>' +
+        '<span class="legend-item"><span class="legend-ring"></span>Rincon-managed</span>' +
+        '<span class="legend-item"><span class="legend-swatch band"></span>Recommended range</span>' +
+        '<span class="legend-item"><span class="legend-swatch line"></span>Estimated market rent</span>' +
+      '</div>' +
+      '<div class="chart-scroll"><div class="chart-grid">' +
+        '<div class="chart-overlay">' + overlayHtml + '</div>' +
+        rows +
+        '<div class="chart-overlay">' + lineHtml + '</div>' +
+        '<div class="chart-axis"><span>' + fmtMoney(domainMin) + '</span><span>' + fmtMoney(domainMax) + '</span></div>' +
+      '</div></div>'
+    );
+  }
+
+  // ── Market Trends (zip-level area context from marketData) ─────────────
+  // marketData can be null (no RentCast coverage for the zip, or the lookup
+  // failed) — every function below assumes that's already been checked by
+  // buildMarketTrendsSection() and returns '' rather than re-checking.
+
+  // Vertical bar chart of rent by month from marketData.history, oldest to
+  // newest. Same domain-with-padding approach as buildChart() above for
+  // visual consistency, just oriented as columns instead of horizontal bars
+  // since this is a time series rather than a ranked list of comps.
+  function buildTrendChart(history) {
+    if (!history || typeof history !== 'object') return '';
+
+    // history's keys are "YYYY-MM" strings straight from RentCast — object
+    // key order isn't guaranteed, so sort explicitly. Plain string sort is
+    // correct here because the format is fixed-width and zero-padded.
+    const keys = Object.keys(history).sort();
+    const points = keys
+      .map((key) => {
+        const entry = history[key] || {};
+        const value = entry.medianRent != null ? entry.medianRent : entry.averageRent;
+        return { key, entry, value };
+      })
+      .filter((p) => p.value != null && !isNaN(p.value));
+
+    if (!points.length) return '';
+
+    const values = points.map((p) => p.value);
+    let domainMin = Math.min(...values);
+    let domainMax = Math.max(...values);
+    if (domainMin === domainMax) { domainMin -= 100; domainMax += 100; }
+    const pad = Math.max((domainMax - domainMin) * 0.12, 50);
+    domainMin = Math.max(0, Math.floor((domainMin - pad) / 25) * 25);
+    domainMax = Math.ceil((domainMax + pad) / 25) * 25;
+    const span = domainMax - domainMin || 1;
+
+    const cols = points.map((p) => {
+      const heightPct = Math.max(((p.value - domainMin) / span) * 100, 2);
+      return (
+        '<div class="trend-col">' +
+          '<div class="trend-value">' + fmtMoney(p.value) + '</div>' +
+          '<div class="trend-track"><div class="trend-bar" style="height:' + heightPct + '%"></div></div>' +
+          '<div class="trend-label">' + fmtMonthLabel(p.key, p.entry.date) + '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    return (
+      '<div class="chart-legend">' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:var(--violet)"></span>Median asking rent by month (zip-wide)</span>' +
+      '</div>' +
+      '<div class="trend-chart-scroll"><div class="trend-bars">' + cols + '</div></div>'
+    );
+  }
+
+  // Compact list comparing each bedroom count's average rent (zip-wide) to
+  // the zip's overall average rent — same idea as Blanket's report, which
+  // set the specific-bedroom-count average against the zip average. The row
+  // matching the subject property's own bedroom count is highlighted so it
+  // reads as "here's where your unit's bedroom count sits."
+  function buildBedroomBreakdown(marketData, subjectBedrooms) {
+    const rows = Array.isArray(marketData.data_by_bedrooms) ? marketData.data_by_bedrooms : [];
+    if (!rows.length) return '';
+
+    const zipAvg = marketData.average_rent;
+    const sorted = rows.slice().sort((a, b) => (a.bedrooms || 0) - (b.bedrooms || 0));
+
+    const rowsHtml = sorted.map((r) => {
+      const rent = r.averageRent != null ? r.averageRent : r.medianRent;
+      const isSubject = subjectBedrooms != null && Number(r.bedrooms) === Number(subjectBedrooms);
+
+      let diffHtml = '';
+      if (rent != null && zipAvg != null) {
+        const diff = rent - zipAvg;
+        const sign = diff > 0 ? '+' : (diff < 0 ? '&minus;' : '');
+        diffHtml = '<span class="br-diff">' + sign + fmtMoney(Math.abs(diff)) + ' vs. zip average</span>';
+      }
+
+      return (
+        '<div class="bedroom-row' + (isSubject ? ' is-subject' : '') + '">' +
+          '<span class="br-beds">' + (r.bedrooms != null ? r.bedrooms + ' bd' : 'Unknown') + '</span>' +
+          '<span class="br-rent">' + fmtMoney(rent) + (rent != null ? '/mo' : '') + '</span>' +
+          diffHtml +
+        '</div>'
+      );
+    }).join('');
+
+    return (
+      '<div class="bedroom-breakdown-heading">By Bedroom Count (Zip-Wide)</div>' +
+      '<div class="bedroom-breakdown">' + rowsHtml + '</div>'
+    );
+  }
+
+  // Top-level section builder — returns '' (no placeholder, no error) when
+  // marketData is null, per spec: a zip RentCast has no coverage for, or a
+  // failed lookup, should never break or blank out the rest of the report.
+  function buildMarketTrendsSection(marketData, analysis) {
+    if (!marketData) return '';
+
+    const zip = marketData.zip || analysis.subject_zip || '';
+    const daysOnMarket = marketData.median_days_on_market;
+
+    const trendChartHtml = buildTrendChart(marketData.history);
+    const bedroomHtml = buildBedroomBreakdown(marketData, analysis.subject_bedrooms);
+
+    return (
+      '<div class="section-heading">Market Trends' + (zip ? ' &mdash; ZIP ' + esc(zip) : '') + '</div>' +
+      '<div class="market-trends-note">Area-wide data for this zip code as a whole &mdash; not specific to the subject property above. Use this for broader market context, not as a substitute for the comps.</div>' +
+
+      '<div class="stat-row">' +
+        '<div class="stat-box">' +
+          '<div class="stat-label">Zip Median Rent</div>' +
+          '<div class="stat-value">' + fmtMoney(marketData.median_rent) + (marketData.median_rent != null ? '/mo' : '') + '</div>' +
+        '</div>' +
+        '<div class="stat-box">' +
+          '<div class="stat-label">Zip Rent per Sqft</div>' +
+          '<div class="stat-value">' + fmtPerSqft(marketData.median_rent_per_sqft) + '</div>' +
+        '</div>' +
+        '<div class="stat-box">' +
+          '<div class="stat-label">Median Days on Market</div>' +
+          '<div class="stat-value">' + (daysOnMarket != null ? fmtNum(daysOnMarket) + ' days' : '&#8212;') + '</div>' +
+        '</div>' +
+      '</div>' +
+
+      trendChartHtml +
+      bedroomHtml
+    );
+  }
+
+  // ── Comp map (Leaflet + OpenStreetMap, no API key required) ────────────
+  let compMapInstance = null;
+
+  function hasNumericCoords(obj) {
+    return obj != null && typeof obj.latitude === 'number' && typeof obj.longitude === 'number';
+  }
+
+  function statusColorHex(status) {
+    const map = { active: '#3b82f6', leased: '#16a34a', off_market: '#9ca3af' };
+    return map[status] || '#9ca3af';
+  }
+
+  function buildMapSection(analysis, comps) {
+    const subjectHasCoords = typeof analysis.subject_latitude === 'number' && typeof analysis.subject_longitude === 'number';
+    const anyCompHasCoords = comps.some(hasNumericCoords);
+    if (!subjectHasCoords && !anyCompHasCoords) return '';
+
+    return (
+      '<div class="section-heading">Comp Locations</div>' +
+      '<div class="chart-legend">' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#DF8C41"></span>Subject property</span>' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#3b82f6"></span>Active listing</span>' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span>Just leased</span>' +
+        '<span class="legend-item"><span class="legend-swatch" style="background:#9ca3af"></span>Off market</span>' +
+        '<span class="legend-item"><span class="legend-ring"></span>Rincon-managed</span>' +
+      '</div>' +
+      '<div class="map-wrap"><div id="compMap"></div></div>'
+    );
+  }
+
+  function initMap(analysis, comps) {
+    const el = document.getElementById('compMap');
+    if (!el || typeof L === 'undefined') return;
+
+    if (compMapInstance) {
+      compMapInstance.remove();
+      compMapInstance = null;
+    }
+
+    const map = L.map(el, { scrollWheelZoom: false });
+    compMapInstance = map;
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+    }).addTo(map);
+
+    const points = [];
+
+    comps.forEach((c) => {
+      if (!hasNumericCoords(c)) return; // no coordinates for this comp — skip the pin, don't break the page
+      const sm = statusMeta(c.listing_status);
+      const priceLabel = c.monthly_rent != null ? fmtMoney(c.monthly_rent) + '/mo' : 'Price unavailable';
+
+      const marker = L.circleMarker([c.latitude, c.longitude], {
+        radius: 8,
+        weight: c.is_rincon_managed ? 3 : 2,
+        color: c.is_rincon_managed ? '#41486F' : '#ffffff',
+        fillColor: statusColorHex(c.listing_status),
+        fillOpacity: 0.95,
+      });
+
+      marker.bindTooltip(esc(c.address || 'Unknown address'), { direction: 'top', offset: [0, -8] });
+      marker.bindPopup(
+        '<div style="font-size:12.5px;line-height:1.6">' +
+          '<strong>' + esc(c.address || 'Unknown address') + '</strong><br>' +
+          priceLabel + ' &middot; ' + esc(sm.label) +
+          (c.is_rincon_managed ? '<br><span style="color:#41486F;font-weight:600">Rincon-managed</span>' : '') +
+        '</div>'
+      );
+      marker.addTo(map);
+      points.push([c.latitude, c.longitude]);
+    });
+
+    if (typeof analysis.subject_latitude === 'number' && typeof analysis.subject_longitude === 'number') {
+      const subjectIcon = L.divIcon({
+        className: '',
+        html: '<div style="width:18px;height:18px;border-radius:50% 50% 50% 0;background:#DF8C41;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transform:rotate(-45deg)"></div>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 18],
+      });
+      const subjectMarker = L.marker([analysis.subject_latitude, analysis.subject_longitude], {
+        icon: subjectIcon,
+        zIndexOffset: 1000,
+      });
+      subjectMarker.bindTooltip('Subject property', { direction: 'top', offset: [0, -20] });
+      subjectMarker.bindPopup(
+        '<div style="font-size:12.5px;line-height:1.6">' +
+          '<strong>' + esc(analysis.subject_address || 'Subject property') + '</strong><br>' +
+          '<span style="color:#DF8C41;font-weight:600">Subject property</span>' +
+          (analysis.subject_estimated_rent != null ? '<br>Est. ' + fmtMoney(analysis.subject_estimated_rent) + '/mo' : '') +
+        '</div>'
+      );
+      subjectMarker.addTo(map);
+      points.push([analysis.subject_latitude, analysis.subject_longitude]);
+    }
+
+    if (points.length === 1) {
+      map.setView(points[0], 14);
+    } else if (points.length > 1) {
+      map.fitBounds(points, { padding: [28, 28], maxZoom: 15 });
+    }
+
+    // The report view is display:none at the moment renderReport() runs
+    // (showView('report') flips it visible right after), so Leaflet would
+    // otherwise measure a zero-size container. initMap() is deferred with
+    // setTimeout so it runs after that visibility flip; recalculate size
+    // once more as a safety net against any further layout timing.
+    setTimeout(() => map.invalidateSize(), 0);
+  }
+
+  function buildCompCard(c) {
+    const sm = statusMeta(c.listing_status);
+    let badges = '<span class="comp-badge b-' + sm.cls + '">' +
+      esc(sm.label) + (c.listing_status === 'active' && c.days_on_market != null ? ' &middot; ' + c.days_on_market + ' DAYS' : '') +
+      '</span>';
+    if (c.is_rincon_managed) badges += '<span class="comp-badge b-managed">RINCON MANAGED</span>';
+    if (c.had_price_cut) badges += '<span class="comp-badge b-cut">PRICE CUT</span>';
+
+    const priceHtml = fmtMoney(c.monthly_rent) +
+      (c.is_estimated_price ? '<span class="est-flag">*est.</span>' : '') +
+      (c.had_price_cut && c.original_price ? '<span class="orig-price">' + fmtMoney(c.original_price) + '</span>' : '');
+
+    return (
+      '<div class="comp-card">' +
+        '<div class="comp-addr">' + esc(c.address || 'Unknown address') + '</div>' +
+        (c.distance_miles != null ? '<div class="comp-city">' + Number(c.distance_miles).toFixed(2) + ' mi from subject</div>' : '') +
+        '<div class="comp-meta">' + esc(propertyTypeLabel(c.property_type)) + ' &middot; ' + fmtBath(c.bedrooms) + ' bd / ' + fmtBath(c.bathrooms) + ' ba' + (c.sqft ? ' &middot; ' + fmtNum(c.sqft) + ' sqft' : '') + '</div>' +
+        '<div class="comp-price">' + priceHtml + (c.monthly_rent != null ? '<span style="font-size:12px;font-weight:500;color:#9ca3af"> /mo</span>' : '') +
+          (c.monthly_rent != null && c.sqft ? '<span style="font-size:12px;font-weight:500;color:#9ca3af"> &middot; ' + pricePerSqft(c.monthly_rent, c.sqft) + '</span>' : '') +
+        '</div>' +
+        '<div class="comp-badges">' + badges + '</div>' +
+        (c.narrative ? '<div class="comp-narrative">' + esc(c.narrative) + '</div>' : '') +
+        (c.is_estimated_price ? '<div style="font-size:10px;color:#9ca3af;margin-top:6px">*Price is an estimate, not a confirmed listing amount.</div>' : '') +
+        (c.is_rincon_managed ? '<div style="font-size:10px;color:var(--violet);margin-top:6px;font-weight:600">Internal reference only &mdash; not an independent market comp.</div>' : '') +
+      '</div>'
+    );
+  }
+
+  function renderReport(analysis, comps, marketData) {
+    const subjectMeta = [
+      analysis.subject_bedrooms + ' bed',
+      fmtBath(analysis.subject_bathrooms) + ' bath',
+      fmtNum(analysis.subject_sqft) + ' sqft',
+      analysis.subject_year_built ? 'Built ' + analysis.subject_year_built : null,
+      analysis.lease_term_months + '-mo ' + (analysis.furnished ? 'furnished' : 'unfurnished') + ' lease',
+    ].filter(Boolean).join(' &middot; ');
+
+    const hasRecommendation = analysis.recommended_rent_low != null && analysis.recommended_rent_high != null;
+
+    const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(analysis, comps) : '';
+    const cardsHtml = comps.length
+      ? comps.map(buildCompCard).join('')
+      : '<div style="grid-column:1/-1;color:#9ca3af;font-size:13px;padding:12px 0">No comparable properties were returned for this analysis.</div>';
+
+    const html =
+      '<div class="report-band">' +
+        '<div class="eyebrow">Rental Market Analysis</div>' +
+        '<h2>' + esc(analysis.subject_address) + '</h2>' +
+        '<div class="subject-meta">' + subjectMeta + '</div>' +
+      '</div>' +
+      '<div class="report-body">' +
+
+        (hasRecommendation ?
+          '<div class="rent-headline">' +
+            '<div class="label">Recommended Asking Rent</div>' +
+            '<div class="amount">' + fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '<span class="permo">/mo</span></div>' +
+          '</div>'
+        : '') +
+
+        '<div class="stat-row">' +
+          '<div class="stat-box">' +
+            '<div class="stat-label">Estimated Market Rent</div>' +
+            '<div class="stat-value">' + fmtMoney(analysis.subject_estimated_rent) + (analysis.subject_estimated_rent != null ? '/mo' : '') + '</div>' +
+          '</div>' +
+          '<div class="stat-box">' +
+            '<div class="stat-label">Comp Rent Range</div>' +
+            '<div class="stat-value">' + fmtMoney(analysis.raw_comp_rent_low) + '&ndash;' + fmtMoney(analysis.raw_comp_rent_high) + '</div>' +
+          '</div>' +
+          '<div class="stat-box">' +
+            '<div class="stat-label">Price per Sqft</div>' +
+            '<div class="stat-value">' + pricePerSqft(analysis.recommended_rent_mid, analysis.subject_sqft) + '</div>' +
+          '</div>' +
+        '</div>' +
+
+        buildMapSection(analysis, comps) +
+
+        (chartHtml ? '<div class="section-heading">Comparable Rentals</div>' + chartHtml : '') +
+
+        '<div class="comp-cards">' + cardsHtml + '</div>' +
+
+        buildMarketTrendsSection(marketData, analysis) +
+
+        (analysis.rationale ?
+          '<div class="section-heading">Why ' + (hasRecommendation ? fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '/mo' : 'This Range') + '</div>' +
+          '<div class="rationale-box">' + esc(analysis.rationale) + '</div>'
+        : '') +
+
+      '</div>' +
+      '<div class="report-footer">' +
+        '<span class="brand-name">Rincon Property Management</span> &middot; 1500 Palma Drive, Suite 280, Ventura, CA 93003 &middot; DRE #01951188 &middot; rinconmanagement.com<br>' +
+        'Prepared ' + fmtDate(analysis.created_at) +
+      '</div>';
+
+    document.getElementById('reportDoc').innerHTML = html;
+
+    // Deferred so it runs after showView('report') makes the container
+    // visible — see the comment in initMap() for why that matters.
+    setTimeout(() => initMap(analysis, comps), 0);
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────
+  loadUsers();
+</script>
+
+</body>
+</html>

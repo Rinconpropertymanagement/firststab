@@ -1,0 +1,15 @@
+{
+  "name": "rincon-rental-analysis",
+  "version": "1.0.0",
+  "description": "Rent-comp analysis tool for Rincon Management sales and operations — enter a property address, get an automated rent recommendation grounded in real comps. Backend only; Tron builds the interface separately against this API.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test-mapping": "node q-mapping-unit-test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.0"
+  }
+}

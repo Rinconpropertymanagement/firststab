@@ -38,6 +38,8 @@
  *     drill-down), behind GET /api/scorecard/followup-touches/detail.
  *   - ADDED 2026-09-13: `findReengagementAttemptsForWeek` (metric 6's
  *     drill-down), behind GET /api/scorecard/reengagement/detail.
+ *   - ADDED 2026-09-13: `findLostDealsAddedToSequenceForWeek` (metric 10's
+ *     drill-down), behind GET /api/scorecard/lost-deals-sequence/detail.
  */
 
 const {
@@ -51,6 +53,7 @@ const {
   SEQUENCE_DEPTH_WEEK_RULE,
   ENROLLMENT_LOOKBACK_DAYS,
   TRACKED_SEQUENCE_IDS,
+  TRACKED_SEQUENCES,
 } = require('./config');
 const { weekBoundsIso } = require('./week');
 const {
@@ -698,11 +701,26 @@ async function findReengagementAttemptsForWeek(hubspot, weekStart) {
  * gained or lost, only reassigned to the week Rincon's own clock says it
  * happened in.
  */
-async function computeLostDealsAddedToSequence(hubspot, weekStart) {
-  const { fromIso, toIso } = weekBoundsIso(weekStart);
-  const tasks = await hubspot.listTasksForSequenceIds(TRACKED_SEQUENCE_IDS);
-
-  const firstSeenByContact = new Map();
+/**
+ * Every tracked-sequence task, reduced to one entry per CONTACT: the task
+ * whose `hs_createdate` is earliest for that contact. Pulled out of
+ * `computeLostDealsAddedToSequence` so the stored aggregate and the live
+ * drill-down (`findLostDealsAddedToSequenceForWeek`, below) run the exact
+ * same per-person grouping rather than two copies that could drift apart —
+ * the same reasoning `splitFollowupTasksByOwner` was extracted for, above.
+ *
+ * Keyed on `hs_task_sequence_step_enrollment_contact_id`, the per-person
+ * key — see the header comment above `computeLostDealsAddedToSequence` for
+ * why that is NOT `hs_object_source_id`'s per-task enrollment id.
+ *
+ * Returns the TASK itself for each contact, not just its date. The stored
+ * aggregate only ever needed the date; the drill-down additionally needs
+ * that task's own `hs_task_sequence_id` to say which tracked sequence the
+ * contact's earliest touch belongs to, so the whole task is kept rather than
+ * two near-identical grouping passes over the same list.
+ */
+function earliestTaskByContact(tasks) {
+  const byContact = new Map(); // contact id -> earliest task
   let tasksMissingContactOrDate = 0;
   for (const task of tasks) {
     const contactId = task.properties.hs_task_sequence_step_enrollment_contact_id;
@@ -711,13 +729,34 @@ async function computeLostDealsAddedToSequence(hubspot, weekStart) {
       tasksMissingContactOrDate++;
       continue;
     }
-    const existing = firstSeenByContact.get(contactId);
-    if (!existing || created < existing) firstSeenByContact.set(contactId, created);
+    const existing = byContact.get(contactId);
+    if (!existing || created < existing.properties.hs_createdate) byContact.set(contactId, task);
   }
+  return { byContact, tasksMissingContactOrDate };
+}
+
+// Sequence id -> a display-only label, built from TRACKED_SEQUENCES'
+// `names_seen` in config.js: the LAST recorded name is the most recently
+// observed one. Never matched on — see config.js's own header on
+// TRACKED_SEQUENCES for why these names drift mid-life while the id stays
+// fixed. Falls back to the raw id for a sequence id this map hasn't seen,
+// which should not occur since the population is already filtered to
+// TRACKED_SEQUENCE_IDS, but is not assumed.
+const SEQUENCE_LABEL_BY_ID = new Map(
+  TRACKED_SEQUENCES.map((s) => [s.id, s.names_seen[s.names_seen.length - 1]])
+);
+function sequenceLabelFor(sequenceId) {
+  return SEQUENCE_LABEL_BY_ID.get(sequenceId) || sequenceId || '(unknown sequence)';
+}
+
+async function computeLostDealsAddedToSequence(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const tasks = await hubspot.listTasksForSequenceIds(TRACKED_SEQUENCE_IDS);
+  const { byContact, tasksMissingContactOrDate } = earliestTaskByContact(tasks);
 
   let enrollments = 0;
-  for (const firstCreated of firstSeenByContact.values()) {
-    if (isInWindow(firstCreated, fromIso, toIso)) enrollments++;
+  for (const task of byContact.values()) {
+    if (isInWindow(task.properties.hs_createdate, fromIso, toIso)) enrollments++;
   }
 
   return {
@@ -728,7 +767,77 @@ async function computeLostDealsAddedToSequence(hubspot, weekStart) {
       trackedSequenceIds: TRACKED_SEQUENCE_IDS,
       tasksConsidered: tasks.length,
       tasksMissingContactOrDate,
-      distinctContactsAllTime: firstSeenByContact.size,
+      distinctContactsAllTime: byContact.size,
+    },
+  };
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/lost-deals-sequence/detail.
+ *
+ * Runs `earliestTaskByContact` over the SAME `listTasksForSequenceIds`
+ * call `computeLostDealsAddedToSequence` makes, so `count` below equals the
+ * stored numerator for `lost_deals_added_to_sequence` for this week EXACTLY,
+ * by construction — never a second population query.
+ *
+ * Every contact returned is a legitimate new enrollment, same framing as the
+ * booking-rate/follow-up-touches/reengagement drill-downs above: this is
+ * activity, not a defect list.
+ *
+ * *** "WHICH TRACKED SEQUENCE," CHECKED RATHER THAN ASSUMED. ***
+ * `computeLostDealsAddedToSequence` itself does not care which tracked
+ * sequence a contact's earliest task belongs to — it only cares THAT an
+ * earliest task exists and WHEN. But a HubSpot task carries exactly one
+ * `hs_task_sequence_id`, so a contact's single earliest task belongs to
+ * exactly one tracked sequence; there is no ambiguity to resolve and no case
+ * to pick between two. A contact could separately have LATER tasks in a
+ * second tracked sequence — the grouping rule folds all tracked sequences
+ * together specifically so that does not create a second enrollment — but
+ * that does not change which sequence they entered THIS week, since only
+ * their earliest touch across every tracked sequence decides the week (see
+ * the header above `computeLostDealsAddedToSequence`). So "which sequence"
+ * is simply `task.properties.hs_task_sequence_id` off the same earliest task
+ * already selected for the count, looked up against config.js's
+ * `TRACKED_SEQUENCES` for a human-readable (but never matched-on) label.
+ *
+ * CONTACT NAME JOIN, BATCHED ONCE — `getContactsByIds` over every
+ * qualifying contact id for the week, the same batching family every other
+ * drill-down in this file uses, never one lookup per contact.
+ */
+async function findLostDealsAddedToSequenceForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+  const tasks = await hubspot.listTasksForSequenceIds(TRACKED_SEQUENCE_IDS);
+  const { byContact, tasksMissingContactOrDate } = earliestTaskByContact(tasks);
+
+  const entering = [];
+  for (const [contactId, task] of byContact.entries()) {
+    if (isInWindow(task.properties.hs_createdate, fromIso, toIso)) entering.push({ contactId, task });
+  }
+
+  const contactsById = await hubspot.getContactsByIds(entering.map((e) => e.contactId));
+
+  const contacts = entering.map(({ contactId, task }) => {
+    const contactProps = contactsById.get(contactId) || null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+    const sequenceId = task.properties.hs_task_sequence_id || null;
+    return {
+      contactId,
+      name: name || (contactProps && contactProps.email) || null,
+      enteredDate: task.properties.hs_createdate,
+      sequenceId,
+      sequenceLabel: sequenceLabelFor(sequenceId),
+    };
+  });
+
+  return {
+    count: contacts.length,
+    contacts,
+    diagnostics: {
+      trackedSequenceIds: TRACKED_SEQUENCE_IDS,
+      tasksConsidered: tasks.length,
+      tasksMissingContactOrDate,
     },
   };
 }
@@ -1058,6 +1167,7 @@ module.exports = {
   computeReengagementAttempts,
   findReengagementAttemptsForWeek,
   computeLostDealsAddedToSequence,
+  findLostDealsAddedToSequenceForWeek,
   computeCrmContactCompleteness,
   computeCrmDealCompleteness,
   scoreCrmContacts,

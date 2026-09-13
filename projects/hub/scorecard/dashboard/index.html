@@ -198,6 +198,15 @@
           },
           render: renderReengagementDrilldownResult,
         },
+        // Same non-"failing" framing as the three drill-downs above: every
+        // contact here is a legitimate new enrollment, not a defect.
+        lost_deals_added_to_sequence: {
+          buttonLabel: 'See who entered this week',
+          buildUrl: function (week) {
+            return '/api/scorecard/lost-deals-sequence/detail?week=' + encodeURIComponent(week);
+          },
+          render: renderLostDealsSequenceDrilldownResult,
+        },
       };
 
       // Renders one CRM-completeness drill-down response (`type`: 'contacts'
@@ -366,6 +375,43 @@
           var completedShort = typeof task.completedDate === 'string' ? shortDate(task.completedDate.slice(0, 10)) : '—';
           item.appendChild(el('div', 'drilldown-meta',
             'Completed ' + completedShort + (task.contactName ? ' · ' + task.contactName : '')));
+          panel.appendChild(item);
+        });
+      }
+
+      // Renders one lost-deals-added-to-sequence drill-down response into
+      // `panel`. Every contact here is a legitimate new enrollment — same
+      // non-"failing" framing as the booking-rate, follow-up-touches and
+      // re-engagement renderers above — so the empty/summary copy says
+      // plainly what the list is. One row per PERSON (not per task, unlike
+      // the follow-up-touches/reengagement renderers), matching the metric
+      // itself: distinct contacts newly entering a tracked sequence.
+      function renderLostDealsSequenceDrilldownResult(panel, data, week) {
+        if (!data.contacts || data.contacts.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No one newly entered a tracked lost-leads sequence the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.count + ' ' + (data.count === 1 ? 'person' : 'people') +
+          ' newly entered a re-engagement sequence the week of ' + week + ':');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.contacts.forEach(function (contact) {
+          var item = el('div', 'drilldown-item');
+          var nameLine = el('span', 'drilldown-name', contact.name || '(no name on record)');
+          item.appendChild(nameLine);
+
+          var link = el('a', 'drilldown-link', 'View in HubSpot →');
+          link.href = contact.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          item.appendChild(link);
+
+          var enteredShort = typeof contact.enteredDate === 'string' ? shortDate(contact.enteredDate.slice(0, 10)) : '—';
+          item.appendChild(el('div', 'drilldown-meta',
+            'Entered ' + enteredShort + (contact.sequenceLabel ? ' · ' + contact.sequenceLabel : '')));
           panel.appendChild(item);
         });
       }

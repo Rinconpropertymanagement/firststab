@@ -60,6 +60,7 @@ const {
   findLeadDetailsForWeek,
   findFollowupTouchesForWeek,
   findReengagementAttemptsForWeek,
+  findLostDealsAddedToSequenceForWeek,
 } = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
@@ -561,6 +562,54 @@ router.get('/api/scorecard/reengagement/detail', requireScorecardAccess, async (
     });
   } catch (err) {
     console.error('[scorecard] reengagement detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/lost-deals-sequence/detail?week=YYYY-MM-DD
+ *
+ * Same discipline as the drill-downs above — read this file's header
+ * comment on crm-completeness/detail first, it all applies here unchanged:
+ * reads HubSpot LIVE on every call, nothing it returns is written anywhere,
+ * display-only.
+ *
+ * Every contact returned is a legitimate new enrollment, same framing as the
+ * booking-rate/follow-up-touches/reengagement drill-downs above: this is
+ * activity, not a defect list. `findLostDealsAddedToSequenceForWeek`
+ * (lib/metrics.js) reuses computeLostDealsAddedToSequence's own population
+ * call and per-contact-earliest grouping — the exact same
+ * listTasksForSequenceIds(TRACKED_SEQUENCE_IDS) read — so `count` below
+ * equals the stored numerator for `lost_deals_added_to_sequence` for this
+ * week EXACTLY. Uses the same contact record URL shape
+ * (hubspotRecordUrl + CONTACT_OBJECT_TYPE_ID) the CRM-completeness and
+ * booking-rate drill-downs already confirmed live — no new URL discovery.
+ */
+router.get('/api/scorecard/lost-deals-sequence/detail', requireScorecardAccess, async (req, res) => {
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    const { count, contacts, diagnostics } = await findLostDealsAddedToSequenceForWeek(hubspotLeadsConnector, week);
+
+    res.json({
+      week,
+      count,
+      contacts: contacts.map((c) => ({
+        name: c.name,
+        enteredDate: c.enteredDate,
+        sequenceLabel: c.sequenceLabel,
+        url: hubspotRecordUrl(portalId, CONTACT_OBJECT_TYPE_ID, c.contactId),
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] lost-deals-sequence detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

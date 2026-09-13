@@ -62,6 +62,7 @@ const {
   findReengagementAttemptsForWeek,
   findLostDealsAddedToSequenceForWeek,
   findSequenceDepthForWeek,
+  findPastLeadConversionsForWeek,
 } = require('./lib/metrics');
 
 // `mondayOf()` assumes it is handed a parseable YYYY-MM-DD string and throws
@@ -663,6 +664,67 @@ router.get('/api/scorecard/sequence-depth/detail', requireScorecardAccess, async
     });
   } catch (err) {
     console.error('[scorecard] sequence-depth detail failed:', err.message);
+    // No trailing "try again" here — the page appends that once itself so
+    // the message is never duplicated on screen.
+    res.status(500).json({ error: 'Could not read HubSpot for this week.' });
+  }
+});
+
+/**
+ * GET /api/scorecard/past-lead-conversions/detail?week=YYYY-MM-DD
+ *
+ * Same discipline as the drill-downs above — read this file's header comment
+ * on crm-completeness/detail first, it all applies here unchanged: reads
+ * HubSpot LIVE on every call, nothing it returns is written anywhere,
+ * display-only.
+ *
+ * UNLIKE EVERY OTHER DRILL-DOWN ON THIS PAGE: a conversion here is a PAIR of
+ * lead records (an old, dead one and a new, successful one for the same
+ * contact), not a single record — see findPastLeadConversionsForWeek's
+ * header in lib/metrics.js for why HubSpot itself makes this structurally a
+ * pair. `findPastLeadConversionsForWeek` reuses computePastLeadConversions's
+ * own population calls and per-contact earliest-past-lead join (via the
+ * shared buildEarliestPastLeadByContact helper) and its exact throw-guard,
+ * so `count` below equals the stored numerator for `past_lead_conversions`
+ * for this week EXACTLY, and can never silently report a false zero the
+ * stored metric itself would have refused to write. Both lead ids in every
+ * pair link out with the same hubspotLeadUrl shape the booking-rate
+ * drill-down already confirmed live — no new URL discovery.
+ *
+ * This metric is legitimately zero most weeks (13 of 15, historically) — a
+ * zero here is a plain fact, not an error, and the response carries nothing
+ * that would let the page frame it otherwise.
+ */
+router.get('/api/scorecard/past-lead-conversions/detail', requireScorecardAccess, async (req, res) => {
+  const week = String(req.query.week || '');
+  if (!week || !isParsableIsoDate(week) || mondayOf(week) !== week) {
+    return res.status(400).json({ error: 'week must be a Monday (Pacific), formatted YYYY-MM-DD.' });
+  }
+
+  try {
+    const portalId = await hubspotLeadsConnector.getPortalId();
+    const { count, conversions, diagnostics } = await findPastLeadConversionsForWeek(hubspotLeadsConnector, week);
+
+    res.json({
+      week,
+      count,
+      conversions: conversions.map((c) => ({
+        name: c.name,
+        oldLead: {
+          createdDate: c.oldLead.createdDate,
+          stage: c.oldLead.stage,
+          url: hubspotLeadUrl(portalId, c.oldLead.id),
+        },
+        newLead: {
+          createdDate: c.newLead.createdDate,
+          enteredQualifiedDate: c.newLead.enteredQualifiedDate,
+          url: hubspotLeadUrl(portalId, c.newLead.id),
+        },
+      })),
+      diagnostics,
+    });
+  } catch (err) {
+    console.error('[scorecard] past-lead-conversions detail failed:', err.message);
     // No trailing "try again" here — the page appends that once itself so
     // the message is never duplicated on screen.
     res.status(500).json({ error: 'Could not read HubSpot for this week.' });

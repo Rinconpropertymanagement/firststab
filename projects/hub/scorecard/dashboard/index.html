@@ -88,6 +88,16 @@
     /* Sequence-depth drill-down — marks the median rank(s), not a status. */
     .drilldown-badge-median { background: #eef2ff; color: #3730a3; }
     .drilldown-meta { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
+    /* Past-lead-conversions drill-down — the one row shape on this page that
+       carries two dates and two stage labels (an old lead and a new one),
+       so each half gets its own line and its own pill rather than being
+       run together with the follow-up-touches/reengagement single-line
+       shape above. OLD is muted (a dead record, kept only for context); NEW
+       is the same green the booking-rate "BECAME A DEAL" badge uses, since
+       reaching Qualified again is the success half of the pair. */
+    .drilldown-pair-row { margin-top: 5px; padding-left: 1px; line-height: 1.6; }
+    .drilldown-pair-label { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; margin-right: 7px; vertical-align: middle; background: #f3f4f6; color: #6b7280; }
+    .drilldown-pair-label-new { background: #ecfdf5; color: #166534; }
   </style>
 </head>
 <body>
@@ -222,6 +232,17 @@
             return '/api/scorecard/sequence-depth/detail?week=' + encodeURIComponent(week);
           },
           render: renderSequenceDepthDrilldownResult,
+        },
+        // The last of nine metrics to get a drill-down. Unlike every entry
+        // above, a "conversion" here is a PAIR of lead records (an old, dead
+        // one and a new, successful one for the same contact) rather than a
+        // single record — see renderPastLeadConversionsDrilldownResult below
+        // for how that pair is laid out.
+        past_lead_conversions: {
+          buildUrl: function (week) {
+            return '/api/scorecard/past-lead-conversions/detail?week=' + encodeURIComponent(week);
+          },
+          render: renderPastLeadConversionsDrilldownResult,
         },
       };
 
@@ -487,6 +508,79 @@
 
           item.appendChild(el('div', 'drilldown-meta',
             enrollment.touchCount + ' touch' + (enrollment.touchCount === 1 ? '' : 'es')));
+          panel.appendChild(item);
+        });
+      }
+
+      // Renders one past-lead-conversions drill-down response into `panel`.
+      // The one structural outlier on this page: every other drill-down
+      // shows a flat list of single records, but a "conversion" here is a
+      // PAIR of lead records for the same contact — an OLD one, sitting dead
+      // in a past-lead stage, and a NEW, separate record HubSpot created when
+      // that contact came back and reached Qualified again (see
+      // findPastLeadConversionsForWeek's header in scorecard/lib/metrics.js
+      // for why HubSpot itself makes this a pair rather than one record
+      // moving through stages). So each row here carries two dated lines
+      // instead of one — more information than any other drill-down row on
+      // this page — laid out as two clearly-labelled sub-lines under the
+      // contact's name rather than run together on one line.
+      //
+      // THIS METRIC IS LEGITIMATELY ZERO MOST WEEKS (13 of 15, historically)
+      // — see this row's "About this metric" note. The empty state below
+      // says so as a plain fact, matching every other non-"failing" drill-
+      // down on this page: no "error", no "failing", nothing red. When
+      // non-zero, each pair is a genuine win — someone written off came
+      // back — and the summary line says that plainly too.
+      function renderPastLeadConversionsDrilldownResult(panel, data, week) {
+        // Two dated lines per row need more room than the 640px every other
+        // drill-down panel uses to stay legible rather than cramped — set
+        // fresh on every render since the panel element is reused in place
+        // across a toggle-week/close-week cycle.
+        panel.style.maxWidth = '760px';
+
+        if (!data.conversions || data.conversions.length === 0) {
+          panel.appendChild(el('div', 'drilldown-empty', 'No past lead converted the week of ' + week + '.'));
+          return;
+        }
+
+        var summary = el('div', 'metric-note',
+          data.count + ' past lead' + (data.count === 1 ? '' : 's') + ' converted the week of ' + week +
+          ' — someone HubSpot had marked dead came back and reached Qualified again:');
+        summary.style.marginBottom = '6px';
+        panel.appendChild(summary);
+
+        data.conversions.forEach(function (conversion) {
+          var item = el('div', 'drilldown-item');
+          item.appendChild(el('span', 'drilldown-name', conversion.name || '(no name on record)'));
+
+          var oldRow = el('div', 'drilldown-pair-row');
+          oldRow.appendChild(el('span', 'drilldown-pair-label', 'OLD LEAD'));
+          var oldCreatedShort = typeof conversion.oldLead.createdDate === 'string'
+            ? shortDate(conversion.oldLead.createdDate.slice(0, 10)) : '—';
+          oldRow.appendChild(document.createTextNode(
+            'Created ' + oldCreatedShort + ' · ' + (conversion.oldLead.stage || '—') + ' '));
+          var oldLink = el('a', 'drilldown-link', 'View in HubSpot →');
+          oldLink.href = conversion.oldLead.url;
+          oldLink.target = '_blank';
+          oldLink.rel = 'noopener noreferrer';
+          oldRow.appendChild(oldLink);
+          item.appendChild(oldRow);
+
+          var newRow = el('div', 'drilldown-pair-row');
+          newRow.appendChild(el('span', 'drilldown-pair-label drilldown-pair-label-new', 'NEW LEAD'));
+          var newCreatedShort = typeof conversion.newLead.createdDate === 'string'
+            ? shortDate(conversion.newLead.createdDate.slice(0, 10)) : '—';
+          var enteredShort = typeof conversion.newLead.enteredQualifiedDate === 'string'
+            ? shortDate(conversion.newLead.enteredQualifiedDate.slice(0, 10)) : '—';
+          newRow.appendChild(document.createTextNode(
+            'Created ' + newCreatedShort + ' · Entered Qualified ' + enteredShort + ' '));
+          var newLink = el('a', 'drilldown-link', 'View in HubSpot →');
+          newLink.href = conversion.newLead.url;
+          newLink.target = '_blank';
+          newLink.rel = 'noopener noreferrer';
+          newRow.appendChild(newLink);
+          item.appendChild(newRow);
+
           panel.appendChild(item);
         });
       }

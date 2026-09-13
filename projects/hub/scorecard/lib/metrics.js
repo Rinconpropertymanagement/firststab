@@ -44,6 +44,12 @@
  *     behind GET /api/scorecard/sequence-depth/detail. The one exception
  *     among exceptions: it returns an enrollment id too (a workflow-internal
  *     grouping key, never a HubSpot object id) alongside the contact id/name.
+ *   - ADDED 2026-09-13: `findPastLeadConversionsForWeek` (metric 5's
+ *     drill-down, the last of nine), behind
+ *     GET /api/scorecard/past-lead-conversions/detail. A second exception
+ *     among exceptions: it returns TWO lead ids per entry (an old lead and a
+ *     new one, joined by a shared contact id) rather than one — see that
+ *     function's header for why a conversion is structurally a pair.
  */
 
 const {
@@ -626,20 +632,47 @@ async function findSequenceDepthForWeek(hubspot, weekStart, { sinceIso } = {}) {
  * this portal (a filter on it returns HTTP 400), so the whole Qualified
  * population comes back and the date is matched here.
  */
+
+/**
+ * Contact id -> the EARLIEST past-lead record for that contact, pulled out
+ * so `computePastLeadConversions` and the drill-down
+ * (`findPastLeadConversionsForWeek`, below) run the exact same "which past
+ * lead counts" logic rather than two copies that could drift apart.
+ *
+ * Returns TWO maps rather than one, and that split is deliberate, not
+ * incidental: `earliestDateByContact` reproduces, keystroke for keystroke,
+ * the date-only comparison this file always used (`!existing ||
+ * (created && created < existing)`) — the exact rule
+ * `computePastLeadConversions` needs and nothing more, so refactoring this
+ * out cannot change which lead wins ties or a missing-date edge case.
+ * `leadByContact` is updated in the SAME branch, at the SAME time, purely so
+ * the drill-down can also hand back which record that winning date belongs
+ * to (its id, its stage) — something the stored metric never needed and the
+ * date-only map cannot answer by itself.
+ */
+function buildEarliestPastLeadByContact(pastLeads) {
+  const earliestDateByContact = new Map(); // contact id -> earliest past-lead created date
+  const leadByContact = new Map(); // contact id -> the past lead that owns that date
+  for (const lead of pastLeads) {
+    const contactId = lead.properties.hs_primary_contact_id;
+    if (!contactId) continue;
+    const created = lead.properties.hs_createdate;
+    const existing = earliestDateByContact.get(contactId);
+    if (!existing || (created && created < existing)) {
+      earliestDateByContact.set(contactId, created);
+      leadByContact.set(contactId, lead);
+    }
+  }
+  return { earliestDateByContact, leadByContact };
+}
+
 async function computePastLeadConversions(hubspot, weekStart) {
   const { fromIso, toIso } = weekBoundsIso(weekStart);
 
   const { leads: qualified } = await hubspot.listQualifiedLeads(LEAD_STAGES.qualified);
   const { leads: pastLeads } = await hubspot.listLeadsInStages(PAST_LEAD_STAGE_IDS);
 
-  const earliestPastLeadByContact = new Map();
-  for (const lead of pastLeads) {
-    const contactId = lead.properties.hs_primary_contact_id;
-    if (!contactId) continue;
-    const created = lead.properties.hs_createdate;
-    const existing = earliestPastLeadByContact.get(contactId);
-    if (!existing || (created && created < existing)) earliestPastLeadByContact.set(contactId, created);
-  }
+  const { earliestDateByContact } = buildEarliestPastLeadByContact(pastLeads);
 
   // *** THE GUARD. *** This metric legitimately reads zero in 13 of 15 weeks,
   // which means a zero caused by reading the WRONG PROPERTY is
@@ -657,7 +690,7 @@ async function computePastLeadConversions(hubspot, weekStart) {
     if (!isInWindow(enteredQualified, fromIso, toIso)) continue;
     const contactId = lead.properties.hs_primary_contact_id;
     if (!contactId) continue;
-    const earlierPast = earliestPastLeadByContact.get(contactId);
+    const earlierPast = earliestDateByContact.get(contactId);
     if (earlierPast && earlierPast < lead.properties.hs_createdate) conversions++;
   }
 
@@ -673,6 +706,123 @@ async function computePastLeadConversions(hubspot, weekStart) {
     metric_key: 'past_lead_conversions',
     metric_shape: 'count',
     numerator: conversions,
+    diagnostics: {
+      qualifiedPopulation: qualified.length,
+      qualifiedLeadsCarryingEntryDate: leadsWithEntryDate,
+      pastLeadPopulation: pastLeads.length,
+    },
+  };
+}
+
+/**
+ * The live drill-down behind GET /api/scorecard/past-lead-conversions/detail.
+ *
+ * Runs `buildEarliestPastLeadByContact` over the SAME
+ * `listQualifiedLeads`/`listLeadsInStages` calls `computePastLeadConversions`
+ * makes, and the SAME per-lead window/contact/earlier-date check, so `count`
+ * below equals the stored numerator for `past_lead_conversions` for this
+ * week EXACTLY, by construction — never a second implementation that could
+ * drift. *** THE GUARD IS NOT BYPASSED. *** The exact same throw this
+ * function's compute-side sibling raises when not one Qualified lead carries
+ * an entry date is reproduced here, reading the SAME property
+ * (`LEAD_ENTERED_QUALIFIED_PROPERTY`) rather than a second, unchecked one —
+ * a drill-down that read some other date field to dodge the guard would
+ * defeat the whole point of it.
+ *
+ * *** THIS RETURNS PAIRS, NOT A FLAT LIST — THE ONE THING THIS METRIC IS
+ * STRUCTURALLY UNLIKE EVERY OTHER DRILL-DOWN ON THIS PAGE. *** Every other
+ * drill-down in this file shows single records: one lead, one task, one
+ * contact. A past-lead conversion is not one record moving through
+ * stages — it is a NEW, separate lead record HubSpot created when a
+ * previously-dead contact came back, joined to the OLD, dead lead only by
+ * `hs_primary_contact_id`. So each entry below carries both halves: the old
+ * lead (id, created date, stage label) and the new one (id, created date,
+ * the date it entered Qualified), plus the contact's name.
+ *
+ * WHAT WAS CONSIDERED AND REJECTED FOR THE PAIR SHAPE: (a) one row per LEAD
+ * (four rows for two conversions) — rejected, because it hides the very
+ * thing that makes this metric worth a drill-down at all, which is that two
+ * lead records are secretly one story; (b) a single flattened row of eight
+ * fields with no grouping — rejected as illegible once rendered, since this
+ * is already the most information any drill-down row on this page carries
+ * (two ids, two dates, one stage label, one name). Instead each pair is
+ * returned as one object with nested `oldLead`/`newLead`, which is also the
+ * shape the frontend renders as two clearly-labelled sub-lines under one
+ * contact name — see renderPastLeadConversionsDrilldownResult in
+ * dashboard/index.html.
+ *
+ * THIS METRIC IS LEGITIMATELY ZERO MOST WEEKS. An empty `conversions` array
+ * is not a failure and the page must not say it is — see this file's header
+ * on `computePastLeadConversions` for how rare a non-zero week is.
+ *
+ * CONTACT NAME JOIN, BATCHED ONCE — `getContactsByIds` over every converting
+ * pair's contact id, the same batching family every other drill-down in this
+ * file uses, never one lookup per pair.
+ */
+async function findPastLeadConversionsForWeek(hubspot, weekStart) {
+  const { fromIso, toIso } = weekBoundsIso(weekStart);
+
+  const { leads: qualified } = await hubspot.listQualifiedLeads(LEAD_STAGES.qualified);
+  const { leads: pastLeads } = await hubspot.listLeadsInStages(PAST_LEAD_STAGE_IDS);
+
+  const { earliestDateByContact, leadByContact } = buildEarliestPastLeadByContact(pastLeads);
+
+  // *** THE GUARD, UNCHANGED FROM computePastLeadConversions. *** See that
+  // function's header — reproduced here rather than shared as a third
+  // helper because the two callers throw over two different local variables
+  // (`conversions`/`pairs`) and pulling the throw itself into a helper would
+  // buy nothing but an extra indirection to read through.
+  let leadsWithEntryDate = 0;
+  const pairs = [];
+  for (const lead of qualified) {
+    const enteredQualified = lead.properties[LEAD_ENTERED_QUALIFIED_PROPERTY];
+    if (typeof enteredQualified === 'string' && enteredQualified) leadsWithEntryDate++;
+    if (!isInWindow(enteredQualified, fromIso, toIso)) continue;
+    const contactId = lead.properties.hs_primary_contact_id;
+    if (!contactId) continue;
+    const earlierPastDate = earliestDateByContact.get(contactId);
+    if (earlierPastDate && earlierPastDate < lead.properties.hs_createdate) {
+      pairs.push({ contactId, oldLead: leadByContact.get(contactId), newLead: lead, enteredQualified });
+    }
+  }
+
+  if (qualified.length > 0 && leadsWithEntryDate === 0) {
+    throw new Error(
+      `Not one of ${qualified.length} Qualified leads carried "${LEAD_ENTERED_QUALIFIED_PROPERTY}". ` +
+      'The property name is wrong or HubSpot has stopped returning it. Refusing to report 0 conversions, ' +
+      'which would be indistinguishable from a correct answer. Check GET /crm/v3/properties/leads.'
+    );
+  }
+
+  const contactsById = await hubspot.getContactsByIds(pairs.map((p) => p.contactId));
+
+  const conversions = pairs.map(({ contactId, oldLead, newLead, enteredQualified }) => {
+    const contactProps = contactsById.get(contactId) || null;
+    const name = contactProps
+      ? [contactProps.firstname, contactProps.lastname].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : '';
+    const oldRawStage = oldLead.properties.hs_pipeline_stage;
+    return {
+      contactId,
+      name: name || (contactProps && contactProps.email) || null,
+      oldLead: {
+        id: oldLead.id,
+        createdDate: oldLead.properties.hs_createdate,
+        // Falls back to the raw id for a stage this map hasn't been updated
+        // for yet — same fallback findLeadDetailsForWeek uses above.
+        stage: LEAD_STAGE_LABELS[oldRawStage] || oldRawStage,
+      },
+      newLead: {
+        id: newLead.id,
+        createdDate: newLead.properties.hs_createdate,
+        enteredQualifiedDate: enteredQualified,
+      },
+    };
+  });
+
+  return {
+    count: conversions.length,
+    conversions,
     diagnostics: {
       qualifiedPopulation: qualified.length,
       qualifiedLeadsCarryingEntryDate: leadsWithEntryDate,
@@ -1322,6 +1472,7 @@ module.exports = {
   computeSequenceDepth,
   findSequenceDepthForWeek,
   computePastLeadConversions,
+  findPastLeadConversionsForWeek,
   computeReengagementAttempts,
   findReengagementAttemptsForWeek,
   computeLostDealsAddedToSequence,

@@ -156,7 +156,13 @@
         var row = document.getElementById('head-row');
         row.innerHTML = '';
         row.appendChild(el('th', '', 'Metric'));
-        weeks.forEach(function (week) {
+        // Display only, newest first: weeks arrives oldest-first from the
+        // API (weeksEndingAt in lib/week.js), which stays that way because
+        // other code depends on it — the rolling-average math walks it in
+        // chronological order. Reversing a COPY here, right before layout,
+        // means the newest week sits next to the metric name where it's
+        // read first, without touching the order anything else relies on.
+        weeks.slice().reverse().forEach(function (week) {
           var th = el('th', 'num', shortWeek(week));
           th.title = 'Week beginning ' + week + ' (Monday to Sunday)';
           row.appendChild(th);
@@ -409,7 +415,11 @@
           }
           row.appendChild(labelCell);
 
-          metric.cells.forEach(function (cell) { row.appendChild(renderCell(metric, cell)); });
+          // Same reversed-copy-for-display trick as renderHead, and it must
+          // match it exactly: cells is built by mapping over the same
+          // weeks array (router.js), so reversing both the same way keeps
+          // every number under its own week's header.
+          metric.cells.slice().reverse().forEach(function (cell) { row.appendChild(renderCell(metric, cell)); });
           row.appendChild(renderAverage(metric));
           body.appendChild(row);
 

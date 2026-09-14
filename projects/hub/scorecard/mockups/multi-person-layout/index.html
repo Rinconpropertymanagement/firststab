@@ -1,0 +1,134 @@
+<title>Scoreboard Layout Options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0c; --surface:#131518; --surface-2:#1a1d21;
+    --border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.16);
+    --ink:#f3f4f2; --muted:#9aa0a1; --faint:#5c6265;
+    --accent:#f0a83c; --accent-ink:#1a1206; --accent-soft:rgba(240,168,60,.13);
+    --shadow-md:0 24px 48px rgba(0,0,0,.55), 0 4px 12px rgba(0,0,0,.4);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:'Bricolage Grotesque',var(--sans);
+  }
+  *,*::before,*::after{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans);
+  }
+  .topbar{display:flex;align-items:center;gap:10px;padding:16px 28px;border-bottom:1px solid var(--border);
+    position:relative;z-index:2;}
+  .mark{width:26px;height:26px;border-radius:8px;background:var(--accent);flex:none;
+    display:flex;align-items:center;justify-content:center;color:var(--accent-ink);}
+  .wordmark{font-family:var(--display);font-weight:700;font-size:15px;letter-spacing:-.01em;}
+  .topbar .tag{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);
+    letter-spacing:.05em;text-transform:uppercase;border:1px solid var(--border);border-radius:999px;
+    padding:4px 10px;}
+
+  .hero{position:relative;overflow:hidden;}
+  .hero::before{
+    content:""; position:absolute; top:-260px; left:50%; transform:translateX(-50%);
+    width:900px; height:520px;
+    background:radial-gradient(closest-side, rgba(240,168,60,.20), rgba(240,168,60,0) 72%);
+    pointer-events:none;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 28px 0;position:relative;z-index:1;}
+  h1{font-family:var(--display);font-weight:700;font-size:42px;letter-spacing:-.02em;
+    margin:0 0 12px;text-wrap:balance;}
+  h1 em{font-style:normal;color:var(--accent);}
+  p.intro{color:var(--muted);font-size:14.5px;line-height:1.65;max-width:600px;margin:0 0 36px;}
+  .wrap-body{max-width:1080px;margin:0 auto;padding:0 28px 64px;position:relative;z-index:1;}
+
+  .picker{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-items:stretch;}
+  .tab{
+    text-align:left; background:var(--surface); border:1px solid var(--border); border-radius:16px;
+    padding:18px 18px 16px; cursor:pointer; font:inherit; color:var(--ink);
+    transition:border-color .18s ease, transform .18s ease, opacity .18s ease; opacity:.68;
+  }
+  .tab:hover{opacity:1; border-color:var(--border-strong); transform:translateY(-2px);}
+  .tab.active{border-color:var(--accent); opacity:1; box-shadow:0 0 0 1px var(--accent) inset, var(--shadow-md);}
+  .tab-row{display:flex;align-items:center;gap:9px;margin-bottom:10px;}
+  .tab-num{font-family:var(--display);font-weight:700;font-size:22px;color:var(--faint);}
+  .tab.active .tab-num{color:var(--accent);}
+  .tab-dot{width:7px;height:7px;border-radius:50%;background:var(--faint);margin-left:auto;
+    transition:background .18s ease, transform .18s ease;}
+  .tab.active .tab-dot{background:var(--accent);transform:scale(1.3);
+    box-shadow:0 0 10px rgba(240,168,60,.6);}
+  .tab-title{font-size:14.5px; font-weight:600; margin:0 0 6px;}
+  .tab-desc{font-size:12px; color:var(--muted); line-height:1.55;}
+
+  .frame-wrap{
+    margin-top:22px; border:1px solid var(--border); border-radius:16px; overflow:hidden;
+    background:var(--surface); box-shadow:var(--shadow-md);
+  }
+  .frame-bar{
+    display:flex; align-items:center; gap:7px; padding:11px 14px; border-bottom:1px solid var(--border);
+  }
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--surface-2);border:1px solid var(--border-strong);}
+  .frame-bar .label{margin-left:8px;font-family:var(--mono);font-size:11px;color:var(--faint);
+    letter-spacing:.04em;}
+  iframe{width:100%; height:780px; border:0; display:block; background:#0a0b0c;}
+  .footnote{color:var(--faint); font-size:11.5px; margin-top:18px; line-height:1.7;}
+  .footnote b{color:var(--muted);font-weight:600;}
+</style>
+
+<div class="topbar">
+  <div class="mark">
+    <svg width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="9" width="3" height="6" rx="1" fill="currentColor" opacity=".6"/><rect x="6.5" y="6" width="3" height="9" rx="1" fill="currentColor" opacity=".8"/><rect x="12" y="2" width="3" height="13" rx="1" fill="currentColor"/></svg>
+  </div>
+  <div class="wordmark">Rincon Hub — Scoreboard</div>
+  <span class="tag">Design review</span>
+</div>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Three ways to organize <em>fifteen</em> people.</h1>
+    <p class="intro">
+      Static visual directions only — nothing inside the preview below is wired up yet.
+      React to the shape and feel of each one before any of it gets built for real.
+    </p>
+  </div>
+</div>
+
+<div class="wrap-body">
+  <div class="picker" id="tabs">
+    <button class="tab active" data-src="option-a.html">
+      <div class="tab-row"><span class="tab-num">01</span><span class="tab-dot"></span></div>
+      <div class="tab-title">Directory + Drill-down</div>
+      <div class="tab-desc">Closest to today's page — a name list up front, click through to one person's table.</div>
+    </button>
+    <button class="tab" data-src="option-b.html">
+      <div class="tab-row"><span class="tab-num">02</span><span class="tab-dot"></span></div>
+      <div class="tab-title">Sidebar Navigator</div>
+      <div class="tab-desc">Pods and people stay visible on the left; the table updates on the right. Built for checking several people in a row.</div>
+    </button>
+    <button class="tab" data-src="option-c.html">
+      <div class="tab-row"><span class="tab-num">03</span><span class="tab-dot"></span></div>
+      <div class="tab-title">Visual Scorecards Grid</div>
+      <div class="tab-desc">Everyone's headline numbers on one page, grouped by pod. Click a card for full detail.</div>
+    </button>
+  </div>
+
+  <div class="frame-wrap">
+    <div class="frame-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">static preview</span></div>
+    <iframe id="preview" src="option-a.html" title="Layout option preview"></iframe>
+  </div>
+
+  <p class="footnote">
+    Same made-up 14 people, 5 pods, and per-metric goals in all three, so the only thing
+    changing between tabs is the layout — not the data. <b>Green</b> means a week cleared
+    its goal, <b>red</b> means it didn't.
+  </p>
+</div>
+
+<script>
+  document.getElementById('tabs').addEventListener('click', function(e){
+    var btn = e.target.closest('.tab');
+    if(!btn) return;
+    document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+    btn.classList.add('active');
+    document.getElementById('preview').src = btn.dataset.src;
+  });
+</script>

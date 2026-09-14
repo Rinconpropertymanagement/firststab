@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Option C — Visual Scorecards Grid</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0c; --surface:#131518; --surface-2:#1a1d21;
+    --border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.15);
+    --ink:#f3f4f2; --muted:#9aa0a1; --faint:#5c6265;
+    --accent:#f0a83c; --accent-soft:rgba(240,168,60,.12);
+    --good:#3ddc9a; --good-bg:rgba(61,220,154,.13);
+    --bad:#f66354; --bad-bg:rgba(246,99,84,.14);
+    --shadow-md:0 20px 44px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.4);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:'Bricolage Grotesque',var(--sans);
+  }
+  *,*::before,*::after{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);font-size:14px;background:var(--bg);color:var(--ink);}
+  .strip{display:flex;align-items:center;gap:8px;padding:9px 20px;background:var(--surface);
+    border-bottom:1px solid var(--border);font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;
+    color:var(--muted);text-transform:uppercase;}
+  .strip b{color:var(--accent);font-weight:600;}
+  .page{max-width:1040px;margin:0 auto;padding:36px 24px 64px;}
+  h1{font-family:var(--display);font-weight:700;font-size:30px;letter-spacing:-.02em;margin-bottom:5px;}
+  p.sub{color:var(--muted);font-size:13.5px;margin-bottom:8px;}
+  p.hint{color:var(--accent);font-size:12px;font-family:var(--mono);margin-bottom:30px;}
+
+  .pod-head{display:flex;align-items:center;gap:10px;margin:30px 0 12px;}
+  .pod-head:first-of-type{margin-top:0;}
+  .dept-dot{width:7px;height:7px;border-radius:50%;flex:none;}
+  .pod-name{font-weight:600;font-size:13px;}
+  .pod-count{font-family:var(--mono);color:var(--faint);font-size:11px;margin-left:auto;}
+  .rollup{display:flex;align-items:center;gap:8px;}
+  .rollup-bar{display:flex;width:80px;height:6px;border-radius:3px;overflow:hidden;flex:none;}
+  .rollup-bar span{height:100%;}
+  .rollup-bar .g{background:var(--good);}
+  .rollup-bar .b{background:var(--bad);}
+  .rollup-frac{font-family:var(--mono);color:var(--muted);font-size:11px;white-space:nowrap;}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;
+    align-items:start;}
+  .scorecard{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--border);
+    border-radius:12px 14px 14px 12px;box-shadow:var(--shadow-md);transition:border-color .15s ease;}
+  .scorecard.flagged{border-left-color:var(--bad);}
+  .scorecard.ok{border-left-color:var(--good);}
+  .scorecard.is-open{grid-column:1 / -1;}
+
+  .compact-view{padding:14px 16px;cursor:pointer;transition:transform .15s ease;}
+  .compact-view:hover{transform:translateY(-1px);}
+  .sc-who{display:flex;align-items:center;gap:8px;margin-bottom:12px;}
+  .avatar{width:26px;height:26px;border-radius:50%;flex:none;display:flex;align-items:center;
+    justify-content:center;color:#0a0b0c;font-family:var(--mono);font-size:9.5px;font-weight:700;}
+  .sc-name{font-weight:600;font-size:13px;}
+  .status-bar{display:flex;gap:3px;margin-bottom:9px;flex-wrap:wrap;}
+  .seg{width:14px;height:6px;border-radius:3px;background:var(--border-strong);}
+  .seg.hit{background:var(--good);}
+  .seg.miss{background:var(--bad);}
+  .status-frac{font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .status-frac b{font-size:13px;}
+  .status-frac b.good{color:var(--good);}
+  .status-frac b.bad{color:var(--bad);}
+
+  .detail-view{padding:20px 22px 22px;}
+  .expanded-head{display:flex;align-items:center;gap:11px;margin-bottom:6px;cursor:pointer;}
+  .expanded-head .avatar{width:34px;height:34px;font-size:12px;}
+  .expanded-head .sc-name{font-family:var(--display);font-size:17px;font-weight:700;}
+  .expanded-head .sc-pod{color:var(--faint);font-size:11px;margin-top:1px;}
+  .collapse-link{margin-left:auto;font-size:12px;color:var(--accent);font-weight:500;
+    display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+  .detail-status{margin:10px 0 16px;}
+  .scroll{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:520px;}
+  th{text-align:right;color:var(--faint);font-weight:600;padding:0 5px 8px;font-family:var(--mono);
+    font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;}
+  th:first-child,td.label{text-align:left;}
+  td{padding:5px;vertical-align:middle;}
+  tr.metric-row td{padding-top:11px;border-top:1px solid var(--border);}
+  tr.metric-row:first-child td{border-top:none;}
+  .metric-label{font-weight:600;font-size:12.5px;display:block;color:var(--ink);}
+  .metric-flag{color:var(--faint);font-size:10px;font-family:var(--mono);display:block;margin-top:2px;}
+  .goal-col{color:var(--muted);font-family:var(--mono);font-size:11px;text-align:right;white-space:nowrap;}
+  .cell{text-align:right;font-family:var(--mono);font-weight:600;font-size:12px;}
+  .cell .chip{display:inline-block;min-width:42px;padding:3px 6px;border-radius:6px;}
+  .chip.hit{background:var(--good-bg);color:var(--good);}
+  .chip.miss{background:var(--bad-bg);color:var(--bad);}
+  .avg-col{text-align:right;font-family:var(--mono);font-weight:700;font-size:12px;}
+  .avg-col .chip{background:var(--surface-2);color:var(--ink);border:1px solid var(--border-strong);}
+</style>
+</head>
+<body>
+  <div class="strip"><b>MOCKUP</b>&nbsp;— placeholder people &amp; numbers. The layout and click-to-expand behavior are real; the data behind it isn't.</div>
+  <div class="page">
+    <h1>Scoreboard</h1>
+    <p class="sub">Everyone's numbers against goal, at a glance.</p>
+    <p class="hint">→ Click any card to expand it. Click its header to collapse it again.</p>
+
+    <div id="board"></div>
+  </div>
+
+<script>
+const PODS = [
+  { key:'pm', name:'Property Management', color:'#5b8def', people:[
+    { key:'maria', initials:'MS', name:'Maria S.', metrics:[
+      { label:'Renewal offers sent 60+ days out', goal:'≥ 90%', unit:'%', weeks:[88,90,94,96], avg:92, hit:true },
+      { label:'Lease renewal conversion rate', goal:'≥ 70%', unit:'%', weeks:[68,72,74,75], avg:72, hit:true },
+      { label:'Open maintenance tickets >7 days', goal:'≤ 3', flag:'lower is better', weeks:[4,3,3,2], avg:3, hit:true },
+      { label:'Avg. maintenance response time', goal:'≤ 24', flag:'lower is better · hours', weeks:[30,26,22,20], avg:24.5, hit:false },
+      { label:'Resident satisfaction score', goal:'≥ 4.5', weeks:[4.5,4.6,4.7,4.6], avg:4.6, hit:true },
+      { label:'Move-out inspections on time', goal:'≥ 95%', unit:'%', weeks:[90,93,96,100], avg:95, hit:true },
+      { label:'Delinquent accounts >30 days', goal:'≤ 2', flag:'lower is better', weeks:[3,3,2,2], avg:2.5, hit:false },
+      { label:'Annual inspections completed', goal:'≥ 90%', unit:'%', weeks:[80,85,90,95], avg:87.5, hit:false },
+      { label:'Owner reply time', goal:'≤ 4', flag:'lower is better · hours', weeks:[3,3,4,3], avg:3.25, hit:true },
+      { label:'Unit turnover, average days', goal:'≤ 14', flag:'lower is better', weeks:[18,16,15,13], avg:15.5, hit:false },
+    ]},
+    { key:'priya', initials:'PN', name:'Priya N.', metrics:[
+      { label:'Renewal offers sent 60+ days out', goal:'≥ 90%', unit:'%', weeks:[89,90,93,92], avg:91, hit:true },
+      { label:'Open maintenance tickets >7 days', goal:'≤ 3', flag:'lower is better', weeks:[3,2,2,1], avg:2, hit:true },
+      { label:'Resident satisfaction score', goal:'≥ 4.5', weeks:[4.7,4.8,4.9,4.8], avg:4.8, hit:true },
+    ]},
+    { key:'devon', initials:'DK', name:'Devon K.', metrics:[
+      { label:'Renewal offers sent 60+ days out', goal:'≥ 90%', unit:'%', weeks:[75,78,80,79], avg:78, hit:false },
+      { label:'Open maintenance tickets >7 days', goal:'≤ 3', flag:'lower is better', weeks:[6,7,8,7], avg:7, hit:false },
+      { label:'Resident satisfaction score', goal:'≥ 4.5', weeks:[4.0,4.1,4.2,4.1], avg:4.1, hit:false },
+    ]},
+    { key:'chris', initials:'CL', name:'Chris L.', metrics:[
+      { label:'Renewal offers sent 60+ days out', goal:'≥ 90%', unit:'%', weeks:[62,64,67,65], avg:65, hit:false },
+      { label:'Open maintenance tickets >7 days', goal:'≤ 3', flag:'lower is better', weeks:[10,12,11,11], avg:11, hit:false },
+      { label:'Resident satisfaction score', goal:'≥ 4.5', weeks:[3.8,3.9,4.0,3.9], avg:3.9, hit:false },
+    ]},
+  ]},
+  { key:'mc', name:'Maintenance Coordination', color:'#e8935f', people:[
+    { key:'sam', initials:'ST', name:'Sam T.', metrics:[
+      { label:'Work orders assigned same day', goal:'≥ 90%', unit:'%', weeks:[92,94,96,98], avg:95, hit:true },
+      { label:'Average days to close', goal:'≤ 3.2', flag:'lower is better', weeks:[2.4,2.2,2.0,1.8], avg:2.1, hit:true },
+      { label:'Vendor cost variance vs. estimate', goal:'≤ 5%', flag:'lower is better', weeks:['+5%','+4%','+2%','+1%'], avg:'+3%', hit:true },
+    ]},
+    { key:'jordan', initials:'JB', name:'Jordan B.', metrics:[
+      { label:'Work orders assigned same day', goal:'≥ 90%', unit:'%', weeks:[78,80,83,81], avg:81, hit:false },
+      { label:'Average days to close', goal:'≤ 3.2', flag:'lower is better', weeks:[5.0,4.6,4.4,4.4], avg:4.6, hit:false },
+      { label:'Vendor cost variance vs. estimate', goal:'≤ 5%', flag:'lower is better', weeks:['+13%','+11%','+10%','+10%'], avg:'+11%', hit:false },
+    ]},
+    { key:'elena', initials:'ER', name:'Elena R.', metrics:[
+      { label:'Work orders assigned same day', goal:'≥ 90%', unit:'%', weeks:[88,90,91,91], avg:90, hit:true },
+      { label:'Average days to close', goal:'≤ 3.2', flag:'lower is better', weeks:[3.2,3.0,2.8,3.0], avg:3.0, hit:true },
+      { label:'Vendor cost variance vs. estimate', goal:'≤ 5%', flag:'lower is better', weeks:['-1%','-2%','-3%','-2%'], avg:'-2%', hit:true },
+    ]},
+  ]},
+  { key:'ls', name:'Leasing', color:'#a78bfa', people:[
+    { key:'alex', initials:'AP', name:'Alex P.', metrics:[
+      { label:'Average days on market', goal:'≤ 18', flag:'lower is better', weeks:[22,20,16,14], avg:18, hit:true },
+      { label:'Showings logged', goal:'≥ 18', weeks:[20,22,26,28], avg:24, hit:true },
+      { label:'Applications processed', goal:'≥ 6', weeks:[6,8,10,12], avg:9, hit:true },
+    ]},
+    { key:'taylor', initials:'TW', name:'Taylor W.', metrics:[
+      { label:'Average days on market', goal:'≤ 18', flag:'lower is better', weeks:[28,26,25,25], avg:26, hit:false },
+      { label:'Showings logged', goal:'≥ 18', weeks:[13,14,16,15], avg:15, hit:false },
+      { label:'Applications processed', goal:'≥ 6', weeks:[4,5,6,5], avg:5, hit:false },
+    ]},
+    { key:'morgan', initials:'MD', name:'Morgan D.', metrics:[
+      { label:'Average days on market', goal:'≤ 18', flag:'lower is better', weeks:[16,15,13,12], avg:14, hit:true },
+      { label:'Showings logged', goal:'≥ 18', weeks:[28,30,32,34], avg:31, hit:true },
+      { label:'Applications processed', goal:'≥ 6', weeks:[10,12,13,13], avg:12, hit:true },
+    ]},
+  ]},
+  { key:'or', name:'Owner Relations & Accounting', color:'#f472b6', people:[
+    { key:'nina', initials:'NF', name:'Nina F.', metrics:[
+      { label:'Owner reports sent on time', goal:'≥ 95%', unit:'%', weeks:[100,100,100,100], avg:100, hit:true },
+      { label:'AR over 30 days', goal:'≤ $5k', flag:'lower is better', weeks:['$2.6k','$2.5k','$2.3k','$2.2k'], avg:'$2.4k', hit:true },
+    ]},
+    { key:'owen', initials:'OG', name:'Owen G.', metrics:[
+      { label:'Owner reports sent on time', goal:'≥ 95%', unit:'%', weeks:[85,86,88,89], avg:87, hit:false },
+      { label:'AR over 30 days', goal:'≤ $5k', flag:'lower is better', weeks:['$8.6k','$8.3k','$8.0k','$8.0k'], avg:'$8.2k', hit:false },
+    ]},
+  ]},
+  { key:'mk', name:'Marketing', color:'#2dd4bf', people:[
+    { key:'jamie', initials:'JC', name:'Jamie C.', metrics:[
+      { label:'Qualified leads generated', goal:'≥ 100', weeks:[138,140,145,145], avg:142, hit:true },
+      { label:'Cost per lead', goal:'≤ $25', flag:'lower is better', weeks:['$20','$19','$17','$16'], avg:'$18', hit:true },
+    ]},
+    { key:'riley', initials:'RH', name:'Riley H.', metrics:[
+      { label:'Qualified leads generated', goal:'≥ 100', weeks:[92,94,98,100], avg:96, hit:false },
+      { label:'Cost per lead', goal:'≤ $25', flag:'lower is better', weeks:['$30','$28','$26','$24'], avg:'$27', hit:false },
+    ]},
+  ]},
+];
+
+function segHtml(metrics){
+  return metrics.map(m => `<span class="seg ${m.hit ? 'hit' : 'miss'}"></span>`).join('');
+}
+function fracHtml(metrics){
+  const hits = metrics.filter(m => m.hit).length;
+  const cls = hits === metrics.length ? 'good' : 'bad';
+  return `<b class="${cls}">${hits}</b>/${metrics.length} on track`;
+}
+function weekCell(w, hit){
+  return `<td class="cell"><span class="chip ${hit ? 'hit' : 'miss'}">${w}</span></td>`;
+}
+// Explicit per-metric weekly hit flags for the handful of metrics where early weeks
+// missed goal even though the metric is trending well overall (everything else just
+// uses the metric's overall hit/miss for all four weeks).
+const WEEK_HIT_OVERRIDES = {
+  'Renewal offers sent 60+ days out|92': [false,true,true,true],
+  'Avg. maintenance response time|24.5': [false,false,true,true],
+  'Delinquent accounts >30 days|2.5': [false,false,true,true],
+  'Annual inspections completed|87.5': [false,false,true,true],
+  'Move-out inspections on time|95': [false,false,true,true],
+  'Average days on market|18': [false,false,true,true],
+};
+
+function buildCard(pod, person){
+  const detailRows = person.metrics.map(m => {
+    const overrideKey = m.label + '|' + m.avg;
+    const overrides = WEEK_HIT_OVERRIDES[overrideKey];
+    const cells = m.weeks.map((w,i) => {
+      const hit = overrides ? overrides[i] : m.hit;
+      return weekCell(w, hit);
+    }).join('');
+    return `<tr class="metric-row">
+      <td class="label"><span class="metric-label">${m.label}</span>${m.flag ? `<span class="metric-flag">${m.flag}</span>` : ''}</td>
+      <td class="goal-col">${m.goal}</td>
+      ${cells}
+      <td class="avg-col"><span class="chip">${m.avg}</span></td>
+    </tr>`;
+  }).join('');
+
+  const cardClass = person.metrics.filter(m=>m.hit).length === person.metrics.length ? 'ok' : 'flagged';
+
+  return `
+  <div class="scorecard ${cardClass}" data-person="${person.key}">
+    <div class="compact-view">
+      <div class="sc-who"><span class="avatar" style="background:${pod.color}">${person.initials}</span><span class="sc-name">${person.name}</span></div>
+      <div class="status-bar">${segHtml(person.metrics)}</div>
+      <div class="status-frac">${fracHtml(person.metrics)}</div>
+    </div>
+    <div class="detail-view" hidden>
+      <div class="expanded-head">
+        <span class="avatar" style="background:${pod.color}">${person.initials}</span>
+        <div><div class="sc-name">${person.name}</div><div class="sc-pod">${pod.name}</div></div>
+        <span class="collapse-link">Collapse ▴</span>
+      </div>
+      <div class="detail-status status-frac">${fracHtml(person.metrics)}</div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Metric</th><th>Goal</th><th>Aug 18</th><th>Aug 25</th><th>Sep 1</th><th>Sep 8</th><th>Avg</th></tr></thead>
+          <tbody>${detailRows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+function buildPod(pod){
+  const allMetrics = pod.people.flatMap(p => p.metrics);
+  const hits = allMetrics.filter(m => m.hit).length;
+  const total = allMetrics.length;
+  const pct = Math.round((hits/total)*100);
+  const cards = pod.people.map(p => buildCard(pod, p)).join('');
+  return `
+  <div class="pod-head">
+    <span class="dept-dot" style="background:${pod.color}"></span>
+    <span class="pod-name">${pod.name}</span>
+    <span class="pod-count">${pod.people.length} people</span>
+    <div class="rollup">
+      <div class="rollup-bar"><span class="g" style="width:${pct}%"></span><span class="b" style="width:${100-pct}%"></span></div>
+      <span class="rollup-frac">${hits}/${total} on track</span>
+    </div>
+  </div>
+  <div class="grid">${cards}</div>`;
+}
+
+document.getElementById('board').innerHTML = PODS.map(buildPod).join('');
+
+document.getElementById('board').addEventListener('click', (e) => {
+  const openTrigger = e.target.closest('.compact-view');
+  const closeTrigger = e.target.closest('.expanded-head');
+  if (openTrigger) {
+    const card = openTrigger.closest('.scorecard');
+    card.classList.add('is-open');
+    card.querySelector('.compact-view').hidden = true;
+    card.querySelector('.detail-view').hidden = false;
+  } else if (closeTrigger) {
+    const card = closeTrigger.closest('.scorecard');
+    card.classList.remove('is-open');
+    card.querySelector('.detail-view').hidden = true;
+    card.querySelector('.compact-view').hidden = false;
+  }
+});
+</script>
+</body>
+</html>

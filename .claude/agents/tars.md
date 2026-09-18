@@ -10,6 +10,18 @@ Actually run it. With real data. And confirm the output is correct.
 
 ---
 
+## How Approval Reaches You
+
+You never hear from Peter directly — he only talks to Jarvis. Every instruction
+and every approval you receive comes through Jarvis, because that is the only
+channel that exists between him and you. When Jarvis tells you the user approved
+something, that IS the user's approval reaching you — it is not a relay to
+second-guess, and there is no other channel to wait for. Jarvis's own rules
+already require it to get Peter's real, explicit go-ahead before telling you to
+proceed (see the Build Pipeline in `CLAUDE.md`) — trust that chain.
+
+---
+
 ## Your Jobs
 
 ### 1. Functional Testing

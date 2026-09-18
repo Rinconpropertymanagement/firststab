@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Compliance Review — Rincon Management</title>
+  <style>
+    /* Merges what were two separate admin pages (dashboard/index.html —
+       "Fair Housing" tab below — and dashboard/escalations-review.html —
+       "Escalations" tab below) plus one new read-only tab ("Legal /
+       Privileged Hold") into one page with client-side tabs, replacing two
+       Hub home-page tiles with one (Peter's own ask: save space on the
+       home page). Each tab's markup/logic below is moved as-is from its
+       original file — only element ids were prefixed (fh-/esc-/legal-) to
+       keep the three from colliding now that they share one page/one
+       <script>. Same house palette as every other Hub dashboard — gray/
+       blue tokens, reused verbatim, not reinvented.
+
+       GET /archive-search/flagged-review and GET /archive-search/
+       escalations-review (router.js) still exist as plain redirects here,
+       for anyone with the old URLs bookmarked — see router.js's own
+       comments on both routes. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1100px; margin: 0 auto; padding: 20px 16px 56px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 20px; font-weight: 700; margin: 10px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 18px; font-size: 13px; line-height: 1.5; }
+    .tab-sub { color: #6b7280; margin: 14px 0 16px; font-size: 13px; line-height: 1.5; }
+
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+    .notice { border-radius: 8px; padding: 14px 16px; font-size: 13.5px; line-height: 1.5; }
+    .notice-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .notice-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .notice button {
+      margin-top: 10px; font-size: 12.5px; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; font-family: inherit;
+    }
+    .notice button:hover { background: #f3f4f6; }
+
+    /* Tab bar — plain, pure client-side switching (see showTab() below), no
+       page reload and no framework. .tab-panel visibility uses the native
+       `hidden` attribute rather than a custom CSS display rule, so nothing
+       here needs to fight the browser's own default [hidden] behavior. */
+    .tab-bar { display: flex; gap: 4px 22px; flex-wrap: wrap; border-bottom: 1px solid #e5e7eb; margin-bottom: 4px; }
+    .tab-btn {
+      font-family: inherit; font-size: 13.5px; font-weight: 600; color: #6b7280;
+      background: none; border: none; border-bottom: 2px solid transparent;
+      padding: 10px 2px; cursor: pointer; white-space: nowrap;
+    }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.active { color: #1d4ed8; border-bottom-color: #2563eb; }
+
+    .row-count { color: #6b7280; font-size: 12.5px; margin-bottom: 10px; }
+
+    /* Sender filter (Fair Housing tab only) — plain client-side substring
+       match against the from-address already loaded in `rows`. */
+    .filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .filter-label { font-size: 12.5px; color: #6b7280; white-space: nowrap; }
+    .filter-input {
+      flex: 1 1 240px; min-width: 180px; font-size: 13px; font-family: inherit;
+      padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; color: #111827;
+    }
+    .filter-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
+    .filter-checkbox-label {
+      display: flex; align-items: center; gap: 6px; font-size: 12.5px;
+      color: #374151; white-space: nowrap; cursor: pointer;
+    }
+    .filter-checkbox-label input { cursor: pointer; }
+
+    /* Bulk-reinstate bar (Fair Housing tab only) — appears only once at
+       least one row is checked. Sticky so it stays reachable without
+       scrolling back up through a long table. */
+    .bulk-bar {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      align-items: center;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+    }
+    .bulk-bar.show { display: flex; }
+    .bulk-bar .btn-reinstate { background: #fff; }
+
+    /* Table scrolls horizontally on narrow screens rather than breaking the
+       page layout — mobile-first per Tron's own build standards. */
+    .table-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 760px; }
+    .checkbox-cell { width: 34px; text-align: center; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 9px 10px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; background: #f9fafb; position: sticky; top: 0; }
+    td { padding: 9px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    .col-date { white-space: nowrap; color: #374151; }
+    .col-from { color: #6b7280; font-size: 12px; margin-top: 2px; }
+    .col-snippet { color: #374151; max-width: 320px; }
+    .col-category { white-space: nowrap; }
+    .col-reported-by { color: #374151; }
+    .col-reason { color: #374151; max-width: 240px; }
+    .missive-link { font-size: 11.5px; color: #1d4ed8; text-decoration: none; }
+    .missive-link:hover { text-decoration: underline; }
+
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    .badge-amber { background: #fffbeb; color: #92400e; }
+    .badge-green { background: #f0fdf4; color: #166534; }
+    .badge-red { background: #fef2f2; color: #991b1b; }
+    .badge-gray { background: #f3f4f6; color: #4b5563; }
+    .status-detail { color: #9ca3af; font-size: 11px; margin-top: 4px; line-height: 1.4; }
+
+    .btn { font-size: 12.5px; padding: 6px 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; font-family: inherit; white-space: nowrap; }
+    .btn:hover { background: #f3f4f6; }
+    .btn-reinstate { border-color: #2563eb; color: #1d4ed8; }
+    .btn-resolve { border-color: #2563eb; color: #1d4ed8; }
+    .btn-reopen { border-color: #b45309; color: #92400e; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .action-cell { min-width: 120px; }
+    .action-note { color: #9ca3af; font-size: 11px; margin-top: 4px; line-height: 1.4; max-width: 160px; }
+
+    .empty { color: #9ca3af; padding: 32px; text-align: center; }
+    .loading { color: #6b7280; padding: 24px; text-align: center; font-size: 13px; }
+
+    /* Shared modal chrome — same overlay/box/chip look every tab's own
+       modal(s) below reuse, unprefixed since it's pure presentation. */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(17, 24, 39, 0.45);
+      align-items: center;
+      justify-content: center;
+      z-index: 20;
+      padding: 16px;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal-box {
+      background: #fff;
+      border-radius: 10px;
+      padding: 20px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+    }
+    .modal-title { font-size: 13.5px; color: #111827; line-height: 1.5; margin-bottom: 14px; }
+    .modal-subtitle { font-size: 12px; color: #6b7280; line-height: 1.5; margin: -8px 0 14px; }
+    .reason-chips { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+    .reason-chip {
+      text-align: left; font-size: 13px; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; font-family: inherit;
+    }
+    .reason-chip:hover { background: #f3f4f6; border-color: #9ca3af; }
+    .reason-other textarea {
+      width: 100%; min-height: 72px; font-size: 13px; font-family: inherit; padding: 8px 10px;
+      border: 1px solid #d1d5db; border-radius: 6px; resize: vertical; margin-bottom: 12px;
+    }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+    /* Resolve modal, step 1 (Escalations tab): the two outcome choices. */
+    .outcome-choices { display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px; }
+    .outcome-btn {
+      text-align: left; padding: 12px 14px; border-radius: 8px; cursor: pointer; font-family: inherit;
+      background: #fff; font-size: 13.5px; font-weight: 600;
+    }
+    .outcome-btn span { display: block; font-size: 12px; font-weight: 400; margin-top: 2px; }
+    .outcome-btn-confirm { border: 1.5px solid #fca5a5; color: #991b1b; }
+    .outcome-btn-confirm:hover { background: #fef2f2; }
+    .outcome-btn-confirm span { color: #b91c1c; }
+    .outcome-btn-false-alarm { border: 1.5px solid #86efac; color: #166534; }
+    .outcome-btn-false-alarm:hover { background: #f0fdf4; }
+    .outcome-btn-false-alarm span { color: #15803d; }
+
+    /* Reopen modal's own layout (Escalations tab). */
+    .field-label { display: block; font-size: 12.5px; font-weight: 600; color: #374151; margin: 14px 0 6px; }
+    .field-label:first-of-type { margin-top: 0; }
+    .reopen-reason-chips { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+    .reopen-reason-chip {
+      text-align: left; font-size: 12.5px; padding: 8px 10px; border-radius: 6px;
+      border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; font-family: inherit;
+    }
+    .reopen-reason-chip.selected { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; }
+    .reopen-reason-chip:hover { background: #f3f4f6; }
+    .reopen-other-textarea {
+      width: 100%; min-height: 60px; font-size: 13px; font-family: inherit; padding: 8px 10px;
+      border: 1px solid #d1d5db; border-radius: 6px; resize: vertical;
+    }
+    .attestation-box {
+      display: flex; align-items: flex-start; gap: 8px; background: #fffbeb; border: 1px solid #fde68a;
+      border-radius: 8px; padding: 10px 12px; margin-top: 6px;
+    }
+    .attestation-box input { margin-top: 2px; cursor: pointer; flex-shrink: 0; }
+    .attestation-box label { font-size: 12.5px; color: #78350f; line-height: 1.5; cursor: pointer; }
+    .reopen-different-admin-note {
+      font-size: 12px; color: #6b7280; background: #f9fafb; border: 1px solid #e5e7eb;
+      border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; line-height: 1.5;
+    }
+
+    @media (max-width: 480px) {
+      .page { padding: 16px 12px 48px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Compliance Review</h1>
+    <p class="sub">
+      Three review queues in one place: conversations the AI screening pass held back over a possible Fair Housing
+      concern, concerns employees personally reported, and conversations held from search for legal or privileged
+      review.
+    </p>
+
+    <div id="page-status-area"></div>
+
+    <div id="tabs-area" hidden>
+      <div class="tab-bar" role="tablist">
+        <button type="button" class="tab-btn" data-tab="fair-housing">Fair Housing</button>
+        <button type="button" class="tab-btn" data-tab="escalations">Escalations</button>
+        <button type="button" class="tab-btn" data-tab="legal-hold">Legal Hold</button>
+      </div>
+
+      <!-- ============================================================
+           TAB 1 — Fair Housing. Moved as-is from the old dashboard/
+           index.html (flagged-conversation review & reinstatement):
+           reinstate, bulk-select, quick-pick reasons, sender filter,
+           hide-reviewed toggle. Only element ids changed (fh- prefix).
+           ============================================================ -->
+      <div id="tab-fair-housing" class="tab-panel">
+        <p class="tab-sub">
+          Every conversation the AI screening pass held back from Archive Search over a possible Fair Housing
+          protected-class concern. If you review one and decide it was a false positive, click Reinstate to make it
+          searchable again — this is recorded permanently, with your name and reason attached, and Mason is expected
+          to be notified of every reinstatement.
+        </p>
+
+        <div id="fh-status-area"></div>
+
+        <div class="filter-bar">
+          <label for="fh-sender-filter" class="filter-label">Filter by sender email or domain</label>
+          <input type="text" id="fh-sender-filter" class="filter-input" placeholder="e.g. showmojo.com" autocomplete="off">
+          <label class="filter-checkbox-label" for="fh-hide-reinstated">
+            <input type="checkbox" id="fh-hide-reinstated" checked>
+            Hide already reinstated
+          </label>
+        </div>
+
+        <div id="fh-bulk-bar" class="bulk-bar">
+          <button type="button" id="fh-bulk-reinstate-btn" class="btn btn-reinstate">Reinstate Selected</button>
+        </div>
+
+        <div id="fh-table-area"></div>
+
+        <div id="fh-reason-modal-overlay" class="modal-overlay">
+          <div class="modal-box">
+            <p id="fh-reason-modal-title" class="modal-title"></p>
+            <div id="fh-reason-modal-presets" class="reason-chips"></div>
+            <div id="fh-reason-modal-other" class="reason-other" style="display:none;">
+              <textarea id="fh-reason-modal-other-input" placeholder="Describe the reason…"></textarea>
+            </div>
+            <div class="modal-actions">
+              <button type="button" id="fh-reason-modal-other-back" class="btn" style="display:none;">Back</button>
+              <button type="button" id="fh-reason-modal-other-confirm" class="btn btn-reinstate" style="display:none;">Confirm</button>
+              <button type="button" id="fh-reason-modal-cancel" class="btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           TAB 2 — Escalations. Moved as-is from the old dashboard/
+           escalations-review.html (resolve/reopen flows). Only element
+           ids changed (esc- prefix).
+           ============================================================ -->
+      <div id="tab-escalations" class="tab-panel" hidden>
+        <p class="tab-sub">
+          Every concern an employee personally reported while using Archive Search — the moment someone reports one,
+          that conversation is pulled from search for everyone, immediately, before any admin review happens. Resolve
+          each report as Confirmed (a real concern — stays excluded permanently) or False Alarm (restores it to search).
+          A confirmed report can later be reopened by a different admin than the one who confirmed it.
+        </p>
+
+        <div id="esc-status-area"></div>
+        <div id="esc-table-area"></div>
+
+        <div id="esc-resolve-modal-overlay" class="modal-overlay">
+          <div class="modal-box">
+            <p id="esc-resolve-modal-title" class="modal-title"></p>
+            <div id="esc-resolve-step-outcome" class="outcome-choices">
+              <button type="button" class="outcome-btn outcome-btn-confirm" id="esc-resolve-outcome-confirmed">
+                Confirmed
+                <span>This is a real Fair Housing concern — stays excluded from search, permanently.</span>
+              </button>
+              <button type="button" class="outcome-btn outcome-btn-false-alarm" id="esc-resolve-outcome-false-alarm">
+                False Alarm
+                <span>Not a real concern — this conversation is restored to search right away.</span>
+              </button>
+            </div>
+            <div id="esc-resolve-step-reason" style="display:none;">
+              <div id="esc-resolve-reason-chips" class="reason-chips"></div>
+              <div id="esc-resolve-reason-other" class="reason-other" style="display:none;">
+                <textarea id="esc-resolve-reason-other-input" placeholder="Describe the disposition and why — don't quote the correspondence itself…"></textarea>
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button type="button" id="esc-resolve-modal-back" class="btn" style="display:none;">Back</button>
+              <button type="button" id="esc-resolve-modal-other-confirm" class="btn btn-resolve" style="display:none;">Confirm</button>
+              <button type="button" id="esc-resolve-modal-cancel" class="btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="esc-reopen-modal-overlay" class="modal-overlay">
+          <div class="modal-box">
+            <p class="modal-title">Reopen this escalation</p>
+            <p class="modal-subtitle">
+              This restores the conversation to search immediately. The original confirmation is never erased — it
+              stays on record alongside this reopening.
+            </p>
+            <div id="esc-reopen-different-admin-note" class="reopen-different-admin-note" style="display:none;"></div>
+
+            <label class="field-label">Why was the original confirmation wrong?</label>
+            <div id="esc-reopen-reason-chips" class="reopen-reason-chips"></div>
+            <textarea id="esc-reopen-reason-input" class="reopen-other-textarea" placeholder="Or describe it yourself — don't quote the correspondence itself…"></textarea>
+
+            <label class="field-label">Litigation hold</label>
+            <div class="attestation-box">
+              <input type="checkbox" id="esc-reopen-attestation-checkbox">
+              <label for="esc-reopen-attestation-checkbox">
+                I have confirmed this conversation is not under an active litigation hold.
+              </label>
+            </div>
+
+            <div class="modal-actions">
+              <button type="button" id="esc-reopen-modal-confirm" class="btn btn-reopen" disabled>Reopen</button>
+              <button type="button" id="esc-reopen-modal-cancel" class="btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           TAB 3 — Legal / Privileged Hold. NEW. Read-only — Finding 8 /
+           Mason's Condition 4: a human reviews the held bucket by hand,
+           outside this tool. No override/disposition mechanism exists
+           for held items (confirmed directly against router.js — there
+           is no such route), so this tab only ever displays GET /api/
+           archive-search/held-review-export?format=json, never an
+           action on it. That export's rows carry no body_text, so
+           there's no correspondence excerpt to show here — only date
+           held, sender, subject, and the hold mechanism (when known).
+           ============================================================ -->
+      <div id="tab-legal-hold" class="tab-panel" hidden>
+        <p class="tab-sub">
+          Every conversation currently held from Archive Search for legal or privileged review. This list is
+          read-only — reviewing and closing out a held item happens by hand, outside this tool; there is nothing to
+          click here.
+        </p>
+
+        <div id="legal-status-area"></div>
+        <div id="legal-table-area"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ============================================================
+    // Shared helpers — identical in both original pages; hoisted here once
+    // rather than duplicated per tab. Pure functions only (no globals they
+    // read/write beyond their own arguments), so every tab module below
+    // can call them directly.
+    // ============================================================
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function formatDate(iso) {
+      if (!iso) return '—';
+      return String(iso).slice(0, 10);
+    }
+
+    function snippet(text, max) {
+      if (!text) return '';
+      var flat = String(text).replace(/\s+/g, ' ').trim();
+      return flat.length > max ? flat.slice(0, max) + '…' : flat;
+    }
+
+    function noticeBox(message, kind, retryLabel, onRetry) {
+      var div = document.createElement('div');
+      div.className = 'notice notice-' + kind;
+      div.textContent = message;
+      if (retryLabel) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = retryLabel;
+        btn.addEventListener('click', onRetry);
+        div.appendChild(document.createElement('br'));
+        div.appendChild(btn);
+      }
+      return div;
+    }
+
+    // Takes the target status area's element id (each tab has its own),
+    // rather than a hardcoded 'status-area' the way each original page's
+    // own renderStatus() did — the one change needed to share this across
+    // three tabs on one page.
+    function renderStatus(areaId, node) {
+      var area = document.getElementById(areaId);
+      if (!area) return;
+      area.innerHTML = '';
+      if (node) area.appendChild(node);
+    }
+
+    // ============================================================
+    // TAB 1 — Fair Housing module. Moved as-is from dashboard/index.html's
+    // own inline script, wrapped in an IIFE so its many top-level function
+    // names (renderTable, loadRows, init, etc.) can't collide with the
+    // Escalations module's own identically-named functions below. Exposes
+    // only load() — called once, by the tab controller, the first time
+    // this tab is viewed.
+    // ============================================================
+    var FairHousingTab = (function () {
+      // Quick-pick reasons for reinstating a flagged conversation. Each
+      // string is the exact, complete sentence recorded as
+      // override_reason when its chip is clicked.
+      var REASON_PRESETS = [
+        'Routine mention, not adverse treatment.',
+        'Automated notification, no real content.',
+        'Accommodation/request handled normally.'
+      ];
+
+      var rows = [];
+      var selected = new Set();
+      var filterText = '';
+      var hideReinstated = true;
+
+      function isReinstatedStatus(status) {
+        return status === 'reinstated' || status === 'reinstated_then_revoked';
+      }
+
+      function matchesFilter(row) {
+        if (hideReinstated && isReinstatedStatus(row.override_status)) return false;
+        if (!filterText) return true;
+        var from = String(row.earliest_from_address || '').toLowerCase();
+        return from.indexOf(filterText) !== -1;
+      }
+
+      function formatCategory(cat) {
+        if (!cat) return '—';
+        return String(cat).replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      }
+
+      function statusBadge(row) {
+        if (row.override_status === 'reinstated') {
+          var html = '<span class="badge badge-green">Reinstated</span>';
+          html += '<div class="status-detail">by ' + escapeHtml(row.overridden_by || '—') +
+            (row.overridden_at ? ' on ' + formatDate(row.overridden_at) : '') + '</div>';
+          return html;
+        }
+        if (row.override_status === 'reinstated_then_revoked') {
+          var html2 = '<span class="badge badge-gray">Reinstated, then revoked</span>';
+          html2 += '<div class="status-detail">revoked by ' + escapeHtml(row.revoked_by || '—') +
+            (row.revoked_at ? ' on ' + formatDate(row.revoked_at) : '') + '</div>';
+          return html2;
+        }
+        return '<span class="badge badge-amber">Not yet reviewed</span>';
+      }
+
+      function updateBulkBar() {
+        Array.from(selected).forEach(function (index) {
+          if (!rows[index] || rows[index].override_status !== 'not_yet_reviewed') {
+            selected.delete(index);
+          }
+        });
+
+        var bar = document.getElementById('fh-bulk-bar');
+        var btn = document.getElementById('fh-bulk-reinstate-btn');
+        if (selected.size === 0) {
+          bar.classList.remove('show');
+          return;
+        }
+        bar.classList.add('show');
+        btn.textContent = 'Reinstate Selected (' + selected.size + ')';
+      }
+
+      function syncSelectAllCheckbox(entries) {
+        var selectAll = document.getElementById('fh-select-all-visible');
+        if (!selectAll) return;
+        var selectableIndices = entries
+          .filter(function (entry) { return entry.row.override_status === 'not_yet_reviewed'; })
+          .map(function (entry) { return entry.index; });
+        selectAll.disabled = selectableIndices.length === 0;
+        selectAll.checked = selectableIndices.length > 0 &&
+          selectableIndices.every(function (index) { return selected.has(index); });
+      }
+
+      function actionCell(row, index) {
+        if (row.override_status !== 'not_yet_reviewed') {
+          return '<span style="color:#9ca3af;">—</span>';
+        }
+        return '<button type="button" class="btn btn-reinstate" data-index="' + index + '">Reinstate</button>';
+      }
+
+      function renderTable() {
+        var area = document.getElementById('fh-table-area');
+        if (!rows.length) {
+          area.innerHTML = '<div class="card empty">No flagged conversations right now.</div>';
+          return;
+        }
+
+        var entries = rows
+          .map(function (row, index) { return { row: row, index: index }; })
+          .filter(function (entry) { return matchesFilter(entry.row); });
+
+        if (!entries.length) {
+          area.innerHTML = '<div class="card empty">No flagged conversations match that filter.</div>';
+          return;
+        }
+
+        var html = '<div class="row-count">' +
+          (entries.length === rows.length
+            ? rows.length + ' flagged conversation' + (rows.length === 1 ? '' : 's')
+            : entries.length + ' of ' + rows.length + ' flagged conversation' + (rows.length === 1 ? '' : 's') + ' shown') +
+          '</div>';
+        html += '<div class="table-wrap"><table><thead><tr>';
+        html += '<th class="checkbox-cell"><input type="checkbox" id="fh-select-all-visible" title="Select all visible rows"></th>';
+        html += '<th>Date</th><th>Subject / From</th><th>Snippet</th><th>Category</th><th>Status</th><th></th>';
+        html += '</tr></thead><tbody>';
+
+        entries.forEach(function (entry) {
+          var row = entry.row;
+          var index = entry.index;
+          var selectable = row.override_status === 'not_yet_reviewed';
+          html += '<tr>';
+          html += '<td class="checkbox-cell">' +
+            (selectable
+              ? '<input type="checkbox" class="fh-row-select" data-index="' + index + '"' + (selected.has(index) ? ' checked' : '') + '>'
+              : '') +
+            '</td>';
+          html += '<td class="col-date">' + formatDate(row.earliest_delivered_at) + '</td>';
+          html += '<td>' + escapeHtml(row.earliest_subject || '(no subject)') +
+            '<div class="col-from">' + escapeHtml(row.earliest_from_address || '') + '</div></td>';
+          html += '<td class="col-snippet">' + escapeHtml(snippet(row.body_text, 180)) + '</td>';
+          html += '<td class="col-category">' + escapeHtml(formatCategory(row.screening_category)) + '</td>';
+          html += '<td>' + statusBadge(row) + '</td>';
+          html += '<td class="action-cell">' + actionCell(row, index) +
+            (row.missive_link ? '<div style="margin-top:6px;"><a class="missive-link" href="' + escapeHtml(row.missive_link) + '" target="_blank" rel="noopener">View in Missive</a></div>' : '') +
+            '</td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        area.innerHTML = html;
+
+        area.querySelectorAll('.btn-reinstate').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            reinstate(Number(btn.getAttribute('data-index')), btn);
+          });
+        });
+
+        area.querySelectorAll('.fh-row-select').forEach(function (cb) {
+          cb.addEventListener('change', function () {
+            var index = Number(cb.getAttribute('data-index'));
+            if (cb.checked) selected.add(index); else selected.delete(index);
+            syncSelectAllCheckbox(entries);
+            updateBulkBar();
+          });
+        });
+
+        var selectAll = document.getElementById('fh-select-all-visible');
+        if (selectAll) {
+          selectAll.addEventListener('change', function () {
+            area.querySelectorAll('.fh-row-select').forEach(function (cb) {
+              var index = Number(cb.getAttribute('data-index'));
+              cb.checked = selectAll.checked;
+              if (selectAll.checked) selected.add(index); else selected.delete(index);
+            });
+            updateBulkBar();
+          });
+        }
+
+        syncSelectAllCheckbox(entries);
+        updateBulkBar();
+      }
+
+      function pickReason(promptText) {
+        return new Promise(function (resolve) {
+          var overlay = document.getElementById('fh-reason-modal-overlay');
+          var title = document.getElementById('fh-reason-modal-title');
+          var presetsEl = document.getElementById('fh-reason-modal-presets');
+          var otherWrap = document.getElementById('fh-reason-modal-other');
+          var otherInput = document.getElementById('fh-reason-modal-other-input');
+          var backBtn = document.getElementById('fh-reason-modal-other-back');
+          var confirmBtn = document.getElementById('fh-reason-modal-other-confirm');
+          var cancelBtn = document.getElementById('fh-reason-modal-cancel');
+
+          function showPresets() {
+            presetsEl.style.display = '';
+            otherWrap.style.display = 'none';
+            backBtn.style.display = 'none';
+            confirmBtn.style.display = 'none';
+          }
+
+          function showOther() {
+            presetsEl.style.display = 'none';
+            otherWrap.style.display = 'block';
+            backBtn.style.display = '';
+            confirmBtn.style.display = '';
+            otherInput.focus();
+          }
+
+          function close(result) {
+            overlay.classList.remove('show');
+            document.removeEventListener('keydown', onKeydown);
+            resolve(result);
+          }
+
+          function onKeydown(e) {
+            if (e.key === 'Escape') close(null);
+          }
+
+          title.textContent = promptText;
+          otherInput.value = '';
+          showPresets();
+
+          presetsEl.innerHTML = '';
+          REASON_PRESETS.forEach(function (text) {
+            var chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'reason-chip';
+            chip.textContent = text;
+            chip.addEventListener('click', function () { close(text); });
+            presetsEl.appendChild(chip);
+          });
+          var otherChip = document.createElement('button');
+          otherChip.type = 'button';
+          otherChip.className = 'reason-chip';
+          otherChip.textContent = 'Other…';
+          otherChip.addEventListener('click', showOther);
+          presetsEl.appendChild(otherChip);
+
+          backBtn.onclick = showPresets;
+          confirmBtn.onclick = function () {
+            var text = otherInput.value.trim();
+            if (!text) {
+              alert('A reason is required to reinstate.');
+              return;
+            }
+            close(text);
+          };
+          cancelBtn.onclick = function () { close(null); };
+          overlay.onclick = function (e) { if (e.target === overlay) close(null); };
+
+          document.addEventListener('keydown', onKeydown);
+          overlay.classList.add('show');
+        });
+      }
+
+      async function reinstate(index, btn) {
+        var row = rows[index];
+        var reason = await pickReason(
+          'Why are you reinstating this conversation? This is recorded permanently and Mason is expected to be notified.'
+        );
+        if (reason === null) return; // cancelled
+
+        btn.disabled = true;
+        var originalText = btn.textContent;
+        btn.textContent = 'Reinstating…';
+
+        try {
+          var res = await fetch('/api/archive-search/flagged/' + encodeURIComponent(row.missive_conversation_id) + '/override', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mailbox_key: row.mailbox_key, reason: reason }),
+          });
+          var body = await res.json().catch(function () { return {}; });
+
+          if (!res.ok) {
+            alert(body.error || ('Could not reinstate this conversation (error ' + res.status + '). Please try again.'));
+            btn.disabled = false;
+            btn.textContent = originalText;
+            return;
+          }
+
+          row.override_status = 'reinstated';
+          row.override_id = body.override.id;
+          row.overridden_by = body.override.overridden_by;
+          row.override_reason = body.override.override_reason;
+          row.overridden_at = body.override.overridden_at;
+          selected.delete(index);
+          renderTable();
+        } catch (e) {
+          alert('Network error — nothing was reinstated. Please try again.');
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      }
+
+      async function bulkReinstate() {
+        var indices = Array.from(selected).filter(function (index) {
+          return rows[index] && rows[index].override_status === 'not_yet_reviewed';
+        });
+        if (!indices.length) return;
+
+        var reason = await pickReason(
+          'Why are you reinstating these ' + indices.length + ' conversations? The same reason is recorded ' +
+          'permanently against every one of them, and Mason is expected to be notified of each.'
+        );
+        if (reason === null) return; // cancelled
+
+        var btn = document.getElementById('fh-bulk-reinstate-btn');
+        btn.disabled = true;
+
+        var succeededCount = 0;
+        var failures = []; // { row, message }
+
+        for (var n = 0; n < indices.length; n++) {
+          var index = indices[n];
+          var row = rows[index];
+          btn.textContent = 'Reinstating ' + (n + 1) + ' of ' + indices.length + '…';
+
+          try {
+            var res = await fetch('/api/archive-search/flagged/' + encodeURIComponent(row.missive_conversation_id) + '/override', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mailbox_key: row.mailbox_key, reason: reason }),
+            });
+            var body = await res.json().catch(function () { return {}; });
+
+            if (!res.ok) {
+              failures.push({ row: row, message: body.error || ('Error ' + res.status) });
+            } else {
+              row.override_status = 'reinstated';
+              row.override_id = body.override.id;
+              row.overridden_by = body.override.overridden_by;
+              row.override_reason = body.override.override_reason;
+              row.overridden_at = body.override.overridden_at;
+              succeededCount++;
+            }
+          } catch (e) {
+            failures.push({ row: row, message: 'Network error' });
+          }
+
+          selected.delete(index);
+          renderTable();
+        }
+
+        btn.disabled = false;
+
+        if (failures.length) {
+          var lines = failures.map(function (f) {
+            return '- ' + (f.row.earliest_subject || f.row.missive_conversation_id) + ': ' + f.message;
+          });
+          alert(
+            (succeededCount ? succeededCount + ' of ' + indices.length + ' reinstated.\n\n' : 'None were reinstated.\n\n') +
+            failures.length + ' failed:\n' + lines.join('\n')
+          );
+        }
+      }
+
+      async function loadRows() {
+        document.getElementById('fh-table-area').innerHTML = '<div class="loading">Loading…</div>';
+        try {
+          var res = await fetch('/api/archive-search/flagged-review-export?format=json', { credentials: 'include' });
+          if (res.status === 403) {
+            var body = await res.json().catch(function () { return {}; });
+            renderStatus('fh-status-area', noticeBox(body.error || 'This action is restricted to Archive Search admins.', 'error'));
+            document.getElementById('fh-table-area').innerHTML = '';
+            return;
+          }
+          if (!res.ok) {
+            var errBody = await res.json().catch(function () { return {}; });
+            renderStatus('fh-status-area', noticeBox(errBody.error || ('Could not load flagged conversations (error ' + res.status + ').'), 'error', 'Try again', loadRows));
+            document.getElementById('fh-table-area').innerHTML = '';
+            return;
+          }
+          var data = await res.json();
+          renderStatus('fh-status-area', null);
+          rows = data.rows || [];
+          renderTable();
+        } catch (e) {
+          renderStatus('fh-status-area', noticeBox('Network error — could not load flagged conversations.', 'error', 'Try again', loadRows));
+          document.getElementById('fh-table-area').innerHTML = '';
+        }
+      }
+
+      // Static controls, wired once here — never recreated by renderTable(),
+      // so typing never loses focus/cursor position.
+      document.getElementById('fh-bulk-reinstate-btn').addEventListener('click', bulkReinstate);
+      document.getElementById('fh-sender-filter').addEventListener('input', function (e) {
+        filterText = e.target.value.trim().toLowerCase();
+        renderTable();
+      });
+      document.getElementById('fh-hide-reinstated').addEventListener('change', function (e) {
+        hideReinstated = e.target.checked;
+        renderTable();
+      });
+
+      // load() is the only thing the tab controller calls — the page-level
+      // admin check already ran once before any tab can be shown at all, so
+      // this tab doesn't repeat its own /auth/me call the way the original
+      // standalone page's init() did.
+      return { load: loadRows };
+    })();
+
+    // ============================================================
+    // TAB 2 — Escalations module. Moved as-is from dashboard/escalations-
+    // review.html's own inline script, same IIFE-per-tab reasoning as
+    // above. Exposes load() and setCurrentIdentity() (the page-level init
+    // calls the latter once, right after its own /auth/me check, since
+    // this tab's own isSameAdminAsResolver() UX guard needs that identity
+    // and no longer runs its own auth/me call to get it).
+    // ============================================================
+    var EscalationsTab = (function () {
+      var CONFIRM_REASON_PRESETS = [
+        'Reviewed the correspondence — this is a real Fair Housing concern.',
+        'Confirmed after review; reflects adverse treatment on a protected class.'
+      ];
+      var FALSE_ALARM_REASON_PRESETS = [
+        'Reviewed the correspondence — not a Fair Housing concern.',
+        'Routine content; does not reflect adverse treatment on a protected class.'
+      ];
+      var REOPEN_REASON_PRESETS = [
+        'New information shows the original confirmation was incorrect.',
+        'Reviewed again with fresh eyes — this was not a real concern.'
+      ];
+      var LITIGATION_HOLD_ATTESTATION_TEXT = 'I have confirmed this conversation is not under an active litigation hold.';
+
+      var rows = [];
+      // This admin's own display identity — set once via setCurrentIdentity()
+      // by the page-level init, from the same GET auth/me response used to
+      // gate the whole page. Used only for a client-side UX guard (disable
+      // Reopen when this admin is also the one who resolved it) — the real,
+      // authoritative check is still the server's own 403 on POST
+      // .../reopen either way.
+      var currentIdentity = null;
+
+      function statusBadge(row) {
+        if (row.status === 'open') {
+          return '<span class="badge badge-amber">Open</span>';
+        }
+        if (row.status === 'false_alarm') {
+          var htmlFalse = '<span class="badge badge-green">False alarm</span>';
+          htmlFalse += '<div class="status-detail"' +
+            (row.resolution_notes ? ' title="' + escapeHtml(row.resolution_notes) + '"' : '') + '>by ' +
+            escapeHtml(row.resolved_by || '—') + (row.resolved_at ? ' on ' + formatDate(row.resolved_at) : '') + '</div>';
+          return htmlFalse;
+        }
+        // status === 'confirmed'
+        if (row.reopened_at) {
+          var htmlReopened = '<span class="badge badge-green">Confirmed, then reopened</span>';
+          htmlReopened += '<div class="status-detail" title="' + escapeHtml(row.resolution_notes || '') + '">confirmed by ' +
+            escapeHtml(row.resolved_by || '—') + (row.resolved_at ? ' on ' + formatDate(row.resolved_at) : '') + '</div>';
+          htmlReopened += '<div class="status-detail" title="' + escapeHtml(row.reopen_reason || '') + '">reopened by ' +
+            escapeHtml(row.reopened_by || '—') + (row.reopened_at ? ' on ' + formatDate(row.reopened_at) : '') + '</div>';
+          return htmlReopened;
+        }
+        var htmlConfirmed = '<span class="badge badge-red">Confirmed</span>';
+        htmlConfirmed += '<div class="status-detail"' +
+          (row.resolution_notes ? ' title="' + escapeHtml(row.resolution_notes) + '"' : '') + '>by ' +
+          escapeHtml(row.resolved_by || '—') + (row.resolved_at ? ' on ' + formatDate(row.resolved_at) : '') + '</div>';
+        return htmlConfirmed;
+      }
+
+      function isSameAdminAsResolver(row) {
+        return !!(currentIdentity && row.resolved_by && row.resolved_by === currentIdentity);
+      }
+
+      function actionCell(row, index) {
+        if (row.status === 'open') {
+          return '<button type="button" class="btn btn-resolve" data-action="resolve" data-index="' + index + '">Resolve</button>';
+        }
+        if (row.status === 'confirmed' && !row.reopened_at) {
+          if (isSameAdminAsResolver(row)) {
+            return '<span style="color:#9ca3af;">—</span>' +
+              '<div class="action-note">Must be reopened by a different admin than ' + escapeHtml(row.resolved_by) + '.</div>';
+          }
+          return '<button type="button" class="btn btn-reopen" data-action="reopen" data-index="' + index + '">Reopen</button>';
+        }
+        return '<span style="color:#9ca3af;">—</span>';
+      }
+
+      function renderTable() {
+        var area = document.getElementById('esc-table-area');
+        if (!rows.length) {
+          area.innerHTML = '<div class="card empty">No escalations have been reported.</div>';
+          return;
+        }
+
+        var html = '<div class="row-count">' + rows.length + ' escalation' + (rows.length === 1 ? '' : 's') + '</div>';
+        html += '<div class="table-wrap"><table><thead><tr>';
+        html += '<th>Date Reported</th><th>Reported By</th><th>Reason</th><th>Snippet</th><th>Status</th><th></th>';
+        html += '</tr></thead><tbody>';
+
+        rows.forEach(function (row, index) {
+          html += '<tr>';
+          html += '<td class="col-date">' + formatDate(row.reported_at) + '</td>';
+          html += '<td class="col-reported-by">' + escapeHtml(row.reported_by || '—') + '</td>';
+          html += '<td class="col-reason">' + escapeHtml(row.escalation_reason || '') + '</td>';
+          html += '<td class="col-snippet">' + escapeHtml(snippet(row.body_text, 160)) + '</td>';
+          html += '<td>' + statusBadge(row) + '</td>';
+          html += '<td class="action-cell">' + actionCell(row, index) +
+            (row.missive_link ? '<div style="margin-top:6px;"><a class="missive-link" href="' + escapeHtml(row.missive_link) + '" target="_blank" rel="noopener">View in Missive</a></div>' : '') +
+            '</td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        area.innerHTML = html;
+
+        area.querySelectorAll('[data-action="resolve"]').forEach(function (btn) {
+          btn.addEventListener('click', function () { resolveEscalation(Number(btn.getAttribute('data-index')), btn); });
+        });
+        area.querySelectorAll('[data-action="reopen"]').forEach(function (btn) {
+          btn.addEventListener('click', function () { reopenEscalation(Number(btn.getAttribute('data-index')), btn); });
+        });
+      }
+
+      function pickResolution() {
+        return new Promise(function (resolve) {
+          var overlay = document.getElementById('esc-resolve-modal-overlay');
+          var title = document.getElementById('esc-resolve-modal-title');
+          var stepOutcome = document.getElementById('esc-resolve-step-outcome');
+          var stepReason = document.getElementById('esc-resolve-step-reason');
+          var chipsEl = document.getElementById('esc-resolve-reason-chips');
+          var otherWrap = document.getElementById('esc-resolve-reason-other');
+          var otherInput = document.getElementById('esc-resolve-reason-other-input');
+          var backBtn = document.getElementById('esc-resolve-modal-back');
+          var confirmBtn = document.getElementById('esc-resolve-modal-other-confirm');
+          var cancelBtn = document.getElementById('esc-resolve-modal-cancel');
+          var confirmBtnConfirmed = document.getElementById('esc-resolve-outcome-confirmed');
+          var confirmBtnFalseAlarm = document.getElementById('esc-resolve-outcome-false-alarm');
+
+          var chosenOutcome = null;
+
+          function showOutcomeStep() {
+            chosenOutcome = null;
+            title.textContent = 'How should this escalation be resolved?';
+            stepOutcome.style.display = '';
+            stepReason.style.display = 'none';
+            backBtn.style.display = 'none';
+            confirmBtn.style.display = 'none';
+          }
+
+          function showReasonStep(outcome) {
+            chosenOutcome = outcome;
+            var presets = outcome === 'confirmed' ? CONFIRM_REASON_PRESETS : FALSE_ALARM_REASON_PRESETS;
+            title.textContent = outcome === 'confirmed'
+              ? 'Why is this a real concern? Recorded permanently.'
+              : 'Why is this a false alarm? Recorded permanently.';
+            stepOutcome.style.display = 'none';
+            stepReason.style.display = '';
+            otherWrap.style.display = 'none';
+            otherInput.value = '';
+            backBtn.style.display = '';
+            confirmBtn.style.display = 'none';
+
+            chipsEl.innerHTML = '';
+            presets.forEach(function (text) {
+              var chip = document.createElement('button');
+              chip.type = 'button';
+              chip.className = 'reason-chip';
+              chip.textContent = text;
+              chip.addEventListener('click', function () { close({ resolution: outcome, resolution_notes: text }); });
+              chipsEl.appendChild(chip);
+            });
+            var otherChip = document.createElement('button');
+            otherChip.type = 'button';
+            otherChip.className = 'reason-chip';
+            otherChip.textContent = 'Other…';
+            otherChip.addEventListener('click', function () {
+              otherWrap.style.display = 'block';
+              confirmBtn.style.display = '';
+              otherInput.focus();
+            });
+            chipsEl.appendChild(otherChip);
+          }
+
+          function close(result) {
+            overlay.classList.remove('show');
+            document.removeEventListener('keydown', onKeydown);
+            resolve(result);
+          }
+
+          function onKeydown(e) {
+            if (e.key === 'Escape') close(null);
+          }
+
+          confirmBtnConfirmed.onclick = function () { showReasonStep('confirmed'); };
+          confirmBtnFalseAlarm.onclick = function () { showReasonStep('false_alarm'); };
+          backBtn.onclick = showOutcomeStep;
+          confirmBtn.onclick = function () {
+            var text = otherInput.value.trim();
+            if (!text) {
+              alert('A reason is required to resolve this escalation.');
+              return;
+            }
+            close({ resolution: chosenOutcome, resolution_notes: text });
+          };
+          cancelBtn.onclick = function () { close(null); };
+          overlay.onclick = function (e) { if (e.target === overlay) close(null); };
+
+          document.addEventListener('keydown', onKeydown);
+          showOutcomeStep();
+          overlay.classList.add('show');
+        });
+      }
+
+      function pickReopen(row) {
+        return new Promise(function (resolve) {
+          var overlay = document.getElementById('esc-reopen-modal-overlay');
+          var noteEl = document.getElementById('esc-reopen-different-admin-note');
+          var chipsEl = document.getElementById('esc-reopen-reason-chips');
+          var reasonInput = document.getElementById('esc-reopen-reason-input');
+          var checkbox = document.getElementById('esc-reopen-attestation-checkbox');
+          var confirmBtn = document.getElementById('esc-reopen-modal-confirm');
+          var cancelBtn = document.getElementById('esc-reopen-modal-cancel');
+
+          noteEl.style.display = row.resolved_by ? '' : 'none';
+          noteEl.textContent = row.resolved_by
+            ? 'Confirmed by ' + row.resolved_by + '. Reopening must be done by a different admin.'
+            : '';
+
+          reasonInput.value = '';
+          checkbox.checked = false;
+          confirmBtn.disabled = true;
+
+          chipsEl.querySelectorAll('.reopen-reason-chip').forEach(function (el) { el.remove(); });
+          REOPEN_REASON_PRESETS.forEach(function (text) {
+            var chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'reopen-reason-chip';
+            chip.textContent = text;
+            chip.addEventListener('click', function () {
+              reasonInput.value = text;
+              chipsEl.querySelectorAll('.reopen-reason-chip').forEach(function (c) { c.classList.remove('selected'); });
+              chip.classList.add('selected');
+              syncConfirmEnabled();
+            });
+            chipsEl.appendChild(chip);
+          });
+
+          function syncConfirmEnabled() {
+            confirmBtn.disabled = !(reasonInput.value.trim() && checkbox.checked);
+          }
+
+          function close(result) {
+            overlay.classList.remove('show');
+            reasonInput.oninput = null;
+            checkbox.onchange = null;
+            document.removeEventListener('keydown', onKeydown);
+            resolve(result);
+          }
+
+          function onKeydown(e) {
+            if (e.key === 'Escape') close(null);
+          }
+
+          reasonInput.oninput = function () {
+            chipsEl.querySelectorAll('.reopen-reason-chip').forEach(function (c) { c.classList.remove('selected'); });
+            syncConfirmEnabled();
+          };
+          checkbox.onchange = syncConfirmEnabled;
+          confirmBtn.onclick = function () {
+            var reason = reasonInput.value.trim();
+            if (!reason || !checkbox.checked) return;
+            close({ reopen_reason: reason, litigation_hold_attestation: LITIGATION_HOLD_ATTESTATION_TEXT });
+          };
+          cancelBtn.onclick = function () { close(null); };
+          overlay.onclick = function (e) { if (e.target === overlay) close(null); };
+
+          document.addEventListener('keydown', onKeydown);
+          overlay.classList.add('show');
+        });
+      }
+
+      async function resolveEscalation(index, btn) {
+        var row = rows[index];
+        var choice = await pickResolution();
+        if (choice === null) return; // cancelled
+
+        btn.disabled = true;
+        var originalText = btn.textContent;
+        btn.textContent = 'Resolving…';
+
+        try {
+          var res = await fetch('/api/archive-search/escalations/' + encodeURIComponent(row.id) + '/resolve', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(choice),
+          });
+          var body = await res.json().catch(function () { return {}; });
+
+          if (!res.ok) {
+            alert(body.error || ('Could not resolve this escalation (error ' + res.status + '). Please try again.'));
+            btn.disabled = false;
+            btn.textContent = originalText;
+            return;
+          }
+
+          row.status = body.escalation.status;
+          row.resolved_by = body.escalation.resolved_by;
+          row.resolved_at = body.escalation.resolved_at;
+          row.resolution_notes = body.escalation.resolution_notes;
+          renderTable();
+        } catch (e) {
+          alert('Network error — nothing was resolved. Please try again.');
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      }
+
+      async function reopenEscalation(index, btn) {
+        var row = rows[index];
+        var choice = await pickReopen(row);
+        if (choice === null) return; // cancelled
+
+        btn.disabled = true;
+        var originalText = btn.textContent;
+        btn.textContent = 'Reopening…';
+
+        try {
+          var res = await fetch('/api/archive-search/escalations/' + encodeURIComponent(row.id) + '/reopen', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(choice),
+          });
+          var body = await res.json().catch(function () { return {}; });
+
+          if (!res.ok) {
+            alert(body.error || ('Could not reopen this escalation (error ' + res.status + '). Please try again.'));
+            btn.disabled = false;
+            btn.textContent = originalText;
+            return;
+          }
+
+          row.reopened_at = body.escalation.reopened_at;
+          row.reopened_by = body.escalation.reopened_by;
+          row.reopen_reason = body.escalation.reopen_reason;
+          row.litigation_hold_attestation = body.escalation.litigation_hold_attestation;
+          renderTable();
+        } catch (e) {
+          alert('Network error — nothing was reopened. Please try again.');
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      }
+
+      async function loadRows() {
+        document.getElementById('esc-table-area').innerHTML = '<div class="loading">Loading…</div>';
+        try {
+          var res = await fetch('/api/archive-search/escalations-review-export?format=json', { credentials: 'include' });
+          if (res.status === 403) {
+            var body = await res.json().catch(function () { return {}; });
+            renderStatus('esc-status-area', noticeBox(body.error || 'This action is restricted to Archive Search admins.', 'error'));
+            document.getElementById('esc-table-area').innerHTML = '';
+            return;
+          }
+          if (!res.ok) {
+            var errBody = await res.json().catch(function () { return {}; });
+            renderStatus('esc-status-area', noticeBox(errBody.error || ('Could not load escalations (error ' + res.status + ').'), 'error', 'Try again', loadRows));
+            document.getElementById('esc-table-area').innerHTML = '';
+            return;
+          }
+          var data = await res.json();
+          renderStatus('esc-status-area', null);
+          rows = data.rows || [];
+          renderTable();
+        } catch (e) {
+          renderStatus('esc-status-area', noticeBox('Network error — could not load escalations.', 'error', 'Try again', loadRows));
+          document.getElementById('esc-table-area').innerHTML = '';
+        }
+      }
+
+      return {
+        load: loadRows,
+        setCurrentIdentity: function (identity) { currentIdentity = identity; },
+      };
+    })();
+
+    // ============================================================
+    // TAB 3 — Legal / Privileged Hold module. NEW. Read-only by design —
+    // no override/action mechanism exists for held items (confirmed
+    // against router.js directly), so unlike the two modules above there
+    // is no modal, no button beyond the "View in Missive" link, and no
+    // POST call anywhere in this module.
+    // ============================================================
+    var LegalHoldTab = (function () {
+      var rows = [];
+
+      function renderTable() {
+        var area = document.getElementById('legal-table-area');
+        if (!rows.length) {
+          area.innerHTML = '<div class="card empty">Nothing is currently held for legal or privileged review.</div>';
+          return;
+        }
+
+        var html = '<div class="row-count">' + rows.length + ' held conversation' + (rows.length === 1 ? '' : 's') + '</div>';
+        html += '<div class="table-wrap"><table><thead><tr>';
+        html += '<th>Date Held</th><th>Sender</th><th>Subject</th><th>Hold Mechanism</th><th></th>';
+        html += '</tr></thead><tbody>';
+
+        rows.forEach(function (row) {
+          html += '<tr>';
+          html += '<td class="col-date">' + formatDate(row.delivered_at) + '</td>';
+          html += '<td class="col-reported-by">' + escapeHtml(row.from_address || '—') + '</td>';
+          // The held-review-export route's rows carry a subject but no
+          // body_text — there is no correspondence excerpt to show, so
+          // this column shows the subject line, the closest thing to a
+          // snippet the export actually returns.
+          html += '<td class="col-snippet">' + escapeHtml(row.subject || '(no subject)') + '</td>';
+          html += '<td class="col-reason">' + escapeHtml(row.hold_mechanism || '—') + '</td>';
+          html += '<td class="action-cell">' +
+            (row.missive_link ? '<a class="missive-link" href="' + escapeHtml(row.missive_link) + '" target="_blank" rel="noopener">View in Missive</a>' : '<span style="color:#9ca3af;">—</span>') +
+            '</td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        area.innerHTML = html;
+      }
+
+      async function loadRows() {
+        document.getElementById('legal-table-area').innerHTML = '<div class="loading">Loading…</div>';
+        try {
+          var res = await fetch('/api/archive-search/held-review-export?format=json', { credentials: 'include' });
+          if (res.status === 403) {
+            var body = await res.json().catch(function () { return {}; });
+            renderStatus('legal-status-area', noticeBox(body.error || 'This action is restricted to Archive Search admins.', 'error'));
+            document.getElementById('legal-table-area').innerHTML = '';
+            return;
+          }
+          if (!res.ok) {
+            var errBody = await res.json().catch(function () { return {}; });
+            renderStatus('legal-status-area', noticeBox(errBody.error || ('Could not load held conversations (error ' + res.status + ').'), 'error', 'Try again', loadRows));
+            document.getElementById('legal-table-area').innerHTML = '';
+            return;
+          }
+          var data = await res.json();
+          renderStatus('legal-status-area', null);
+          rows = data.rows || [];
+          renderTable();
+        } catch (e) {
+          renderStatus('legal-status-area', noticeBox('Network error — could not load held conversations.', 'error', 'Try again', loadRows));
+          document.getElementById('legal-table-area').innerHTML = '';
+        }
+      }
+
+      return { load: loadRows };
+    })();
+
+    // ============================================================
+    // Tab controller + page-level init. One shared GET /api/archive-search/
+    // auth/me check, run once — not once per tab, since all three tabs
+    // share the identical admin gate. The first tab shown (the URL's own
+    // ?tab= if valid, else "fair-housing") loads its data immediately as
+    // part of being shown for the first time; the other two load lazily,
+    // the first time a user actually clicks their tab — never all three
+    // up front.
+    // ============================================================
+    var TAB_IDS = ['fair-housing', 'escalations', 'legal-hold'];
+    var TAB_MODULES = {
+      'fair-housing': FairHousingTab,
+      'escalations': EscalationsTab,
+      'legal-hold': LegalHoldTab,
+    };
+    var tabLoaded = {};
+
+    function showTab(tabId) {
+      if (TAB_IDS.indexOf(tabId) === -1) tabId = 'fair-housing';
+      TAB_IDS.forEach(function (id) {
+        var panel = document.getElementById('tab-' + id);
+        var btn = document.querySelector('.tab-btn[data-tab="' + id + '"]');
+        if (panel) panel.hidden = (id !== tabId);
+        if (btn) btn.classList.toggle('active', id === tabId);
+      });
+      if (!tabLoaded[tabId]) {
+        tabLoaded[tabId] = true;
+        TAB_MODULES[tabId].load();
+      }
+    }
+
+    document.querySelectorAll('.tab-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { showTab(btn.getAttribute('data-tab')); });
+    });
+
+    async function init() {
+      try {
+        var meRes = await fetch('/api/archive-search/auth/me', { credentials: 'include' });
+        if (meRes.status === 403) {
+          var meBody = await meRes.json().catch(function () { return {}; });
+          renderStatus('page-status-area', noticeBox(meBody.error || 'Your Rincon Hub account does not have access to Archive Search. Ask an admin to grant you access.', 'error'));
+          return;
+        }
+        if (!meRes.ok) {
+          renderStatus('page-status-area', noticeBox('Could not check your access. Please refresh the page.', 'error', 'Try again', init));
+          return;
+        }
+        var me = await meRes.json();
+        if (me.role !== 'admin') {
+          renderStatus('page-status-area', noticeBox('This page is restricted to Archive Search admins. Ask an admin to grant you the admin role for Archive Search.', 'info'));
+          return;
+        }
+
+        EscalationsTab.setCurrentIdentity(me.name || me.email);
+        document.getElementById('tabs-area').hidden = false;
+
+        var requestedTab = '';
+        try {
+          requestedTab = new URLSearchParams(window.location.search).get('tab') || '';
+        } catch (parseErr) { /* malformed query string — fall back to the default tab */ }
+        showTab(requestedTab.trim());
+      } catch (e) {
+        renderStatus('page-status-area', noticeBox('Network error — could not check your access.', 'error', 'Try again', init));
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

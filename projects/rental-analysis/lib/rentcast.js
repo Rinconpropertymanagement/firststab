@@ -1,12 +1,13 @@
 /**
  * lib/rentcast.js
- * RentCast API client — the only comp source with a real handler so far.
- * Zillow and FlexMLS are seeded in rental_comp_sources but not implemented:
- * Zillow's public API was confirmed dead (retired 2021) and its current
- * replacement is a gated business product that only returns a single
- * Zestimate-style number, not comp listings — there is nothing to build
- * against, not just a pending-access situation. FlexMLS/CRMLS access is
- * still genuinely pending (a real, buildable source once access clears).
+ * RentCast API client — one of two real comp sources now (CRMLS is the
+ * other — see lib/crmls.js). Zillow is seeded in rental_comp_sources but
+ * not implemented: its public API was confirmed dead (retired 2021) and
+ * its current replacement is a gated business product that only returns a
+ * single Zestimate-style number, not comp listings — there is nothing to
+ * build against, not just a pending-access situation. The FlexMLS
+ * placeholder row was renamed to CRMLS and activated once real Recore
+ * access was confirmed (see lib/crmls.js and its migration).
  * See lib/sources.js for how a new source gets added later without
  * touching this file.
  *
@@ -136,9 +137,10 @@ function assertConfigured() {
 // way to confirm an Inactive listing actually leased vs. was simply pulled
 // or expired unleased (its own docs describe this as an inferred signal,
 // not a clean transaction flag). We only map to our 'leased' status from a
-// source that gives a real transaction confirmation (FlexMLS, once live).
-// RentCast maps to 'off_market' instead — honestly says "delisted, no
-// confirmed transaction" without asserting a lease that isn't proven.
+// source that gives a real transaction confirmation — CRMLS, now live (see
+// lib/crmls.js's mapComparable). RentCast maps to 'off_market' instead —
+// honestly says "delisted, no confirmed transaction" without asserting a
+// lease that isn't proven.
 function mapListingStatus(rentcastStatus) {
   return rentcastStatus === 'Active' ? 'active' : 'off_market';
 }

@@ -40,6 +40,8 @@
  * disagree with.
  */
 
+const { weightFor, SELF_SOURCED_TRUSTED_SOURCE_NAMES } = require('./weighting');
+
 function normalizeAddress(addr) {
   if (!addr) return '';
   return addr.split(',')[0]
@@ -111,6 +113,26 @@ function addressWordScore(normA, normB) {
   return wa.filter(w => wb.has(w)).length / Math.max(wa.length, wb.size);
 }
 
+// Same matching rules as findBestPropertyMatch() below (house-number gate,
+// unit gate, 0.6 word-overlap threshold), but for comparing two free-text
+// addresses directly rather than a target against a list of property rows —
+// used by dedupeComps() below to recognize the same real unit reported by
+// two different comp sources with slightly different address formatting
+// (e.g. "1696 Salt River Ave" vs "1696 Salt River Avenue").
+function addressesMatch(addressA, addressB) {
+  if (!addressA || !addressB) return false;
+  const normA = normalizeAddress(addressA);
+  const normB = normalizeAddress(addressB);
+  if (!normA || !normB) return false;
+  const houseA = houseNumber(normA);
+  const houseB = houseNumber(normB);
+  if (houseA && houseB && houseA !== houseB) return false;
+  const unitA = unitIdentifier(addressA);
+  const unitB = unitIdentifier(addressB);
+  if ((unitA || unitB) && unitA !== unitB) return false;
+  return addressWordScore(normA, normB) >= 0.6;
+}
+
 // `properties` stores address/city/state/zip as separate columns (unlike
 // subject_address/rental_comps.address, which are single free-text fields —
 // see the migration's design notes on why). Compose one comparable string.
@@ -157,10 +179,69 @@ function findBestPropertyMatch(targetAddress, properties) {
   return best;
 }
 
+// Collapses comps that describe the same real rental unit but arrived as
+// separate rows — either from two different sources (RentCast inferring
+// 'off_market' on a unit CRMLS separately confirms as 'leased') or from one
+// source reporting the same address twice (CRMLS returning both an older
+// 'Active' record and a newer 'Closed' one for the same unit). Either way,
+// it's one real data point, not two, and counting it twice skews the range
+// math. Walks the list once; for each comp, checks it against every comp
+// already kept via addressesMatch() on .address. No match -> keep it. Match
+// found -> keep whichever of the two is more trustworthy:
+//   1. Higher listing_status weight (weightFor(), lib/weighting.js) wins —
+//      reusing the real weighting so this can't drift out of sync with it.
+//   2. Tie -> prefer a comp from a trusted, self-sourced source (e.g.
+//      LeadSimple Move-Ins — see SELF_SOURCED_TRUSTED_SOURCE_NAMES,
+//      lib/weighting.js) over one that isn't. Added for the LeadSimple
+//      Move-Ins build: a Rincon-managed unit could in principle be
+//      independently listed on CRMLS around the same time (a
+//      broker-assisted listing) at the same 'leased' weight — without this
+//      rule, dedupeComps() could keep the CRMLS copy on a coin-flip
+//      first-seen tie, and that kept copy would then get excluded by
+//      excludeRinconManaged() (it's Rincon-managed but not from a trusted
+//      source), silently losing a comp that should have counted. See
+//      LEADSIMPLE-COMP-SOURCE-SPEC.md, "What Could Go Wrong."
+//   3. Still tied (both or neither trusted) -> prefer a real (non-null)
+//      distance_miles over a missing one.
+//   4. Still tied -> keep whichever was already kept (first-seen wins).
+// The loser is dropped entirely — not inserted, not returned, not shown.
+function dedupeComps(comps) {
+  const kept = [];
+  for (const comp of (comps || [])) {
+    const matchIndex = kept.findIndex(k => addressesMatch(k.address, comp.address));
+    if (matchIndex === -1) {
+      kept.push(comp);
+      continue;
+    }
+    const existing = kept[matchIndex];
+    const existingWeight = weightFor(existing.listing_status);
+    const compWeight = weightFor(comp.listing_status);
+    if (compWeight > existingWeight) {
+      kept[matchIndex] = comp;
+    } else if (compWeight === existingWeight) {
+      const existingTrusted = SELF_SOURCED_TRUSTED_SOURCE_NAMES.has(existing.source_name);
+      const compTrusted = SELF_SOURCED_TRUSTED_SOURCE_NAMES.has(comp.source_name);
+      if (compTrusted && !existingTrusted) {
+        kept[matchIndex] = comp;
+      } else if (existingTrusted === compTrusted) {
+        const existingHasDistance = existing.distance_miles !== null && existing.distance_miles !== undefined;
+        const compHasDistance = comp.distance_miles !== null && comp.distance_miles !== undefined;
+        if (!existingHasDistance && compHasDistance) kept[matchIndex] = comp;
+        // else: still tied -> first-seen wins, keep existing.
+      }
+      // else: existing is the trusted one -> keep existing.
+    }
+    // else: existing has the stronger (or equal, non-improved) signal -> keep existing.
+  }
+  return kept;
+}
+
 module.exports = {
   normalizeAddress,
   addressWordScore,
+  addressesMatch,
   findBestPropertyMatch,
+  dedupeComps,
   fullAddress,
   houseNumber,
   hasParseableHouseNumber,

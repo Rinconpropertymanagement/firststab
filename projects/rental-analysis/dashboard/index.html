@@ -1479,7 +1479,18 @@
         '<div class="comp-badges">' + badges + '</div>' +
         (c.narrative ? '<div class="comp-narrative">' + esc(c.narrative) + '</div>' : '') +
         (c.is_estimated_price ? '<div style="font-size:10px;color:#9ca3af;margin-top:6px">*Price is an estimate, not a confirmed listing amount.</div>' : '') +
-        (c.is_rincon_managed ? '<div style="font-size:10px;color:var(--violet);margin-top:6px;font-weight:600">Internal reference only &mdash; not an independent market comp.</div>' : '') +
+        // RINCON MANAGED (badge above) stays true/shown for any Rincon-owned
+        // comp either way. This "not counted" note only applies when the
+        // comp is ALSO excluded from the recommended range — a comp from a
+        // trusted, self-sourced source (e.g. LeadSimple Move-Ins, Rincon's
+        // own confirmed new-tenant leases) is Rincon-managed by construction
+        // but IS counted at full weight, so it must not say "internal
+        // reference only, not counted" here. is_excluded_rincon_managed is
+        // computed server-side (server.js, POST /run) from the one shared
+        // lib/weighting.js#isExcludedRinconManaged() check — this file has
+        // no way to require() that module directly, so it just renders the
+        // verdict server.js already decided, rather than re-deriving it.
+        (c.is_excluded_rincon_managed ? '<div style="font-size:10px;color:var(--violet);margin-top:6px;font-weight:600">Internal reference only &mdash; not an independent market comp.</div>' : '') +
       '</div>'
     );
   }

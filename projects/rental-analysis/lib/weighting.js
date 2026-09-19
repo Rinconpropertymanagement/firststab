@@ -31,14 +31,56 @@ function weightFor(listingStatus) {
   return LISTING_STATUS_WEIGHTS[listingStatus] || 1;
 }
 
+// How much to trust a comp's price based on how close its bedroom count is
+// to the subject property's — a comp of a very different size isn't really
+// the same kind of rental, even if it's nearby and recently leased.
+const BEDROOM_ONE_OFF_MULTIPLIER = 0.5; // comp is 1 bedroom off from the subject
+const BEDROOM_MISMATCH_THRESHOLD = 2;   // 2+ bedrooms off from the subject -> excluded entirely
+
+// Comp bedroom count vs. the subject's — a comp of a very different size
+// isn't really the same kind of rental, even if it's nearby and recently
+// leased. Exact match: full trust (unchanged behavior). 1 bedroom off:
+// still a real signal, but weighted down, not treated equally. 2+
+// bedrooms off: excluded entirely from both range calculations (same
+// treatment as excludeRinconManaged — still saved/shown to the user,
+// just not counted in the math). A comp with unknown/missing bedroom
+// data is treated as "1 off" (moderate trust) rather than excluded
+// (don't punish a real comp for missing metadata) or fully trusted
+// (we genuinely don't know if it matches).
+//
+// subjectBedrooms is optional — when it's not a real number (caller
+// didn't pass one), this returns 1 for every comp, i.e. no filtering,
+// identical to this function not existing. This keeps every existing
+// caller (including the test suite) working unchanged unless it
+// deliberately opts in by passing subjectBedrooms.
+function sizeSimilarityMultiplier(compBedrooms, subjectBedrooms) {
+  if (typeof subjectBedrooms !== 'number') return 1;
+  if (typeof compBedrooms !== 'number') return BEDROOM_ONE_OFF_MULTIPLIER;
+  const diff = Math.abs(compBedrooms - subjectBedrooms);
+  if (diff === 0) return 1;
+  if (diff < BEDROOM_MISMATCH_THRESHOLD) return BEDROOM_ONE_OFF_MULTIPLIER;
+  return 0;
+}
+
 // Builds a weighted sample by repeating each comp's rent `weight` times, so
 // percentiles computed on the sample naturally lean toward higher-trust
 // comps without needing a more complex weighted-percentile formula.
-function buildWeightedSample(comps) {
+// subjectBedrooms is optional (see sizeSimilarityMultiplier) — omitting it
+// preserves the exact prior behavior: repeatCount is the plain status
+// weight, not scaled at all. When subjectBedrooms IS given, every comp's
+// repeatCount is computed on the same *2 scale (needed so the 0.5 "one
+// bedroom off" multiplier produces a whole number of repeats) — that scale
+// only ever compares comps to each other within this one call, so it never
+// needs to match the unscaled, subjectBedrooms-omitted case number-for-number.
+function buildWeightedSample(comps, subjectBedrooms) {
+  const sizeAware = typeof subjectBedrooms === 'number';
   const sample = [];
   for (const comp of comps) {
-    const w = weightFor(comp.listing_status);
-    for (let i = 0; i < w; i++) sample.push(Number(comp.monthly_rent));
+    const statusWeight = weightFor(comp.listing_status);
+    const repeatCount = sizeAware
+      ? Math.round(statusWeight * sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) * 2) // *2 keeps the 0.5 multiplier producing whole repeats without changing the existing 3/2/1 status weights' relative proportions
+      : statusWeight;
+    for (let i = 0; i < repeatCount; i++) sample.push(Number(comp.monthly_rent));
   }
   return sample.sort((a, b) => a - b);
 }
@@ -60,28 +102,54 @@ function round2(n) {
   return n === null || n === undefined ? null : Math.round(n * 100) / 100;
 }
 
-// A Rincon-managed comp is Rincon's own listing, not an independent market
-// data point — the narrative (lib/narrative.js's describeComp) and the
-// dashboard (dashboard/index.html's "Internal reference only — not an
-// independent market comp" label) already tell the reader this. The math
-// has to agree: confirmed against Peter's own reference report (stated
-// "Comp rent range" $4,650-$5,000, with the Rincon-managed comp in that
-// report priced at $4,635 — below the stated range, i.e. already excluded
-// from Rincon's existing manual process). Comps still get displayed and
-// stored with their badge either way — this only controls what feeds the
-// two range calculations below.
+// A Rincon-managed comp is normally Rincon's own listing showing up via an
+// INDEPENDENT market source (RentCast/CRMLS) — not a real outside data
+// point, so the math excludes it. Confirmed against Peter's own reference
+// report (stated "Comp rent range" $4,650-$5,000, with the Rincon-managed
+// comp in that report priced at $4,635 — below the stated range, i.e.
+// already excluded from Rincon's existing manual process).
+//
+// LeadSimple Move-Ins comp source build (see LEADSIMPLE-COMP-SOURCE-SPEC.md,
+// "Resolving the Rincon-managed exclusion conflict"): a source can now be
+// DELIBERATELY built to pull only Rincon's own managed properties, on
+// purpose, because that's real, confirmed, real-transaction data — not an
+// incidental match. Excluding those the same way would silently zero out
+// every comp this kind of source ever produces (they're Rincon-managed by
+// construction), so the exclusion is now keyed off which SOURCE produced
+// the comp, not is_rincon_managed alone. Named, explicit exemption list —
+// a source must be deliberately added here, never inferred.
+const SELF_SOURCED_TRUSTED_SOURCE_NAMES = new Set(['LeadSimple Move-Ins']);
+
+// True when a comp should be treated as "internal reference only, don't
+// count it" — is_rincon_managed AND not from a source on the trusted list
+// above. Shared by excludeRinconManaged() below, lib/narrative.js's
+// describeComp() (so Claude isn't told a counted, 3x-weighted comp is
+// "internal reference only"), and server.js (which forwards the same
+// verdict to the dashboard, since dashboard/index.html is plain browser JS
+// with no way to require() this file directly — see server.js's own
+// comment on why the check is duplicated there rather than imported).
+// Keeping the trusted-source list in exactly one place (here) means all
+// three call sites can never drift out of sync with each other.
+function isExcludedRinconManaged(comp) {
+  return !!(comp && comp.is_rincon_managed) && !SELF_SOURCED_TRUSTED_SOURCE_NAMES.has(comp.source_name);
+}
+
+// Comps still get displayed and stored with their RINCON MANAGED badge
+// either way — this only controls what feeds the two range calculations
+// below.
 function excludeRinconManaged(comps) {
-  return (comps || []).filter(c => !c.is_rincon_managed);
+  return (comps || []).filter(c => !isExcludedRinconManaged(c));
 }
 
 /**
- * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed}
+ * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed, bedrooms}
+ * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
  * @returns {{low: number|null, mid: number|null, high: number|null}}
  */
-function computeRecommendedRange(comps) {
+function computeRecommendedRange(comps, subjectBedrooms) {
   const eligible = excludeRinconManaged(comps);
   if (!eligible.length) return { low: null, mid: null, high: null };
-  const sample = buildWeightedSample(eligible);
+  const sample = buildWeightedSample(eligible, subjectBedrooms);
   return {
     low:  round2(percentile(sample, 25)),
     mid:  round2(percentile(sample, 50)),
@@ -92,12 +160,16 @@ function computeRecommendedRange(comps) {
 /**
  * The unweighted spread across the actual comps pulled — distinct from the
  * recommended range above (see migration design notes on raw_comp_rent_*
- * vs. recommended_rent_*).
- * @param {object[]} comps - each needs {monthly_rent, is_rincon_managed}
+ * vs. recommended_rent_*). Comps 2+ bedrooms off from the subject are
+ * excluded here too (same principle as excludeRinconManaged) — a 1-bed
+ * apartment isn't a legitimate comp for a 5-bed house in either number.
+ * @param {object[]} comps - each needs {monthly_rent, is_rincon_managed, bedrooms}
+ * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
  * @returns {{low: number|null, high: number|null}}
  */
-function computeRawRange(comps) {
-  const eligible = excludeRinconManaged(comps);
+function computeRawRange(comps, subjectBedrooms) {
+  const eligible = excludeRinconManaged(comps)
+    .filter(c => sizeSimilarityMultiplier(c.bedrooms, subjectBedrooms) > 0);
   if (!eligible.length) return { low: null, high: null };
   const rents = eligible.map(c => Number(c.monthly_rent)).filter(n => Number.isFinite(n));
   if (!rents.length) return { low: null, high: null };
@@ -106,9 +178,14 @@ function computeRawRange(comps) {
 
 module.exports = {
   LISTING_STATUS_WEIGHTS,
+  BEDROOM_ONE_OFF_MULTIPLIER,
+  BEDROOM_MISMATCH_THRESHOLD,
+  SELF_SOURCED_TRUSTED_SOURCE_NAMES,
   weightFor,
+  sizeSimilarityMultiplier,
   buildWeightedSample,
   percentile,
+  isExcludedRinconManaged,
   excludeRinconManaged,
   computeRecommendedRange,
   computeRawRange,

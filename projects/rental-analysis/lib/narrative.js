@@ -14,6 +14,7 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { isExcludedRinconManaged } = require('./weighting');
 
 // Same model this codebase already uses for real narrative writing —
 // content-engine's draft.js/revise.js/captions.js/chat.js all use
@@ -47,7 +48,17 @@ function describeComp(c, i) {
     c.distance_miles != null ? `${c.distance_miles} mi away` : null,
     c.days_on_market != null ? `${c.days_on_market} days on market` : null,
     c.had_price_cut ? `had a price cut${c.original_price ? ` (from ${fmtMoney(c.original_price)})` : ''}` : null,
-    c.is_rincon_managed ? 'this is a Rincon-managed property, not outside competition — internal reference only' : null,
+    // A Rincon-managed comp is "internal reference only, not counted" UNLESS
+    // it came from a trusted, self-sourced source (e.g. LeadSimple Move-Ins)
+    // that was deliberately built to report Rincon's own confirmed,
+    // new-tenant leases — that kind of comp IS counted, at full weight, and
+    // must never be described as excluded. See lib/weighting.js's
+    // isExcludedRinconManaged() — the one place this distinction is decided.
+    c.is_rincon_managed
+      ? (isExcludedRinconManaged(c)
+        ? 'this is a Rincon-managed property, not outside competition — internal reference only'
+        : 'this is a Rincon-managed property, but a real, confirmed new-tenant lease from Rincon\'s own records — counted in the range like any other leased comp, not excluded')
+      : null,
   ].filter(Boolean);
   return bits.join(' | ');
 }
@@ -57,7 +68,11 @@ function buildPrompt({ subject, comps, recommended, raw, subjectEstimatedRent, s
 
 HARD RULES:
 - Only use facts given below. Never invent a number, address, or fact not present in this data.
-- Comp data came from RentCast only today (sources used: ${sourcesUsed.join(', ') || 'none'}). RentCast is not MLS data, and it cannot confirm whether an "off_market" comp actually leased or was simply delisted — never describe an off_market comp as "leased" or "rented." Call it delisted/off-market, and note its price is the last known asking price, not a confirmed transaction.
+- Comp data for this analysis came from: ${sourcesUsed.join(', ') || 'none'}.
+- A comp's status tells you exactly how much to trust its price:
+  - "leased" = a real, confirmed transaction (the strongest signal) — describe it as an actual lease with confidence, not a guess.
+  - "active" = a real, current asking price, not yet confirmed by a transaction — describe it as currently available, not as leased.
+  - "off_market" = delisted with no way to confirm what actually happened (could have leased, could have simply expired) — describe it as delisted/off-market, never as leased or rented.
 - If there are few comps (fewer than 4) or only one source was used, say so plainly in the rationale and describe the recommendation as a rough/preliminary estimate rather than a confident one. Do not manufacture confidence the data doesn't support.
 
 SUBJECT PROPERTY:
@@ -70,7 +85,7 @@ ${comps.map(describeComp).join('\n')}
 COMPUTED NUMBERS (already calculated — explain these, do not recompute or contradict them):
 - Raw comp rent range: ${fmtMoney(raw.low)}-${fmtMoney(raw.high)}
 - Recommended asking rent range: ${fmtMoney(recommended.low)}-${fmtMoney(recommended.high)}, midpoint ${fmtMoney(recommended.mid)}
-  (this range weights comps with a more reliable status more heavily — only active/off_market are possible today, since RentCast has no confirmed-leased signal; leased comps will count for more once a source that confirms real transactions is live)
+  (this range weights comps with a more reliable status more heavily — leased comps count 3x today, active comps 2x, off_market comps 1x)
 
 WRITE:
 1. A one-to-two sentence "narrative" for EACH comp above, in the same order, citing that comp's own specific facts.
@@ -119,7 +134,15 @@ async function generateNarrative({ subject, comps, recommended, raw, subjectEsti
   const client = getClient();
   const response = await client.messages.create({
     model: MODEL,
-    max_tokens: 4096,
+    // Bumped from 4096: real analyses now pull 20-30 comps (RentCast +
+    // CRMLS combined), and the prompt asks for a narrative for every comp
+    // plus a rationale, all packed into one trailing JSON marker line that
+    // parseNarrativeOutput() requires to be complete — 4096 was getting cut
+    // off mid-response on real runs. 8192 gives real headroom for today's
+    // counts plus room to grow, well under claude-opus-4-8's much larger
+    // output ceiling, so this is a safety cap, not a cost target (cost is
+    // driven by tokens actually generated either way).
+    max_tokens: 8192,
     messages: [
       { role: 'user', content: buildPrompt({ subject, comps, recommended, raw, subjectEstimatedRent, sourcesUsed }) },
     ],

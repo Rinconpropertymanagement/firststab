@@ -113,8 +113,8 @@ const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/locationiq');
-const { findBestPropertyMatch, hasParseableHouseNumber } = require('./lib/property-matching');
-const { computeRecommendedRange, computeRawRange } = require('./lib/weighting');
+const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
+const { computeRecommendedRange, computeRawRange, isExcludedRinconManaged } = require('./lib/weighting');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 
@@ -415,15 +415,26 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       const subjectMatch = findBestPropertyMatch(subject_address, properties);
       if (subjectMatch) resolvedPropertyId = subjectMatch.id;
     }
-    const compsWithMatch = rawComps.map(c => {
+    const matchedComps = rawComps.map(c => {
       const match = findBestPropertyMatch(c.address, properties);
       return { ...c, comp_property_id: match ? match.id : null, is_rincon_managed: !!match };
     });
+    // Collapse the same real unit reported twice (e.g. RentCast inferring
+    // 'off_market' on a unit CRMLS separately confirms as 'leased') into one
+    // comp before anything downstream counts or ranges them — see
+    // dedupeComps() in lib/property-matching.js. Reassigning compsWithMatch
+    // (rather than introducing a new name) means every existing downstream
+    // use below — recommended/raw range math, narrative, the DB insert —
+    // automatically runs on the deduped list with no further changes.
+    const compsWithMatch = dedupeComps(matchedComps);
+    if (compsWithMatch.length !== matchedComps.length) {
+      console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedComps.length} after=${compsWithMatch.length}`);
+    }
 
     // Numbers first — the narrative step below only explains these, never
     // computes or overrides them.
-    const recommended = computeRecommendedRange(compsWithMatch);
-    const raw = computeRawRange(compsWithMatch);
+    const recommended = computeRecommendedRange(compsWithMatch, bedrooms);
+    const raw = computeRawRange(compsWithMatch, bedrooms);
 
     // Rationale + per-comp narrative text. Non-fatal on failure — the
     // numbers above already stand on their own, and rationale/narrative
@@ -480,6 +491,24 @@ app.post('/api/rental-analysis/run', async (req, res) => {
 
     const insertedComps = await insert('rental_comps', compRows);
 
+    // rental_comps has no source_name column (source_name only exists in
+    // memory, on compsWithMatch — see lib/sources.js's runActiveSources()
+    // comment on why it's kept there and stripped before insert), and
+    // dashboard/index.html is plain browser JS with no way to require()
+    // lib/weighting.js's isExcludedRinconManaged() directly. So the
+    // authoritative "is this comp internal-reference-only / not counted"
+    // verdict is computed here, once, using the one shared helper, and
+    // attached to the JSON response only (never persisted) — the dashboard
+    // just renders this boolean instead of re-deriving the trusted-source
+    // logic itself, so that logic can never drift out of sync across files.
+    // Positional match against compsWithMatch, same assumption
+    // narrativesByIndex[i] above already relies on (compRows was built by
+    // mapping compsWithMatch in this exact order).
+    const responseComps = insertedComps.map((row, i) => ({
+      ...row,
+      is_excluded_rincon_managed: isExcludedRinconManaged(compsWithMatch[i]),
+    }));
+
     const [updatedAnalysis] = await update('rental_analyses', `id=eq.${analysis.id}`, {
       status: 'complete',
       property_id: resolvedPropertyId,
@@ -512,7 +541,7 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       }
     }
 
-    return res.json({ analysis: updatedAnalysis, comps: insertedComps, marketData });
+    return res.json({ analysis: updatedAnalysis, comps: responseComps, marketData });
   } catch (err) {
     console.error(`[${ts}] Analysis pipeline error: id=${analysis.id}`, err.message);
     try {

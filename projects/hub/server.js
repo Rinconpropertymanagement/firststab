@@ -127,8 +127,12 @@ GET  /rental-analysis         Rental Analysis — enter an address, get an
                               real comps (requires login + a role in
                               tool='rental_analysis' — see
                               rental-analysis/router.js). Folded in from
-                              the standalone deployment; not linked from
-                              the Hub home page yet.
+                              the standalone deployment. Home-page tile is
+                              itself role-gated (checks GET /api/rental-
+                              analysis/auth/me before rendering), so it only
+                              appears for someone who already has access —
+                              not a broader announcement that the tool is
+                              open to everyone.
      /api/rental-analysis/*   Rental Analysis API routes
 
 Environment variables required (.env file):
@@ -899,6 +903,7 @@ app.get('/', (req, res) => {
             <span>The business's weekly numbers, one row per metric, with the person accountable for each</span>
           </a>
           <span id="complaint-tracking-tile-slot"></span>
+          <span id="rental-analysis-tile-slot"></span>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
         <script>
@@ -935,6 +940,35 @@ app.get('/', (req, res) => {
                   });
               })
               .catch(function () { /* role lookup or count failed — tile stays absent, rest of the home page still works */ });
+          })();
+
+          // Rental Analysis's home-page tile — same "check first, mount
+          // only on success, no hint it exists otherwise" pattern as
+          // Complaint Tracking's tile just above, but simpler (no count):
+          // calls the already-built, already-gated
+          // GET /api/rental-analysis/auth/me directly. Only Peter has a
+          // role for tool='rental_analysis' today (his own explicit call:
+          // "nothing actually gives them access until i say — i need the
+          // tool to be better before i roll it out"), so this tile is
+          // invisible to everyone else, same as the route itself already
+          // was — this just gives the one person who does have access a
+          // real link to click instead of needing to type the URL from
+          // memory. No role lookup happens in server.js itself.
+          (function () {
+            fetch('/api/rental-analysis/auth/me', { credentials: 'include' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (me) {
+                if (!me) return; // no access — tile never appears, no hint it exists
+                var slot = document.getElementById('rental-analysis-tile-slot');
+                if (!slot) return;
+                var el = document.createElement('a');
+                el.className = 'section-link';
+                el.href = '/rental-analysis';
+                el.innerHTML = '<strong>Rental Analysis</strong>' +
+                  '<span>Enter an address, get an automated rent recommendation grounded in real comps</span>';
+                slot.replaceWith(el);
+              })
+              .catch(function () { /* role lookup failed — tile stays absent, rest of the home page still works */ });
           })();
         </script>
       `,

@@ -122,6 +122,14 @@ GET  /scorecard               Scoreboard — the business's weekly metrics,
                               login + a role in tool='scorecard' — see
                               scorecard/router.js)
      /api/scorecard/*         Scoreboard API routes
+GET  /rental-analysis         Rental Analysis — enter an address, get an
+                              automated rent recommendation grounded in
+                              real comps (requires login + a role in
+                              tool='rental_analysis' — see
+                              rental-analysis/router.js). Folded in from
+                              the standalone deployment; not linked from
+                              the Hub home page yet.
+     /api/rental-analysis/*   Rental Analysis API routes
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -198,6 +206,29 @@ gracefully otherwise, see .env.example):
                               (content-engine/lib/viral-scan.js).
   ENABLE_WEB_SEARCH_CITATIONS    Used by drafting/revision for non-legal
                               source citations; defaults to enabled if unset.
+
+Optional (Rental Analysis — each checked lazily, per-request, inside its
+own lib/*.js file, not at startup; a missing one degrades just that source/
+feature rather than taking down this section or the rest of the Hub — see
+rental-analysis/router.js's own startup warnings):
+  RENTCAST_API_KEY               Pulls comps + property-lookup pre-fill
+                              (developers.rentcast.io, free tier: 50
+                              requests/month). Without it, every analysis
+                              fails at the "no comps" step.
+  LOCATIONIQ_API_KEY             Live address autocomplete
+                              (locationiq.com, free, no credit card).
+                              Without it, address-suggest just returns no
+                              suggestions — typing an address manually
+                              still works.
+  RECORE_CLIENT_ID, RECORE_CLIENT_SECRET, RECORE_SERVER_TOKEN,
+  RECORE_BROWSER_TOKEN           CRMLS comp source (rental-analysis/
+                              lib/crmls.js). Without these, that one comp
+                              source is silently skipped.
+  ANTHROPIC_API_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+                              Shared with the other tools above — no
+                              rental-analysis-specific values needed for
+                              these three (confirmed identical between the
+                              old standalone app's .env and the Hub's).
 `);
   process.exit(0);
 }
@@ -225,6 +256,7 @@ const { internalRouter: emailIntakeInternalRouter } = require('./email-intake/ro
 const { router: complaintTrackingRouter, internalRouter: complaintTrackingInternalRouter } = require('./complaint-tracking/router');
 const { router: archiveSearchRouter, internalRouter: archiveSearchInternalRouter } = require('./archive-search/router');
 const { router: scorecardRouter, internalRouter: scorecardInternalRouter } = require('./scorecard/router');
+const { router: rentalAnalysisRouter } = require('./rental-analysis/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -328,12 +360,32 @@ app.use((req, res, next) => {
 // directly in the page rather than in external files — checked, there is no
 // external <script src=...> anywhere in the hub. Tightening this later means
 // moving those inline scripts to files and switching to a nonce instead.
+//
+// img-src additionally widened for Rental Analysis's comp map
+// (rental-analysis/dashboard/index.html, projects/rental-analysis/
+// HUB-INTEGRATION-SPEC.md): Leaflet's own JS/CSS/marker-icon files are
+// self-hosted (rental-analysis/dashboard/vendor/leaflet/, served
+// same-origin — see rental-analysis/router.js) specifically so this shared,
+// app-wide CSP would NOT need script-src widened for a third-party CDN.
+// But the map TILES themselves are fetched live, at runtime, from
+// OpenStreetMap's tile servers (L.tileLayer('https://{s}.tile.
+// openstreetmap.org/...') in that dashboard's own JS — not visible in a
+// plain grep of the HTML source, only in the running page, so confirmed by
+// actually loading the page and checking, not assumed) — there's no
+// reasonable way to self-host a global map tile set the way a small,
+// fixed set of library files can be. img-src is the narrowest directive
+// that can be widened for this: unlike script-src, an img-src exception
+// can't be used to run attacker script or exfiltrate more than "a viewer
+// loaded a map tile," and this only adds one specific, well-known public
+// tile host (OpenStreetMap's own *.tile.openstreetmap.org subdomains) —
+// not a blanket https: allowance.
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
         'script-src': ["'self'", "'unsafe-inline'"],
+        'img-src': ["'self'", 'data:', 'https://*.tile.openstreetmap.org'],
       },
     },
   })
@@ -1033,6 +1085,23 @@ app.use(archiveSearchRouter);
 // way. Call Stats shipped 2026-09-12 and is live; it can feed the Scoreboard
 // later, once this shape has proven itself.
 app.use(scorecardRouter);
+
+// ─── Rental Analysis section ───────────────────────────────────────────
+// projects/rental-analysis/HUB-INTEGRATION-SPEC.md — folded in from the
+// standalone deployment at https://srv1784739.hstgr.cloud/rental-analysis/
+// (which had no login of any kind; that gap is what this build closes).
+// Same shape again: requireLogin already ran; rental-analysis/router.js
+// does its own additional check — does this specific person hold a role
+// in team_member_tool_roles for tool='rental_analysis' (only the shared
+// 'admin' value is used — this tool has no permission tiers of its own).
+// The migration widening that table's tool CHECK inserts zero rows on its
+// own; nobody has real access yet until Peter explicitly grants it — see
+// that router.js's own file header. No home-page tile is added for this
+// section yet, on purpose (reachable only by typing /rental-analysis
+// directly) — matching Peter's own "the tool needs to be better before I
+// roll it out" call; a tile is Tron/Peter's decision for later, not part
+// of this pass.
+app.use(rentalAnalysisRouter);
 
 // ─── Central error handler — must be registered last ──────────────────────
 // Catches errors a route handler throws synchronously (e.g. destructuring

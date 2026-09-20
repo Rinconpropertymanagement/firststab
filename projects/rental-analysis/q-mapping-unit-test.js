@@ -26,14 +26,16 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 const assert = require('node:assert/strict');
 
 const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier } = require('./lib/weighting');
-const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails } = require('./lib/rentcast');
+const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails, applyRadiusTiering } = require('./lib/rentcast');
 const {
   mapComparable: mapCrmlsComparable,
   haversineMiles,
   buildBoundingBox,
   buildFilter: buildCrmlsFilter,
   pullCrmlsComps,
-  SEARCH_RADIUS_MILES,
+  NARROW_SEARCH_RADIUS_MILES,
+  WIDE_SEARCH_RADIUS_MILES,
+  MIN_COMPS_FOR_NARROW_RADIUS,
 } = require('./lib/crmls');
 const {
   mapComparable: mapLeadSimpleComparable,
@@ -43,7 +45,7 @@ const {
 } = require('./lib/leadsimple');
 const { findBestPropertyMatch, normalizeAddress, houseNumber, hasParseableHouseNumber, unitIdentifier, addressesMatch, dedupeComps } = require('./lib/property-matching');
 const { parseNarrativeOutput, buildPrompt, describeComp } = require('./lib/narrative');
-const { suggestAddresses, mapSuggestion } = require('./lib/locationiq');
+const { suggestAddresses, mapSuggestion, geocodeAddress } = require('./lib/locationiq');
 const marketDataLib = require('./lib/market-data');
 const { mapMarketData, fetchMarketData, getMarketData, normalizeZip, isFresh, FRESHNESS_WINDOW_DAYS } = marketDataLib;
 const sourcesLib = require('./lib/sources');
@@ -834,6 +836,51 @@ async function main() {
     assert.equal(result.plausible, true);
   });
 
+  console.log('--- lib/rentcast.js radius tiering ---');
+
+  await check('pullRentCastComps() requests the real documented maxRadius param set to WIDE_SEARCH_RADIUS_MILES', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.RENTCAST_API_KEY;
+    process.env.RENTCAST_API_KEY = 'test-key';
+    let requestedUrl = null;
+    global.fetch = async (url) => {
+      requestedUrl = String(url);
+      return { ok: true, json: async () => ({ rent: 4200, subjectProperty: { state: 'CA' }, comparables: [] }) };
+    };
+    try {
+      await pullRentCastComps({ address: '456 Oak Ave, Newbury Park, CA', propertyType: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1450 });
+      const maxRadius = new URL(requestedUrl).searchParams.get('maxRadius');
+      assert.equal(maxRadius, String(WIDE_SEARCH_RADIUS_MILES), 'expected maxRadius to be sent as WIDE_SEARCH_RADIUS_MILES, one call, no separate narrow request');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RENTCAST_API_KEY = originalKey;
+    }
+  });
+
+  await check('applyRadiusTiering() prefers the <=1mi subset when it meets MIN_COMPS_FOR_NARROW_RADIUS', () => {
+    const comps = [
+      { distance_miles: 0.2 }, { distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: 1.0 },
+      { distance_miles: 1.5 }, { distance_miles: 1.9 },
+    ];
+    const tiered = applyRadiusTiering(comps);
+    assert.equal(tiered.length, 4, 'exactly the 4 comps at <= 1 mile should survive');
+    assert.ok(tiered.every(c => c.distance_miles <= NARROW_SEARCH_RADIUS_MILES));
+  });
+
+  await check('applyRadiusTiering() falls back to the full wide set when the narrow subset does not meet MIN_COMPS_FOR_NARROW_RADIUS', () => {
+    const comps = [{ distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: 1.8 }]; // only 2 within 1 mile
+    const tiered = applyRadiusTiering(comps);
+    assert.equal(tiered.length, 3, 'below threshold at 1 mile -> keep the full wide (already-queried) set, no second request needed');
+  });
+
+  await check('applyRadiusTiering() treats a comp with no distance_miles as never countable toward the narrow subset, only ever kept via the wide fallback', () => {
+    const comps = [{ distance_miles: 0.2 }, { distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: null }];
+    // Only 3 real comps within 1 mile — below the threshold of 4 — so the
+    // full set (including the no-distance comp) must be kept.
+    const tiered = applyRadiusTiering(comps);
+    assert.equal(tiered.length, 4);
+  });
+
   console.log('--- lib/narrative.js ---');
 
   await check('parseNarrativeOutput() parses a well-formed trailing marker line', () => {
@@ -1117,7 +1164,7 @@ async function main() {
   });
 
   await check('buildBoundingBox() matches the documented lat/long delta formula, and its corner sits farther from center than its edge (why pullCrmlsComps() post-filters to a true circle)', () => {
-    const lat = 34.179615, lon = -119.198962, radius = SEARCH_RADIUS_MILES;
+    const lat = 34.179615, lon = -119.198962, radius = WIDE_SEARCH_RADIUS_MILES;
     const box = buildBoundingBox(lat, lon, radius);
     const latDelta = radius / 69.0;
     const lonDelta = radius / (69.0 * Math.cos(lat * Math.PI / 180));
@@ -1150,22 +1197,26 @@ async function main() {
     assert.equal(mapCrmlsComparable(record, 1.23).distance_miles, 1.23);
   });
 
-  await check('pullCrmlsComps() runs a lat/long bounding-box search (not PostalCode) when subject coordinates are present, and post-filters to a true circle — drops a box-corner record beyond SEARCH_RADIUS_MILES, keeps a near one with a real nonzero distance_miles', async () => {
+  await check('pullCrmlsComps() runs a lat/long bounding-box search (not PostalCode) when subject coordinates are present, and post-filters to a true circle — drops a box-corner record beyond WIDE_SEARCH_RADIUS_MILES, keeps a near one with a real nonzero distance_miles', async () => {
     const originalFetch = global.fetch;
     const originalToken = process.env.RECORE_SERVER_TOKEN;
     process.env.RECORE_SERVER_TOKEN = 'test-token';
 
     const subjectLat = 34.179615, subjectLon = -119.198962;
-    const box = buildBoundingBox(subjectLat, subjectLon, SEARCH_RADIUS_MILES);
+    const box = buildBoundingBox(subjectLat, subjectLon, WIDE_SEARCH_RADIUS_MILES);
     const baseFields = {
       StandardStatus: 'Closed', PropertySubType: 'Single Family Residence',
       StreetSuffix: 'St', City: 'Newbury Park', StateOrProvince: 'CA', PostalCode: '91320', ClosePrice: 4300,
     };
-    // Just inside the box, close to center — must survive the circle filter with a real distance_miles.
+    // Just inside the box, close to center (well within the NARROW 1-mile
+    // radius too, but only 1 comp total -> below MIN_COMPS_FOR_NARROW_RADIUS,
+    // so tiering keeps the full set either way — see the tiering-specific
+    // checks below for cases where the narrow/wide choice actually differs).
+    // Must survive the circle filter with a real distance_miles.
     const nearRecord = { ...baseFields, StreetNumberNumeric: 100, StreetName: 'Near', Latitude: subjectLat + 0.001, Longitude: subjectLon };
     // Sits exactly at the box's own corner — inside the box's lat/lon range,
     // but per the "corners are farther than edges" math above, actually
-    // outside a true SEARCH_RADIUS_MILES circle — must be dropped.
+    // outside a true WIDE_SEARCH_RADIUS_MILES circle — must be dropped.
     const cornerRecord = { ...baseFields, StreetNumberNumeric: 200, StreetName: 'Corner', Latitude: box.maxLat, Longitude: box.maxLon };
 
     const requestedUrls = [];
@@ -1192,8 +1243,8 @@ async function main() {
 
       assert.equal(result.comps.length, 1, 'the box-corner record must be dropped by the true-circle post-filter');
       assert.ok(result.comps[0].address.startsWith('100 Near St'), 'the surviving comp must be the near record, not the corner one');
-      assert.ok(typeof result.comps[0].distance_miles === 'number' && result.comps[0].distance_miles > 0 && result.comps[0].distance_miles <= SEARCH_RADIUS_MILES,
-        `expected a real, nonzero distance_miles <= ${SEARCH_RADIUS_MILES}, got ${result.comps[0].distance_miles}`);
+      assert.ok(typeof result.comps[0].distance_miles === 'number' && result.comps[0].distance_miles > 0 && result.comps[0].distance_miles <= WIDE_SEARCH_RADIUS_MILES,
+        `expected a real, nonzero distance_miles <= ${WIDE_SEARCH_RADIUS_MILES}, got ${result.comps[0].distance_miles}`);
     } finally {
       global.fetch = originalFetch;
       process.env.RECORE_SERVER_TOKEN = originalToken;
@@ -1226,6 +1277,74 @@ async function main() {
       assert.equal(result.comps.length, 1);
       assert.equal(result.comps[0].distance_miles, null, 'distance_miles must stay null on the zip-fallback path, even though this record has its own lat/long');
       assert.equal(result.subjectZip, '91320');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  console.log('--- lib/crmls.js radius tiering (narrow vs wide) ---');
+
+  await check('pullCrmlsComps() prefers the <=1mi subset when it has enough comps (MIN_COMPS_FOR_NARROW_RADIUS), dropping farther box-search comps from the result', async () => {
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    const baseFields = {
+      StandardStatus: 'Active', PropertySubType: 'Single Family Residence',
+      StreetSuffix: 'St', City: 'Newbury Park', StateOrProvince: 'CA', PostalCode: '91320', ListPrice: 4200,
+    };
+    // 4 records within 1 mile (0.3/0.5/0.7/0.9), 2 more within 2 miles but
+    // beyond 1 (1.3/1.7) — offsets built the same latDelta = miles/69.0 way
+    // buildBoundingBox() itself does, same-longitude so Haversine distance
+    // is effectively the offset in miles (verified to <0.01mi tolerance by
+    // the haversineMiles() test above).
+    const milesOffsets = [0.3, 0.5, 0.7, 0.9, 1.3, 1.7];
+    const records = milesOffsets.map((mi, i) => ({
+      ...baseFields, StreetNumberNumeric: 100 + i, StreetName: `Comp${i}`,
+      Latitude: subjectLat + mi / 69.0, Longitude: subjectLon,
+    }));
+
+    global.fetch = async (url) => {
+      const recs = new URL(String(url)).searchParams.get('$orderby') === 'OnMarketDate desc' ? records : [];
+      return { ok: true, json: async () => ({ value: recs }) };
+    };
+    try {
+      const result = await pullCrmlsComps({ address: '1895 Dorrit St, Newbury Park, CA 91320', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 4, 'the 4 comps within 1 mile meet MIN_COMPS_FOR_NARROW_RADIUS -> narrow subset used');
+      assert.ok(result.comps.every(c => c.distance_miles <= NARROW_SEARCH_RADIUS_MILES), 'every surviving comp must be within the narrow radius');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  await check('pullCrmlsComps() falls back to the full <=2mi set when the <=1mi subset does not have enough comps', async () => {
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    const baseFields = {
+      StandardStatus: 'Active', PropertySubType: 'Single Family Residence',
+      StreetSuffix: 'St', City: 'Newbury Park', StateOrProvince: 'CA', PostalCode: '91320', ListPrice: 4200,
+    };
+    // Only 2 within 1 mile (below MIN_COMPS_FOR_NARROW_RADIUS), 2 more
+    // between 1 and 2 miles.
+    const milesOffsets = [0.3, 0.5, 1.3, 1.7];
+    const records = milesOffsets.map((mi, i) => ({
+      ...baseFields, StreetNumberNumeric: 200 + i, StreetName: `Comp${i}`,
+      Latitude: subjectLat + mi / 69.0, Longitude: subjectLon,
+    }));
+
+    global.fetch = async (url) => {
+      const recs = new URL(String(url)).searchParams.get('$orderby') === 'OnMarketDate desc' ? records : [];
+      return { ok: true, json: async () => ({ value: recs }) };
+    };
+    try {
+      const result = await pullCrmlsComps({ address: '1895 Dorrit St, Newbury Park, CA 91320', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 4, 'only 2 within 1 mile -> below threshold -> keep the full wide (<=2mi) set, no second request');
     } finally {
       global.fetch = originalFetch;
       process.env.RECORE_SERVER_TOKEN = originalToken;
@@ -1316,6 +1435,145 @@ async function main() {
       assert.equal(called, false);
       assert.deepEqual(result.comps, []);
       assert.equal(result.subjectZip, null);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('mapComparable() defaults distance_miles/latitude/longitude to null with no second argument, and passes through real values when given', () => {
+    const row = { address: '1 Test St', city: 'Oxnard', state: 'CA', zip_code: '93036', rent: 3000, latitude: 34.18, longitude: -119.2 };
+    const noDistance = mapLeadSimpleComparable(row);
+    assert.equal(noDistance.distance_miles, null);
+    assert.equal(noDistance.latitude, 34.18, 'row has real coordinates of its own -> carried through regardless of distance arg');
+    const withDistance = mapLeadSimpleComparable(row, 0.75);
+    assert.equal(withDistance.distance_miles, 0.75);
+  });
+
+  console.log('--- lib/leadsimple.js radius tiering (coordinates added for this build) ---');
+
+  await check('pullLeadSimpleComps() computes real distance_miles and prefers the <=1mi subset when the subject has coordinates and enough rows do too', async () => {
+    const originalFetch = global.fetch;
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    const milesOffsets = [0.3, 0.5, 0.7, 0.9, 1.3, 1.7]; // 4 within 1mi, 2 more within 2mi
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) {
+        return {
+          ok: true,
+          json: async () => milesOffsets.map((mi, i) => ({
+            address: `${100 + i} Comp St`, city: 'Oxnard', state: 'CA', zip_code: '93036',
+            property_type: 'Single Home', bedrooms: 3, bathrooms: 2, sqft: 1200,
+            rent: 3000 + i, lease_start_date: '2026-06-01', closed_at: '2026-06-05',
+            latitude: subjectLat + mi / 69.0, longitude: subjectLon,
+          })),
+        };
+      }
+      throw new Error('Unexpected fetch: ' + u);
+    };
+    try {
+      const result = await pullLeadSimpleComps({ address: '1 Comp St, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 4, 'the 4 rows within 1 mile meet MIN_COMPS_FOR_NARROW_RADIUS -> narrow subset used');
+      assert.ok(result.comps.every(c => typeof c.distance_miles === 'number' && c.distance_miles <= NARROW_SEARCH_RADIUS_MILES));
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('pullLeadSimpleComps() falls back to the full <=2mi bounded set when the <=1mi subset does not have enough rows', async () => {
+    const originalFetch = global.fetch;
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    const milesOffsets = [0.3, 0.5, 1.3, 1.7]; // only 2 within 1mi
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) {
+        return {
+          ok: true,
+          json: async () => milesOffsets.map((mi, i) => ({
+            address: `${200 + i} Comp St`, city: 'Oxnard', state: 'CA', zip_code: '93036',
+            rent: 3000 + i, lease_start_date: '2026-06-01', closed_at: '2026-06-05',
+            latitude: subjectLat + mi / 69.0, longitude: subjectLon,
+          })),
+        };
+      }
+      throw new Error('Unexpected fetch: ' + u);
+    };
+    try {
+      const result = await pullLeadSimpleComps({ address: '1 Comp St, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 4, 'only 2 within 1 mile -> below threshold -> keep the full <=2mi set');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('pullLeadSimpleComps() drops a row beyond WIDE_SEARCH_RADIUS_MILES even though it shares the subject\'s zip code', async () => {
+    const originalFetch = global.fetch;
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) {
+        return {
+          ok: true,
+          json: async () => ([
+            { address: '1 Near St', city: 'Oxnard', state: 'CA', zip_code: '93036', rent: 3000, lease_start_date: '2026-06-01', closed_at: '2026-06-05', latitude: subjectLat + 0.5 / 69.0, longitude: subjectLon },
+            // Same zip on paper, but a real 4-mile-away outlier once geocoded — must be dropped.
+            { address: '2 Far St', city: 'Oxnard', state: 'CA', zip_code: '93036', rent: 3100, lease_start_date: '2026-06-01', closed_at: '2026-06-05', latitude: subjectLat + 4.0 / 69.0, longitude: subjectLon },
+          ]),
+        };
+      }
+      throw new Error('Unexpected fetch: ' + u);
+    };
+    try {
+      const result = await pullLeadSimpleComps({ address: '1 Near St, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 1, 'the 4-mile-away row must be dropped even though it matched on zip');
+      assert.equal(result.comps[0].address.startsWith('1 Near St'), true);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('pullLeadSimpleComps() keeps a row with no coordinates of its own (never yet geocoded) even when the subject has coordinates, distance_miles left null', async () => {
+    const originalFetch = global.fetch;
+    const subjectLat = 34.179615, subjectLon = -119.198962;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) {
+        return {
+          ok: true,
+          json: async () => ([
+            { address: '1 Not Geocoded Yet', city: 'Oxnard', state: 'CA', zip_code: '93036', rent: 3000, lease_start_date: '2026-06-01', closed_at: '2026-06-05', latitude: null, longitude: null },
+          ]),
+        };
+      }
+      throw new Error('Unexpected fetch: ' + u);
+    };
+    try {
+      const result = await pullLeadSimpleComps({ address: '1 Not Geocoded Yet, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
+      assert.equal(result.comps.length, 1, 'never dropped for lack of coordinates — no basis to compute or drop it');
+      assert.equal(result.comps[0].distance_miles, null);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('pullLeadSimpleComps() falls back to exactly the zip-only behavior (no tiering, distance_miles null) when the subject itself has no coordinates', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) {
+        return {
+          ok: true,
+          json: async () => ([
+            { address: '1 Test St', city: 'Oxnard', state: 'CA', zip_code: '93036', rent: 3000, lease_start_date: '2026-06-01', closed_at: '2026-06-05', latitude: 34.2, longitude: -119.2 },
+          ]),
+        };
+      }
+      throw new Error('Unexpected fetch: ' + u);
+    };
+    try {
+      // No subject.latitude/longitude passed — same as a plain address-only call today.
+      const result = await pullLeadSimpleComps({ address: '1 Test St, Oxnard, CA 93036' });
+      assert.equal(result.comps.length, 1);
+      assert.equal(result.comps[0].distance_miles, null, 'never computed without real subject coordinates, even though this row has its own');
     } finally {
       global.fetch = originalFetch;
     }
@@ -1706,6 +1964,70 @@ async function main() {
       await assert.rejects(() => suggestAddresses('1895 Dorrit St'), /Missing LOCATIONIQ_API_KEY/);
     } finally {
       process.env.LOCATIONIQ_API_KEY = originalKey;
+    }
+  });
+
+  console.log('--- lib/locationiq.js geocodeAddress() (added for LeadSimple coordinate backfill/sync) ---');
+
+  await check('geocodeAddress() hits the /v1/search forward-geocoding endpoint (not /v1/autocomplete) and maps the first result to {latitude, longitude}', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.LOCATIONIQ_API_KEY;
+    process.env.LOCATIONIQ_API_KEY = 'test-key';
+    let requestedUrl = null;
+    global.fetch = async (url) => {
+      requestedUrl = String(url);
+      return { ok: true, json: async () => ([{ lat: '34.179615', lon: '-119.198962', display_name: '1895 Dorrit St, Newbury Park, CA 91320' }]) };
+    };
+    try {
+      const result = await geocodeAddress('1895 Dorrit St, Newbury Park, CA 91320');
+      assert.ok(requestedUrl.startsWith('https://api.locationiq.com/v1/search?'), `expected the /v1/search endpoint, got ${requestedUrl}`);
+      assert.deepEqual(result, { latitude: 34.179615, longitude: -119.198962 });
+    } finally {
+      global.fetch = originalFetch;
+      process.env.LOCATIONIQ_API_KEY = originalKey;
+    }
+  });
+
+  await check('geocodeAddress() returns null (not a throw) on a non-OK response, a network error, an empty array, or a non-numeric lat/lon', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.LOCATIONIQ_API_KEY;
+    process.env.LOCATIONIQ_API_KEY = 'test-key';
+    try {
+      global.fetch = async () => ({ ok: false, json: async () => ({}) });
+      assert.equal(await geocodeAddress('1 Bad Address'), null);
+
+      global.fetch = async () => { throw new Error('network down'); };
+      assert.equal(await geocodeAddress('1 Bad Address'), null);
+
+      global.fetch = async () => ({ ok: true, json: async () => ([]) });
+      assert.equal(await geocodeAddress('1 No Match Address'), null);
+
+      global.fetch = async () => ({ ok: true, json: async () => ([{ lat: 'not-a-number', lon: '-119.2' }]) });
+      assert.equal(await geocodeAddress('1 Bad Coords'), null);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.LOCATIONIQ_API_KEY = originalKey;
+    }
+  });
+
+  await check('geocodeAddress() returns null for an empty/whitespace-only address without calling fetch, and throws when LOCATIONIQ_API_KEY is missing for a real address', async () => {
+    const originalFetch = global.fetch;
+    let called = false;
+    global.fetch = async () => { called = true; return { ok: true, json: async () => ([]) }; };
+    try {
+      assert.equal(await geocodeAddress(''), null);
+      assert.equal(await geocodeAddress('   '), null);
+      assert.equal(called, false, 'must not spend a request on an empty address');
+
+      const originalKey = process.env.LOCATIONIQ_API_KEY;
+      delete process.env.LOCATIONIQ_API_KEY;
+      try {
+        await assert.rejects(() => geocodeAddress('1895 Dorrit St'), /Missing LOCATIONIQ_API_KEY/);
+      } finally {
+        process.env.LOCATIONIQ_API_KEY = originalKey;
+      }
+    } finally {
+      global.fetch = originalFetch;
     }
   });
 

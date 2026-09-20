@@ -21,6 +21,8 @@
  * needed (contrast lib/rentcast.js's DEFAULT_COMP_COUNT comment).
  */
 
+const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+
 const CRMLS_BASE_URL = 'https://api.marketplace.recore.net/api/v2/OData/crmls/Property';
 
 // Per status, mirrors RentCast's DEFAULT_COMP_COUNT order of magnitude (10).
@@ -29,11 +31,11 @@ const CRMLS_BASE_URL = 'https://api.marketplace.recore.net/api/v2/OData/crmls/Pr
 const COMPS_PER_STATUS = 10;
 
 // How far out to search when the subject's coordinates are known (see
-// pullCrmlsComps()) — a bounding box is queried at this radius, then
-// post-filtered to a true circle (see haversineMiles()/buildBoundingBox()
-// below). Easily adjustable later; 2 miles is a reasonable starting default,
-// not a permanent decision.
-const SEARCH_RADIUS_MILES = 2;
+// pullCrmlsComps()) — a bounding box is queried at this radius (unchanged:
+// still ONE network call), then post-filtered to a true circle (see
+// haversineMiles()/buildBoundingBox() below) and tiered down to
+// NARROW_SEARCH_RADIUS_MILES when there are enough comps there — see
+// applyRadiusTiering() below and lib/constants.js for the shared numbers.
 
 const SELECT_FIELDS = [
   'ListingKey', 'ListingId', 'StandardStatus', 'PropertySubType',
@@ -262,7 +264,7 @@ async function pullCrmlsComps(subject) {
 
   let scope;
   if (hasCoordinates) {
-    scope = { type: 'box', ...buildBoundingBox(subject.latitude, subject.longitude, SEARCH_RADIUS_MILES) };
+    scope = { type: 'box', ...buildBoundingBox(subject.latitude, subject.longitude, WIDE_SEARCH_RADIUS_MILES) };
   } else if (zip) {
     scope = { type: 'zip', zip };
   } else {
@@ -294,7 +296,7 @@ async function pullCrmlsComps(subject) {
   // alone isn't a true radius search. On the coordinate path only: compute
   // each record's real distance where it has coordinates of its own, and
   // drop anything the box let through but that's actually beyond
-  // SEARCH_RADIUS_MILES once measured on the circle. A record with no
+  // WIDE_SEARCH_RADIUS_MILES once measured on the circle. A record with no
   // Latitude/Longitude (some older Closed listings don't have them — per
   // the spec's field notes) is kept as-is, distance left null — no basis to
   // compute or drop it. The zip fallback path never runs this at all.
@@ -305,10 +307,20 @@ async function pullCrmlsComps(subject) {
           ? { ...record, _distanceMiles: haversineMiles(subject.latitude, subject.longitude, record.Latitude, record.Longitude) }
           : record
       ))
-      .filter(record => typeof record._distanceMiles !== 'number' || record._distanceMiles <= SEARCH_RADIUS_MILES);
+      .filter(record => typeof record._distanceMiles !== 'number' || record._distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
   }
 
-  const comps = records.map(record => mapComparable(record, record._distanceMiles)).filter(Boolean);
+  let comps = records.map(record => mapComparable(record, record._distanceMiles)).filter(Boolean);
+
+  // Tiering: prefer the tight NARROW_SEARCH_RADIUS_MILES subset when it has
+  // enough comps, otherwise keep the full WIDE_SEARCH_RADIUS_MILES set
+  // already queried above — no second request either way. Zip-fallback path
+  // has no distance data to tier on (every comp there has distance_miles
+  // null), so this only ever changes anything on the box-search path.
+  if (scope.type === 'box') {
+    const narrow = comps.filter(c => typeof c.distance_miles === 'number' && c.distance_miles <= NARROW_SEARCH_RADIUS_MILES);
+    if (narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS) comps = narrow;
+  }
 
   return {
     comps,
@@ -338,5 +350,7 @@ module.exports = {
   buildFilter,
   FROM_CRMLS_PROPERTY_TYPE,
   CRMLS_BASE_URL,
-  SEARCH_RADIUS_MILES,
+  NARROW_SEARCH_RADIUS_MILES,
+  WIDE_SEARCH_RADIUS_MILES,
+  MIN_COMPS_FOR_NARROW_RADIUS,
 };

@@ -15,6 +15,7 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 const { isExcludedRinconManaged } = require('./weighting');
+const { MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
 
 // Same model this codebase already uses for real narrative writing —
 // content-engine's draft.js/revise.js/captions.js/chat.js all use
@@ -73,7 +74,7 @@ HARD RULES:
   - "leased" = a real, confirmed transaction (the strongest signal) — describe it as an actual lease with confidence, not a guess.
   - "active" = a real, current asking price, not yet confirmed by a transaction — describe it as currently available, not as leased.
   - "off_market" = delisted with no way to confirm what actually happened (could have leased, could have simply expired) — describe it as delisted/off-market, never as leased or rented.
-- If there are few comps (fewer than 4) or only one source was used, say so plainly in the rationale and describe the recommendation as a rough/preliminary estimate rather than a confident one. Do not manufacture confidence the data doesn't support.
+- If there are few comps (fewer than ${MIN_COMPS_FOR_NARROW_RADIUS}) or only one source was used, say so plainly in the rationale and describe the recommendation as a rough/preliminary estimate rather than a confident one. Do not manufacture confidence the data doesn't support.
 
 SUBJECT PROPERTY:
 ${subject.address} | ${subject.bedrooms}bd/${subject.bathrooms}ba | ${subject.sqft} sqft | ${subject.propertyType}${subject.yearBuilt ? ` | built ${subject.yearBuilt}` : ''} | ${subject.leaseTermMonths}-month lease | ${subject.furnished ? 'furnished' : 'unfurnished'}

@@ -32,6 +32,17 @@
 
 const LOCATIONIQ_BASE_URL = 'https://api.locationiq.com/v1/autocomplete';
 
+// Separate endpoint from the Autocomplete one above — same vendor, same
+// domain/auth convention, different purpose. Checked LocationIQ's real docs
+// before building (docs.locationiq.com/docs/search-forward-geocoding, not
+// assumed): Autocomplete is for "as someone types" suggestions; this
+// endpoint ("Search / Forward Geocoding") is the documented tool for
+// "convert one complete, known address into coordinates" — exactly what
+// geocodeAddress() below needs for a LeadSimple sync row's already-complete
+// stored address, not a partial in-progress query.
+// Docs: https://docs.locationiq.com/docs/search-forward-geocoding
+const LOCATIONIQ_SEARCH_URL = 'https://api.locationiq.com/v1/search';
+
 // Below this, a query can't narrow down a real address yet ("1", "12 ") —
 // not worth spending a request on. LocationIQ's free tier is a limited
 // resource, same reasoning as RentCast's budget notes in lib/rentcast.js.
@@ -119,8 +130,55 @@ async function suggestAddresses(query) {
   return data.map(mapSuggestion);
 }
 
+/**
+ * Geocodes one complete, known address to {latitude, longitude} — used by
+ * sync-move-in-leases.js to populate leadsimple_new_leases.latitude/
+ * longitude (see that migration), never called from the live analysis path.
+ * Same "never throw for no-data reasons" convention as suggestAddresses():
+ * a bad/empty response, LocationIQ down, or a network error all return
+ * null so the sync can skip that one row's coordinates (leave them null,
+ * per this project's "don't invent, leave unknown" policy) rather than
+ * failing the whole sync run. A missing API key is the one exception — a
+ * real setup problem, same as every other assertConfigured() in this file.
+ * @param {string} address
+ * @returns {Promise<{latitude: number, longitude: number}|null>}
+ */
+async function geocodeAddress(address) {
+  if (typeof address !== 'string' || !address.trim()) return null;
+
+  assertConfigured();
+
+  const params = new URLSearchParams({
+    key: process.env.LOCATIONIQ_API_KEY,
+    q: address.trim(),
+    format: 'json',
+    limit: '1',
+    countrycodes: 'us',
+  });
+
+  let data;
+  try {
+    const res = await fetch(`${LOCATIONIQ_SEARCH_URL}?${params.toString()}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null; // no match, rate-limited, LocationIQ down, etc. — same "no result" fallback as suggestAddresses()
+    data = await res.json();
+  } catch (err) {
+    return null; // network error, bad JSON, etc.
+  }
+
+  if (!Array.isArray(data) || !data.length) return null;
+
+  const lat = Number(data[0].lat);
+  const lon = Number(data[0].lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  return { latitude: lat, longitude: lon };
+}
+
 module.exports = {
   suggestAddresses,
   mapSuggestion,
+  geocodeAddress,
   MIN_QUERY_LENGTH,
 };

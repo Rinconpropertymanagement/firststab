@@ -736,7 +736,17 @@
 </div><!-- /page -->
 
 <script>
-  const API_BASE = 'http://localhost:3457';
+  // Same-origin by default — matches projects/insurance-compliance's own
+  // dashboard (INSURANCE_API = ''). Was hardcoded to
+  // 'http://localhost:3457', which only ever worked on Peter's own machine:
+  // opened from any other computer, every fetch below would have tried to
+  // reach that visitor's own localhost:3457, not Sally, and silently failed
+  // with no server-side error to explain why. Fixed as part of deploying
+  // this to Sally for team-wide access — nginx now serves this dashboard
+  // and proxies /api/rental-analysis/ on the same origin, so a relative
+  // path reaches the right place regardless of which host serves the page.
+  // (Scotty, 2026-09-19 deploy.)
+  const API_BASE = '';
   const RUN_BY_STORAGE_KEY = 'rentalAnalysis.runBy';
 
   // ── Helpers ──────────────────────────────────────────────────────────

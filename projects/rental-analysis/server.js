@@ -159,14 +159,36 @@ app.use(express.json({ limit: '5mb' }));
 // deployment (one URL, everyone on the team) would need anyway.
 app.use(express.static(path.join(__dirname, 'dashboard')));
 
-// CORS — reflect origin, no credentials/session needed (this endpoint has
-// no login step; "who ran it" comes from the run_by field in the request
-// body, per spec — not a session).
+// CORS — locked to a fixed allowlist (Scotty, 2026-09-19, deploy to Sally).
+// This used to reflect ANY request origin back in the Allow-Origin header —
+// fine while the only way to reach this server was localhost on Peter's own
+// machine, but once this is reachable over the real network, reflecting any
+// origin means literally any website that gets someone to load it in their
+// browser could call this API cross-site. Flagged by Judge at first ship as
+// an accepted risk specifically for local-only use, to be fixed before any
+// real deployment — this is that fix.
+//
+// In production the dashboard is served same-origin (nginx serves
+// dashboard/ and proxies /api/rental-analysis/ on the same host — see
+// deploy-to-sally.sh and dashboard/index.html's API_BASE), so the browser
+// never even sends a cross-origin request for the normal flow. This
+// allowlist exists as defense-in-depth (a same-site request never carries
+// an Origin header that needs checking) and to keep local development
+// working (running the dashboard/API on localhost:3457 like before).
+// Add an origin here only for a real, known caller — never widen this back
+// to reflecting/allow-all.
+const ALLOWED_ORIGINS = [
+  'https://srv1784739.hstgr.cloud',  // Sally, production — see nginx site "calendar-assistant"
+  'https://2.25.70.7',               // Sally by bare IP (same nginx server_name)
+  'http://localhost:3457',           // local dev (dashboard + API on the same machine)
+];
 app.use((req, res, next) => {
-  const origin = req.headers.origin || '';
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -554,6 +576,10 @@ app.post('/api/rental-analysis/run', async (req, res) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+// Bound to 127.0.0.1, not all interfaces — matches projects/hub/server.js's
+// convention. This process is only ever meant to be reached through Sally's
+// nginx (which terminates TLS and proxies /api/rental-analysis/ to this
+// port), never directly from the network. (Scotty, 2026-09-19 deploy.)
+app.listen(PORT, '127.0.0.1', () => {
   console.log(`[${new Date().toISOString()}] Rental analysis server running on port ${PORT}`);
 });

@@ -1,0 +1,130 @@
+-- ============================================================
+-- Migration: 20260919000000_add_coordinates_to_leadsimple_new_leases
+-- Created:   2026-09-19
+-- Author:    Neo (database specialist)
+--
+-- Part of the "distance-based comp tiering" build (Peter approved via
+-- Jarvis: "1 mile but in a more rural setting maybe 2" — i.e.
+-- NARROW_SEARCH_RADIUS_MILES = 1 / WIDE_SEARCH_RADIUS_MILES = 2, the same
+-- constants lib/constants.js already defines and lib/crmls.js/rentcast.js
+-- already tier by). This adds the one piece leadsimple_new_leases
+-- (20260918070000) is missing to join that tiering: real coordinates.
+-- Today this table is zip-scoped only (lib/leadsimple.js,
+-- pullLeadSimpleComps(), filters by zip_code equality) — no lat/lon exists
+-- on this table, and lib/leadsimple.js hardcodes latitude/longitude: null
+-- on every comp it emits (confirmed in the file, line ~100). RentCast and
+-- CRMLS comps already carry real coordinates (rental_comps.latitude/
+-- longitude, added by 20260814000000) and are filtered to a true circle
+-- in application code via haversineMiles() (lib/crmls.js) — this migration
+-- lets LeadSimple comps join that same distance filter instead of relying
+-- on zip-code boundaries as a crude proxy for "nearby."
+--
+-- This migration is schema only. Populating these columns — geocoding each
+-- row's stored address (address/city/state/zip_code, all already on this
+-- table) via LocationIQ, both going forward at sync time
+-- (sync-move-in-leases.js) and as a one-time backfill for the 257 existing
+-- rows — is Q's application-code work, tracked separately. No backfill of
+-- any kind happens in this migration.
+--
+-- ============================================================
+-- COLUMN TYPE — NUMERIC(9,6) with range CHECKs, not DOUBLE PRECISION
+-- ============================================================
+-- The build request that prompted this migration specified `latitude
+-- DOUBLE PRECISION` / `longitude DOUBLE PRECISION`. Deviating from that on
+-- purpose: this exact column pair already exists twice in this schema —
+-- rental_analyses.subject_latitude/subject_longitude and
+-- rental_comps.latitude/longitude, both added by 20260814000000 — and both
+-- use NUMERIC(9,6) with a BETWEEN CHECK constraint, specifically to carry
+-- the map/distance-calc coordinates for this same rental-analysis tool.
+-- leadsimple_new_leases' rows feed the identical downstream code path
+-- (lib/leadsimple.js emits comps into the same shape lib/crmls.js and
+-- lib/rentcast.js do, all converging on haversineMiles()-style distance
+-- math against the SEARCH_RADIUS_MILES / NARROW_SEARCH_RADIUS_MILES /
+-- WIDE_SEARCH_RADIUS_MILES constants in lib/constants.js). Using
+-- DOUBLE PRECISION here would give this one source's coordinates a
+-- different type, different effective precision, and — critically — no
+-- guardrail against a bad geocode landing outside the valid range, while
+-- rental_comps' RentCast/CRMLS coordinates keep the range check. Matching
+-- the established convention keeps all three comp sources' coordinates
+-- structurally identical and equally protected, per this table's own
+-- existing pattern of reusing rental_comps' CHECKs for shared columns
+-- (bedrooms/bathrooms/sqft, see 20260918070000).
+--
+-- NUMERIC(9,6): 6 decimal places is survey-grade precision (~11cm) and
+-- matches LocationIQ's own geocoding response precision (typically 6-7
+-- decimal digits, Nominatim-based) — more than sufficient for a 1-2 mile
+-- radius comparison, same reasoning 20260814000000 used for RentCast's
+-- coordinates. 3 digits before the decimal covers longitude's full range;
+-- latitude reuses the same column type for consistency.
+--
+-- CHECK constraints bound each value to its valid geographic range
+-- (latitude -90..90, longitude -180..180) — cheap protection against a
+-- geocoding response parsed wrong or a swapped lat/lng landing silently in
+-- the table. Same IS NULL OR ... BETWEEN pattern as every other optional
+-- bounded numeric in this schema.
+--
+-- ============================================================
+-- NULLABLE — never guessed, never blocking
+-- ============================================================
+-- Both columns are nullable, per the build's own explicit requirement:
+-- when geocoding an address fails, these stay null — never guessed, never
+-- blocking the nightly sync. This also matches rental_comps.latitude/
+-- longitude's own nullability (comps from a source that can't always
+-- provide coordinates), and means a row with a failed geocode still saves
+-- everything else it has (rent, lease_start_date, etc.) — that data is
+-- confirmed-current per this table's real invariant (20260918070000) and
+-- must not be blocked by an unrelated geocoding failure. A row with null
+-- coordinates simply can't participate in distance-based tiering and falls
+-- back to today's zip-scoped behavior in lib/leadsimple.js (Q's concern,
+-- not this migration's).
+--
+-- ============================================================
+-- NO NEW INDEX
+-- ============================================================
+-- lib/leadsimple.js's one real query (pullLeadSimpleComps(), zip_code
+-- equality + closed_at range, already served by
+-- idx_leadsimple_new_leases_zip_closed_at) stays the fetch step. Distance
+-- tiering happens after that fetch, in application code, the same way
+-- lib/crmls.js already narrows a zip/box-scoped result set to a true
+-- circle via in-memory haversineMiles() — not via a Postgres-side
+-- proximity query. No index on latitude/longitude would serve a query this
+-- codebase issues today. Same "no new indexes" conclusion 20260814000000
+-- reached for rental_comps.latitude/longitude, for the same reason.
+--
+-- ============================================================
+-- Gate check (must pass before applying to any real database):
+--   [x] Rollback exists — see bottom of this file
+--   [x] No existing data is deleted or overwritten — ADD COLUMN only, both
+--       nullable, no default that would rewrite existing rows' meaning;
+--       all 257 existing rows simply get latitude = NULL, longitude = NULL
+--       until Q's separate backfill script fills them in
+--   [x] Touches only this one table — no ALTER on units, leases,
+--       properties, rental_comps, rental_analyses, or rental_comp_sources
+--   [x] Additive only — two nullable ADD COLUMNs with CHECK constraints
+--       that only ever validate non-null values; safe to re-run (IF NOT
+--       EXISTS guards on both columns and both indexes... n/a here, no
+--       index added; ADD COLUMN itself is guarded with IF NOT EXISTS below)
+--   [ ] Tested on a copy of Supabase before production apply — no staging
+--       copy exists in this project, same standing caveat as every
+--       migration in this repo to date (including 20260918070000 and
+--       20260814000000, the two direct precedents for this change)
+--
+-- Rollback: see the DROP section at the bottom of this file.
+-- ============================================================
+
+ALTER TABLE leadsimple_new_leases
+  ADD COLUMN IF NOT EXISTS latitude  NUMERIC(9,6) CHECK (latitude  IS NULL OR (latitude  BETWEEN -90  AND 90)),
+  ADD COLUMN IF NOT EXISTS longitude NUMERIC(9,6) CHECK (longitude IS NULL OR (longitude BETWEEN -180 AND 180));
+
+COMMENT ON COLUMN leadsimple_new_leases.latitude  IS 'Row''s geocoded latitude, from LocationIQ against the stored address/city/state/zip_code (both at nightly sync time going forward and via a one-time backfill for rows that predate this column). Nullable — stays null when geocoding fails; never guessed, never blocks the sync. Enables distance-based comp tiering alongside rental_comps.latitude (RentCast/CRMLS) against the same NARROW_SEARCH_RADIUS_MILES/WIDE_SEARCH_RADIUS_MILES constants (lib/constants.js).';
+COMMENT ON COLUMN leadsimple_new_leases.longitude IS 'Row''s geocoded longitude, from LocationIQ. Nullable — see latitude.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE leadsimple_new_leases DROP COLUMN IF EXISTS longitude;
+-- ALTER TABLE leadsimple_new_leases DROP COLUMN IF EXISTS latitude;
+--
+-- ============================================================

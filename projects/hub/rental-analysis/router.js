@@ -82,7 +82,7 @@ const { select, insert, update } = require('./lib/supabase');
 const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
-const { suggestAddresses } = require('./lib/locationiq');
+const { suggestAddresses } = require('./lib/google-places');
 const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
 const { computeRecommendedRange, computeRawRange, isExcludedRinconManaged } = require('./lib/weighting');
 const { generateNarrative } = require('./lib/narrative');
@@ -104,16 +104,25 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// RENTCAST_API_KEY and LOCATIONIQ_API_KEY are NOT startup requirements here
-// either — same as the standalone app's own server.js, each is checked
-// per-request inside its own lib/*.js file the moment that source actually
-// runs (lib/rentcast.js, lib/locationiq.js), so a missing key degrades that
-// one source/feature rather than taking down this whole section.
+// RENTCAST_API_KEY and GOOGLE_PLACES_API_KEY are NOT startup requirements
+// here either — same as the standalone app's own server.js, each is
+// checked per-request inside its own lib/*.js file the moment that source
+// actually runs (lib/rentcast.js, lib/google-places.js), so a missing key
+// degrades that one source/feature rather than taking down this whole
+// section.
 if (!process.env.RENTCAST_API_KEY) {
   console.warn('[rental-analysis] RENTCAST_API_KEY not set — analyses will fail until it is added to the Hub\'s .env (developers.rentcast.io, free tier).');
 }
-if (!process.env.LOCATIONIQ_API_KEY) {
-  console.warn('[rental-analysis] LOCATIONIQ_API_KEY not set — address-suggest will return no suggestions until it is added to the Hub\'s .env (locationiq.com, free, no credit card).');
+if (!process.env.GOOGLE_PLACES_API_KEY) {
+  console.warn('[rental-analysis] GOOGLE_PLACES_API_KEY not set — address-suggest will return no suggestions until it is added to the Hub\'s .env (Google Cloud Console, Places API (New), free tier).');
+}
+// Same non-startup-blocking treatment — a missing key just means GET
+// /api/rental-analysis/map-config below returns a null tileKey and the
+// dashboard renders the comp map without background tiles, not a broken
+// section. See that route's own comment for why this key (unlike the two
+// above) is read by the browser, not just this server.
+if (!process.env.MAPTILER_API_KEY) {
+  console.warn('[rental-analysis] MAPTILER_API_KEY not set — the comp map will render without background tiles until it is added to the Hub\'s .env (maptiler.com, free tier).');
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -227,6 +236,21 @@ router.get('/api/rental-analysis/auth/me', requireRentalAnalysisAccess, (req, re
   });
 });
 
+// ─── GET /api/rental-analysis/map-config ───────────────────────────────────
+// New (this migration didn't have a comp map to speak of yet when the rest
+// of this file's "unchanged from standalone" routes were written). Hands
+// the dashboard's comp map the MapTiler key it needs to build its own tile
+// URL client-side — see the standalone app's own server.js
+// (projects/rental-analysis/server.js) for the full reasoning on why this
+// one key, unlike RentCast/LocationIQ above, is read by the browser rather
+// than proxied through this server. Gated the same as every other data
+// route here even though the key itself isn't sensitive Rincon data —
+// consistent with this file's "every route that actually returns anything
+// IS gated" rule (see GET /rental-analysis above).
+router.get('/api/rental-analysis/map-config', requireRentalAnalysisAccess, (req, res) => {
+  res.json({ tileKey: process.env.MAPTILER_API_KEY || null });
+});
+
 // ─── GET /api/rental-analysis/users ────────────────────────────────────────
 // Unchanged from the standalone app: read-only list of users for the
 // frontend's "Run by" dropdown. Note this is the tool's own `users` table
@@ -269,7 +293,8 @@ router.get('/api/rental-analysis/property-lookup', requireRentalAnalysisAccess, 
 });
 
 // ─── GET /api/rental-analysis/address-suggest ──────────────────────────────
-// Unchanged from the standalone app.
+// Same as the standalone app — switched from LocationIQ to Google Places
+// Autocomplete (New) 2026-09-20, see lib/google-places.js.
 router.get('/api/rental-analysis/address-suggest', requireRentalAnalysisAccess, async (req, res) => {
   const ts = new Date().toISOString();
   const q = typeof req.query.q === 'string' ? req.query.q : '';

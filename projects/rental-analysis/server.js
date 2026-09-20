@@ -30,10 +30,44 @@
  *
  * Also needed for live address-suggest (checked per-request, not at startup
  * — degrades to "no suggestions" rather than affecting anything else, see
- * lib/locationiq.js):
- *   LOCATIONIQ_API_KEY  — locationiq.com, free tier, no credit card required.
+ * lib/google-places.js):
+ *   GOOGLE_PLACES_API_KEY  — Google Cloud Console, Places API (New). Free
+ *                         tier: 10,000 Autocomplete Requests/month.
  *                         Separate vendor and separate key from RentCast —
  *                         address-suggest never spends a RentCast request.
+ *                         Also separate from this repo's unrelated
+ *                         GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET (Gmail
+ *                         OAuth in projects/hub) — different Google
+ *                         product, different credential. Switched from
+ *                         LocationIQ 2026-09-20 — LocationIQ couldn't
+ *                         handle a bare house-number-plus-street query
+ *                         with no city (confirmed live). lib/locationiq.js
+ *                         itself is unchanged; its geocodeAddress() still
+ *                         powers the LeadSimple lease sync.
+ *
+ * Also needed for the comp map's background tiles (checked per-request via
+ * GET /api/rental-analysis/map-config, not at startup — degrades to a
+ * blank/gray map instead of affecting anything else):
+ *   MAPTILER_API_KEY    — maptiler.com, free tier: 100,000 tile loads/month.
+ *                         Unlike every other key above, this one is read by
+ *                         the BROWSER, not just this server: the dashboard
+ *                         fetches it from GET /api/rental-analysis/map-config
+ *                         at page load and builds the MapTiler tile URL
+ *                         client-side, because map tiles are images the
+ *                         browser requests directly from MapTiler, not
+ *                         something this server can proxy without adding a
+ *                         real tile-proxying endpoint. MapTiler keys are
+ *                         designed to be used this way (protected by
+ *                         domain restriction in the MapTiler dashboard, not
+ *                         by secrecy) — see MapTiler's own docs.
+ *                         Replaces OpenStreetMap's tile servers
+ *                         (*.tile.openstreetmap.org), which started
+ *                         returning "Access blocked" under real usage —
+ *                         confirmed live via curl, 2026-09-20. OSM's own
+ *                         tile-usage policy
+ *                         (operations.osmfoundation.org/policies/tiles/)
+ *                         says those servers are for casual/personal use
+ *                         only, not a real application's traffic.
  *
  * Optional:
  *   RENTAL_ANALYSIS_PORT  (default: 3457)
@@ -54,11 +88,12 @@ GET /api/rental-analysis/property-lookup?address=...
   Spends a second RentCast request beyond the one POST /run already uses.
 
 GET /api/rental-analysis/address-suggest?q=...
-  Live address autocomplete as you type, via LocationIQ — a different vendor
-  from RentCast above, so this never spends a RentCast request. Always
-  returns a JSON array, empty if the query is too short (under 3 characters),
-  LocationIQ has no key configured, or LocationIQ errors/is down — this
-  endpoint never fails the page, it just means no suggestions right now.
+  Live address autocomplete as you type, via Google Places Autocomplete
+  (New) — a different vendor from RentCast above, so this never spends a
+  RentCast request. Always returns a JSON array, empty if the query is too
+  short (under 3 characters), Google has no key configured, or Google
+  errors/is down — this endpoint never fails the page, it just means no
+  suggestions right now.
 
 POST /api/rental-analysis/run
   JSON body:
@@ -101,7 +136,8 @@ Environment variables required (.env file):
   ANTHROPIC_API_KEY
   RENTAL_ANALYSIS_PORT   (optional, default 3457)
   RENTCAST_API_KEY       (needed to actually pull comps — see above)
-  LOCATIONIQ_API_KEY     (needed for address-suggest — see above)
+  GOOGLE_PLACES_API_KEY  (needed for address-suggest — see above)
+  MAPTILER_API_KEY       (needed for the comp map's background tiles — see above)
 `);
   process.exit(0);
 }
@@ -112,7 +148,7 @@ const { select, insert, update } = require('./lib/supabase');
 const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
-const { suggestAddresses } = require('./lib/locationiq');
+const { suggestAddresses } = require('./lib/google-places');
 const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
 const { computeRecommendedRange, computeRawRange, isExcludedRinconManaged } = require('./lib/weighting');
 const { generateNarrative } = require('./lib/narrative');
@@ -143,9 +179,17 @@ if (!process.env.RENTCAST_API_KEY) {
 
 // Same non-startup-blocking treatment as RENTCAST_API_KEY above — a missing
 // key just means the address-suggest endpoint returns no suggestions
-// (see lib/locationiq.js), not a broken server.
-if (!process.env.LOCATIONIQ_API_KEY) {
-  console.warn('[rental-analysis] LOCATIONIQ_API_KEY not set — address-suggest will return no suggestions until it is added to .env (locationiq.com, free, no credit card).');
+// (see lib/google-places.js), not a broken server.
+if (!process.env.GOOGLE_PLACES_API_KEY) {
+  console.warn('[rental-analysis] GOOGLE_PLACES_API_KEY not set — address-suggest will return no suggestions until it is added to .env (Google Cloud Console, Places API (New), free tier).');
+}
+
+// Same non-startup-blocking treatment — a missing key just means the comp
+// map's GET /api/rental-analysis/map-config returns a null tileKey and the
+// dashboard renders the map without background tiles (see that route and
+// dashboard/index.html's initMap()), not a broken server.
+if (!process.env.MAPTILER_API_KEY) {
+  console.warn('[rental-analysis] MAPTILER_API_KEY not set — the comp map will render without background tiles until it is added to .env (maptiler.com, free tier).');
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -196,6 +240,24 @@ app.use((req, res, next) => {
 function validationError(res, message) {
   return res.status(400).json({ error: message });
 }
+
+// ─── GET /api/rental-analysis/map-config ─────────────────────────────────────
+// Hands the dashboard's comp map the one thing it needs to build its own
+// MapTiler tile URL client-side: the key. Every OTHER external key this
+// server holds (RentCast, LocationIQ) is used only server-side, behind a
+// proxying endpoint that does the actual third-party call — this one is
+// different because map tiles are images the BROWSER requests directly from
+// MapTiler for every pan/zoom, so there's no reasonable way to proxy them
+// through this server without building real tile-proxying (fetching and
+// streaming each {z}/{x}/{y}.png). MapTiler keys are meant to be used this
+// way — see maptiler.com's own docs — protected by domain restriction in
+// the MapTiler account dashboard, not by being kept secret. tileKey is null
+// (not an error) when MAPTILER_API_KEY isn't set — dashboard/index.html's
+// initMap() treats that as "render the map without tiles," same graceful
+// degradation as a missing GOOGLE_PLACES_API_KEY above.
+app.get('/api/rental-analysis/map-config', (req, res) => {
+  return res.json({ tileKey: process.env.MAPTILER_API_KEY || null });
+});
 
 // ─── GET /api/rental-analysis/users ──────────────────────────────────────────
 // Read-only list of users, for the frontend's "Run by" dropdown — there's no
@@ -255,16 +317,17 @@ app.get('/api/rental-analysis/property-lookup', async (req, res) => {
 
 // ─── GET /api/rental-analysis/address-suggest ────────────────────────────────
 // Live address autocomplete for the "run analysis" form's address field, via
-// LocationIQ (a different vendor from RentCast — see lib/locationiq.js for
-// why LocationIQ specifically). Completely separate concern from
-// property-lookup above: this only completes address TEXT as the user
-// types — it has no idea about bedrooms/bathrooms/sqft, and never touches
-// RentCast or spends one of its 50 free monthly requests.
+// Google Places Autocomplete (New) — a different vendor from RentCast (see
+// lib/google-places.js for why Google specifically, replacing LocationIQ).
+// Completely separate concern from property-lookup above: this only
+// completes address TEXT as the user types — it has no idea about
+// bedrooms/bathrooms/sqft, and never touches RentCast or spends one of its
+// 50 free monthly requests.
 //
 // Always responds 200 with a JSON array, never an error — an empty array
-// means "too short to search," "no key configured," or "LocationIQ errored/
-// is down," and the frontend's fallback in every case is the same: let the
-// user keep typing manually. See lib/locationiq.js's suggestAddresses().
+// means "too short to search," "no key configured," or "Google errored/is
+// down," and the frontend's fallback in every case is the same: let the
+// user keep typing manually. See lib/google-places.js's suggestAddresses().
 app.get('/api/rental-analysis/address-suggest', async (req, res) => {
   const ts = new Date().toISOString();
   const q = typeof req.query.q === 'string' ? req.query.q : '';
@@ -273,7 +336,7 @@ app.get('/api/rental-analysis/address-suggest', async (req, res) => {
     const suggestions = await suggestAddresses(q);
     return res.json(suggestions);
   } catch (err) {
-    // suggestAddresses() only throws today for a missing LOCATIONIQ_API_KEY
+    // suggestAddresses() only throws today for a missing GOOGLE_PLACES_API_KEY
     // (a real setup problem worth logging) — still degrades to "no
     // suggestions" here rather than breaking the form, per spec.
     console.error(`[${ts}] address-suggest error:`, err.message);

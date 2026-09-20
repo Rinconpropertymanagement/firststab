@@ -2501,6 +2501,56 @@ test('router.js — process-significance-pending route reads an optional ?since_
 });
 
 // ============================================================
+// PART 17b — mapWithConcurrency, added 2026-09-19 alongside the
+// buildDispatchEntries() concurrency fix (see that function's own header in
+// lib/significance-batch.js for the real timing evidence this fix responds
+// to). Pure — touches neither significancePass nor any fake Supabase/
+// Anthropic client, so unlike every PART 18/19 test below it is safe as an
+// ordinary concurrent asyncTest() rather than needing runSerialCheck()'s
+// strict sequencing.
+// ============================================================
+asyncTest('significance-batch — mapWithConcurrency: bounded concurrency (never exceeds the requested limit), output array stays index-aligned to INPUT order even though completion order is deliberately scrambled, and every item is processed exactly once', async () => {
+  const items = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const limit = 3;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const callCounts = new Map();
+
+  const results = await significanceBatch.mapWithConcurrency(items, limit, async (item) => {
+    callCounts.set(item, (callCounts.get(item) || 0) + 1);
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    // Deliberately INVERTED delays — item 0 (first in input order) finishes
+    // LAST, item 9 (last in input order) finishes FIRST. A naive "push to
+    // the output array as each promise resolves" implementation would get
+    // the output order backwards; index-based assignment must not.
+    await new Promise((resolve) => setTimeout(resolve, (items.length - item) * 4));
+    inFlight--;
+    return item * 10;
+  });
+
+  assert.deepStrictEqual(results, items.map((i) => i * 10), 'expected the output array in the same order as the input array, not completion order');
+  assert.ok(maxInFlight <= limit, `expected concurrency to never exceed the requested limit of ${limit}, but saw ${maxInFlight} in flight at once`);
+  assert.ok(maxInFlight > 1, 'expected genuine concurrency (more than 1 call in flight at some point) — a maxInFlight of 1 would mean this silently regressed to sequential execution');
+  for (const item of items) {
+    assert.strictEqual(callCounts.get(item), 1, `expected item ${item} to be processed exactly once, was processed ${callCounts.get(item) || 0} times`);
+  }
+});
+
+asyncTest('significance-batch — mapWithConcurrency: an empty items array resolves to an empty array without spawning any workers', async () => {
+  let called = false;
+  const results = await significanceBatch.mapWithConcurrency([], 5, async () => { called = true; });
+  assert.deepStrictEqual(results, []);
+  assert.strictEqual(called, false, 'expected asyncFn to never be called for an empty input');
+});
+
+asyncTest('significance-batch — mapWithConcurrency: fewer items than the concurrency limit still processes every item exactly once (worker count is capped to items.length, not a fixed limit)', async () => {
+  const items = ['a', 'b'];
+  const results = await significanceBatch.mapWithConcurrency(items, 10, async (item) => item.toUpperCase());
+  assert.deepStrictEqual(results, ['A', 'B']);
+});
+
+// ============================================================
 // PART 18 — lib/significance-batch.js + run-significance-batch.js (the
 // Message Batches API "bulk method" build, 2026-09-17). All mocked — zero
 // real Supabase or Anthropic calls anywhere below.
@@ -2619,6 +2669,7 @@ function matchesFilters(row, filters) {
     if (f.type === 'eq') return row[f.col] === f.val;
     if (f.type === 'is') return f.val === null ? (row[f.col] === null || row[f.col] === undefined) : row[f.col] === f.val;
     if (f.type === 'gt') return row[f.col] > f.val;
+    if (f.type === 'in') return Array.isArray(f.val) && f.val.includes(row[f.col]); // added PART 19 (submission_run_items bulk dispatch update, keyed by .in('id', [...]))
     return true;
   });
 }
@@ -2741,6 +2792,261 @@ function makeBatchTrackingFakeClient({ batchRow = null, itemRows = [], significa
   };
 }
 
+// ============================================================
+// makeRunTrackingFakeClient — added for PART 19 (the submission-run
+// redesign, 2026-09-18). Covers the two NEW tables (archive_search_
+// significance_submission_runs / _run_items) plus the two EXISTING Batches
+// tracking tables (archive_search_significance_batches / _batch_items, same
+// shape as makeBatchTrackingFakeClient's own batchesChain/itemsChain above —
+// deliberately not re-derived, copied verbatim, so checkAndResumeOneBatch/
+// writeBackBatch/maybeMarkBatchCompleted/insertBatchItems — all UNCHANGED
+// production code — work identically against this fake as they already do
+// against makeBatchTrackingFakeClient in PART 18) and a minimal missive_
+// conversation_significance select (for reportNeedsCall2, reused unchanged
+// by run-scoped call sites in the CLI).
+// ============================================================
+function makeRunTrackingFakeClient({ runRow = null, runItemRows = [], batchRows = [], batchItemRows = [], significanceRows = [] } = {}) {
+  const state = {
+    run: runRow ? { ...runRow } : null,
+    runItems: runItemRows.map((r) => ({ ...r })),
+    batches: batchRows.map((r) => ({ ...r })),
+    batchItems: batchItemRows.map((r) => ({ ...r })),
+  };
+  let nextRunItemId = 1;
+  let nextBatchId = 1;
+  let nextBatchItemId = 1;
+  const calls = {
+    runInserts: [], runUpdates: [],
+    runItemInserts: [], runItemUpdates: [],
+    batchInserts: [], batchUpdates: [],
+    batchItemInserts: [], batchItemUpdates: [],
+  };
+
+  function runsChain() {
+    const filters = [];
+    let op = null, insertRow = null, updateFields = null;
+    const chain = {
+      select() { op = op || 'select'; return chain; },
+      insert(row) { op = 'insert'; insertRow = row; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, type: 'eq', val }); return chain; },
+      is(col, val) { filters.push({ col, type: 'is', val }); return chain; },
+      order() { return chain; },
+      limit() { return chain; },
+      maybeSingle() {
+        const match = state.run && matchesFilters(state.run, filters) ? state.run : null;
+        return Promise.resolve({ data: match, error: null });
+      },
+      single() {
+        if (op === 'insert') {
+          const row = {
+            id: `run-${calls.runInserts.length + 1}`,
+            assembled_at: null, eligible_count: null, fully_processed_at: null, failed_at: null, failure_reason: null, notes: null,
+            ...insertRow,
+          };
+          calls.runInserts.push({ ...insertRow });
+          state.run = row;
+          return Promise.resolve({ data: { ...row }, error: null });
+        }
+        if (op === 'update') {
+          calls.runUpdates.push({ ...updateFields });
+          if (state.run) Object.assign(state.run, updateFields);
+          return Promise.resolve({ data: state.run ? { ...state.run } : null, error: null });
+        }
+        const match = state.run && matchesFilters(state.run, filters) ? state.run : null;
+        return Promise.resolve({ data: match, error: null });
+      },
+      then(resolve, reject) {
+        let result = { data: null, error: null };
+        if (op === 'update' && state.run && matchesFilters(state.run, filters)) {
+          calls.runUpdates.push({ ...updateFields });
+          Object.assign(state.run, updateFields);
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  function runItemsChain() {
+    const filters = [];
+    let op = null, insertRows = null, updateFields = null, orderCol = null, orderAsc = true, limitN = null;
+    const chain = {
+      select() { op = op || 'select'; return chain; },
+      insert(rows) { op = 'insert'; insertRows = Array.isArray(rows) ? rows : [rows]; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, type: 'eq', val }); return chain; },
+      is(col, val) { filters.push({ col, type: 'is', val }); return chain; },
+      gt(col, val) { filters.push({ col, type: 'gt', val }); return chain; },
+      in(col, vals) { filters.push({ col, type: 'in', val: vals }); return chain; },
+      order(col, opts) { orderCol = col; orderAsc = !(opts && opts.ascending === false); return chain; },
+      limit(n) { limitN = n; return chain; },
+      then(resolve, reject) {
+        let result;
+        if (op === 'insert') {
+          const inserted = insertRows.map((r) => {
+            const row = { id: `runitem-${String(nextRunItemId++).padStart(6, '0')}`, chunk_number: null, batch_id: null, dispatched_at: null, ...r };
+            state.runItems.push(row);
+            return row;
+          });
+          calls.runItemInserts.push(...insertRows);
+          result = { data: inserted, error: null };
+        } else if (op === 'update') {
+          const matching = state.runItems.filter((it) => matchesFilters(it, filters));
+          matching.forEach((it) => { calls.runItemUpdates.push({ id: it.id, fields: { ...updateFields } }); Object.assign(it, updateFields); });
+          result = { data: null, error: null };
+        } else {
+          let matching = state.runItems.filter((it) => matchesFilters(it, filters));
+          if (orderCol) {
+            matching = [...matching].sort((a, b) => {
+              const av = a[orderCol], bv = b[orderCol];
+              if (av === bv) return 0;
+              return orderAsc ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+            });
+          }
+          if (limitN != null) matching = matching.slice(0, limitN);
+          result = { data: matching, error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  // Same shape as makeBatchTrackingFakeClient's own batchesChain() above,
+  // extended with plain multi-row select (via then(), no .maybeSingle())
+  // and order/limit — needed for fetchNextChunkNumberForRun's MAX(chunk_
+  // number) lookup and checkAndResumeRun's "every batch for this run" scan,
+  // neither of which the single-batch-per-stage PART 18 tests ever needed.
+  function batchesChain() {
+    const filters = [];
+    let op = null, insertRow = null, updateFields = null, orderCol = null, orderAsc = true, limitN = null;
+    const chain = {
+      select() { op = op || 'select'; return chain; },
+      insert(row) { op = 'insert'; insertRow = row; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, type: 'eq', val }); return chain; },
+      is(col, val) { filters.push({ col, type: 'is', val }); return chain; },
+      order(col, opts) { orderCol = col; orderAsc = !(opts && opts.ascending === false); return chain; },
+      limit(n) { limitN = n; return chain; },
+      maybeSingle() {
+        const matching = state.batches.filter((b) => matchesFilters(b, filters));
+        return Promise.resolve({ data: matching[0] || null, error: null });
+      },
+      single() {
+        if (op === 'insert') {
+          const row = { id: `batch-${nextBatchId++}`, completed_at: null, failed_at: null, results_retrieved_at: null, last_checked_at: null, ...insertRow };
+          calls.batchInserts.push({ ...insertRow });
+          state.batches.push(row);
+          return Promise.resolve({ data: { ...row }, error: null });
+        }
+        if (op === 'update') {
+          const matching = state.batches.filter((b) => matchesFilters(b, filters));
+          matching.forEach((b) => { calls.batchUpdates.push({ id: b.id, fields: { ...updateFields } }); Object.assign(b, updateFields); });
+          return Promise.resolve({ data: matching[0] ? { ...matching[0] } : null, error: null });
+        }
+        const matching = state.batches.filter((b) => matchesFilters(b, filters));
+        return Promise.resolve({ data: matching[0] || null, error: null });
+      },
+      then(resolve, reject) {
+        let result;
+        if (op === 'update') {
+          const matching = state.batches.filter((b) => matchesFilters(b, filters));
+          matching.forEach((b) => { calls.batchUpdates.push({ id: b.id, fields: { ...updateFields } }); Object.assign(b, updateFields); });
+          result = { data: null, error: null };
+        } else {
+          let matching = state.batches.filter((b) => matchesFilters(b, filters));
+          if (orderCol) {
+            matching = [...matching].sort((a, b) => {
+              const av = a[orderCol], bv = b[orderCol];
+              if (av === bv) return 0;
+              if (av == null) return orderAsc ? -1 : 1;
+              if (bv == null) return orderAsc ? 1 : -1;
+              return orderAsc ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+            });
+          }
+          if (limitN != null) matching = matching.slice(0, limitN);
+          result = { data: matching, error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  // Identical shape to makeBatchTrackingFakeClient's own itemsChain() above —
+  // copied, not re-derived, so writeBackBatch/maybeMarkBatchCompleted/
+  // insertBatchItems/checkAndResumeOneBatch (all UNCHANGED production code)
+  // work against this fake exactly as already proven in PART 18.
+  function batchItemsChain() {
+    const filters = [];
+    let op = null, insertRows = null, updateFields = null, orderCol = null, limitN = null, countMode = false;
+    const chain = {
+      select(cols, opts) { op = op || 'select'; if (opts && opts.count) countMode = true; return chain; },
+      insert(rows) { op = 'insert'; insertRows = Array.isArray(rows) ? rows : [rows]; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, type: 'eq', val }); return chain; },
+      is(col, val) { filters.push({ col, type: 'is', val }); return chain; },
+      gt(col, val) { filters.push({ col, type: 'gt', val }); return chain; },
+      order(col) { orderCol = col; return chain; },
+      limit(n) { limitN = n; return chain; },
+      then(resolve, reject) {
+        let result;
+        if (op === 'insert') {
+          const inserted = insertRows.map((r) => {
+            const row = { id: `batchitem-${String(nextBatchItemId++).padStart(6, '0')}`, result_status: 'pending', error_detail: null, written_back_at: null, ...r };
+            state.batchItems.push(row);
+            return row;
+          });
+          calls.batchItemInserts.push(...insertRows);
+          result = { data: inserted, error: null };
+        } else if (op === 'update') {
+          const matching = state.batchItems.filter((it) => matchesFilters(it, filters));
+          matching.forEach((it) => { calls.batchItemUpdates.push({ id: it.id, fields: { ...updateFields } }); Object.assign(it, updateFields); });
+          result = { data: null, error: null };
+        } else if (op === 'select') {
+          let matching = state.batchItems.filter((it) => matchesFilters(it, filters));
+          if (orderCol) matching = [...matching].sort((a, b) => (a[orderCol] > b[orderCol] ? 1 : a[orderCol] < b[orderCol] ? -1 : 0));
+          if (countMode) result = { data: null, error: null, count: matching.length };
+          else result = { data: limitN != null ? matching.slice(0, limitN) : matching, error: null };
+        } else {
+          result = { data: null, error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  function significanceChain() {
+    let inVals = null;
+    const chain = {
+      select() { return chain; },
+      in(col, vals) { inVals = vals; return chain; },
+      then(resolve, reject) {
+        const matching = significanceRows.filter((r) => inVals.includes(r.missive_conversation_id));
+        return Promise.resolve({ data: matching, error: null }).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  return {
+    client: {
+      from(table) {
+        if (table === 'archive_search_significance_submission_runs') return runsChain();
+        if (table === 'archive_search_significance_submission_run_items') return runItemsChain();
+        if (table === 'archive_search_significance_batches') return batchesChain();
+        if (table === 'archive_search_significance_batch_items') return batchItemsChain();
+        if (table === 'missive_conversation_significance') return significanceChain();
+        throw new Error(`makeRunTrackingFakeClient: unexpected table "${table}" — this fake covers the submission-run tables plus the Batches tracking tables; everything else should go through a monkey-patched significance-pass.js export.`);
+      },
+    },
+    state,
+    calls,
+  };
+}
+
 // Uses significance-batch.js's own TEST-ONLY DI seam (_setSupabaseClient
 // ForTesting / _setAnthropicClientForTesting — see that file's own header
 // comment on those two functions for exactly why they exist instead of the
@@ -2799,6 +3105,177 @@ test('run-significance-batch — parseLimitArg: undefined when omitted (submitBa
   assert.deepStrictEqual(runSignificanceBatchCli.parseLimitArg(['--limit=50']), { limit: 50, error: null });
   assert.ok(runSignificanceBatchCli.parseLimitArg(['--limit=0']).error, 'expected 0 to be rejected');
   assert.ok(runSignificanceBatchCli.parseLimitArg(['--limit=abc']).error, 'expected a non-numeric value to be rejected');
+});
+
+test('run-significance-batch — parseForceArg: false when omitted, true when --force is present anywhere in the args', () => {
+  assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg([]), { force: false });
+  assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--stage=call_1']), { force: false });
+  assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--force']), { force: true });
+  assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--since-date=2025-09-17', '--force']), { force: true });
+});
+
+// ============================================================
+// PART 19 — lib/significance-batch.js's SUBMISSION RUN / size-aware
+// chunking / resumable dispatch redesign (2026-09-18, the real-incident
+// fix — see that file's own "ADDED 2026-09-18" header). All mocked — zero
+// real Supabase or Anthropic calls. Pure functions (partitionIntoChunks,
+// sizeOfRequestBytes) are tested directly, with small/fast numbers standing
+// in for the real MAX_BATCH_REQUESTS (100,000) / MAX_BATCH_BYTES (200MB)
+// constants — see partitionIntoChunks' and dispatchRunChunks' own comments
+// in significance-batch.js for why those are parameters, not hardcoded, in
+// the first place (constructing 100,000+ real entries or a ~200MB mock
+// request just to exercise a boundary would make this suite both slow and
+// unreadable for no extra correctness gained).
+// ============================================================
+test('significance-batch — partitionIntoChunks: cuts a new chunk on REQUEST COUNT alone when every entry is tiny (the byte limit never comes close to triggering)', () => {
+  const entries = [1, 2, 3, 4, 5].map((n) => ({ n, bytes: 10 }));
+  const chunks = significanceBatch.partitionIntoChunks(entries, 2, 1000000);
+  assert.deepStrictEqual(chunks.map((c) => c.map((e) => e.n)), [[1, 2], [3, 4], [5]]);
+});
+
+test('significance-batch — partitionIntoChunks: cuts a new chunk on REAL BYTE SIZE alone when one entry is individually large enough to force it, even though the count limit is nowhere near reached — the exact shape of tonight\'s incident (84,408 requests, well under the 100,000 count cap, but over the real 256MB byte cap)', () => {
+  const entries = [
+    { n: 1, bytes: 10 },
+    { n: 2, bytes: 90 }, // running total 10 -> 100, exactly at maxBytes — still fits, the limit is inclusive
+    { n: 3, bytes: 1 },  // one more byte would exceed maxBytes (100) — must start a new chunk
+    { n: 4, bytes: 5 },
+  ];
+  const chunks = significanceBatch.partitionIntoChunks(entries, 1000, 100);
+  assert.deepStrictEqual(chunks.map((c) => c.map((e) => e.n)), [[1, 2], [3, 4]]);
+});
+
+test('significance-batch — partitionIntoChunks: an empty entries array produces zero chunks', () => {
+  assert.deepStrictEqual(significanceBatch.partitionIntoChunks([], 100, 100), []);
+});
+
+test('significance-batch — partitionIntoChunks: a single entry that alone exceeds neither limit stays in a chunk of one, never dropped', () => {
+  assert.deepStrictEqual(significanceBatch.partitionIntoChunks([{ n: 1, bytes: 50 }], 100, 100), [[{ n: 1, bytes: 50 }]]);
+});
+
+test('significance-batch — sizeOfRequestBytes: uses the REAL UTF-8 byte length (Buffer.byteLength), not JS string .length — the exact bug tonight\'s incident traces back to (a non-ASCII character must count as MORE than one byte, unlike .length which counts UTF-16 code units)', () => {
+  const asciiRequest = { text: 'aaaa' };
+  const nonAsciiRequest = { text: 'café café café café' }; // real accented characters, exactly the kind tenant/owner email text routinely has
+  assert.strictEqual(significanceBatch.sizeOfRequestBytes(asciiRequest), JSON.stringify(asciiRequest).length, 'pure ASCII should match .length exactly — not a useful test on its own, but confirms the two measures agree when there is nothing to disagree about');
+  assert.ok(
+    significanceBatch.sizeOfRequestBytes(nonAsciiRequest) > JSON.stringify(nonAsciiRequest).length,
+    'expected the real UTF-8 byte count to exceed .length once real non-ASCII characters are present — if this ever fails, sizeOfRequestBytes has regressed back to the exact undercount bug this fix exists to close'
+  );
+});
+
+// ============================================================
+// PART 20a — evaluatePoolRatio: the pure comparison half of the expected-
+// pool sanity check (2026-09-19, the real-incident-class safeguard — see
+// significance-batch.js's own EXPECTED_POOL_MIN_RATIO header for the full
+// incident story and threshold reasoning). No DB call, no significancePass
+// dependency, no fake client — plain numbers in, a pass/fail + ratio out.
+// ============================================================
+test('evaluatePoolRatio — tonight\'s real incident numbers (33,755 found vs. an 84,192 estimate, ~40.1%) FAIL the check', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 33755, expectedPool: 84192 });
+  assert.strictEqual(result.passed, false, 'expected the real incident shape to fail the sanity check');
+  assert.ok(Math.abs(result.ratio - 0.4009) < 0.001, `expected ratio ~0.401, got ${result.ratio}`);
+});
+
+test('evaluatePoolRatio — a normal, healthy run (3,000 found against a proportionally-sized 3,100 estimate, ~96.8%) PASSES the check', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 3000, expectedPool: 3100 });
+  assert.strictEqual(result.passed, true, 'expected an ordinary, small legitimate shortfall to pass');
+  assert.ok(Math.abs(result.ratio - (3000 / 3100)) < 1e-9);
+});
+
+test('evaluatePoolRatio — exactly at the 70% threshold PASSES (>=, not >)', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 700, expectedPool: 1000 });
+  assert.strictEqual(result.passed, true);
+  assert.strictEqual(result.ratio, 0.7);
+});
+
+test('evaluatePoolRatio — just below the 70% threshold FAILS', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 699, expectedPool: 1000 });
+  assert.strictEqual(result.passed, false);
+});
+
+test('evaluatePoolRatio — a custom minRatio overrides the module default', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 500, expectedPool: 1000, minRatio: 0.4 });
+  assert.strictEqual(result.passed, true, 'expected 50% to pass a deliberately looser 40% threshold');
+});
+
+test('evaluatePoolRatio — expectedPool of zero or negative is treated as "nothing meaningful to compare against", never a false alarm', () => {
+  assert.deepStrictEqual(significanceBatch.evaluatePoolRatio({ eligibleCount: 5, expectedPool: 0 }), { passed: true, ratio: null });
+  assert.deepStrictEqual(significanceBatch.evaluatePoolRatio({ eligibleCount: 5, expectedPool: -10 }), { passed: true, ratio: null });
+});
+
+test('evaluatePoolRatio — an eligibleCount of zero against a real positive expected pool fails (ratio 0) — a defensive edge case, even though startSubmissionRun never persists a run with zero eligible conversations', () => {
+  const result = significanceBatch.evaluatePoolRatio({ eligibleCount: 0, expectedPool: 500 });
+  assert.strictEqual(result.passed, false);
+  assert.strictEqual(result.ratio, 0);
+});
+
+test('evaluatePoolRatio — EXPECTED_POOL_MIN_RATIO is exported and is 0.7 (70%) — documents the actual live threshold so this test tracks a real change to it, not a hardcoded guess', () => {
+  assert.strictEqual(significanceBatch.EXPECTED_POOL_MIN_RATIO, 0.7);
+});
+
+// ============================================================
+// PART 20b — estimateExpectedEligiblePool (lib/significance-pass.js): the
+// real, DB-touching half of the sanity check's estimate. A small, dedicated
+// fake client (count-mode selects only — no ordering, no pagination, unlike
+// makeFilteringFakeClient above) via the same generic withFakeSupabaseClient
+// harness PART 13-17 already use against this same module.
+// ============================================================
+function makeCountFakeClient(tableData) {
+  function makeChain(table) {
+    let gteField = null, gteValue = null;
+    const chain = {
+      select() { return chain; }, // count/head mode is a select() option in the real client, but the actual count is entirely determined by the filtered row count below — this fake never needs to inspect the options object itself.
+      gte(field, value) { gteField = field; gteValue = value; return chain; },
+      then(resolve, reject) {
+        const rows = (tableData[table] || []).filter((row) => gteField == null || (row[gteField] != null && row[gteField] >= gteValue));
+        return Promise.resolve({ data: null, error: null, count: rows.length }).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+  return { from: (table) => makeChain(table) };
+}
+
+asyncTest('significance-pass — estimateExpectedEligiblePool: counts matching messages (scoped by sinceDate) minus ALL already-processed conversations (table-wide, not date-scoped)', async () => {
+  const fakeClient = makeCountFakeClient({
+    missive_message_intake_search_safe_clear_branch: [
+      { id: 'm1', delivered_at: '2026-08-01T00:00:00.000Z' }, // on/after cutoff
+      { id: 'm2', delivered_at: '2026-09-01T00:00:00.000Z' }, // on/after cutoff
+      { id: 'm3', delivered_at: '2020-01-01T00:00:00.000Z' }, // before cutoff — excluded
+    ],
+    missive_conversation_significance: [{ id: 's1' }, { id: 's2' }],
+  });
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const result = await freshSignificancePass.estimateExpectedEligiblePool('2025-09-17');
+    assert.strictEqual(result.totalMatchingMessages, 2, 'expected only the 2 messages on/after the cutoff to be counted');
+    assert.strictEqual(result.totalAlreadyProcessed, 2, 'expected the full, table-wide already-processed count, not scoped by date');
+    assert.strictEqual(result.expectedPool, 0, 'expected 2 - 2 = 0');
+  });
+});
+
+asyncTest('significance-pass — estimateExpectedEligiblePool: sinceDate omitted counts every message row, no gte filter applied at all (same "no cutoff" default as fetchNextEligibleConversations)', async () => {
+  const fakeClient = makeCountFakeClient({
+    missive_message_intake_search_safe_clear_branch: [
+      { id: 'm1', delivered_at: '2020-01-01T00:00:00.000Z' },
+      { id: 'm2', delivered_at: '2026-01-01T00:00:00.000Z' },
+    ],
+    missive_conversation_significance: [],
+  });
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const result = await freshSignificancePass.estimateExpectedEligiblePool();
+    assert.strictEqual(result.totalMatchingMessages, 2, 'expected both rows counted with no date cutoff at all');
+    assert.strictEqual(result.expectedPool, 2);
+  });
+});
+
+asyncTest('significance-pass — estimateExpectedEligiblePool: floors expectedPool at 0 rather than going negative when already-processed exceeds matching messages', async () => {
+  const fakeClient = makeCountFakeClient({
+    missive_message_intake_search_safe_clear_branch: [{ id: 'm1', delivered_at: '2026-01-01T00:00:00.000Z' }],
+    missive_conversation_significance: [{ id: 's1' }, { id: 's2' }, { id: 's3' }],
+  });
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const result = await freshSignificancePass.estimateExpectedEligiblePool();
+    assert.strictEqual(result.expectedPool, 0, 'expected max(0, 1 - 3) = 0, never a negative pool');
+  });
 });
 
 // Every 18b-18i scenario below runs inside this ONE async IIFE, in a real,
@@ -2983,6 +3460,153 @@ asyncResults.push((async () => {
     assert.strictEqual(outcome.resultsJustRetrieved, false);
   });
   assert.strictEqual(state.batch.results_retrieved_at, null);
+});
+
+// ─── 18f-2 — checkAndResumeOneBatch concurrency fix (2026-09-20): the old
+// one-at-a-time `for await` loop over Anthropic's results stream is now
+// drained in DISPATCH_CONCURRENCY-sized groups (drainInGroups()) with each
+// group's database updates run concurrently (mapWithConcurrency()) — see
+// both functions' own header comments in lib/significance-batch.js.
+// statusCounts must come out identical to what the old sequential loop
+// would have produced regardless of which of a group's concurrent writes
+// actually finishes first (it's tallied straight off the stream, before any
+// write is even attempted), and a single item's write failure must still
+// only be logged, never abort the batch. A dedicated timing-aware fake is
+// used here (rather than makeBatchTrackingFakeClient, which resolves every
+// call instantly) specifically so completion order can be deliberately
+// scrambled and real concurrency can be measured, mirroring the technique
+// test 19h below already uses for buildDispatchEntries' own concurrency
+// fix. ────────────────────────────────────────────────────────────────────
+function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken, errorForToken }) {
+  const state = { batch: { ...batchRow }, items: itemRows.map((r) => ({ ...r })) };
+  const timing = { inFlight: 0, maxInFlight: 0 };
+  return {
+    client: {
+      from(table) {
+        if (table === 'archive_search_significance_batches') {
+          const filters = [];
+          let op = null, updateFields = null;
+          const chain = {
+            select() { op = op || 'select'; return chain; },
+            update(fields) { op = 'update'; updateFields = fields; return chain; },
+            eq(col, val) { filters.push({ col, type: 'eq', val }); return chain; },
+            is(col, val) { filters.push({ col, type: 'is', val }); return chain; },
+            maybeSingle() {
+              const match = state.batch && filters.every((f) => (f.type === 'is' ? (state.batch[f.col] ?? null) === f.val : state.batch[f.col] === f.val)) ? state.batch : null;
+              return Promise.resolve({ data: match, error: null });
+            },
+            then(resolve, reject) {
+              if (op === 'update') Object.assign(state.batch, updateFields);
+              return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+            },
+          };
+          return chain;
+        }
+        if (table === 'archive_search_significance_batch_items') {
+          const filters = [];
+          let op = null, updateFields = null, countMode = false;
+          const chain = {
+            select(cols, opts) { op = op || 'select'; if (opts && opts.count) countMode = true; return chain; },
+            update(fields) { op = 'update'; updateFields = fields; return chain; },
+            eq(col, val) { filters.push({ col, val }); return chain; },
+            then(resolve, reject) {
+              const run = async () => {
+                if (op === 'update') {
+                  const token = (filters.find((f) => f.col === 'token') || {}).val;
+                  timing.inFlight++;
+                  timing.maxInFlight = Math.max(timing.maxInFlight, timing.inFlight);
+                  await new Promise((res) => setTimeout(res, delayForToken ? delayForToken(token) : 0));
+                  timing.inFlight--;
+                  if (errorForToken && errorForToken(token)) return { data: null, error: { message: `simulated write failure for ${token}` } };
+                  const item = state.items.find((it) => it.token === token);
+                  if (item) Object.assign(item, updateFields);
+                  return { data: null, error: null };
+                }
+                if (op === 'select') {
+                  const matching = state.items.filter((it) => filters.every((f) => it[f.col] === f.val));
+                  return countMode ? { data: null, error: null, count: matching.length } : { data: matching, error: null };
+                }
+                return { data: null, error: null };
+              };
+              return run().then(resolve, reject);
+            },
+          };
+          return chain;
+        }
+        throw new Error(`makeTimingAwareItemsBatchFakeClient: unexpected table "${table}"`);
+      },
+    },
+    state,
+    timing,
+  };
+}
+
+  await runSerialCheck('significance-batch — checkAndResumeOneBatch (via checkAndResume): processes a group of results with REAL bounded concurrency — completion order is deliberately scrambled, yet statusCounts comes out identical to what the old sequential loop would have produced', async () => {
+  const existingBatchRow = { id: 'batch-1', stage: 'call_1', anthropic_batch_id: 'msgbatch_abc', anthropic_status: 'in_progress', completed_at: null, failed_at: null, results_retrieved_at: null };
+  const N = 12;
+  const itemRows = Array.from({ length: N }, (_, i) => ({ batch_id: 'batch-1', token: `tok-${i}`, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}`, result_status: 'pending', written_back_at: null }));
+  const { client: supabaseClient, state, timing } = makeTimingAwareItemsBatchFakeClient({
+    batchRow: existingBatchRow,
+    itemRows,
+    // Deliberately inverted: tok-0 (first in the stream) finishes LAST,
+    // tok-11 (last in the stream) finishes FIRST.
+    delayForToken: (token) => (N - Number(token.split('-')[1])) * 3,
+  });
+  const statusForIndex = (i) => (i % 4 === 0 ? 'succeeded' : i % 4 === 1 ? 'errored' : i % 4 === 2 ? 'canceled' : 'expired');
+  const fakeResults = itemRows.map((it, i) => ({
+    custom_id: it.token,
+    result: statusForIndex(i) === 'succeeded'
+      ? { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } }
+      : statusForIndex(i) === 'errored'
+      ? { type: 'errored', error: { type: 'invalid_request', message: 'bad' } }
+      : { type: statusForIndex(i) },
+  }));
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    retrieve: async () => ({ processing_status: 'ended', request_counts: {} }),
+    results: async () => asyncIterableFromArray(fakeResults),
+  });
+
+  await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+    const outcome = await freshBatchModule.checkAndResume({ stage: 'call_1' });
+    assert.strictEqual(outcome.resultsJustRetrieved, true);
+    assert.deepStrictEqual(outcome.statusCounts, { succeeded: 3, errored: 3, canceled: 3, expired: 3 }, 'expected the exact same tally the old sequential loop would have produced, regardless of concurrent completion order');
+  });
+
+  assert.ok(timing.maxInFlight > 1, `expected genuine concurrency (more than 1 database write in flight at once), saw ${timing.maxInFlight}`);
+  assert.ok(timing.maxInFlight <= significanceBatch.DISPATCH_CONCURRENCY, `expected concurrency capped at DISPATCH_CONCURRENCY (${significanceBatch.DISPATCH_CONCURRENCY}), saw ${timing.maxInFlight}`);
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  itemRows.forEach((it, i) => {
+    assert.strictEqual(byToken[it.token].result_status, statusForIndex(i), `expected ${it.token} to be recorded as ${statusForIndex(i)}`);
+  });
+});
+
+  await runSerialCheck('significance-batch — checkAndResumeOneBatch (via checkAndResume): a single item\'s database-update failure during concurrent result streaming is logged, not thrown — the rest of the group is still recorded correctly, the batch is not aborted, and the failed item honestly stays pending (never falsely marked complete)', async () => {
+  const existingBatchRow = { id: 'batch-1', stage: 'call_1', anthropic_batch_id: 'msgbatch_abc', anthropic_status: 'in_progress', completed_at: null, failed_at: null, results_retrieved_at: null };
+  const itemRows = Array.from({ length: 6 }, (_, i) => ({ batch_id: 'batch-1', token: `tok-${i}`, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}`, result_status: 'pending', written_back_at: null }));
+  const { client: supabaseClient, state } = makeTimingAwareItemsBatchFakeClient({
+    batchRow: existingBatchRow,
+    itemRows,
+    errorForToken: (token) => token === 'tok-3',
+  });
+  const fakeResults = itemRows.map((it) => ({ custom_id: it.token, result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }));
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    retrieve: async () => ({ processing_status: 'ended', request_counts: {} }),
+    results: async () => asyncIterableFromArray(fakeResults),
+  });
+
+  await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+    const outcome = await freshBatchModule.checkAndResume({ stage: 'call_1' });
+    assert.strictEqual(outcome.found, true, 'expected checkAndResume to complete normally despite one item\'s DB-write failure');
+    assert.strictEqual(outcome.statusCounts.succeeded, 6, 'expected the tally itself to be unaffected by a downstream write failure — tallied straight off the stream, before the write is even attempted');
+    assert.strictEqual(outcome.resultsJustRetrieved, false, 'expected the honest partial-completion signal — tok-3 never became non-pending, so results_retrieved_at must not be set');
+  });
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  assert.strictEqual(byToken['tok-3'].result_status, 'pending', 'expected tok-3\'s row to remain untouched after its simulated write failure');
+  for (const i of [0, 1, 2, 4, 5]) {
+    assert.strictEqual(byToken[`tok-${i}`].result_status, 'succeeded', `expected tok-${i} to still be recorded correctly despite tok-3's unrelated failure`);
+  }
 });
 
 // ─── 18g — writeBackBatch: resumability after a simulated partial failure ─
@@ -3178,6 +3802,132 @@ asyncResults.push((async () => {
   assert.ok(byToken['tok-real'].written_back_at, 'expected the batch item to be marked written back after a successful integration write');
 });
 
+// ─── 18h-2 — writeBackBatch concurrency fix (2026-09-20): the old
+// one-at-a-time `for await` loop is now drained in WRITEBACK_CONCURRENCY-
+// sized groups (drainInGroups()) with each group's items run concurrently
+// (mapWithConcurrency()) — see writeBackBatch()'s own comment in lib/
+// significance-batch.js. Three properties must survive the move off the
+// sequential loop: (1) real concurrency, with totals unaffected by
+// completion order, (2) unmatched (pending items that never appear in the
+// stream at all) still counted correctly, (3) one item's error still only
+// counted, never aborting the rest of a group. ────────────────────────────
+  await runSerialCheck('significance-batch — writeBackBatch: processes items with REAL bounded concurrency (~WRITEBACK_CONCURRENCY) — completion order is deliberately scrambled via buildConversationContext\'s own delay, yet processed/written_significance/no_row_written/unmatched come out identical to what the old sequential loop would have produced', async () => {
+  const N = 10;
+  const itemRows = Array.from({ length: N }, (_, i) => ({ id: `item-${String(i).padStart(6, '0')}`, batch_id: 'batch-1', token: `tok-${i}`, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}`, result_status: 'succeeded', written_back_at: null }));
+  const { client: supabaseClient, state } = makeBatchTrackingFakeClient({ itemRows });
+
+  let inFlight = 0, maxInFlight = 0;
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    const n = Number(convId.split('-')[1]);
+    await new Promise((resolve) => setTimeout(resolve, (N - n) * 3)); // conv-0 (first in the stream) resolves LAST, conv-9 resolves FIRST
+    inFlight--;
+    return { rows: [{ missive_message_id: `m-${n}`, screening_completed_at: '2026-01-01T00:00:00.000Z' }], thread: {}, addressMatch: {}, addressMatched: false, threadText: `text ${convId}` };
+  });
+  const parseSpy = spyOn(significancePass, 'parseCall1Response', () => ({ resolution_status: 'open', category: 'dispute', why: 'test', tone_trend: null, identification: { property_text: null, vendor_text: null } }));
+  const applySpy = spyOn(significancePass, 'applyCall1Result', async () => ({ significanceId: 'sig-x', property_id: null, vendor_id: null, keywordCheck: { flagged_protected_class: false, flagged_category: null } }));
+  const propDirSpy = spyOn(significancePass, 'fetchPropertyDirectory', async () => []);
+  const vendorDirSpy = spyOn(significancePass, 'fetchVendorDirectory', async () => []);
+
+  const fakeResults = itemRows.map((it) => ({ custom_id: it.token, result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }));
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({ results: async () => asyncIterableFromArray(fakeResults) });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.writeBackBatch({ batchId: 'batch-1', anthropicBatchId: 'msgbatch_abc' });
+      assert.strictEqual(summary.processed, N);
+      assert.strictEqual(summary.written_significance, N);
+      assert.strictEqual(summary.no_row_written, 0);
+      assert.strictEqual(summary.errors, 0);
+      assert.strictEqual(summary.unmatched, 0);
+    });
+  } finally {
+    contextSpy.restore(); parseSpy.restore(); applySpy.restore(); propDirSpy.restore(); vendorDirSpy.restore();
+  }
+
+  assert.ok(maxInFlight > 1, `expected genuine concurrency (more than 1 buildConversationContext call in flight at once), saw ${maxInFlight}`);
+  assert.ok(maxInFlight <= significanceBatch.WRITEBACK_CONCURRENCY, `expected concurrency capped at WRITEBACK_CONCURRENCY (${significanceBatch.WRITEBACK_CONCURRENCY}), saw ${maxInFlight}`);
+  assert.strictEqual(applySpy.calls.length, N, 'expected every item to be individually applied exactly once, none skipped or duplicated');
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  itemRows.forEach((it) => assert.ok(byToken[it.token].written_back_at, `expected ${it.token} to be marked written back`));
+});
+
+  await runSerialCheck('significance-batch — writeBackBatch: unmatched still counts correctly under concurrent processing when some pending items never appear in the mocked results stream at all', async () => {
+  const pendingCount = 10, appearingCount = 6;
+  const itemRows = Array.from({ length: pendingCount }, (_, i) => ({ id: `item-${String(i).padStart(6, '0')}`, batch_id: 'batch-1', token: `tok-${i}`, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}`, result_status: 'succeeded', written_back_at: null }));
+  const { client: supabaseClient, state } = makeBatchTrackingFakeClient({ itemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    await new Promise((resolve) => setTimeout(resolve, Math.random() * 6)); // real jitter — proves the count doesn't depend on any particular completion order
+    return { rows: [{ missive_message_id: 'm1', screening_completed_at: '2026-01-01T00:00:00.000Z' }], thread: {}, addressMatch: {}, addressMatched: false, threadText: `text ${convId}` };
+  });
+  const parseSpy = spyOn(significancePass, 'parseCall1Response', () => ({ resolution_status: 'open', category: 'dispute', why: 'test', tone_trend: null, identification: { property_text: null, vendor_text: null } }));
+  const applySpy = spyOn(significancePass, 'applyCall1Result', async () => ({ significanceId: 'sig-x', property_id: null, vendor_id: null, keywordCheck: { flagged_protected_class: false, flagged_category: null } }));
+  const propDirSpy = spyOn(significancePass, 'fetchPropertyDirectory', async () => []);
+  const vendorDirSpy = spyOn(significancePass, 'fetchVendorDirectory', async () => []);
+
+  // Only the first 6 of 10 pending tokens ever show up in the stream — the
+  // other 4 (tok-6..tok-9) never appear at all, simulating results
+  // Anthropic never returned for whatever reason.
+  const fakeResults = itemRows.slice(0, appearingCount).map((it) => ({ custom_id: it.token, result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }));
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({ results: async () => asyncIterableFromArray(fakeResults) });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.writeBackBatch({ batchId: 'batch-1', anthropicBatchId: 'msgbatch_abc' });
+      assert.strictEqual(summary.processed, appearingCount);
+      assert.strictEqual(summary.unmatched, pendingCount - appearingCount, 'expected the 4 tokens that never appeared in the stream to be counted as unmatched');
+    });
+  } finally {
+    contextSpy.restore(); parseSpy.restore(); applySpy.restore(); propDirSpy.restore(); vendorDirSpy.restore();
+  }
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  for (let i = 0; i < appearingCount; i++) assert.ok(byToken[`tok-${i}`].written_back_at, `expected tok-${i} to be written back`);
+  for (let i = appearingCount; i < pendingCount; i++) assert.strictEqual(byToken[`tok-${i}`].written_back_at, null, `expected tok-${i} (never in the stream) to remain un-written-back`);
+});
+
+  await runSerialCheck('significance-batch — writeBackBatch: under real concurrency (more items than WRITEBACK_CONCURRENCY), one item\'s error during applyCall1Result is caught and counted, never aborting the rest of the batch', async () => {
+  const N = 10;
+  const itemRows = Array.from({ length: N }, (_, i) => ({ id: `item-${String(i).padStart(6, '0')}`, batch_id: 'batch-1', token: `tok-${i}`, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}`, result_status: 'succeeded', written_back_at: null }));
+  const { client: supabaseClient, state } = makeBatchTrackingFakeClient({ itemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    await new Promise((resolve) => setTimeout(resolve, Math.random() * 6));
+    return { rows: [{ missive_message_id: 'm1', screening_completed_at: '2026-01-01T00:00:00.000Z' }], thread: {}, addressMatch: {}, addressMatched: false, threadText: `text ${convId}` };
+  });
+  const parseSpy = spyOn(significancePass, 'parseCall1Response', () => ({ resolution_status: 'open', category: 'dispute', why: 'test', tone_trend: null, identification: { property_text: null, vendor_text: null } }));
+  const applySpy = spyOn(significancePass, 'applyCall1Result', async ({ missive_conversation_id }) => {
+    if (missive_conversation_id === 'conv-4') throw new Error('simulated write failure for conv-4');
+    return { significanceId: 'sig-x', property_id: null, vendor_id: null, keywordCheck: { flagged_protected_class: false, flagged_category: null } };
+  });
+  const propDirSpy = spyOn(significancePass, 'fetchPropertyDirectory', async () => []);
+  const vendorDirSpy = spyOn(significancePass, 'fetchVendorDirectory', async () => []);
+
+  const fakeResults = itemRows.map((it) => ({ custom_id: it.token, result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }));
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({ results: async () => asyncIterableFromArray(fakeResults) });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.writeBackBatch({ batchId: 'batch-1', anthropicBatchId: 'msgbatch_abc' });
+      assert.strictEqual(summary.errors, 1);
+      assert.strictEqual(summary.processed, N - 1, 'expected every OTHER item to still be processed despite conv-4\'s failure');
+      assert.strictEqual(summary.written_significance, N - 1);
+    });
+  } finally {
+    contextSpy.restore(); parseSpy.restore(); applySpy.restore(); propDirSpy.restore(); vendorDirSpy.restore();
+  }
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  assert.strictEqual(byToken['tok-4'].written_back_at, null, 'expected conv-4\'s item to remain un-written-back after its simulated failure (resumable on a later retry)');
+  for (let i = 0; i < N; i++) {
+    if (i === 4) continue;
+    assert.ok(byToken[`tok-${i}`].written_back_at, `expected tok-${i} to still be written back despite tok-4's unrelated failure`);
+  }
+});
+
 // ─── 18i — reportNeedsCall2: reuses the real needsCall2, scoped to only
 // this batch's own conversations ───────────────────────────────────────────
   await runSerialCheck('significance-batch — reportNeedsCall2: reuses the REAL needsCall2 (spied, not reimplemented) and scopes its count to only this batch\'s own conversations', async () => {
@@ -3206,7 +3956,508 @@ asyncResults.push((async () => {
   assert.ok(needsCall2Spy.calls.length >= 2, 'expected the REAL needsCall2 to be consulted for each matched conversation, not a reimplemented equivalent');
   });
 
-  return { name: 'significance-batch — PART 18 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
+// ============================================================================
+// PART 19 (continued, same sequential runner as PART 18 — deliberately NOT a
+// separate asyncResults.push((async()=>{...})()) IIFE: a second, concurrently
+// running IIFE spying on the SAME significancePass object would reintroduce
+// exactly the race PART 18's own header comment documents finding and fixing.
+// Appending here keeps every spyOn() in this whole file strictly serialized).
+// ============================================================================
+
+// ─── 19a — the single most important property given tonight's incident:
+// fetchNextEligibleConversations is called EXACTLY ONCE per startSubmissionRun,
+// and its full result is durably recorded (assembled_at/eligible_count set,
+// every pair persisted in order) before the call returns ────────────────────
+  await runSerialCheck('significance-batch — startSubmissionRun: calls fetchNextEligibleConversations EXACTLY ONCE, and durably records the run row + every submission_run_item (in order) BEFORE returning', async () => {
+  const pairs = [
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-1' },
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-2' },
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-3' },
+  ];
+  const fetchSpy = spyOn(significancePass, 'fetchNextEligibleConversations', async () => pairs);
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({});
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({});
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const result = await freshBatchModule.startSubmissionRun({ stage: 'call_1', sinceDate: '2025-09-17' });
+      assert.strictEqual(result.started, true);
+      assert.strictEqual(result.eligibleCount, 3);
+      assert.ok(result.run.assembled_at, 'expected assembled_at to be set — the durability checkpoint');
+      assert.strictEqual(result.run.eligible_count, 3);
+    });
+  } finally {
+    fetchSpy.restore();
+  }
+
+  assert.strictEqual(fetchSpy.calls.length, 1, 'THE key property: fetchNextEligibleConversations must be called EXACTLY once per startSubmissionRun call — this is the entire no-double-submission/no-double-scan guarantee tonight\'s incident needs');
+  assert.strictEqual(state.runItems.length, 3, 'expected one submission_run_item per eligible pair, durably recorded');
+  assert.deepStrictEqual(state.runItems.map((it) => it.sequence_in_run), [0, 1, 2], 'expected sequence_in_run to preserve the exact order fetchNextEligibleConversations returned');
+  assert.deepStrictEqual(new Set(state.runItems.map((it) => it.missive_conversation_id)), new Set(['conv-1', 'conv-2', 'conv-3']));
+});
+
+// ─── 19b — the one-active-run-per-stage guard ─────────────────────────────
+  await runSerialCheck('significance-batch — startSubmissionRun: an existing unfinished run for the stage refuses to start a new one, and makes ZERO calls to fetchNextEligibleConversations — never re-running the expensive scan while a run is still active', async () => {
+  const existingRun = { id: 'run-existing', stage: 'call_1', assembled_at: new Date().toISOString(), eligible_count: 5, fully_processed_at: null, failed_at: null };
+  const fetchSpy = spyOn(significancePass, 'fetchNextEligibleConversations', async () => { throw new Error('fetchNextEligibleConversations should NEVER be called while a run is already active'); });
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ runRow: existingRun });
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({});
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const result = await freshBatchModule.startSubmissionRun({ stage: 'call_1' });
+      assert.strictEqual(result.started, false);
+      assert.strictEqual(result.reason, 'unfinished_run_exists');
+      assert.strictEqual(result.run.id, 'run-existing');
+    });
+  } finally {
+    fetchSpy.restore();
+  }
+  assert.strictEqual(fetchSpy.calls.length, 0, 'expected ZERO calls to the expensive eligibility scan while a run is already active');
+});
+
+// ─── 19c — chunk-boundary logic, REQUEST COUNT as the binding constraint ──
+  await runSerialCheck('significance-batch — dispatchRunChunks: cuts chunks on REQUEST COUNT when maxRequests is the binding constraint (5 small conversations, maxRequests=2) — submits 3 separate Anthropic batches in order, chunk_number 0/1/2, every item ends up dispatched', async () => {
+  const runId = 'run-count-cut';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 5, fully_processed_at: null, failed_at: null };
+  const runItemRows = [1, 2, 3, 4, 5].map((n) => ({ id: `ri-${n}`, run_id: runId, sequence_in_run: n - 1, mailbox_key: 'mb1', missive_conversation_id: `conv-${n}`, chunk_number: null, batch_id: null, dispatched_at: null }));
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text for ${convId}` }));
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  // Neutralizes the 2026-09-19 expected-pool sanity check (dispatchRunChunks
+  // now calls this before dispatching anything) — this test's own subject is
+  // chunk-cutting, not the sanity check, so the estimate is stubbed to
+  // exactly match eligible_count (ratio 1.0), guaranteeing a pass. PART 19h/
+  // 19j-19l test the sanity check itself.
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  let createCount = 0;
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => { createCount++; return { id: `msgbatch_chunk${createCount}`, processing_status: 'in_progress' }; },
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId, maxRequests: 2, maxBytes: 10000000 });
+      assert.strictEqual(summary.chunksSubmitted, 3, 'expected 5 items split into chunks of 2, 2, 1 by request count alone');
+      assert.strictEqual(summary.itemsDispatched, 5);
+    });
+  } finally {
+    contextSpy.restore(); promptSpy.restore(); poolSpy.restore();
+  }
+
+  assert.strictEqual(anthropicCalls.create.length, 3);
+  assert.deepStrictEqual(anthropicCalls.create.map(([{ requests }]) => requests.length), [2, 2, 1]);
+  assert.strictEqual(state.batches.length, 3);
+  assert.deepStrictEqual(state.batches.map((b) => b.chunk_number).sort((a, b) => a - b), [0, 1, 2]);
+  assert.ok(state.runItems.every((it) => it.batch_id != null), 'expected every run item to have been assigned a batch_id');
+});
+
+// ─── 19d — chunk-boundary logic, REAL BYTE SIZE as the binding constraint —
+// the exact fix for tonight's 413 ──────────────────────────────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: cuts a chunk on REAL BYTE SIZE (Buffer.byteLength, not .length) when one conversation\'s own request is individually large enough to force it, even though the request count is nowhere near maxRequests', async () => {
+  const runId = 'run-byte-cut';
+  const bigText = 'é'.repeat(200); // each 'é' is 2 UTF-8 bytes but 1 UTF-16 code unit — proves REAL byte counting, not .length, drives the cut
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 2, fully_processed_at: null, failed_at: null };
+  const runItemRows = [
+    { id: 'ri-big', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-big', chunk_number: null, batch_id: null, dispatched_at: null },
+    { id: 'ri-small', run_id: runId, sequence_in_run: 1, mailbox_key: 'mb1', missive_conversation_id: 'conv-small', chunk_number: null, batch_id: null, dispatched_at: null },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: convId === 'conv-big' ? bigText : 'x' }));
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  // Neutralizes the 2026-09-19 expected-pool sanity check — see 19c's own
+  // identical comment; this test's own subject is byte-size chunk-cutting.
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  let createCount = 0;
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => { createCount++; return { id: `msgbatch_bytecut${createCount}`, processing_status: 'in_progress' }; },
+  });
+
+  // Real byte size of the big request, via the module's own exported
+  // sizeOfRequestBytes — maxBytes is then set just ABOVE it, so the cut this
+  // test proves is driven by a real measured size, not a hardcoded guess
+  // about how 200 'é' characters happen to serialize.
+  const bigRequestBytes = significanceBatch.sizeOfRequestBytes({
+    custom_id: 'x'.repeat(12), // real tokens are always exactly 12 base64url chars (crypto.randomBytes(9)) — same length, so byte-identical to a real request for sizing purposes
+    params: { model: 'claude-sonnet-5', max_tokens: 1024, output_config: { effort: 'medium' }, messages: [{ role: 'user', content: [{ type: 'text', text: bigText }] }] },
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId, maxRequests: 1000, maxBytes: bigRequestBytes + 1 });
+      assert.strictEqual(summary.chunksSubmitted, 2, 'expected the big request to occupy its own chunk, forcing the small one into a second chunk');
+    });
+  } finally {
+    contextSpy.restore(); promptSpy.restore(); poolSpy.restore();
+  }
+
+  assert.strictEqual(anthropicCalls.create.length, 2);
+  assert.strictEqual(anthropicCalls.create[0][0].requests.length, 1, 'expected the big conversation alone in the first chunk (sequence order preserved — it was sequence_in_run 0)');
+  assert.ok(anthropicCalls.create[0][0].requests[0].params.messages[0].content[0].text.includes('é'), 'expected the big-text conversation to be the one placed first');
+  assert.strictEqual(anthropicCalls.create[1][0].requests[0].params.messages[0].content[0].text, 'x');
+});
+
+// ─── 19e — resumability: an item that already has batch_id set is skipped
+// entirely by a later dispatchRunChunks call ───────────────────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: resumable after a simulated partial failure — an item that already has batch_id set (dispatched by an earlier, interrupted call) is skipped entirely; only the genuinely undispatched items are built into new requests and submitted, with chunk numbering resuming after the existing chunk rather than colliding with it', async () => {
+  const runId = 'run-resume';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 3, fully_processed_at: null, failed_at: null };
+  const runItemRows = [
+    { id: 'ri-1', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-already-dispatched', chunk_number: 0, batch_id: 'batch-earlier', dispatched_at: '2026-09-18T00:00:00.000Z' },
+    { id: 'ri-2', run_id: runId, sequence_in_run: 1, mailbox_key: 'mb1', missive_conversation_id: 'conv-2', chunk_number: null, batch_id: null, dispatched_at: null },
+    { id: 'ri-3', run_id: runId, sequence_in_run: 2, mailbox_key: 'mb1', missive_conversation_id: 'conv-3', chunk_number: null, batch_id: null, dispatched_at: null },
+  ];
+  const batchRows = [{ id: 'batch-earlier', stage: 'call_1', anthropic_batch_id: 'msgbatch_earlier', anthropic_status: 'in_progress', run_id: runId, chunk_number: 0, completed_at: null, failed_at: null, results_retrieved_at: null }];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows, batchRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    assert.notStrictEqual(convId, 'conv-already-dispatched', 'expected the already-dispatched item to NEVER be re-fetched/re-built');
+    return { addressMatched: false, threadText: `text ${convId}` };
+  });
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  // Neutralizes the 2026-09-19 expected-pool sanity check — see 19c's own
+  // identical comment; this test's own subject is resumability.
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => ({ id: 'msgbatch_resumed', processing_status: 'in_progress' }),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId });
+      assert.strictEqual(summary.chunksSubmitted, 1);
+      assert.strictEqual(summary.itemsDispatched, 2, 'expected only the two genuinely undispatched items to be dispatched');
+    });
+  } finally {
+    contextSpy.restore(); promptSpy.restore(); poolSpy.restore();
+  }
+
+  assert.strictEqual(anthropicCalls.create.length, 1);
+  assert.strictEqual(anthropicCalls.create[0][0].requests.length, 2);
+  const newBatch = state.batches.find((b) => b.id !== 'batch-earlier');
+  assert.ok(newBatch, 'expected a new batch row for the newly dispatched chunk');
+  assert.strictEqual(newBatch.chunk_number, 1, 'expected chunk numbering to resume after the existing chunk_number 0, not collide with it');
+  const alreadyDispatchedItem = state.runItems.find((it) => it.id === 'ri-1');
+  assert.strictEqual(alreadyDispatchedItem.batch_id, 'batch-earlier', 'expected the already-dispatched item to be completely untouched');
+});
+
+// ─── 19f — a 429 leaves that chunk's items undispatched, never crashes the
+// whole dispatch, and a later call retries exactly those items ────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: a 429 (rate limit) from Anthropic on one chunk leaves that chunk\'s items undispatched (batch_id stays NULL) rather than crashing the whole dispatch — later chunks still get attempted, and a later dispatchRunChunks call retries exactly the rate-limited items', async () => {
+  const runId = 'run-429';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 4, fully_processed_at: null, failed_at: null };
+  const runItemRows = [1, 2, 3, 4].map((n) => ({ id: `ri-${n}`, run_id: runId, sequence_in_run: n - 1, mailbox_key: 'mb1', missive_conversation_id: `conv-${n}`, chunk_number: null, batch_id: null, dispatched_at: null }));
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}` }));
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  // Neutralizes the 2026-09-19 expected-pool sanity check — see 19c's own
+  // identical comment; this test's own subject is 429 handling. Left active
+  // across BOTH dispatchRunChunks calls below (the initial rate-limited
+  // attempt and the later retry) since both have undispatched items and so
+  // both now run the check.
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+
+  try {
+    let createCallCount = 0;
+    const rateLimitError = new Error('Rate limited');
+    rateLimitError.status = 429; // matches @anthropic-ai/sdk's real RateLimitError shape (error.js: this.status = 429) — confirmed against the installed SDK, not assumed
+    const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+      create: async () => {
+        createCallCount++;
+        if (createCallCount === 1) throw rateLimitError; // first chunk (conv-1, conv-2) rate-limited
+        return { id: `msgbatch_after429_${createCallCount}`, processing_status: 'in_progress' };
+      },
+    });
+
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId, maxRequests: 2, maxBytes: 10000000 });
+      assert.strictEqual(summary.chunksRateLimited, 1, 'expected the first chunk\'s 429 to be counted, never thrown');
+      assert.strictEqual(summary.chunksSubmitted, 1, 'expected the SECOND chunk to still be attempted and succeed despite the first one\'s 429');
+      assert.strictEqual(summary.itemsDispatched, 2);
+    });
+
+    assert.strictEqual(anthropicCalls.create.length, 2, 'expected both chunks to have been attempted — a 429 on one must not abort the whole dispatch loop');
+    for (const convId of ['conv-1', 'conv-2']) {
+      assert.strictEqual(state.runItems.find((r) => r.missive_conversation_id === convId).batch_id, null, `expected ${convId} (rate-limited chunk) to remain undispatched`);
+    }
+    for (const convId of ['conv-3', 'conv-4']) {
+      assert.ok(state.runItems.find((r) => r.missive_conversation_id === convId).batch_id, `expected ${convId} (successfully submitted chunk) to have a batch_id`);
+    }
+
+    // A later call (e.g. the next cron run) retries EXACTLY the previously
+    // rate-limited items — the real resumability guarantee this design
+    // exists to provide.
+    const { client: anthropicClientFake2, calls: anthropicCalls2 } = makeFakeAnthropicBatchesClient({
+      create: async () => ({ id: 'msgbatch_retry', processing_status: 'in_progress' }),
+    });
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake2 }, async (freshBatchModule) => {
+      const summary2 = await freshBatchModule.dispatchRunChunks({ runId, maxRequests: 2, maxBytes: 10000000 });
+      assert.strictEqual(summary2.chunksSubmitted, 1);
+      assert.strictEqual(summary2.itemsDispatched, 2, 'expected exactly the two previously rate-limited items to be retried, nothing else');
+    });
+    assert.strictEqual(anthropicCalls2.create.length, 1);
+    assert.strictEqual(anthropicCalls2.create[0][0].requests.length, 2);
+    for (const convId of ['conv-1', 'conv-2']) {
+      assert.ok(state.runItems.find((r) => r.missive_conversation_id === convId).batch_id, `expected ${convId} to be dispatched on the retry`);
+    }
+  } finally {
+    contextSpy.restore(); promptSpy.restore(); poolSpy.restore();
+  }
+});
+
+// ─── 19g — checkAndResumeRun loops the unchanged per-batch logic over every
+// chunk of a run, and only marks the run fully processed once ALL chunks
+// have reached completed_at ─────────────────────────────────────────────
+  await runSerialCheck('significance-batch — checkAndResumeRun: loops the EXISTING per-batch checkAndResumeOneBatch/writeBackBatch/maybeMarkBatchCompleted logic over every batch in a run, and only sets the run\'s fully_processed_at once EVERY chunk has reached completed_at — not merely once every chunk has ended at Anthropic', async () => {
+  const runId = 'run-multi-chunk';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 2, fully_processed_at: null, failed_at: null };
+  const batchRows = [
+    { id: 'batch-a', stage: 'call_1', anthropic_batch_id: 'msgbatch_a', anthropic_status: 'in_progress', run_id: runId, chunk_number: 0, completed_at: null, failed_at: null, results_retrieved_at: null },
+    { id: 'batch-b', stage: 'call_1', anthropic_batch_id: 'msgbatch_b', anthropic_status: 'in_progress', run_id: runId, chunk_number: 1, completed_at: null, failed_at: null, results_retrieved_at: null },
+  ];
+  const batchItemRows = [
+    { id: 'bi-a1', batch_id: 'batch-a', token: 'tok-a1', mailbox_key: 'mb1', missive_conversation_id: 'conv-a1', result_status: 'pending', written_back_at: null },
+    { id: 'bi-b1', batch_id: 'batch-b', token: 'tok-b1', mailbox_key: 'mb1', missive_conversation_id: 'conv-b1', result_status: 'pending', written_back_at: null },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, batchRows, batchItemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => ({ rows: [{ missive_message_id: 'm1' }], thread: {}, addressMatch: {}, addressMatched: false, threadText: 'x' }));
+  const parseSpy = spyOn(significancePass, 'parseCall1Response', () => ({ resolution_status: 'open', category: 'dispute', why: 'test', tone_trend: null, identification: { property_text: null, vendor_text: null } }));
+  const applySpy = spyOn(significancePass, 'applyCall1Result', async () => ({}));
+  const propDirSpy = spyOn(significancePass, 'fetchPropertyDirectory', async () => []);
+  const vendorDirSpy = spyOn(significancePass, 'fetchVendorDirectory', async () => []);
+
+  try {
+    // Round 1: batch-a has ENDED at Anthropic; batch-b is still in_progress.
+    const { client: anthropicClientFake1 } = makeFakeAnthropicBatchesClient({
+      retrieve: async (id) => (id === 'msgbatch_a' ? { processing_status: 'ended' } : { processing_status: 'in_progress' }),
+      results: async () => asyncIterableFromArray([{ custom_id: 'tok-a1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }]),
+    });
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake1 }, async (freshBatchModule) => {
+      const outcome = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome.fullyProcessed, false, 'expected NOT fully processed — batch-b has not even ended yet at Anthropic');
+    });
+    assert.ok(state.batches.find((b) => b.id === 'batch-a').completed_at, 'expected batch-a to be fully written back and marked completed');
+    assert.strictEqual(state.batches.find((b) => b.id === 'batch-b').completed_at, null);
+    assert.strictEqual(state.run.fully_processed_at, null);
+
+    // Round 2: batch-b now also ends.
+    const { client: anthropicClientFake2 } = makeFakeAnthropicBatchesClient({
+      retrieve: async () => ({ processing_status: 'ended' }),
+      results: async () => asyncIterableFromArray([{ custom_id: 'tok-b1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }]),
+    });
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake2 }, async (freshBatchModule) => {
+      const outcome2 = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome2.fullyProcessed, true, 'expected fully processed once EVERY chunk has reached completed_at');
+    });
+    assert.ok(state.run.fully_processed_at, 'expected the run row itself to have fully_processed_at set');
+  } finally {
+    contextSpy.restore(); parseSpy.restore(); applySpy.restore(); propDirSpy.restore(); vendorDirSpy.restore();
+  }
+  });
+
+// ─── 19h — buildDispatchEntries concurrency fix (2026-09-19): output order
+// matches INPUT order despite deliberately scrambled completion times, real
+// bounded concurrency, and token uniqueness all survive the move off the
+// old one-at-a-time `for...of` loop ─────────────────────────────────────────
+  await runSerialCheck('significance-batch — buildDispatchEntries: entries come back in the SAME order as the input items even when buildConversationContext resolves in a deliberately scrambled (reverse) order, concurrency never exceeds the requested limit, and every token is still unique', async () => {
+  const items = Array.from({ length: 9 }, (_, i) => ({ id: `ri-${i}`, sequence_in_run: i, mailbox_key: 'mb1', missive_conversation_id: `conv-${i}` }));
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    const n = Number(convId.split('-')[1]);
+    await new Promise((resolve) => setTimeout(resolve, (items.length - n) * 4)); // conv-0 (first in input order) resolves LAST
+    inFlight--;
+    return { addressMatched: false, threadText: `text ${convId}` };
+  });
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+
+  try {
+    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, significanceBatch.MAX_BATCH_BYTES, 3);
+    assert.strictEqual(entries.length, 9);
+    assert.deepStrictEqual(entries.map((e) => e.item.missive_conversation_id), items.map((it) => it.missive_conversation_id), 'expected entries in the exact same order as the input items, not completion order');
+    assert.strictEqual(skippedEmpty, 0);
+    assert.strictEqual(skippedOversized, 0);
+    assert.ok(maxInFlight <= 3, `expected concurrency capped at the requested limit of 3, saw ${maxInFlight} in flight at once`);
+    assert.ok(maxInFlight > 1, 'expected genuine concurrency (more than 1 in flight at some point) — a maxInFlight of 1 would mean this silently regressed to sequential execution');
+
+    const tokens = entries.map((e) => e.token);
+    assert.strictEqual(new Set(tokens).size, tokens.length, 'expected every token to be unique across the whole concurrent run');
+  } finally {
+    contextSpy.restore(); promptSpy.restore();
+  }
+});
+
+// ─── 19i — skipped_empty/skipped_oversized counting survives concurrency,
+// and the surviving entries still preserve input order around the gaps ─────
+  await runSerialCheck('significance-batch — buildDispatchEntries: skipped_empty (context disappeared) and skipped_oversized (single request over the byte cap) are both still correctly counted under concurrent execution, with the surviving entries preserving their original relative order', async () => {
+  const items = [
+    { id: 'ri-0', mailbox_key: 'mb1', missive_conversation_id: 'conv-0' },
+    { id: 'ri-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1-missing' }, // context disappeared -> skipped_empty
+    { id: 'ri-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2' },
+    { id: 'ri-3', mailbox_key: 'mb1', missive_conversation_id: 'conv-3-big' }, // oversized -> skipped_oversized
+    { id: 'ri-4', mailbox_key: 'mb1', missive_conversation_id: 'conv-4' },
+  ];
+  const bigText = 'x'.repeat(1000);
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    await new Promise((resolve) => setTimeout(resolve, Math.random() * 10)); // real jitter — proves the correct counts don't depend on any particular completion order
+    if (convId === 'conv-1-missing') return null;
+    if (convId === 'conv-3-big') return { addressMatched: false, threadText: bigText };
+    return { addressMatched: false, threadText: `text ${convId}` };
+  });
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+
+  // maxBytes set just above a normal (small) request's real size but below
+  // the big one's — same technique test 19d already uses to force the cut
+  // off a real measured size rather than a hardcoded guess.
+  const smallRequestBytes = significanceBatch.sizeOfRequestBytes({
+    custom_id: 'x'.repeat(12),
+    params: { model: 'claude-sonnet-5', max_tokens: 1024, output_config: { effort: 'medium' }, messages: [{ role: 'user', content: [{ type: 'text', text: 'text conv-0' }] }] },
+  });
+
+  try {
+    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, smallRequestBytes + 50, 3);
+    assert.strictEqual(skippedEmpty, 1, 'expected exactly one skipped_empty (conv-1-missing)');
+    assert.strictEqual(skippedOversized, 1, 'expected exactly one skipped_oversized (conv-3-big)');
+    assert.strictEqual(entries.length, 3, 'expected the 3 surviving normal items');
+    assert.deepStrictEqual(entries.map((e) => e.item.missive_conversation_id), ['conv-0', 'conv-2', 'conv-4'], 'expected the surviving entries in the same relative order as the input, with the skipped items\' gaps simply closed up');
+  } finally {
+    contextSpy.restore(); promptSpy.restore();
+  }
+});
+
+// ─── 19j — the expected-pool sanity check ITSELF, wired live into
+// dispatchRunChunks: a failing ratio (tonight's real incident shape, scaled
+// down) refuses to dispatch anything, makes ZERO Anthropic calls, and never
+// even builds a single conversation's request ──────────────────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: REFUSES to dispatch when the expected-pool sanity check fails (tonight\'s real ~40% incident shape, scaled down to 337-of-842) — zero Anthropic calls, every item stays undispatched, nothing lost', async () => {
+  const runId = 'run-sanity-fail';
+  const runRow = { id: runId, stage: 'call_1', since_date: '2025-09-17', assembled_at: new Date().toISOString(), eligible_count: 337, fully_processed_at: null, failed_at: null };
+  const runItemRows = [1, 2, 3].map((n) => ({ id: `ri-${n}`, run_id: runId, sequence_in_run: n - 1, mailbox_key: 'mb1', missive_conversation_id: `conv-${n}`, chunk_number: null, batch_id: null, dispatched_at: null }));
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  // 337 / 842 ≈ 40.0% — the same ratio as the real 2026-09-18 incident.
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async (sinceDate) => {
+    assert.strictEqual(sinceDate, '2025-09-17', 'expected the run\'s own since_date to be threaded through to the estimate');
+    return { expectedPool: 842, totalMatchingMessages: 900, totalAlreadyProcessed: 58 };
+  });
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => { throw new Error('buildConversationContext should NEVER be called — a failing sanity check must block BEFORE any per-conversation dispatch work begins'); });
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({});
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId });
+      assert.strictEqual(summary.blockedBySanityCheck, true);
+      assert.strictEqual(summary.chunksSubmitted, 0);
+      assert.strictEqual(summary.itemsDispatched, 0);
+      assert.strictEqual(summary.sanityCheck.passed, false);
+      assert.strictEqual(summary.sanityCheck.eligibleCount, 337);
+      assert.strictEqual(summary.sanityCheck.expectedPool, 842);
+      assert.ok(Math.abs(summary.sanityCheck.ratio - (337 / 842)) < 1e-9);
+    });
+  } finally {
+    poolSpy.restore(); contextSpy.restore();
+  }
+
+  assert.strictEqual(anthropicCalls.create.length, 0, 'expected ZERO Anthropic calls when the sanity check fails');
+  assert.ok(state.runItems.every((it) => it.batch_id == null), 'expected every item to remain undispatched — the run\'s durably-saved eligible list is untouched, nothing lost, nothing silently sent');
+});
+
+// ─── 19k — force: true bypasses a failing check for exactly this one call,
+// never persisted anywhere on the run row ───────────────────────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: force: true bypasses a failing sanity check for this one call and dispatches normally — the deliberate human override this design requires, never a persisted decision (estimateExpectedEligiblePool is never even called)', async () => {
+  const runId = 'run-sanity-forced';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 2, fully_processed_at: null, failed_at: null };
+  const runItemRows = [1, 2].map((n) => ({ id: `ri-${n}`, run_id: runId, sequence_in_run: n - 1, mailbox_key: 'mb1', missive_conversation_id: `conv-${n}`, chunk_number: null, batch_id: null, dispatched_at: null }));
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => { throw new Error('estimateExpectedEligiblePool should NEVER be called when force: true is passed — the whole point of force is to skip the check, not to check and ignore the result'); });
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}` }));
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => ({ id: 'msgbatch_forced', processing_status: 'in_progress' }),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId, force: true });
+      assert.strictEqual(summary.blockedBySanityCheck, false);
+      assert.strictEqual(summary.chunksSubmitted, 1);
+      assert.strictEqual(summary.itemsDispatched, 2);
+    });
+  } finally {
+    poolSpy.restore(); contextSpy.restore(); promptSpy.restore();
+  }
+
+  assert.strictEqual(anthropicCalls.create.length, 1, 'expected the dispatch to actually go through under force: true');
+  assert.ok(state.runItems.every((it) => it.batch_id != null), 'expected every item to actually be dispatched under force: true');
+});
+
+// ─── 19l — a run with nothing new to dispatch skips the sanity check
+// entirely — there is nothing left to protect once every item is already
+// sent, so this must never fire an extra, pointless (or blocking) check ────
+  await runSerialCheck('significance-batch — dispatchRunChunks: a run with nothing left to dispatch skips the sanity check entirely (never calls estimateExpectedEligiblePool) — an already-fully-dispatched run\'s resume/poll path must never be gated on a fresh count query', async () => {
+  const runId = 'run-nothing-to-dispatch';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 1, fully_processed_at: null, failed_at: null };
+  const runItemRows = [
+    { id: 'ri-1', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-1', chunk_number: 0, batch_id: 'batch-done', dispatched_at: '2026-09-18T00:00:00.000Z' },
+  ];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => { throw new Error('estimateExpectedEligiblePool should NEVER be called when there is nothing undispatched left for this run'); });
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({});
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId });
+      assert.strictEqual(summary.blockedBySanityCheck, false);
+      assert.strictEqual(summary.chunksSubmitted, 0);
+    });
+  } finally {
+    poolSpy.restore();
+  }
+  assert.strictEqual(anthropicCalls.create.length, 0);
+});
+
+// ─── 19m — a healthy ratio just above the 70% threshold proceeds normally
+// through the REAL checkEligiblePoolSanity()/evaluatePoolRatio() wiring —
+// unlike 19c-19f above, this is NOT neutralized to a flat 100% stub, so it
+// actually exercises the real comparison math end-to-end ───────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: a healthy ratio just above the 70% threshold (71%) proceeds normally through the REAL checkEligiblePoolSanity/evaluatePoolRatio wiring, not a neutralized 100% stub', async () => {
+  const runId = 'run-sanity-pass';
+  // eligible_count/runItemRows are deliberately independent here (1 real
+  // item row is enough to prove dispatch actually happens) — the sanity
+  // check itself only ever reads run.eligible_count, never the item count.
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 71, fully_processed_at: null, failed_at: null };
+  const runItemRows = [{ id: 'ri-1', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-1', chunk_number: null, batch_id: null, dispatched_at: null }];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ runRow, runItemRows });
+
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: 100, totalMatchingMessages: 100, totalAlreadyProcessed: 0 })); // 71/100 = 71%, just above the 70% threshold
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}` }));
+  const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => ({ id: 'msgbatch_healthy', processing_status: 'in_progress' }),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId });
+      assert.strictEqual(summary.blockedBySanityCheck, false);
+      assert.strictEqual(summary.chunksSubmitted, 1);
+    });
+  } finally {
+    poolSpy.restore(); contextSpy.restore(); promptSpy.restore();
+  }
+  assert.strictEqual(anthropicCalls.create.length, 1, 'expected the healthy-ratio run to actually dispatch');
+});
+
+  return { name: 'significance-batch — PART 18-19 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
 })());
 
 // ─── Report ──────────────────────────────────────────────────────────────

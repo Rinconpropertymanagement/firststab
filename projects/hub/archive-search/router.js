@@ -84,14 +84,14 @@ const { runScreeningPassChunk, getScreeningStatus, fetchFlaggedEarliestBodyTextB
 const { runSignificancePassBatch } = require('./lib/significance-pass');
 const { withSignificanceLock, SignificancePassLockedError } = require('./lib/significance-lock');
 const { toCsv } = require('./lib/csv');
+const { sendMail } = require('../lib/notify');
 
-// ─── Nodemailer (escalation notification email) — same setup pattern as
-// security-deposit/router.js and insurance/router.js: each tool keeps its
-// own small mailer/audit-log helpers rather than a shared library, per
-// this file's own Section 2 comment ("sibling implementation, same
-// reasoning every other router.js in this codebase gives for its own
-// copy"). Used only by the escalation mechanism (Section 6c, below) —
-// nothing else in this file sends email.
+// ─── Nodemailer — kept ONLY for sendFailureAlertEmail's own independent
+// send path (Section 6c below). The escalation notification itself now
+// goes through the shared lib/notify.js module instead of this file's own
+// copy — see that module's header, and security-deposit/router.js's
+// identical comment on its own retained copy, for why
+// sendFailureAlertEmail deliberately keeps its own separate one.
 let nodemailer = null;
 try {
   nodemailer = require('nodemailer');
@@ -1051,10 +1051,10 @@ router.post('/api/archive-search/flagged-override/:overrideId/revoke', requireAr
 // 2026-09-12): unlike Section 6b's flagged-conversation override (which
 // has no real notification channel and carries an explicit
 // mason_notification_required/_status placeholder), a real, already-
-// wired email channel exists in this codebase (security-deposit/
-// router.js's and insurance/router.js's own createMailer()/nodemailer
-// pattern), and Peter decided the escalation email goes to BOTH
-// DO_EMAIL and PETER_EMAIL — not a choice between them. See .env.example
+// wired email channel exists in this codebase (now ../lib/notify.js,
+// shared with security-deposit/router.js and insurance/router.js — see
+// that module's header), and Peter decided the escalation email goes to
+// BOTH DO_EMAIL and PETER_EMAIL — not a choice between them. See .env.example
 // for both variables; both are optional and the mailer degrades
 // gracefully (never throws, always reports success/failure honestly)
 // if either or both are unset, same posture every other email-sending
@@ -1081,50 +1081,38 @@ function createMailer() {
 // names notification_email_sent as a field) and in the API response, and
 // fires sendFailureAlertEmail() when it's false.
 async function sendEscalationEmail(escalation, reportedByName) {
-  try {
-    const mailer = createMailer();
-    if (!mailer) {
-      console.error('[archive-search email] Escalation notification NOT sent — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured).');
-      return false;
-    }
-
-    const recipients = [process.env.DO_EMAIL, process.env.PETER_EMAIL].filter(Boolean);
-    if (!recipients.length) {
-      console.error('[archive-search email] Escalation reported but no recipient configured — DO_EMAIL and PETER_EMAIL are both unset.');
-      return false;
-    }
-
-    const info = await mailer.sendMail({
-      from: process.env.GMAIL_USER,
-      to: recipients.join(', '),
-      subject: 'Archive Search: Fair Housing concern reported — needs your review',
-      text: [
-        'A Rincon Hub user has reported a suspected material Fair Housing concern found while using Archive Search.',
-        '',
-        `Reported by:    ${reportedByName}`,
-        `Reported at:    ${escalation.reported_at}`,
-        `Reason given:   ${escalation.escalation_reason}`,
-        '',
-        `Conversation:   ${missiveConversationLink(escalation.missive_conversation_id)}`,
-        '',
-        'This conversation has already been removed from Archive Search for everyone, effective immediately — this email is so it gets reviewed, not to gate that removal.',
-        'Log in to the Rincon Hub, open Archive Search, and pull the escalations review export to see the full record (including the correspondence itself) and resolve it as confirmed or false alarm.',
-      ].join('\n'),
-    });
-    // Nodemailer can resolve successfully while still rejecting individual
-    // addresses (bad address, full mailbox, etc.) — same info.rejected
-    // check security-deposit's own sendEscalationEmail() already uses.
-    const rejected = info.rejected || [];
-    if (rejected.length) {
-      console.error(`[archive-search email] Escalation notification: ${rejected.length} of ${recipients.length} recipient(s) rejected: ${rejected.join(', ')}`);
-      return false;
-    }
-    console.log(`[archive-search email] Escalation notification sent to ${recipients.length} recipient(s).`);
-    return true;
-  } catch (err) {
-    console.error('[archive-search email] Failed to send escalation notification:', err.message);
+  // Both addresses independently, per Peter's own recorded decision — not
+  // a choice between them. Left as env-var reads here (not migrated to
+  // shared_inboxes / a person lookup) per this build's task scope.
+  const recipients = [process.env.DO_EMAIL, process.env.PETER_EMAIL].filter(Boolean);
+  if (!recipients.length) {
+    console.error('[archive-search email] Escalation reported but no recipient configured — DO_EMAIL and PETER_EMAIL are both unset.');
     return false;
   }
+
+  const result = await sendMail({
+    to: recipients,
+    subject: 'Archive Search: Fair Housing concern reported — needs your review',
+    text: [
+      'A Rincon Hub user has reported a suspected material Fair Housing concern found while using Archive Search.',
+      '',
+      `Reported by:    ${reportedByName}`,
+      `Reported at:    ${escalation.reported_at}`,
+      `Reason given:   ${escalation.escalation_reason}`,
+      '',
+      `Conversation:   ${missiveConversationLink(escalation.missive_conversation_id)}`,
+      '',
+      'This conversation has already been removed from Archive Search for everyone, effective immediately — this email is so it gets reviewed, not to gate that removal.',
+      'Log in to the Rincon Hub, open Archive Search, and pull the escalations review export to see the full record (including the correspondence itself) and resolve it as confirmed or false alarm.',
+    ].join('\n'),
+  });
+  if (!result.ok) {
+    const detail = result.error || `${result.rejected.length} of ${recipients.length} recipient(s) rejected: ${result.rejected.join(', ')}`;
+    console.error(`[archive-search email] Escalation notification failed: ${detail}`);
+    return false;
+  }
+  console.log(`[archive-search email] Escalation notification sent to ${recipients.length} recipient(s).`);
+  return true;
 }
 
 // ─── Failure alert — same shape/purpose as security-deposit/router.js's
@@ -1140,7 +1128,7 @@ async function sendFailureAlertEmail(subject, body) {
   try {
     const mailer = createMailer();
     if (!mailer) {
-      console.error(`[archive-search ALERT] Could not send failure alert — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured). Subject would have been: ${subject}`);
+      console.error(`[HUB-ALERT] Could not send failure alert — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured). Subject would have been: ${subject}`);
       return false;
     }
     await mailer.sendMail({
@@ -1149,10 +1137,10 @@ async function sendFailureAlertEmail(subject, body) {
       subject: `[ALERT] ${subject}`,
       text: body,
     });
-    console.error(`[archive-search ALERT] Failure alert sent to ${FAILURE_ALERT_RECIPIENT}: ${subject}`);
+    console.error(`[HUB-ALERT] Failure alert sent to ${FAILURE_ALERT_RECIPIENT}: ${subject}`);
     return true;
   } catch (err) {
-    console.error(`[archive-search ALERT] Failure alert itself failed to send: ${err.message} — original subject: ${subject}`);
+    console.error(`[HUB-ALERT] Failure alert itself failed to send: ${err.message} — original subject: ${subject}`);
     return false;
   }
 }

@@ -1057,6 +1057,91 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
 }
 
 // ============================================================
+// estimateExpectedEligiblePool — added 2026-09-19, the real-incident-class
+// safeguard. THE INCIDENT: a real production submission run's eligibility
+// scan (fetchNextEligibleConversations, above) found only 33,755 eligible
+// conversations when the real, independently-verified pool was ~84,192 — a
+// silent ~60% undercount, with no error thrown anywhere in the chain from
+// the database call up through the CLI entry point. Two extensive
+// investigations (Neo's, and a second one directly) could not prove the
+// exact root cause, and it did not reproduce on two independent clean
+// re-runs of the identical code. Given that, this is deliberately NOT an
+// attempt to re-derive or double-check the exact eligible set — it is a
+// cheap, independent SANITY CHECK that makes this whole CLASS of silent
+// undercount impossible to ship past without a human looking at it, no
+// matter what actually caused any individual occurrence of it. The
+// consuming half of this check (the actual pass/fail threshold) lives in
+// lib/significance-batch.js's checkEligiblePoolSanity()/dispatchRunChunks()
+// — see that file's own EXPECTED_POOL_MIN_RATIO comment for the threshold
+// reasoning; this function only produces the estimate.
+//
+// Deliberately NOT another row-by-row pass over the same clear-branch
+// search-safe view fetchDriverPage() itself pages through — that would just
+// pay the same expensive, hours-long cost a second time, defeating the
+// whole point of a FAST sanity check. Instead, exactly two cheap COUNT-only
+// queries, using the same `count: 'exact', head: true` pattern already used
+// elsewhere in this
+// codebase for a fast row count with no rows actually returned (e.g.
+// significance-batch.js's own pending-item count in
+// checkAndResumeOneBatch()):
+//   1. How many rows in missive_message_intake_search_safe_clear_branch —
+//      the SAME table fetchDriverPage() itself pages through — match the
+//      same delivered_at >= sinceDate condition passesSinceDate() applies
+//      client-side (a single, one-shot .gte() filter, never an id-ordered
+//      keyset scan). fetchDriverPage()'s own header comment documents why
+//      COMBINING an id-ordered keyset cursor with a delivered_at filter
+//      broke the query planner (confirmed live, twice) — but that failure
+//      mode is specific to a repeated, paginated ORDER BY id query. A
+//      single one-shot count with no ordering at all is a fundamentally
+//      different query shape, not subject to that same problem.
+//   2. How many rows exist, TOTAL, in missive_conversation_significance —
+//      every conversation this pass has ever fully processed, table-wide,
+//      deliberately NOT scoped by sinceDate (this task's own explicit
+//      instruction) — a coarse, cheap upper bound on "already done," not an
+//      authoritative per-window count.
+//
+// expectedPool = max(0, (1) - (2)) — an APPROXIMATION, stated plainly, not
+// a second authoritative computation:
+//   - (1) counts MESSAGES matching the date cutoff, not distinct
+//     CONVERSATIONS (one conversation can contribute several matching
+//     message rows), so (1) runs a bit HIGH relative to the true
+//     conversation-level pool. This only makes the resulting estimate MORE
+//     conservative (harder to silently pass a real undercount) — never
+//     less.
+//   - (2) is NOT scoped to sinceDate at all, so it can push the other way:
+//     whenever a meaningful share of already-processed conversations sit
+//     outside this run's own date window, expectedPool comes out LOWER
+//     than the true pool. That is the safer direction to be wrong in for a
+//     check whose whole job is "don't demand more from the real scan than
+//     is fair" — it never manufactures a false alarm by overstating what
+//     was expected.
+//   - Neither term accounts for the small, legitimate exclusions
+//     fetchNextEligibleConversations() itself applies (an open Fair
+//     Housing escalation, a conversation whose messages disappeared
+//     between the scan and now) — measured, not assumed, to be small
+//     relative to the ~60% gap this check exists to catch.
+// @param {string|null} [sinceDate] same ISO-date-string/null semantics as
+//   fetchNextEligibleConversations' own sinceDate parameter.
+// @returns {Promise<{expectedPool:number, totalMatchingMessages:number, totalAlreadyProcessed:number}>}
+// ============================================================
+async function estimateExpectedEligiblePool(sinceDate = null) {
+  let matchingMessagesQuery = supabase
+    .from('missive_message_intake_search_safe_clear_branch')
+    .select('id', { count: 'exact', head: true });
+  if (sinceDate != null) matchingMessagesQuery = matchingMessagesQuery.gte('delivered_at', sinceDate);
+  const { count: totalMatchingMessages, error: messagesErr } = await matchingMessagesQuery;
+  if (messagesErr) throw messagesErr;
+
+  const { count: totalAlreadyProcessed, error: processedErr } = await supabase
+    .from('missive_conversation_significance')
+    .select('id', { count: 'exact', head: true });
+  if (processedErr) throw processedErr;
+
+  const expectedPool = Math.max(0, (totalMatchingMessages || 0) - (totalAlreadyProcessed || 0));
+  return { expectedPool, totalMatchingMessages: totalMatchingMessages || 0, totalAlreadyProcessed: totalAlreadyProcessed || 0 };
+}
+
+// ============================================================
 // PENDING — the override branch (archive_search_flagged_overrides, ~127
 // active rows) is NOT implemented anywhere in this file. Migration
 // 20260918020000's own "THE FIX" section confirms this directly: the
@@ -1757,6 +1842,7 @@ module.exports = {
   passesEscalationExclusion,
   fetchEscalationExclusionSet,
   fetchNextEligibleConversations,
+  estimateExpectedEligiblePool,
   fetchIncompleteSignificanceRows,
   retryCall2ForExistingRow,
   dedupeNewPairs,

@@ -36,27 +36,69 @@
  * applies every result in one process lifetime.
  *
  * ============================================================================
+ * UPDATED 2026-09-18 — SUBMISSION RUNS, REPLACING THE OLD SINGLE-BATCH FLOW
+ * ============================================================================
+ * Tonight, an 8-hour eligibility scan's real 84,408-conversation result was
+ * lost outright when the old single-batch submitBatch() call it fed into was
+ * rejected by Anthropic with a real 413 (over the real 256MB-per-batch
+ * limit) — nothing had been saved to the database before that call. This
+ * script now drives lib/significance-batch.js's newer SUBMISSION RUN flow
+ * (startSubmissionRun/dispatchRunChunks/checkAndResumeRun) instead of the
+ * old single-batch submitBatch()/checkAndResume() pair: the full eligible
+ * list a submission is built from is now durably recorded BEFORE any
+ * Anthropic call happens at all, and is then split into as many
+ * appropriately-sized chunks (each its own real Anthropic batch) as its real
+ * byte size and request count actually require — see lib/significance-
+ * batch.js's own "ADDED 2026-09-18" header and Neo's migration (supabase/
+ * migrations/20260918060000_..._schema.sql) for the full story. The flags
+ * below are UNCHANGED from before this fix — this is an internal mechanism
+ * change, not a new CLI interface.
+ *
+ * ============================================================================
  * HOW TO USE IT — re-run the SAME command; it figures out what to do next
  * ============================================================================
  * This is one command, safe to re-run repeatedly (a cron entry, or just
  * checking back later by hand):
- *   - No unfinished batch for --stage exists yet -> submits a new one.
- *   - An unfinished batch exists -> checks its status with Anthropic,
- *     downloads results once it has ended, and writes results back to the
- *     database (resumable — a re-run after a crash picks up exactly where
- *     write-back left off).
- *   - Once every item is written back, the batch is marked complete. For a
- *     'call_1' stage batch, this prints how many of its conversations need
- *     a Call 2 pass — Call 2 is NEVER submitted automatically; that is a
- *     separate, deliberate run of this same command with --stage=call_2,
- *     only once that path is actually built (see lib/significance-batch.js).
+ *   - No unfinished submission run for --stage exists yet -> starts one (one
+ *     call to the expensive eligibility scan, durably recorded immediately,
+ *     before anything is sent to Anthropic).
+ *   - An unfinished run exists -> dispatches any of its chunks not yet
+ *     submitted to Anthropic (safe to re-run — already-dispatched chunks are
+ *     always skipped), then checks every chunk's status, downloads results
+ *     once each has ended, and writes results back to the database
+ *     (resumable at every step — a re-run after a crash or a rate limit
+ *     picks up exactly where it left off).
+ *   - Once every chunk's results are written back, the run is marked fully
+ *     processed. For a 'call_1' stage run, this prints how many of its
+ *     conversations (across every chunk) need a Call 2 pass — Call 2 is
+ *     NEVER submitted automatically; that is a separate, deliberate run of
+ *     this same command with --stage=call_2, only once that path is
+ *     actually built (see lib/significance-batch.js).
  *
  * Usage:
  *   node run-significance-batch.js                          Stage call_1, no date cutoff, up to the 100,000-request cap.
  *   node run-significance-batch.js --since-date=2025-09-17   Only conversations active on/after this date (Peter's staged-by-recency plan).
  *   node run-significance-batch.js --limit=50                Cap this SUBMISSION at 50 conversations (a small first real test, not a permanent ceiling).
  *   node run-significance-batch.js --stage=call_2             Check/resume a call_2 batch (submission not yet built — see the header above).
+ *   node run-significance-batch.js --force                   Override a failed expected-pool sanity check for THIS run only (see below).
  *   node run-significance-batch.js --help                    Show this help and exit.
+ *
+ * ============================================================================
+ * ADDED 2026-09-19 — THE EXPECTED-POOL SANITY CHECK (the 33,755-vs-84,192
+ * real-incident-class safeguard)
+ * ============================================================================
+ * Before dispatching anything NEW to Anthropic for a run, this tool now
+ * compares that run's own real eligible_count against a fast, independent
+ * estimate of what the pool should roughly be (lib/significance-batch.js's
+ * checkEligiblePoolSanity(), lib/significance-pass.js's
+ * estimateExpectedEligiblePool() — see both files' own headers for the full
+ * incident story and the 70% threshold's reasoning). If the real count looks
+ * implausibly low, this command prints a loud warning with the real numbers,
+ * dispatches NOTHING, and exits non-zero — the run's already-scanned,
+ * already-persisted eligible list is untouched either way, so nothing is
+ * ever lost by this refusal. Re-run this exact same command with --force
+ * once a human has reviewed the numbers (see the warning's own instructions)
+ * and confirmed the low count is real, not a repeat of the incident.
  */
 
 // .env loading is deliberately deferred to the require.main guard at the
@@ -94,11 +136,14 @@ function printHelp() {
   console.log(`
 run-significance-batch.js — Phase 2, the Message Batches API run
 
-Submits (or checks/resumes) one Anthropic Message Batch of Call 1 requests
-for the archive-search historical significance backfill, and writes results
-back to the database once the batch ends. MAKES REAL AI CALLS AND REAL
-DATABASE WRITES. MUST RUN ON SALLY, NEVER LOCALLY — see this file's own
-header comment before running it.
+Starts (or dispatches/checks/resumes) one SUBMISSION RUN of Call 1 requests
+for the archive-search historical significance backfill — a run's eligible
+conversations are durably recorded before any Anthropic call happens, then
+split into as many appropriately-sized Anthropic Message Batches (chunks) as
+their real byte size/request count require, and results are written back to
+the database as each chunk finishes. MAKES REAL AI CALLS AND REAL DATABASE
+WRITES. MUST RUN ON SALLY, NEVER LOCALLY — see this file's own header
+comment before running it.
 
 Usage:
   node run-significance-batch.js
@@ -108,19 +153,31 @@ Usage:
   node run-significance-batch.js --help
 
 Flags:
-  --stage=call_1|call_2   Which pass this batch is for (default: call_1).
+  --stage=call_1|call_2   Which pass this run is for (default: call_1).
                           Only call_1 SUBMISSION is built today — checking/
-                          resuming/writing back an already-submitted batch
-                          works for either stage.
+                          resuming/dispatching/writing back an already-
+                          started run works for either stage.
   --since-date=YYYY-MM-DD Only conversations whose MOST RECENT message is
-                          on/after this date are eligible for a NEW
-                          submission (Peter's staged-by-recency backfill —
-                          same semantics as run-significance-pilot.js's own
-                          --since-date). Ignored on a check/resume run.
-  --limit=N               Cap a NEW submission at N conversations (default:
-                          Anthropic's own 100,000-request batch ceiling).
-                          Useful for a small first real test before
-                          committing a full staged window.
+                          on/after this date are eligible for a NEW run
+                          (Peter's staged-by-recency backfill — same
+                          semantics as run-significance-pilot.js's own
+                          --since-date). Ignored when resuming an existing
+                          run.
+  --limit=N               Cap a NEW run's eligible set at N conversations
+                          (default: Anthropic's own 100,000-request batch
+                          ceiling). Useful for a small first real test before
+                          committing a full staged window. A run this large
+                          is still automatically split into multiple
+                          Anthropic batches if its real byte size requires
+                          it — this cap is about how many conversations to
+                          fetch, not how many chunks the run becomes.
+  --force                 Override a failed expected-pool sanity check and
+                          dispatch this run anyway. Only use this after
+                          reviewing the real numbers the warning printed
+                          (this file's own "ADDED 2026-09-19" header above)
+                          and confirming the low count is real. Applies to
+                          this one command invocation only — never silently
+                          remembered for next time.
 `);
 }
 
@@ -142,6 +199,13 @@ function parseLimitArg(args) {
   return { limit: n, error: null };
 }
 
+// A plain boolean flag, no value — pulled into its own tiny, exported,
+// directly-testable function purely for consistency with parseStageArg/
+// parseLimitArg above, not because it needs any real parsing logic.
+function parseForceArg(args) {
+  return { force: args.includes('--force') };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) {
@@ -161,6 +225,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  const { force } = parseForceArg(args);
   // Reused verbatim from run-significance-pilot.js — identical --since-date
   // semantics and validation, not re-derived here. (--since-years is
   // intentionally not offered on this script; Peter's staged plan already
@@ -205,68 +270,105 @@ async function main() {
   // inside it, since every branch below does real, billed work or real
   // database writes.
   const { withSignificanceLock } = require('./lib/significance-lock');
-  await withSignificanceLock(`standalone-batch --stage=${stage}${sinceDate ? ` --since-date=${sinceDate}` : ''}`, () => runBatchWork({ stage, sinceDate, limit }));
+  await withSignificanceLock(`standalone-batch --stage=${stage}${sinceDate ? ` --since-date=${sinceDate}` : ''}${force ? ' --force' : ''}`, () => runBatchWork({ stage, sinceDate, limit, force }));
 }
 
-async function runBatchWork({ stage, sinceDate, limit }) {
+// ============================================================================
+// UPDATED 2026-09-18 — drives lib/significance-batch.js's newer SUBMISSION
+// RUN flow (startSubmissionRun/dispatchRunChunks/checkAndResumeRun) instead
+// of the old single-batch submitBatch()/checkAndResume() pair — see this
+// file's own header for why. Every step below is resumable and safe to
+// re-run; a crash, a rate limit, or a still-processing Anthropic batch (up
+// to 24 hours) just means re-running this same command later picks up
+// exactly where it left off.
+// ============================================================================
+async function runBatchWork({ stage, sinceDate, limit, force = false }) {
   const batchLib = require('./lib/significance-batch');
 
-  const existing = await batchLib.findUnfinishedBatch(stage);
+  let run = await batchLib.findUnfinishedRun(stage);
 
-  if (!existing) {
-    console.log(`No unfinished '${stage}' batch found — submitting a new one...`);
+  if (!run) {
+    console.log(`No unfinished '${stage}' submission run found — starting a new one...`);
     console.log(`Date cutoff: ${sinceDate ? `${sinceDate} — only conversations whose MOST RECENT message is on/after this date` : 'none — every eligible conversation is in scope'}`);
-    if (limit !== undefined) console.log(`Submission cap: ${limit} conversation(s) (--limit)`);
+    if (limit !== undefined) console.log(`Eligible-set cap: ${limit} conversation(s) (--limit)`);
 
-    const result = await batchLib.submitBatch({ stage, sinceDate, limit });
-    if (!result.submitted) {
-      console.log(`\nNothing submitted (${result.reason}).`);
-      if (result.batch) console.log(`Existing/unfinished batch: ${result.batch.anthropic_batch_id} (status: ${result.batch.anthropic_status})`);
-      if (result.orphanedAnthropicBatchId) console.log(`URGENT: real Anthropic batch ${result.orphanedAnthropicBatchId} was created but could not be recorded locally — see the error above and reconcile manually.`);
+    const result = await batchLib.startSubmissionRun({ stage, sinceDate, limit });
+    if (!result.started) {
+      console.log(`\nNothing started (${result.reason}).`);
+      if (result.run) console.log(`Existing/unfinished run: ${result.run.id} (assembled: ${!!result.run.assembled_at})`);
       return;
     }
-    console.log(`\nSubmitted batch ${result.batch.anthropic_batch_id} with ${result.requestCount} conversation(s)${result.skipped ? ` (${result.skipped} skipped — no messages found)` : ''}.`);
-    console.log('Batches can take up to 24 hours. Re-run this same command later to check status.');
+    console.log(`\nRun ${result.run.id} started with ${result.eligibleCount} eligible conversation(s), durably recorded — the expensive eligibility scan's results can never be lost now, regardless of what happens to submission from here.`);
+    run = result.run;
+  } else {
+    console.log(`Found unfinished '${stage}' submission run: ${run.id} (eligible_count: ${run.eligible_count == null ? 'not yet known — assembly may be incomplete' : run.eligible_count})`);
+  }
+
+  if (!run.assembled_at) {
+    console.error(`\nRun ${run.id} has not finished being durably recorded (assembled_at is not set). This should only happen if a previous run crashed between inserting the run row and finishing its item inserts — a narrow, documented window (see lib/significance-batch.js's own header). This needs manual review: re-running this command will NOT re-attempt the eligibility scan for an already-started run (by design — that discipline is the whole point of this fix), so it also cannot fix this on its own.`);
+    process.exitCode = 1;
     return;
   }
 
-  console.log(`Found unfinished '${stage}' batch: ${existing.anthropic_batch_id} (last known status: ${existing.anthropic_status})`);
-  const checked = await batchLib.checkAndResume({ stage });
-  if (!checked.found) {
-    console.log('No unfinished batch found on re-check (it may have just completed) — re-run to submit a new one.');
+  console.log('\nDispatching any undispatched chunks for this run to Anthropic (safe to re-run — already-dispatched chunks are always skipped)...');
+  if (force) console.log('--force given: skipping the expected-pool sanity check for this call.');
+  const dispatch = await batchLib.dispatchRunChunks({ runId: run.id, force });
+
+  if (dispatch.blockedBySanityCheck) {
+    const { sanityCheck } = dispatch;
+    const ratioPct = (sanityCheck.ratio * 100).toFixed(1);
+    const thresholdPct = (batchLib.EXPECTED_POOL_MIN_RATIO * 100).toFixed(0);
+    console.error('\n' + '!'.repeat(72));
+    console.error('SANITY CHECK FAILED — NOTHING WAS SENT TO ANTHROPIC FOR THIS RUN');
+    console.error('!'.repeat(72));
+    console.error(`Found:    ${sanityCheck.eligibleCount} eligible conversation(s) (this run's real, already-scanned result).`);
+    console.error(`Expected: roughly ${sanityCheck.expectedPool} (a fast estimate: ${sanityCheck.totalMatchingMessages} matching message(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)).`);
+    console.error(`That's only ${ratioPct}% of the expected pool — below the ${thresholdPct}% threshold.`);
+    console.error('This is the same shape as the real 2026-09-18 incident (33,755 found vs. ~84,192 expected, 40% of the pool) — an unexplained silent undercount.');
+    console.error('\nThe run itself is safe: its full eligible list is already durably saved (nothing was lost), and nothing has been dispatched to Anthropic yet.');
+    console.error('\nWhat to do next:');
+    console.error(`  1. In the Supabase SQL Editor, look at this run's row (archive_search_significance_submission_runs, id = ${run.id}) and spot-check a sample of its submission_run_items against what you'd expect for since_date=${run.since_date || '(none)'}.`);
+    console.error('  2. If the low count is real and expected (e.g. a genuinely small or already-mostly-processed date window), re-run this exact same command with --force to dispatch anyway.');
+    console.error('  3. If the low count looks wrong, do NOT force it — flag this run for Neo/Q to investigate before anything is sent to Anthropic.');
+    process.exitCode = 1;
     return;
   }
 
-  console.log(`Anthropic status: ${checked.remote.processing_status}`);
-  if (checked.remote.request_counts) {
-    const c = checked.remote.request_counts;
-    console.log(`Request counts — processing: ${c.processing}, succeeded: ${c.succeeded}, errored: ${c.errored}, canceled: ${c.canceled}, expired: ${c.expired}`);
+  console.log(`Dispatch: ${dispatch.chunksSubmitted} chunk(s) submitted, ${dispatch.itemsDispatched} conversation(s) dispatched` +
+    `${dispatch.itemsSkippedEmpty ? `, ${dispatch.itemsSkippedEmpty} skipped (no messages found)` : ''}` +
+    `${dispatch.itemsSkippedOversized ? `, ${dispatch.itemsSkippedOversized} skipped (a single conversation too large to fit in any chunk — needs manual review)` : ''}` +
+    `${dispatch.chunksRateLimited ? `, ${dispatch.chunksRateLimited} chunk(s) rate-limited by Anthropic (will retry on the next run of this command)` : ''}.`);
+
+  console.log('\nChecking every chunk (Anthropic batch) in this run and writing back any results that have finished (resumable, unchanged per-chunk polling/write-back logic)...');
+  const resumed = await batchLib.checkAndResumeRun({ runId: run.id });
+  if (resumed.results.length === 0) {
+    console.log('  (no chunks submitted yet for this run — nothing to check.)');
+  }
+  for (const r of resumed.results) {
+    if (r.alreadyCompleted) { console.log(`  chunk ${r.batchId}: already complete.`); continue; }
+    if (r.failed) { console.log(`  chunk ${r.batchId}: marked failed — skipped.`); continue; }
+    const writeBackText = r.writeBackSummary
+      ? `, write-back: ${r.writeBackSummary.processed} processed (${r.writeBackSummary.written_significance} wrote a significance row), ${r.writeBackSummary.errors} error(s)`
+      : '';
+    console.log(`  chunk ${r.batchId} (${r.anthropicBatchId}): status=${r.anthropicStatus}${writeBackText}${r.nowCompleted ? ' — now fully complete' : ''}`);
   }
 
-  if (checked.remote.processing_status !== 'ended') {
-    console.log('\nBatch is still processing at Anthropic. Nothing more to do right now — re-run later.');
+  if (!resumed.fullyProcessed) {
+    console.log(`\nRun ${run.id} is not fully processed yet — some chunk(s) are still processing at Anthropic (up to 24 hours each), still rate-limited, or still need write-back. Re-run this same command later to continue.`);
     return;
   }
 
-  if (!checked.batch.results_retrieved_at) {
-    console.log('\nBatch ended, but results were not fully retrieved this run (see any errors above) — re-run to retry downloading results.');
-    return;
-  }
-
-  console.log('\nResults retrieved. Writing results back to the database (resumable)...');
-  const writeBackSummary = await batchLib.writeBackBatch({ batchId: checked.batch.id, anthropicBatchId: checked.batch.anthropic_batch_id });
-  console.log(`Write-back: ${writeBackSummary.processed} processed (${writeBackSummary.written_significance} wrote a significance row, ${writeBackSummary.no_row_written} did not — errored/canceled/expired/unparseable), ${writeBackSummary.errors} error(s), ${writeBackSummary.unmatched} unmatched.`);
-
-  const nowCompleted = await batchLib.maybeMarkBatchCompleted(checked.batch.id);
-  if (!nowCompleted) {
-    console.log('\nSome items still need write-back (see counts above, or an interrupted run) — re-run this command to continue.');
-    return;
-  }
-  console.log(`\nBatch ${checked.batch.anthropic_batch_id} is now fully complete.`);
+  console.log(`\nRun ${run.id} is now fully processed — every chunk's results have been written back.`);
 
   if (stage === 'call_1') {
-    const report = await batchLib.reportNeedsCall2({ batchId: checked.batch.id });
-    console.log(`\n${report.needsCall2Count} of ${report.totalWithSignificanceRow} conversation(s) with a written significance row need a Call 2 pass.`);
+    let totalWithSignificanceRow = 0;
+    let totalNeedsCall2 = 0;
+    for (const r of resumed.results) {
+      const report = await batchLib.reportNeedsCall2({ batchId: r.batchId });
+      totalWithSignificanceRow += report.totalWithSignificanceRow;
+      totalNeedsCall2 += report.needsCall2Count;
+    }
+    console.log(`\n${totalNeedsCall2} of ${totalWithSignificanceRow} conversation(s) with a written significance row (across this run's ${resumed.results.length} chunk(s)) need a Call 2 pass.`);
     console.log('Call 2 is NOT submitted automatically. Review these Call 1 results first (same review step the pilot always required), then run this tool again with --stage=call_2 once that submission path is built.');
   }
 }
@@ -281,4 +383,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseStageArg, parseLimitArg };
+module.exports = { parseStageArg, parseLimitArg, parseForceArg };

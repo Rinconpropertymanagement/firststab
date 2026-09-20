@@ -25,7 +25,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 
 const assert = require('node:assert/strict');
 
-const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier } = require('./lib/weighting');
+const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
 const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails, applyRadiusTiering } = require('./lib/rentcast');
 const {
   mapComparable: mapCrmlsComparable,
@@ -292,6 +292,64 @@ async function main() {
 
     const recommended = computeRecommendedRange(comps, 5);
     assert.ok(recommended.low >= 4000, `expected recommended.low (${recommended.low}) to stay at or above the smallest well-matched comp once the 1bd comps are excluded`);
+  });
+
+  await check('propertyTypeMultiplier() returns 1 for every comp when subjectPropertyType is not passed (no filtering, identical to the function not existing)', () => {
+    assert.equal(propertyTypeMultiplier('townhouse', undefined), 1);
+    assert.equal(propertyTypeMultiplier('single_family', undefined), 1);
+    assert.equal(propertyTypeMultiplier(null, undefined), 1);
+  });
+
+  await check('propertyTypeMultiplier() trusts an exact property type match fully and excludes any known different type entirely — no partial-credit tier like bedroom count has', () => {
+    assert.equal(propertyTypeMultiplier('single_family', 'single_family'), 1, 'exact match');
+    assert.equal(propertyTypeMultiplier('townhouse', 'single_family'), 0, 'townhouse vs single_family -> excluded, not partial weight');
+    assert.equal(propertyTypeMultiplier('condo', 'single_family'), 0, 'condo vs single_family -> excluded');
+    assert.equal(propertyTypeMultiplier('apartment', 'single_family'), 0, 'apartment vs single_family -> excluded');
+  });
+
+  await check('propertyTypeMultiplier() treats missing/unknown property type on either side as NOT a confirmed mismatch (multiplier 1, not excluded) — unlike bedroom count, there is no "unknown -> moderate trust" tier, just "unknown -> don\'t punish it"', () => {
+    assert.equal(propertyTypeMultiplier(null, 'single_family'), 1, 'unknown comp type');
+    assert.equal(propertyTypeMultiplier(undefined, 'single_family'), 1, 'undefined comp type');
+    assert.equal(propertyTypeMultiplier('single_family', null), 1, 'unknown subject type');
+  });
+
+  await check('buildWeightedSample() with subjectPropertyType fully excludes a known-different-type comp regardless of how well its bedroom count matches', () => {
+    const sample = buildWeightedSample([
+      { monthly_rent: 4000, listing_status: 'active', bedrooms: 5, property_type: 'single_family' }, // exact match on both -> repeatCount 4
+      { monthly_rent: 3500, listing_status: 'active', bedrooms: 5, property_type: 'townhouse' },      // exact bedroom match, but wrong type -> repeatCount 0
+    ], 5, 'single_family');
+    assert.equal(sample.filter(n => n === 4000).length, 4);
+    assert.equal(sample.filter(n => n === 3500).length, 0, 'a property-type mismatch must zero out the repeat count even with a perfect bedroom match');
+    assert.equal(sample.length, 4);
+  });
+
+  await check('computeRecommendedRange() and computeRawRange() with subjectPropertyType exclude a known-different-type comp from both numbers, reproducing the 9831 Rio Grande St bug fix (a townhouse comp counted at full weight alongside single-family comps)', () => {
+    // Mirrors the real bug: a single-family subject with well-matched
+    // single-family comps around $4,650-$5,000, plus a townhouse comp at
+    // $4,300 that was previously counted at full weight and could pull the
+    // low end down even though "they aren't the same" (Peter's own words).
+    const comps = [
+      { monthly_rent: 4650, listing_status: 'active', bedrooms: 4, property_type: 'single_family', is_rincon_managed: false },
+      { monthly_rent: 4800, listing_status: 'active', bedrooms: 4, property_type: 'single_family', is_rincon_managed: false },
+      { monthly_rent: 5000, listing_status: 'active', bedrooms: 4, property_type: 'single_family', is_rincon_managed: false },
+      { monthly_rent: 4300, listing_status: 'active', bedrooms: 4, property_type: 'townhouse', is_rincon_managed: false },
+    ];
+    const withoutSubjectPropertyType = computeRawRange(comps, 4);
+    assert.equal(withoutSubjectPropertyType.low, 4300, 'sanity check: without subjectPropertyType, the townhouse comp still pulls raw.low down');
+
+    const raw = computeRawRange(comps, 4, 'single_family');
+    assert.equal(raw.low, 4650, 'raw.low must exclude the townhouse comp once subjectPropertyType is passed');
+    assert.equal(raw.high, 5000);
+
+    const recommended = computeRecommendedRange(comps, 4, 'single_family');
+    assert.ok(recommended.low >= 4650, `expected recommended.low (${recommended.low}) to stay at or above the smallest single-family comp once the townhouse comp is excluded`);
+
+    // No regression: an all-single-family pool (e.g. 1895 Dorrit St) has
+    // nothing to exclude, so passing subjectPropertyType must not change
+    // the range at all.
+    const allSameType = comps.slice(0, 3);
+    assert.deepEqual(computeRawRange(allSameType, 4, 'single_family'), computeRawRange(allSameType, 4));
+    assert.deepEqual(computeRecommendedRange(allSameType, 4, 'single_family'), computeRecommendedRange(allSameType, 4));
   });
 
   console.log('--- lib/rentcast.js ---');

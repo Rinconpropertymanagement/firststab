@@ -62,6 +62,23 @@ function sizeSimilarityMultiplier(compBedrooms, subjectBedrooms) {
   return 0;
 }
 
+// A comp's property type either matches the subject's or it doesn't — no
+// partial-credit tier like bedroom count has, because a townhouse isn't
+// "somewhat comparable" to a single-family house, it's a different kind of
+// structure (Peter's own words: "anyone who reviews the report will bring
+// up how they arent the same"). Exact match: counts normally. Known,
+// different type: excluded entirely from both range calculations (same
+// treatment as a severe bedroom mismatch or a Rincon-managed comp — still
+// saved and shown to the user for context, just not counted in the math).
+// Unknown type on either side (not every source cleanly reports it):
+// NOT excluded — an unknown type isn't a confirmed mismatch, same "don't
+// punish a real comp for missing metadata" reasoning sizeSimilarityMultiplier
+// already uses for a comp with no bedroom count at all.
+function propertyTypeMultiplier(compPropertyType, subjectPropertyType) {
+  if (!subjectPropertyType || !compPropertyType) return 1;
+  return compPropertyType === subjectPropertyType ? 1 : 0;
+}
+
 // Builds a weighted sample by repeating each comp's rent `weight` times, so
 // percentiles computed on the sample naturally lean toward higher-trust
 // comps without needing a more complex weighted-percentile formula.
@@ -72,13 +89,19 @@ function sizeSimilarityMultiplier(compBedrooms, subjectBedrooms) {
 // bedroom off" multiplier produces a whole number of repeats) — that scale
 // only ever compares comps to each other within this one call, so it never
 // needs to match the unscaled, subjectBedrooms-omitted case number-for-number.
-function buildWeightedSample(comps, subjectBedrooms) {
+// subjectPropertyType is the same kind of optional add-on (see
+// propertyTypeMultiplier) — omitted, it defaults to 1 for every comp, so
+// it never changes repeatCount on its own. It's combined multiplicatively
+// with the bedroom multiplier: a property-type mismatch (0) zeroes out the
+// repeat count regardless of how well bedrooms match, since these are two
+// independent hard/soft filters that must both pass.
+function buildWeightedSample(comps, subjectBedrooms, subjectPropertyType) {
   const sizeAware = typeof subjectBedrooms === 'number';
   const sample = [];
   for (const comp of comps) {
     const statusWeight = weightFor(comp.listing_status);
     const repeatCount = sizeAware
-      ? Math.round(statusWeight * sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) * 2) // *2 keeps the 0.5 multiplier producing whole repeats without changing the existing 3/2/1 status weights' relative proportions
+      ? Math.round(statusWeight * sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) * propertyTypeMultiplier(comp.property_type, subjectPropertyType) * 2) // *2 keeps the 0.5 multiplier producing whole repeats without changing the existing 3/2/1 status weights' relative proportions
       : statusWeight;
     for (let i = 0; i < repeatCount; i++) sample.push(Number(comp.monthly_rent));
   }
@@ -142,14 +165,15 @@ function excludeRinconManaged(comps) {
 }
 
 /**
- * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed, bedrooms}
+ * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed, bedrooms, property_type}
  * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
+ * @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
  * @returns {{low: number|null, mid: number|null, high: number|null}}
  */
-function computeRecommendedRange(comps, subjectBedrooms) {
+function computeRecommendedRange(comps, subjectBedrooms, subjectPropertyType) {
   const eligible = excludeRinconManaged(comps);
   if (!eligible.length) return { low: null, mid: null, high: null };
-  const sample = buildWeightedSample(eligible, subjectBedrooms);
+  const sample = buildWeightedSample(eligible, subjectBedrooms, subjectPropertyType);
   return {
     low:  round2(percentile(sample, 25)),
     mid:  round2(percentile(sample, 50)),
@@ -160,16 +184,20 @@ function computeRecommendedRange(comps, subjectBedrooms) {
 /**
  * The unweighted spread across the actual comps pulled — distinct from the
  * recommended range above (see migration design notes on raw_comp_rent_*
- * vs. recommended_rent_*). Comps 2+ bedrooms off from the subject are
- * excluded here too (same principle as excludeRinconManaged) — a 1-bed
- * apartment isn't a legitimate comp for a 5-bed house in either number.
- * @param {object[]} comps - each needs {monthly_rent, is_rincon_managed, bedrooms}
+ * vs. recommended_rent_*). Comps 2+ bedrooms off from the subject, or a
+ * known different property type, are excluded here too (same principle as
+ * excludeRinconManaged) — a 1-bed apartment isn't a legitimate comp for a
+ * 5-bed house in either number, and neither is a townhouse for a
+ * single-family house.
+ * @param {object[]} comps - each needs {monthly_rent, is_rincon_managed, bedrooms, property_type}
  * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
+ * @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
  * @returns {{low: number|null, high: number|null}}
  */
-function computeRawRange(comps, subjectBedrooms) {
+function computeRawRange(comps, subjectBedrooms, subjectPropertyType) {
   const eligible = excludeRinconManaged(comps)
-    .filter(c => sizeSimilarityMultiplier(c.bedrooms, subjectBedrooms) > 0);
+    .filter(c => sizeSimilarityMultiplier(c.bedrooms, subjectBedrooms) > 0)
+    .filter(c => propertyTypeMultiplier(c.property_type, subjectPropertyType) > 0);
   if (!eligible.length) return { low: null, high: null };
   const rents = eligible.map(c => Number(c.monthly_rent)).filter(n => Number.isFinite(n));
   if (!rents.length) return { low: null, high: null };
@@ -183,6 +211,7 @@ module.exports = {
   SELF_SOURCED_TRUSTED_SOURCE_NAMES,
   weightFor,
   sizeSimilarityMultiplier,
+  propertyTypeMultiplier,
   buildWeightedSample,
   percentile,
   isExcludedRinconManaged,

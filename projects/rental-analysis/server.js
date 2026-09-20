@@ -455,8 +455,8 @@ app.post('/api/rental-analysis/run', async (req, res) => {
 
     // Numbers first — the narrative step below only explains these, never
     // computes or overrides them.
-    const recommended = computeRecommendedRange(compsWithMatch, bedrooms);
-    const raw = computeRawRange(compsWithMatch, bedrooms);
+    const recommended = computeRecommendedRange(compsWithMatch, bedrooms, subject_property_type);
+    const raw = computeRawRange(compsWithMatch, bedrooms, subject_property_type);
 
     // Rationale + per-comp narrative text. Non-fatal on failure — the
     // numbers above already stand on their own, and rationale/narrative

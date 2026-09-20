@@ -46,6 +46,7 @@ const {
 const { findBestPropertyMatch, normalizeAddress, houseNumber, hasParseableHouseNumber, unitIdentifier, addressesMatch, dedupeComps } = require('./lib/property-matching');
 const { parseNarrativeOutput, buildPrompt, describeComp } = require('./lib/narrative');
 const { suggestAddresses, mapSuggestion, geocodeAddress } = require('./lib/locationiq');
+const { suggestAddresses: suggestAddressesGoogle, mapSuggestion: mapSuggestionGoogle } = require('./lib/google-places');
 const marketDataLib = require('./lib/market-data');
 const { mapMarketData, fetchMarketData, getMarketData, normalizeZip, isFresh, FRESHNESS_WINDOW_DAYS } = marketDataLib;
 const sourcesLib = require('./lib/sources');
@@ -2086,6 +2087,188 @@ async function main() {
       }
     } finally {
       global.fetch = originalFetch;
+    }
+  });
+
+  console.log('--- lib/google-places.js ---');
+
+  await check('mapSuggestion() maps a real-shaped Google Places Autocomplete (New) placePrediction to just {formattedAddress}', () => {
+    // Field names match developers.google.com's real REST reference for
+    // AutocompleteSuggestion/PlacePrediction/FormattableText (confirmed
+    // against Google's real docs, not guessed) — this is the field-masked
+    // shape this project's own request actually asks for
+    // (X-Goog-FieldMask: suggestions.placePrediction.text.text).
+    const googleSuggestion = {
+      placePrediction: {
+        text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA', matches: [{ startOffset: 0, endOffset: 4 }] },
+      },
+    };
+    const mapped = mapSuggestionGoogle(googleSuggestion);
+    assert.deepEqual(mapped, { formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' });
+    // Only formattedAddress — place/placeId/structuredFormat/types/etc.
+    // must not pass through; nothing downstream needs more than the string.
+    assert.deepEqual(Object.keys(mapped), ['formattedAddress']);
+  });
+
+  await check('mapSuggestion() returns null (not a throw) for a queryPrediction (a generic search suggestion with no real place behind it)', () => {
+    // Google's Autocomplete (New) can mix queryPrediction entries into the
+    // same suggestions array — this tool only wants real addresses, and
+    // the field mask sent by suggestAddresses() means a query-only entry
+    // comes back with neither `placePrediction` nor `queryPrediction`
+    // populated, so this also covers a bare `{}` entry.
+    assert.equal(mapSuggestionGoogle({ queryPrediction: { text: { text: 'pizza near me' } } }), null);
+    assert.equal(mapSuggestionGoogle({}), null);
+    assert.equal(mapSuggestionGoogle(null), null);
+  });
+
+  await check('suggestAddresses() returns [] without calling fetch at all for a query under 3 characters (never wastes a request)', async () => {
+    const originalFetch = global.fetch;
+    let fetchCalled = false;
+    global.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => ({ suggestions: [] }) }; };
+    try {
+      assert.deepEqual(await suggestAddressesGoogle(''), []);
+      assert.deepEqual(await suggestAddressesGoogle('1'), []);
+      assert.deepEqual(await suggestAddressesGoogle('12'), []);
+      assert.deepEqual(await suggestAddressesGoogle('  1 '), []); // whitespace-only-effective length still under 3
+      assert.equal(fetchCalled, false, 'a too-short query must never reach fetch()');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('suggestAddresses() POSTs to places:autocomplete with the documented auth header, field mask, and JSON body — and maps a real-shaped multi-result response', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    let requestedUrl = null;
+    let requestedOptions = null;
+    global.fetch = async (url, options) => {
+      requestedUrl = url;
+      requestedOptions = options;
+      return {
+        ok: true,
+        json: async () => ({
+          suggestions: [
+            { placePrediction: { text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA' } } },
+            { placePrediction: { text: { text: '1895 Dorrit Ave, Oxnard, CA 93030, USA' } } },
+          ],
+        }),
+      };
+    };
+    try {
+      const suggestions = await suggestAddressesGoogle('1895 Dorrit');
+      assert.deepEqual(suggestions, [
+        { formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' },
+        { formattedAddress: '1895 Dorrit Ave, Oxnard, CA 93030, USA' },
+      ]);
+      // Confirms this hits the real documented endpoint, not a guessed one.
+      assert.equal(requestedUrl, 'https://places.googleapis.com/v1/places:autocomplete');
+      assert.equal(requestedOptions.method, 'POST');
+      // Confirms the key is sent as the documented `X-Goog-Api-Key` header,
+      // not a query param (LocationIQ's convention) or RentCast's
+      // `X-Api-Key` header name.
+      assert.equal(requestedOptions.headers['X-Goog-Api-Key'], 'test-key');
+      // Confirms the field mask requests exactly (and only) the field
+      // mapSuggestion() needs — never anything that would pull in a Place
+      // Details-priced field.
+      assert.equal(requestedOptions.headers['X-Goog-FieldMask'], 'suggestions.placePrediction.text.text');
+      const body = JSON.parse(requestedOptions.body);
+      assert.equal(body.input, '1895 Dorrit');
+      assert.deepEqual(body.includedRegionCodes, ['us']);
+      assert.ok(body.locationRestriction && body.locationRestriction.rectangle, 'expected a locationRestriction.rectangle to hard-restrict to Southern California');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() caps results at 5 even when Google returns more', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        suggestions: Array.from({ length: 8 }, (_, i) => ({ placePrediction: { text: { text: `${100 + i} Dorrit St, Newbury Park, CA` } } })),
+      }),
+    });
+    try {
+      const suggestions = await suggestAddressesGoogle('Dorrit St');
+      assert.equal(suggestions.length, 5);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() skips queryPrediction entries mixed into a real response rather than passing them through', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          { placePrediction: { text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA' } } },
+          { queryPrediction: { text: { text: 'dorrit street apartments' } } },
+        ],
+      }),
+    });
+    try {
+      const suggestions = await suggestAddressesGoogle('Dorrit');
+      assert.deepEqual(suggestions, [{ formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' }]);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) on a non-OK HTTP response', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({ ok: false, status: 403, text: async () => 'API key not valid' });
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) when fetch itself rejects (network error)', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => { throw new Error('network is down'); };
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) when Google returns a body with no suggestions array (e.g. an error object)', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({ ok: true, json: async () => ({ error: { code: 400, message: 'Invalid request' } }) });
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() throws a clear error when GOOGLE_PLACES_API_KEY is missing — the one case address-suggest\'s server.js route logs before still returning []', async () => {
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    delete process.env.GOOGLE_PLACES_API_KEY;
+    try {
+      await assert.rejects(() => suggestAddressesGoogle('1895 Dorrit St'), /Missing GOOGLE_PLACES_API_KEY/);
+    } finally {
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
     }
   });
 

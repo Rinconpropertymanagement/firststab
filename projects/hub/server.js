@@ -219,11 +219,24 @@ rental-analysis/router.js's own startup warnings):
                               (developers.rentcast.io, free tier: 50
                               requests/month). Without it, every analysis
                               fails at the "no comps" step.
-  LOCATIONIQ_API_KEY             Live address autocomplete
-                              (locationiq.com, free, no credit card).
-                              Without it, address-suggest just returns no
-                              suggestions — typing an address manually
-                              still works.
+  GOOGLE_PLACES_API_KEY          Live address autocomplete, via Google
+                              Places Autocomplete (New) (Google Cloud
+                              Console, free tier: 10,000 Autocomplete
+                              Requests/month). Switched from LocationIQ
+                              2026-09-20. Without it, address-suggest just
+                              returns no suggestions — typing an address
+                              manually still works.
+  MAPTILER_API_KEY               Background tiles for the comp map
+                              (maptiler.com, free tier: 100,000 tile
+                              loads/month). Read by the BROWSER via
+                              GET /api/rental-analysis/map-config, not
+                              this server directly. Switched from
+                              OpenStreetMap's own tile servers 2026-09-20
+                              after they began actively blocking this
+                              tool's real traffic — see the CSP comment
+                              below. Without it, the comp map renders with
+                              no background tiles, everything else on the
+                              page still works.
   RECORE_CLIENT_ID, RECORE_CLIENT_SECRET, RECORE_SERVER_TOKEN,
   RECORE_BROWSER_TOKEN           CRMLS comp source (rental-analysis/
                               lib/crmls.js). Without these, that one comp
@@ -371,25 +384,34 @@ app.use((req, res, next) => {
 // self-hosted (rental-analysis/dashboard/vendor/leaflet/, served
 // same-origin — see rental-analysis/router.js) specifically so this shared,
 // app-wide CSP would NOT need script-src widened for a third-party CDN.
-// But the map TILES themselves are fetched live, at runtime, from
-// OpenStreetMap's tile servers (L.tileLayer('https://{s}.tile.
-// openstreetmap.org/...') in that dashboard's own JS — not visible in a
-// plain grep of the HTML source, only in the running page, so confirmed by
-// actually loading the page and checking, not assumed) — there's no
-// reasonable way to self-host a global map tile set the way a small,
-// fixed set of library files can be. img-src is the narrowest directive
-// that can be widened for this: unlike script-src, an img-src exception
-// can't be used to run attacker script or exfiltrate more than "a viewer
-// loaded a map tile," and this only adds one specific, well-known public
-// tile host (OpenStreetMap's own *.tile.openstreetmap.org subdomains) —
-// not a blanket https: allowance.
+// But the map TILES themselves are fetched live, at runtime, from a tile
+// host (L.tileLayer('https://api.maptiler.com/maps/...') in that
+// dashboard's own JS — not visible in a plain grep of the HTML source,
+// only in the running page, so confirmed by actually loading the page and
+// checking, not assumed) — there's no reasonable way to self-host a global
+// map tile set the way a small, fixed set of library files can be. img-src
+// is the narrowest directive that can be widened for this: unlike
+// script-src, an img-src exception can't be used to run attacker script or
+// exfiltrate more than "a viewer loaded a map tile," and this only adds
+// one specific host — not a blanket https: allowance.
+//
+// SWITCHED 2026-09-20 from OpenStreetMap's own tile servers
+// (*.tile.openstreetmap.org) to MapTiler (api.maptiler.com): OSM's tile
+// servers are documented (operations.osmfoundation.org/policies/tiles/) as
+// casual/personal use only and started returning "Access blocked" /
+// x-blocked responses under this tool's real usage — confirmed live via
+// curl, not a fluke. MapTiler is a real production tile provider (free
+// tier: 100,000 loads/month) meant for exactly this. The old OSM entry is
+// removed, not just supplemented — this tool no longer requests tiles from
+// OpenStreetMap's servers at all, so keeping that allowance around would
+// just be unused CSP surface.
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
         'script-src': ["'self'", "'unsafe-inline'"],
-        'img-src': ["'self'", 'data:', 'https://*.tile.openstreetmap.org'],
+        'img-src': ["'self'", 'data:', 'https://api.maptiler.com'],
       },
     },
   })

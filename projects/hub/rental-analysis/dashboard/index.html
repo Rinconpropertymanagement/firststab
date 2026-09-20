@@ -439,6 +439,7 @@
 
     /* ── Comp map ── */
     .map-wrap {
+      position: relative; /* anchors .maptiler-logo-control to the map, not the page */
       border: 1px solid #e5e7eb;
       border-radius: 8px;
       overflow: hidden;
@@ -446,6 +447,13 @@
     }
     #compMap { height: 340px; width: 100%; background: #f3f4f6; }
     .leaflet-popup-content { font-family: inherit; }
+    /* MapTiler's free-plan terms require this logo (linking to maptiler.com)
+       be shown on the map — see initMap()'s comment for the source. Sized
+       down from MapTiler's own default so it doesn't dominate a map this
+       small; kept out of Leaflet's other bottom-left controls (none exist
+       today) via Leaflet's own control-corner positioning. */
+    .maptiler-logo-control { background: none; }
+    .maptiler-logo-control img { display: block; height: 18px; width: auto; }
 
     /* ── Comp cards ── */
     .comp-cards {
@@ -1362,8 +1370,31 @@
     );
   }
 
-  // ── Comp map (Leaflet + OpenStreetMap, no API key required) ────────────
+  // ── Comp map (Leaflet + MapTiler tiles) ─────────────────────────────────
+  // Was OpenStreetMap's own tile servers (no key required) — switched
+  // 2026-09-20 after those servers started returning "Access blocked"
+  // under this tool's real usage (confirmed live via curl: OSM's tile
+  // servers are documented, operations.osmfoundation.org/policies/tiles/,
+  // as casual/personal use only, not for a real application's traffic).
+  // MapTiler tiles need a key, fetched once from this server (which reads
+  // it from MAPTILER_API_KEY) via loadMapConfig() below — see that
+  // function and GET /api/rental-analysis/map-config in server.js for why
+  // this key is handed to the browser at all, unlike RentCast/Google Places.
   let compMapInstance = null;
+  let mapTileKey = null;
+
+  async function loadMapConfig() {
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/map-config');
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      mapTileKey = (data && data.tileKey) || null;
+    } catch (err) {
+      console.error(err);
+      // mapTileKey stays null — initMap() below renders the map without
+      // background tiles rather than failing the whole report.
+    }
+  }
 
   function hasNumericCoords(obj) {
     return obj != null && typeof obj.latitude === 'number' && typeof obj.longitude === 'number';
@@ -1404,10 +1435,36 @@
     const map = L.map(el, { scrollWheelZoom: false });
     compMapInstance = map;
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
-    }).addTo(map);
+    if (mapTileKey) {
+      // URL format, options (crossOrigin, attribution text) and the
+      // free-plan logo requirement below all verified live against
+      // MapTiler's own current docs (docs.maptiler.com/leaflet/examples/
+      // raster-tiles-in-leaflet-js/ and .../how-to-add-maptiler-
+      // attribution-to-a-map/), 2026-09-20 — not assumed syntax.
+      L.tileLayer('https://api.maptiler.com/maps/streets-v4/256/{z}/{x}/{y}.png?key=' + mapTileKey, {
+        maxZoom: 19,
+        crossOrigin: true,
+        attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank" rel="noopener">&copy; MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">&copy; OpenStreetMap contributors</a>',
+      }).addTo(map);
+
+      // MapTiler's free-plan terms require their logo be shown on the map,
+      // in addition to the text attribution above (which Leaflet's own
+      // attribution control already renders automatically). Not required
+      // on a paid plan — if Rincon ever upgrades, this can come out.
+      const mapTilerLogo = L.control({ position: 'bottomleft' });
+      mapTilerLogo.onAdd = function () {
+        const div = L.DomUtil.create('div', 'maptiler-logo-control leaflet-control');
+        div.innerHTML = '<a href="https://www.maptiler.com" target="_blank" rel="noopener" aria-label="MapTiler"><img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler logo"></a>';
+        return div;
+      };
+      mapTilerLogo.addTo(map);
+    } else {
+      // No key configured (MAPTILER_API_KEY unset, or the config fetch
+      // failed) — render the map without background tiles rather than
+      // requesting tiles MapTiler would reject. Markers/popups below still
+      // work; #compMap's own CSS background (#f3f4f6) fills the gap.
+      console.warn('[rental-analysis] No MapTiler key available — comp map rendering without background tiles.');
+    }
 
     const points = [];
 
@@ -1586,6 +1643,7 @@
 
   // ── Init ──────────────────────────────────────────────────────────────
   loadUsers();
+  loadMapConfig();
 </script>
 
 </body>

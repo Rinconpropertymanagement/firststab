@@ -186,6 +186,7 @@
  *   node sync-move-in-leases.js                    Pull the last 3 days (default) of updated Move-In processes, confirm currency, upsert/delete/retract in Supabase
  *   node sync-move-in-leases.js --since-days 730    Wide-window INITIAL BACKFILL — run once before the nightly cron takes over (see spec, "The initial backfill is a separate step from the nightly cron")
  *   node sync-move-in-leases.js --dry-run           Pull and log each closed process's confirmed-current/superseded/no-match verdict; no property/unit matching against real properties/units is skipped, but no Supabase WRITES happen
+ *   node sync-move-in-leases.js --backfill-geocode  ONE-TIME: geocode every existing row missing latitude/longitude (see GEOCODING below); no LeadSimple API call at all on this path
  *   node sync-move-in-leases.js --help
  *
  * Invoked via cron, same pattern as sync-property-stages.js — no router.js
@@ -193,14 +194,67 @@
  * on. The actual crontab entry / cron-*.sh wrapper on Sally is Scotty's
  * setup work, excluded from this repo's deploys, same documented convention
  * as sync-property-stages.js's own header and deploy-to-sally.sh.
+ *
+ * GEOCODING (added for the distance-based comp tiering build, see
+ * projects/rental-analysis/lib/constants.js's NARROW_SEARCH_RADIUS_MILES /
+ * WIDE_SEARCH_RADIUS_MILES)
+ * ============================================================
+ * leadsimple_new_leases has no coordinates of its own (confirmed live — see
+ * migration 20260919000000) — every OTHER field this table stores comes
+ * from LeadSimple/Rincon's own leases table, but latitude/longitude are
+ * geocoded here, from the row's own address/city/state/zip_code (all
+ * already-permitted fields — see DATA BOUNDARY above), via LocationIQ's
+ * forward-geocoding endpoint (rental-analysis/lib/locationiq.js's
+ * geocodeAddress(), reused as-is, not duplicated). Every newly-confirmed-
+ * current row gets geocoded at insert time, going forward. A failed/empty
+ * geocode never blocks the row from being written — latitude/longitude
+ * just stay null, same "don't invent, leave unknown" policy as every other
+ * ambiguous field in this pipeline — and lib/leadsimple.js falls back to
+ * today's zip-only scoping for any row with null coordinates.
+ * --backfill-geocode (see Usage above) is the one-time pass for rows that
+ * predate this column existing at all.
  */
 
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '..', '.env') });
+// LOCATIONIQ_API_KEY lives only in projects/rental-analysis/.env (that
+// project's own self-contained env file, same pattern as its server.js/
+// test suite — see that project's lib/locationiq.js header), not the root
+// .env this script otherwise loads. dotenv.config() never overwrites a var
+// already set in process.env, so loading this second file on top is safe —
+// it only fills in the one key the root .env doesn't have, same "geocode
+// using LocationIQ, already integrated in this project" reuse the build
+// asked for, without duplicating a second copy of that key.
+require('dotenv').config({ path: path.join(__dirname, '..', '..', 'rental-analysis', '.env') });
 
 const { createClient } = require('@supabase/supabase-js');
 
 const leadsimple = require('./lib/leadsimple-connector');
+// Reused as-is, not duplicated: a clean, self-contained module (no server/
+// Express coupling, unlike rental-analysis/lib/property-matching.js, which
+// is why THIS script's own header explains duplicating that one's rules
+// instead of requiring it). geocodeAddress() is new in this build — see
+// that file.
+const { geocodeAddress } = require(path.join('..', '..', 'rental-analysis', 'lib', 'locationiq'));
+
+// LocationIQ free tier: 2 requests/second (checked live against
+// locationiq.com/pricing, not assumed). Only matters for --backfill-geocode
+// (up to 257 rows in one run) and the rare night with several confirmed-
+// current rows at once — a single nightly row needs no throttling at all,
+// but this applies uniformly rather than special-casing "how many this
+// run" ahead of time.
+const LOCATIONIQ_MIN_MS_BETWEEN_CALLS = 550;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Same join shape as rental-analysis/lib/leadsimple.js's own buildAddress()
+// (address/city/state/zip_code -> one formatted string) — small enough to
+// duplicate locally rather than reach into that project's lib/leadsimple.js
+// (which itself requires lib/supabase.js at module load time; pulling that
+// in here just for a one-line string join isn't worth the coupling).
+function buildGeocodeAddress(row) {
+  const cityStateZip = [row.city, [row.state, row.zip_code].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [row.address, cityStateZip].filter(Boolean).join(', ');
+}
 
 const TABLE = 'leadsimple_new_leases';
 const MOVE_IN_PROCESS_TYPE_NAME = '02 Move Ins';
@@ -222,22 +276,102 @@ const LEASE_MATCH_TOLERANCE_DAYS = 45;
 function printHelp() {
   console.log(`
 Usage:
-  node sync-move-in-leases.js                    Pull the last ${DEFAULT_SINCE_DAYS} days (default) of updated "${MOVE_IN_PROCESS_TYPE_NAME}" processes, confirm currency against Rincon's own leases table, upsert/retract in Supabase
+  node sync-move-in-leases.js                    Pull the last ${DEFAULT_SINCE_DAYS} days (default) of updated "${MOVE_IN_PROCESS_TYPE_NAME}" processes, confirm currency against Rincon's own leases table, upsert/retract in Supabase, geocode each newly-written row
   node sync-move-in-leases.js --since-days 730    Wide-window INITIAL BACKFILL — run once before the nightly cron takes over
   node sync-move-in-leases.js --dry-run           Pull and log each closed process's confirmed-current/superseded/no-match verdict; no Supabase writes
+  node sync-move-in-leases.js --backfill-geocode  ONE-TIME: geocode every existing row that has no latitude/longitude yet (does not touch the LeadSimple API or run the normal sync at all)
   node sync-move-in-leases.js --help              Show this help and exit
 `.trim());
 }
 
 function parseArgs(argv) {
-  const args = { sinceDays: DEFAULT_SINCE_DAYS, dryRun: false, help: false };
+  const args = { sinceDays: DEFAULT_SINCE_DAYS, dryRun: false, backfillGeocode: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--backfill-geocode') args.backfillGeocode = true;
     else if (a === '--since-days') args.sinceDays = Number(argv[++i]);
   }
   return args;
+}
+
+// Guards against a real data-loss risk, not just a friendlier error message:
+// the normal sync's CONFIRMED CURRENT path (below) DELETEs any existing row
+// for a unit before INSERTing its replacement. If latitude/longitude don't
+// exist yet on TABLE (migration 20260919000000 not yet applied — Peter
+// applies migrations himself via Supabase's SQL Editor, see this repo's own
+// memory notes, so there's no guarantee of ordering between "this code
+// deploys" and "that migration runs"), the insert would fail on every
+// confirmed-current row AFTER its old row was already deleted — silently
+// dropping that unit's comp until a later successful run. Checked live
+// against the real table while building this: confirmed the columns do not
+// exist yet as of this build. Refusing to proceed beats risking that.
+async function assertCoordinateColumnsExist(supabase) {
+  const { error } = await supabase.from(TABLE).select('latitude, longitude').limit(1);
+  if (error && (error.code === '42703' || /column .* does not exist/i.test(error.message || ''))) {
+    console.error(
+      `[leadsimple move-in-leases sync] ${TABLE}.latitude/longitude don't exist yet in the database. ` +
+      `Run supabase/migrations/20260919000000_add_coordinates_to_leadsimple_new_leases.sql in Supabase's SQL Editor first ` +
+      `(Peter applies migrations by hand — see this repo's own convention), then re-run this script. ` +
+      `Refusing to proceed: the normal sync path deletes a unit's existing row before inserting its replacement, ` +
+      `and that insert would fail right now, losing the old row with nothing written in its place.`
+    );
+    process.exit(1);
+  } else if (error) {
+    throw new Error(`Unexpected error checking for ${TABLE}.latitude/longitude: ${error.message}`);
+  }
+}
+
+/**
+ * ONE-TIME (or re-run-safe) backfill: geocodes every row in TABLE that has
+ * no latitude/longitude yet. Separate code path from main() below — never
+ * touches the LeadSimple API, never matches units, never writes rent/lease
+ * data. Re-running this is always safe and cheap: it only ever selects rows
+ * still missing coordinates (a row that failed geocoding last time is
+ * retried; a row that already succeeded is skipped, not re-charged against
+ * the LocationIQ rate limit).
+ */
+async function backfillGeocode(supabase) {
+  const ts = new Date().toISOString();
+  const rows = await fetchAllRows(supabase, TABLE, 'id, address, city, state, zip_code, latitude, longitude')
+    .then(all => all.filter(r => r.latitude == null || r.longitude == null));
+
+  console.log(`[${ts}] --backfill-geocode: ${rows.length} row(s) in ${TABLE} still missing coordinates.`);
+
+  let geocoded = 0, failed = 0;
+  for (const row of rows) {
+    const address = buildGeocodeAddress(row);
+    let result = null;
+    try {
+      result = await geocodeAddress(address);
+    } catch (err) {
+      // Only throws for a missing LOCATIONIQ_API_KEY (a real setup problem)
+      // — same convention as every other assertConfigured() in this
+      // codebase. Fatal, not a per-row skip, since every remaining row
+      // would fail identically.
+      console.error(`[${ts}] --backfill-geocode: fatal — ${err.message}`);
+      process.exit(1);
+    }
+    if (result) {
+      const { error } = await supabase.from(TABLE).update({ latitude: result.latitude, longitude: result.longitude }).eq('id', row.id);
+      if (error) {
+        failed++;
+        console.warn(`  row ${row.id} ("${address}"): geocoded but the Supabase update failed: ${error.message}`);
+      } else {
+        geocoded++;
+      }
+    } else {
+      // Never guessed, never blocks — same "don't invent, leave unknown"
+      // policy this whole project follows. Left null for this run; will be
+      // retried on the next --backfill-geocode run (see function header).
+      failed++;
+      console.warn(`  row ${row.id} ("${address}"): LocationIQ returned no match — left null.`);
+    }
+    await sleep(LOCATIONIQ_MIN_MS_BETWEEN_CALLS);
+  }
+
+  console.log(`[${ts}] --backfill-geocode done: ${geocoded} geocoded, ${failed} failed/left null, out of ${rows.length} row(s) processed.`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -486,6 +620,23 @@ async function main() {
     process.exit(1);
   }
 
+  // --backfill-geocode needs Supabase + LocationIQ only — never touches
+  // LeadSimple at all, so LEADSIMPLE_API_KEY isn't required for this path.
+  if (args.backfillGeocode) {
+    const missingBackfill = [];
+    if (!process.env.SUPABASE_URL) missingBackfill.push('SUPABASE_URL');
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missingBackfill.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!process.env.LOCATIONIQ_API_KEY) missingBackfill.push('LOCATIONIQ_API_KEY');
+    if (missingBackfill.length > 0) {
+      console.error(`Missing environment variables: ${missingBackfill.join(', ')}. LOCATIONIQ_API_KEY lives in projects/rental-analysis/.env.`);
+      process.exit(1);
+    }
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    await assertCoordinateColumnsExist(supabase);
+    await backfillGeocode(supabase);
+    return;
+  }
+
   const missing = [];
   if (!process.env.LEADSIMPLE_API_KEY) missing.push('LEADSIMPLE_API_KEY');
   if (!args.dryRun && !process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
@@ -496,6 +647,11 @@ async function main() {
   }
 
   const supabase = args.dryRun ? null : createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+  // See assertCoordinateColumnsExist()'s own header — real data-loss risk on
+  // the delete-before-insert path below, not just a friendlier error.
+  // dry-run never reaches that path (no writes happen at all), so it's
+  // skipped there.
+  if (!args.dryRun) await assertCoordinateColumnsExist(supabase);
   const ts = new Date().toISOString();
   const sinceUnix = Math.floor(Date.now() / 1000) - args.sinceDays * 24 * 60 * 60;
 
@@ -535,6 +691,8 @@ async function main() {
     // succeeded — so it always matches a real SELECT count() against the
     // table for a fresh backfill.
     retracted_within_this_run: 0,
+    geocoded: 0,
+    geocode_failed: 0,
     errors: [],
   };
   const confirmedUnitIdsThisRun = new Set();
@@ -677,7 +835,36 @@ async function main() {
       rent: currency.rent,
       lease_start_date: currency.leaseStart,
       closed_at: proc.closed_at,
+      latitude: null,
+      longitude: null,
     };
+
+    // Geocode this newly-confirmed-current row (see the migration adding
+    // these two columns). Never blocks the sync: a failed/empty geocode
+    // just leaves latitude/longitude null (same "don't invent, leave
+    // unknown" policy as every other mapper here), and lib/leadsimple.js
+    // falls back to today's zip-only scoping for a null-coordinate row. A
+    // missing LOCATIONIQ_API_KEY is treated the same as any other geocode
+    // failure here (logged, left null) rather than aborting the whole
+    // run — RentCast/CRMLS-style "real setup problem" throws are for a
+    // standalone script whose only job is geocoding (see backfillGeocode()
+    // above); this sync's real job is the leases currency check, and one
+    // missing key for one of its many env vars shouldn't drop otherwise-
+    // good lease data on the floor.
+    try {
+      const geocoded = await geocodeAddress(buildGeocodeAddress(row));
+      if (geocoded) {
+        row.latitude = geocoded.latitude;
+        row.longitude = geocoded.longitude;
+        summary.geocoded++;
+      } else {
+        summary.geocode_failed++;
+      }
+    } catch (err) {
+      summary.geocode_failed++;
+      console.warn(`  process ${proc.id}: geocoding failed (${err.message}) — leaving latitude/longitude null.`);
+    }
+    await sleep(LOCATIONIQ_MIN_MS_BETWEEN_CALLS);
 
     const { error: insertErr } = await supabase.from(TABLE).insert(row);
     if (insertErr) {

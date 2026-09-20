@@ -35,10 +35,23 @@
  *     just needs source_name to end up 'LeadSimple Move-Ins' exactly (set
  *     by lib/sources.js's runActiveSources(), from the rental_comp_sources
  *     row's own name) — that exact string is what the exemption keys off.
+ *
+ * COORDINATES / RADIUS TIERING (added for the distance-based comp tiering
+ * build — see lib/constants.js): leadsimple_new_leases now carries a
+ * latitude/longitude column pair (migration 20260919000000), geocoded by
+ * sync-move-in-leases.js via LocationIQ — NOT read from LeadSimple itself,
+ * which has no coordinates anywhere in its own data (confirmed live). A row
+ * geocoded before this build, or one whose geocode failed, simply has null
+ * coordinates — pullLeadSimpleComps() below degrades to exactly the
+ * previous zip-only behavior for those, never throws. The query itself
+ * stays zip-scoped either way (no DB-side radius query exists here); the
+ * narrow/wide tiering only decides which of the already zip-fetched rows to
+ * keep.
  */
 
 const { select } = require('./supabase');
-const { extractZip } = require('./crmls');
+const { extractZip, haversineMiles } = require('./crmls');
+const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
 
 // "The last year or two at the most," per Peter's own words (spec, "What Q
 // Needs to Build This") — scopes which of Rincon's own confirmed-current
@@ -84,21 +97,31 @@ function buildAddress(row) {
  * Maps one leadsimple_new_leases row into a partial rental_comps row.
  * Exported (like every other source's mapComparable) so the test suite can
  * exercise it directly without a real Supabase table.
+ *
+ * @param {object} row
+ * @param {number|null} [distanceMiles] - real Haversine distance from the
+ *   subject, computed by pullLeadSimpleComps() when both the subject and
+ *   this row have real coordinates (see the migration adding
+ *   leadsimple_new_leases.latitude/longitude). Omitted (-> null) for a row
+ *   with no coordinates of its own (not yet backfilled, or its geocode
+ *   failed) or when the subject has none — never guessed, same convention
+ *   as lib/crmls.js's own mapComparable().
  */
-function mapComparable(row) {
+function mapComparable(row, distanceMiles = null) {
+  const hasCoords = typeof row.latitude === 'number' && typeof row.longitude === 'number';
   return {
     address: buildAddress(row),
     property_type: FROM_LEADSIMPLE_PROPERTY_TYPE[row.property_type] || null,
     bedrooms: typeof row.bedrooms === 'number' ? row.bedrooms : null,
     bathrooms: typeof row.bathrooms === 'number' ? row.bathrooms : null,
     sqft: typeof row.sqft === 'number' ? row.sqft : null,
-    // No coordinates anywhere in LeadSimple's data (confirmed live — see
-    // spec's Technical Notes) — this source is zip-scoped only, same as
-    // lib/crmls.js's own zip-fallback path when RentCast coordinates aren't
-    // available. Never guessed.
-    distance_miles: null,
-    latitude: null,
-    longitude: null,
+    // Real, computed distance when pullLeadSimpleComps() could compute one
+    // (subject + this row both geocoded); null otherwise — this source is
+    // zip-scoped at the query level either way (see pullLeadSimpleComps()),
+    // same as lib/crmls.js's own zip-fallback path. Never guessed.
+    distance_miles: typeof distanceMiles === 'number' ? distanceMiles : null,
+    latitude: hasCoords ? row.latitude : null,
+    longitude: hasCoords ? row.longitude : null,
     monthly_rent: typeof row.rent === 'number' ? row.rent : Number(row.rent),
     // Always false — see file header. leadsimple_new_leases carries no
     // is_estimated_price column at all; hardcoded here, same pattern
@@ -123,19 +146,22 @@ function mapComparable(row) {
 
 /**
  * Pulls Rincon's own confirmed-current new-lease comps for one analysis,
- * from the synced leadsimple_new_leases table — zip-scoped (no coordinates
- * exist on this data, see file header) and lookback-windowed on `closed_at`
- * (MOVE_IN_LOOKBACK_MONTHS above). Same {comps: [...]} shape every other
- * source returns, so lib/sources.js's loop doesn't need to know which
- * source it called.
+ * from the synced leadsimple_new_leases table — zip-scoped at the query
+ * level (unchanged: no DB-side radius query exists for this table, see the
+ * migration) and lookback-windowed on `closed_at` (MOVE_IN_LOOKBACK_MONTHS
+ * above). Same {comps: [...]} shape every other source returns, so
+ * lib/sources.js's loop doesn't need to know which source it called.
  *
  * Self-sufficient, like lib/crmls.js's own extractZip() fallback path:
- * parses the zip straight off the subject's typed address, so this doesn't
- * depend on RentCast running first or on lib/sources.js's ordering (unlike
- * lib/crmls.js's coordinate-box search, this source has no coordinate path
- * to opt into even when RentCast did run first).
+ * parses the zip straight off the subject's typed address, so the QUERY
+ * itself doesn't depend on RentCast running first. Radius TIERING (see
+ * below) does opt into lib/sources.js's enrichedSubject.latitude/longitude
+ * when RentCast already geocoded the subject — same mechanism
+ * lib/crmls.js's box search uses — but degrades to exactly the previous
+ * zip-only behavior (no tiering, every fetched row kept, distance_miles
+ * null) whenever those coordinates aren't available, never throws over it.
  *
- * @param {{address: string}} subject
+ * @param {{address: string, latitude?: number, longitude?: number}} subject
  * @returns {Promise<{comps: object[], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: string|null}>}
  */
 async function pullLeadSimpleComps(subject) {
@@ -152,8 +178,38 @@ async function pullLeadSimpleComps(subject) {
   const query = `select=*&zip_code=eq.${encodeURIComponent(zip)}&closed_at=gte.${cutoffDate}`;
   const rows = await select('leadsimple_new_leases', query);
 
+  // Radius tiering — same policy as lib/rentcast.js/lib/crmls.js (see
+  // lib/constants.js), applied on top of the zip-scoped rows already
+  // fetched above rather than a second query (no DB-side radius query
+  // exists for this table). Only runs when the subject itself has real
+  // coordinates (fed forward by lib/sources.js from RentCast, when active);
+  // otherwise every row is mapped as-is, distance_miles null throughout —
+  // exactly today's zip-only behavior, never a throw.
+  const hasSubjectCoords = typeof subject.latitude === 'number' && typeof subject.longitude === 'number';
+  let comps;
+  if (hasSubjectCoords) {
+    const withDistance = (rows || []).map(row => {
+      const hasRowCoords = typeof row.latitude === 'number' && typeof row.longitude === 'number';
+      const distanceMiles = hasRowCoords
+        ? haversineMiles(subject.latitude, subject.longitude, row.latitude, row.longitude)
+        : null;
+      return { row, distanceMiles };
+    });
+    // A row beyond WIDE_SEARCH_RADIUS_MILES is dropped, same as CRMLS's own
+    // box-corner post-filter — a zip code can span well past 2 miles, so
+    // this is the one place that bound gets enforced for this source. A row
+    // with no distance (not yet geocoded/backfilled) is kept as-is, same
+    // "no basis to compute or drop it" rule lib/crmls.js uses.
+    const bounded = withDistance.filter(({ distanceMiles }) => distanceMiles === null || distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
+    const narrow = bounded.filter(({ distanceMiles }) => typeof distanceMiles === 'number' && distanceMiles <= NARROW_SEARCH_RADIUS_MILES);
+    const tiered = narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS ? narrow : bounded;
+    comps = tiered.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles));
+  } else {
+    comps = (rows || []).map(row => mapComparable(row));
+  }
+
   return {
-    comps: (rows || []).map(mapComparable),
+    comps,
     // This source does no AVM-style estimate and doesn't geocode the
     // subject — same reasoning as lib/crmls.js's own nulls here.
     subjectEstimatedRent: null,

@@ -40,7 +40,7 @@
  * disagree with.
  */
 
-const { weightFor, SELF_SOURCED_TRUSTED_SOURCE_NAMES } = require('./weighting');
+const { weightFor, SELF_SOURCED_TRUSTED_SOURCE_NAMES, exclusionReason } = require('./weighting');
 
 function normalizeAddress(addr) {
   if (!addr) return '';
@@ -188,6 +188,25 @@ function findBestPropertyMatch(targetAddress, properties) {
 // math. Walks the list once; for each comp, checks it against every comp
 // already kept via addressesMatch() on .address. No match -> keep it. Match
 // found -> keep whichever of the two is more trustworthy:
+//   0. (Only when subjectBedrooms/subjectPropertyType are passed — see
+//      below) Prefer whichever candidate would NOT be excluded from the
+//      range math (exclusionReason(), lib/weighting.js) over one that
+//      would be. This has to be checked BEFORE the status-weight rule in
+//      step 1, not after or instead of it: two sources can genuinely
+//      disagree about the same real unit's property type or bedroom count
+//      (confirmed real case, 2026-09-20 — a duplex subject where sources
+//      disagreed on type), and status weight has no way to know that one
+//      candidate would survive exclusionReason() downstream and the other
+//      wouldn't. Left unguarded, the OLD status-weight-only rule could
+//      keep a higher-weight 'leased' row that then gets fully zero-weighted
+//      by exclusionReason() (wrong type/size), silently discarding a
+//      lower-weight 'active' row that would have actually counted toward
+//      the range — with no trace, unlike a normal exclusion which at least
+//      stays visible. A comp worth zero weight is worse to keep than one
+//      worth ANY weight, regardless of listing_status. This step is a
+//      no-op (falls through to step 1 unchanged) whenever the two
+//      candidates AGREE on excluded status (both excluded, or neither) —
+//      it only ever overrides the outcome when they disagree.
 //   1. Higher listing_status weight (weightFor(), lib/weighting.js) wins —
 //      reusing the real weighting so this can't drift out of sync with it.
 //   2. Tie -> prefer a comp from a trusted, self-sourced source (e.g.
@@ -205,7 +224,24 @@ function findBestPropertyMatch(targetAddress, properties) {
 //      distance_miles over a missing one.
 //   4. Still tied -> keep whichever was already kept (first-seen wins).
 // The loser is dropped entirely — not inserted, not returned, not shown.
-function dedupeComps(comps) {
+//
+// @param {object[]} comps
+// @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
+//   (lib/weighting.js). Omitted (together with subjectPropertyType below),
+//   step 0 above is skipped entirely and dedupeComps() behaves EXACTLY as
+//   it did before this parameter existed — same pattern computeRawRange()/
+//   sizeSimilarityMultiplier()/propertyTypeMultiplier() already use, so
+//   every existing caller that doesn't pass these is unaffected. Gating on
+//   "was real subject context passed at all" (rather than letting
+//   exclusionReason()'s own Rincon-managed check run unconditionally) is
+//   deliberate: isExcludedRinconManaged() alone doesn't actually depend on
+//   subjectBedrooms/subjectPropertyType, but step 0 only ever activates
+//   when the caller opts in with real subject context, so a caller that
+//   omits both parameters gets provably identical behavior, not just
+//   "usually" identical behavior.
+// @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
+function dedupeComps(comps, subjectBedrooms, subjectPropertyType) {
+  const checkExclusion = typeof subjectBedrooms === 'number' || typeof subjectPropertyType === 'string';
   const kept = [];
   for (const comp of (comps || [])) {
     const matchIndex = kept.findIndex(k => addressesMatch(k.address, comp.address));
@@ -214,6 +250,21 @@ function dedupeComps(comps) {
       continue;
     }
     const existing = kept[matchIndex];
+
+    if (checkExclusion) {
+      const existingExcluded = !!exclusionReason(existing, subjectBedrooms, subjectPropertyType);
+      const compExcluded = !!exclusionReason(comp, subjectBedrooms, subjectPropertyType);
+      if (existingExcluded !== compExcluded) {
+        // Exactly one of the two would count toward the range -> keep that
+        // one, full stop. Skips the status-weight/trusted-source/distance/
+        // first-seen tie-break below entirely, since none of those matter
+        // if the alternative contributes zero weight anyway.
+        if (existingExcluded) kept[matchIndex] = comp;
+        continue;
+      }
+      // else: both excluded, or neither -> no signal here, fall through.
+    }
+
     const existingWeight = weightFor(existing.listing_status);
     const compWeight = weightFor(comp.listing_status);
     if (compWeight > existingWeight) {

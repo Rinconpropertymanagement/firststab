@@ -84,7 +84,7 @@ const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/google-places');
 const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
-const { computeRecommendedRange, computeRawRange, isExcludedRinconManaged } = require('./lib/weighting');
+const { computeRecommendedRange, computeRawRange, exclusionReason } = require('./lib/weighting');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
@@ -454,13 +454,24 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
       const match = findBestPropertyMatch(c.address, properties);
       return { ...c, comp_property_id: match ? match.id : null, is_rincon_managed: !!match };
     });
-    const compsWithMatch = dedupeComps(matchedComps);
+    // subjectBedrooms/subjectPropertyType are passed so dedup's own
+    // tie-break can prefer whichever duplicate would actually count toward
+    // the range (see dedupeComps()'s own comment, lib/property-matching.js)
+    // — real sources can disagree on a unit's type or bedroom count.
+    const compsWithMatch = dedupeComps(matchedComps, bedrooms, subject_property_type);
     if (compsWithMatch.length !== matchedComps.length) {
       console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedComps.length} after=${compsWithMatch.length}`);
     }
 
     const recommended = computeRecommendedRange(compsWithMatch, bedrooms, subject_property_type);
     const raw = computeRawRange(compsWithMatch, bedrooms, subject_property_type);
+
+    // The one shared "why doesn't this comp count" verdict (lib/weighting.js
+    // exclusionReason()) computed once, here, and reused by both the
+    // narrative prompt below and the API response further down — so
+    // narrative.js and the dashboard can never independently drift on which
+    // comps are excluded. Positional array, same order as compsWithMatch.
+    const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, subject_property_type));
 
     let rationale = null;
     let narrativesByIndex = compsWithMatch.map(() => null);
@@ -474,7 +485,12 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
           leaseTermMonths,
           furnished: isFurnished,
         },
-        comps: compsWithMatch,
+        // Each comp annotated with its exclusion_reason (or null) so
+        // describeComp()/buildPrompt() (lib/narrative.js) can tell Claude
+        // plainly which comps contributed zero weight. compsWithMatch
+        // itself is untouched (spread, not mutated) since it still needs
+        // to feed compRows below with only real DB columns.
+        comps: compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: exclusionReasons[i] })),
         recommended,
         raw,
         subjectEstimatedRent,
@@ -512,9 +528,14 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
 
     const insertedComps = await insert('rental_comps', compRows);
 
+    // rental_comps has no source_name column and dashboard/index.html is
+    // plain browser JS with no way to require() lib/weighting.js's
+    // exclusionReason() directly — see server.js's copy of this comment for
+    // the full explanation. Same reason codes narrative.js's
+    // EXCLUSION_LABELS keys off of.
     const responseComps = insertedComps.map((row, i) => ({
       ...row,
-      is_excluded_rincon_managed: isExcludedRinconManaged(compsWithMatch[i]),
+      exclusion_reason: exclusionReasons[i],
     }));
 
     const [updatedAnalysis] = await update('rental_analyses', `id=eq.${analysis.id}`, {

@@ -150,7 +150,7 @@ const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/google-places');
 const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
-const { computeRecommendedRange, computeRawRange, isExcludedRinconManaged } = require('./lib/weighting');
+const { computeRecommendedRange, computeRawRange, exclusionReason } = require('./lib/weighting');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 
@@ -507,11 +507,15 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // Collapse the same real unit reported twice (e.g. RentCast inferring
     // 'off_market' on a unit CRMLS separately confirms as 'leased') into one
     // comp before anything downstream counts or ranges them — see
-    // dedupeComps() in lib/property-matching.js. Reassigning compsWithMatch
-    // (rather than introducing a new name) means every existing downstream
-    // use below — recommended/raw range math, narrative, the DB insert —
-    // automatically runs on the deduped list with no further changes.
-    const compsWithMatch = dedupeComps(matchedComps);
+    // dedupeComps() in lib/property-matching.js. subjectBedrooms/
+    // subjectPropertyType are passed so dedup's own tie-break can prefer
+    // whichever duplicate would actually count toward the range (see that
+    // function's comment) — real sources can disagree on a unit's type or
+    // bedroom count. Reassigning compsWithMatch (rather than introducing a
+    // new name) means every existing downstream use below — recommended/raw
+    // range math, narrative, the DB insert — automatically runs on the
+    // deduped list with no further changes.
+    const compsWithMatch = dedupeComps(matchedComps, bedrooms, subject_property_type);
     if (compsWithMatch.length !== matchedComps.length) {
       console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedComps.length} after=${compsWithMatch.length}`);
     }
@@ -520,6 +524,15 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // computes or overrides them.
     const recommended = computeRecommendedRange(compsWithMatch, bedrooms, subject_property_type);
     const raw = computeRawRange(compsWithMatch, bedrooms, subject_property_type);
+
+    // The one shared "why doesn't this comp count" verdict (lib/weighting.js
+    // exclusionReason()) computed once, here, and reused by both the
+    // narrative prompt below and the API response further down — so
+    // narrative.js and the dashboard can never independently drift on which
+    // comps are excluded. Positional array, same order as compsWithMatch;
+    // every downstream use below relies on that same order already (see
+    // narrativesByIndex/compRows/responseComps).
+    const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, subject_property_type));
 
     // Rationale + per-comp narrative text. Non-fatal on failure — the
     // numbers above already stand on their own, and rationale/narrative
@@ -536,7 +549,14 @@ app.post('/api/rental-analysis/run', async (req, res) => {
           leaseTermMonths,
           furnished: isFurnished,
         },
-        comps: compsWithMatch,
+        // Each comp annotated with its exclusion_reason (or null) so
+        // describeComp()/buildPrompt() (lib/narrative.js) can tell Claude
+        // plainly which comps contributed zero weight — never done as a
+        // separate lookup, so it can't drift out of sync with the comp
+        // it describes. compsWithMatch itself is untouched (spread, not
+        // mutated) since it still needs to feed compRows below with only
+        // real DB columns.
+        comps: compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: exclusionReasons[i] })),
         recommended,
         raw,
         subjectEstimatedRent,
@@ -580,18 +600,20 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // memory, on compsWithMatch — see lib/sources.js's runActiveSources()
     // comment on why it's kept there and stripped before insert), and
     // dashboard/index.html is plain browser JS with no way to require()
-    // lib/weighting.js's isExcludedRinconManaged() directly. So the
-    // authoritative "is this comp internal-reference-only / not counted"
-    // verdict is computed here, once, using the one shared helper, and
-    // attached to the JSON response only (never persisted) — the dashboard
-    // just renders this boolean instead of re-deriving the trusted-source
-    // logic itself, so that logic can never drift out of sync across files.
-    // Positional match against compsWithMatch, same assumption
+    // lib/weighting.js's exclusionReason() directly. So the authoritative
+    // "why doesn't this comp count" verdict is computed once above
+    // (exclusionReasons, reused by the narrative prompt too) and attached
+    // to the JSON response only (never persisted) — the dashboard just
+    // renders this string instead of re-deriving the exclusion logic
+    // itself, so that logic can never drift out of sync across files. Same
+    // machine-readable reason codes narrative.js's EXCLUSION_LABELS keys
+    // off of ('rincon_managed' / 'property_type_mismatch' / 'size_mismatch'
+    // / null). Positional match against compsWithMatch, same assumption
     // narrativesByIndex[i] above already relies on (compRows was built by
     // mapping compsWithMatch in this exact order).
     const responseComps = insertedComps.map((row, i) => ({
       ...row,
-      is_excluded_rincon_managed: isExcludedRinconManaged(compsWithMatch[i]),
+      exclusion_reason: exclusionReasons[i],
     }));
 
     const [updatedAnalysis] = await update('rental_analyses', `id=eq.${analysis.id}`, {

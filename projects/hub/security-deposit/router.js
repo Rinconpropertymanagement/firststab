@@ -54,8 +54,16 @@ const { matchPhoto } = require('./lib/photo-matcher');
 const { resizeForMatching } = require('./lib/image-resize');
 const { readExifCaptureDate } = require('./lib/exif-date');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
+const { getRoleHolders, sendMail } = require('../lib/notify');
 
-// ─── Nodemailer (reminder emails) — same setup pattern as insurance ───────
+// ─── Nodemailer — kept ONLY for sendFailureAlertEmail's own independent
+// send path below. Every other email in this file (escalation email,
+// send-reminders) now goes through the shared lib/notify.js module
+// instead of this local copy — see that module's header for why. This one
+// copy deliberately stays: sendFailureAlertEmail is the "something is
+// fundamentally broken, tell Peter no matter what" fallback, and it must
+// keep working even if lib/notify.js itself has a bug — see that
+// function's own comment below.
 let nodemailer = null;
 try {
   nodemailer = require('nodemailer');
@@ -94,61 +102,41 @@ function createMailer() {
 // failure into a console.error nobody watches, so a broken mail send
 // looked identical to a successful one from the outside.
 async function sendEscalationEmail(kase, escalatedBy, reason) {
-  try {
-    const mailer = createMailer();
-    if (!mailer) {
-      console.error('[security-deposit email] Escalation email NOT sent — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured).');
-      return false;
-    }
-
-    const { data: roleRows } = await supabase
-      .from('team_member_tool_roles')
-      .select('team_members ( email, is_active )')
-      .eq('tool', 'security_deposit')
-      .in('role', ['director_of_operations', 'admin']);
-    const recipients = (roleRows || [])
-      .filter(r => r.team_members && r.team_members.is_active)
-      .map(r => r.team_members.email);
-
-    if (!recipients.length) {
-      console.warn('[security-deposit email] Case escalated but no active director_of_operations/admin recipients found for tool=security_deposit.');
-      return false;
-    }
-
-    const props = kase.leases && kase.leases.units && kase.leases.units.properties;
-    const addr = (props && (props.address || props.name)) || 'Unknown property';
-    const unit = kase.leases && kase.leases.units && kase.leases.units.unit_number;
-
-    const info = await mailer.sendMail({
-      from: process.env.GMAIL_USER,
-      to: recipients.join(', '),
-      subject: `Security Deposit Escalation: ${addr}${unit ? ' Unit ' + unit : ''}`,
-      text: [
-        'A security deposit disposition has been escalated for your review.',
-        '',
-        `Property:      ${addr}${unit ? ' Unit ' + unit : ''}`,
-        `Deadline:      ${kase.disposition_deadline || '—'}`,
-        `Escalated by:  ${escalatedBy}`,
-        `Reason:        ${reason}`,
-        '',
-        'Please log in to the Rincon Hub and open Security Deposit to review.',
-      ].join('\n'),
-    });
-    // Nodemailer can resolve successfully while still rejecting individual
-    // addresses (bad address, full mailbox, etc.) — info.rejected lists
-    // those, same signal send-reminders below uses. Only truly clean if
-    // every recipient landed in .accepted and nothing came back rejected.
-    const rejected = info.rejected || [];
-    if (rejected.length) {
-      console.error(`[security-deposit email] Escalation email: ${rejected.length} of ${recipients.length} recipient(s) rejected: ${rejected.join(', ')}`);
-      return false;
-    }
-    console.log(`[security-deposit email] Escalation email sent to ${recipients.length} director(s) of operations`);
-    return true;
-  } catch (err) {
-    console.error('[security-deposit email] Failed to send escalation email:', err.message);
+  // Same recipients as before — everyone holding 'director_of_operations'
+  // OR 'admin' for tool='security_deposit', tool-wide (no pod filter) —
+  // now via the shared notify module's getRoleHolders() (which accepts an
+  // array of roles) instead of this file's own query.
+  const recipients = await getRoleHolders('security_deposit', ['director_of_operations', 'admin']);
+  if (!recipients.length) {
+    console.warn('[security-deposit email] Case escalated but no active director_of_operations/admin recipients found for tool=security_deposit.');
     return false;
   }
+
+  const props = kase.leases && kase.leases.units && kase.leases.units.properties;
+  const addr = (props && (props.address || props.name)) || 'Unknown property';
+  const unit = kase.leases && kase.leases.units && kase.leases.units.unit_number;
+
+  const result = await sendMail({
+    to: recipients,
+    subject: `Security Deposit Escalation: ${addr}${unit ? ' Unit ' + unit : ''}`,
+    text: [
+      'A security deposit disposition has been escalated for your review.',
+      '',
+      `Property:      ${addr}${unit ? ' Unit ' + unit : ''}`,
+      `Deadline:      ${kase.disposition_deadline || '—'}`,
+      `Escalated by:  ${escalatedBy}`,
+      `Reason:        ${reason}`,
+      '',
+      'Please log in to the Rincon Hub and open Security Deposit to review.',
+    ].join('\n'),
+  });
+  if (!result.ok) {
+    const detail = result.error || `${result.rejected.length} of ${recipients.length} recipient(s) rejected: ${result.rejected.join(', ')}`;
+    console.error(`[security-deposit email] Escalation email failed: ${detail}`);
+    return false;
+  }
+  console.log(`[security-deposit email] Escalation email sent to ${recipients.length} director(s) of operations`);
+  return true;
 }
 
 // ─── Failure alert — "something failed, tell a human" ─────────────────────
@@ -179,7 +167,7 @@ async function sendFailureAlertEmail(subject, body) {
   try {
     const mailer = createMailer();
     if (!mailer) {
-      console.error(`[security-deposit ALERT] Could not send failure alert — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured). Subject would have been: ${subject}`);
+      console.error(`[HUB-ALERT] Could not send failure alert — mailer unavailable (GMAIL_USER/GMAIL_APP_PASSWORD not configured). Subject would have been: ${subject}`);
       return false;
     }
     await mailer.sendMail({
@@ -188,10 +176,10 @@ async function sendFailureAlertEmail(subject, body) {
       subject: `[ALERT] ${subject}`,
       text: body,
     });
-    console.error(`[security-deposit ALERT] Failure alert sent to ${FAILURE_ALERT_RECIPIENT}: ${subject}`);
+    console.error(`[HUB-ALERT] Failure alert sent to ${FAILURE_ALERT_RECIPIENT}: ${subject}`);
     return true;
   } catch (err) {
-    console.error(`[security-deposit ALERT] Failure alert itself failed to send: ${err.message} — original subject: ${subject}`);
+    console.error(`[HUB-ALERT] Failure alert itself failed to send: ${err.message} — original subject: ${subject}`);
     return false;
   }
 }
@@ -3197,15 +3185,11 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
 
   // Every active pod_lead role holder gets every reminder in v1 — no
   // per-property pod routing yet (SPEC.md Deferred list / Open Item #2,
-  // Peter confirmed "fine" as the v1 starting point).
-  const { data: roleRows } = await supabase
-    .from('team_member_tool_roles')
-    .select('team_members ( email, is_active )')
-    .eq('tool', 'security_deposit')
-    .eq('role', 'pod_lead');
-  const recipients = (roleRows || [])
-    .filter(r => r.team_members && r.team_members.is_active)
-    .map(r => r.team_members.email);
+  // Peter confirmed "fine" as the v1 starting point). Still no pod filter
+  // here on purpose — the shared notify module CAN filter by pod now
+  // (Neo's schema supports it), but turning that on for this tool is
+  // Peter's decision to make separately, not bundled into this migration.
+  const recipients = await getRoleHolders('security_deposit', 'pod_lead');
 
   const list = due.map(c => {
     const addrProps = c.leases && c.leases.units && c.leases.units.properties;
@@ -3232,34 +3216,29 @@ internalRouter.post('/api/security-deposit/internal/send-reminders', async (req,
   // sendMail can also resolve successfully while rejecting individual
   // addresses (bad address, full mailbox) — info.rejected/.accepted is
   // the real per-recipient signal, same one sendEscalationEmail uses.
-  let sent = 0;
-  let failed = recipients.length;
-  let emailError = null;
-  let rejectedAddrs = [];
-  try {
-    const mailer = createMailer();
-    if (mailer) {
-      const info = await mailer.sendMail({
-        from: process.env.GMAIL_USER,
-        to: recipients.join(', '),
-        subject: `Security Deposit: ${due.length} disposition${due.length === 1 ? '' : 's'} approaching the 21-day deadline`,
-        text: `The following security deposit dispositions are approaching their 21-day deadline:\n\n${list}\n\nLog in to the Rincon Hub and open Security Deposit to review.`,
-      });
-      rejectedAddrs = info.rejected || [];
-      sent = (info.accepted || []).length;
-      failed = rejectedAddrs.length;
-      if (failed) {
-        console.error(`[${ts}] send-reminders: ${failed} of ${recipients.length} recipient(s) rejected: ${rejectedAddrs.join(', ')}`);
-      } else {
-        console.log(`[${ts}] send-reminders: notified ${sent} pod lead(s) about ${due.length} case(s)`);
-      }
-    } else {
-      emailError = 'Email not configured (GMAIL_USER/GMAIL_APP_PASSWORD missing).';
-      console.warn(`[${ts}] send-reminders: ${due.length} case(s) due but email is not configured (GMAIL_USER/GMAIL_APP_PASSWORD).`);
-    }
-  } catch (emailErr) {
-    emailError = emailErr.message;
-    console.error(`[${ts}] send-reminders email error:`, emailErr.message);
+  const result = await sendMail({
+    to: recipients,
+    subject: `Security Deposit: ${due.length} disposition${due.length === 1 ? '' : 's'} approaching the 21-day deadline`,
+    text: `The following security deposit dispositions are approaching their 21-day deadline:\n\n${list}\n\nLog in to the Rincon Hub and open Security Deposit to review.`,
+  });
+  const sent = result.sent;
+  const failed = result.failed;
+  const rejectedAddrs = result.rejected;
+  // Distinguish "mailer not configured" from "some/all recipients
+  // rejected" from "the send itself threw" the same way this route's
+  // pre-migration version did, so the JSON response below keeps reporting
+  // the real reason rather than a generic one.
+  const emailError = result.error === 'mailer_not_configured'
+    ? 'Email not configured (GMAIL_USER/GMAIL_APP_PASSWORD missing).'
+    : result.error;
+  if (rejectedAddrs.length) {
+    console.error(`[${ts}] send-reminders: ${failed} of ${recipients.length} recipient(s) rejected: ${rejectedAddrs.join(', ')}`);
+  } else if (result.ok) {
+    console.log(`[${ts}] send-reminders: notified ${sent} pod lead(s) about ${due.length} case(s)`);
+  } else if (result.error === 'mailer_not_configured') {
+    console.warn(`[${ts}] send-reminders: ${due.length} case(s) due but email is not configured (GMAIL_USER/GMAIL_APP_PASSWORD).`);
+  } else {
+    console.error(`[${ts}] send-reminders email error:`, emailError);
   }
 
   if (sent === 0 || failed > 0) {

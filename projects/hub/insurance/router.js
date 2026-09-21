@@ -68,68 +68,60 @@ const { createClient } = require('@supabase/supabase-js');
 const { extractPolicy } = require('./extract-policy');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
-// ─── Nodemailer (email notifications) — unchanged from the standalone app ──
-let nodemailer = null;
-try {
-  nodemailer = require('nodemailer');
-} catch (e) {
-  console.warn('[insurance email] nodemailer not installed — email notifications disabled. Run: npm install nodemailer');
-}
-
-function createMailer() {
-  if (!nodemailer || !process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) return null;
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-  });
-}
+// ─── Notifications — shared module (lib/notify.js) ─────────────────────────
+// Recipient lookups and the actual nodemailer send are now centralized
+// there (consolidated from this file's own copy, previously
+// near-identical to security-deposit/router.js's and archive-search/
+// router.js's own copies) — see that module's header for why.
+// sendPMQueueEmail/sendEscalationEmail below keep their same names and
+// signatures; only what they call to actually send changed.
+const { getSharedInbox, getRoleHolders, sendMail } = require('../lib/notify');
 
 async function sendPMQueueEmail(toEmail, entries) {
-  try {
-    const mailer = createMailer();
-    if (!mailer) return;
-    const list = entries.map(e =>
-      `- ${e.address}: AI flagged as ${e.aiStatus || 'pending review'}`
-    ).join('\n');
-    await mailer.sendMail({
-      from: process.env.GMAIL_USER,
-      to: toEmail,
-      subject: `Insurance Review Queue: ${entries.length} new polic${entries.length === 1 ? 'y' : 'ies'} need review`,
-      text: `The following policies were uploaded and need your review:\n\n${list}\n\nLog in to the Rincon Hub and open Insurance Compliance to review.`,
-    });
+  if (!toEmail) {
+    console.log('[email] PM queue notification skipped — no recipient configured for this pod yet.');
+    return;
+  }
+  const list = entries.map(e =>
+    `- ${e.address}: AI flagged as ${e.aiStatus || 'pending review'}`
+  ).join('\n');
+  const result = await sendMail({
+    to: toEmail,
+    subject: `Insurance Review Queue: ${entries.length} new polic${entries.length === 1 ? 'y' : 'ies'} need review`,
+    text: `The following policies were uploaded and need your review:\n\n${list}\n\nLog in to the Rincon Hub and open Insurance Compliance to review.`,
+  });
+  if (result.ok) {
     console.log(`[email] PM queue notification sent to ${toEmail}`);
-  } catch (err) {
-    console.error('[email] Failed to send PM queue email:', err.message);
+  } else {
+    console.error(`[email] Failed to send PM queue email to ${toEmail}: ${result.error || 'see [HUB-ALERT] above'}`);
   }
 }
 
 async function sendEscalationEmail(rec, reviewerName, notes, aiStatus) {
-  try {
-    const mailer = createMailer();
-    if (!mailer || !process.env.DO_EMAIL) return;
-    const addr = rec.property_address_on_policy || 'Unknown property';
-    await mailer.sendMail({
-      from: process.env.GMAIL_USER,
-      to: process.env.DO_EMAIL,
-      subject: `Insurance Escalation: ${addr} flagged as ${aiStatus}`,
-      text: [
-        'A policy has been escalated for your review.',
-        '',
-        `Property:   ${addr}`,
-        `Insurer:    ${rec.insurer_name || '—'}`,
-        `Policy #:   ${rec.policy_number || '—'}`,
-        `Expiration: ${rec.expiration_date || '—'}`,
-        `Coverage:   ${rec.coverage_amount ? '$' + Number(rec.coverage_amount).toLocaleString() : '—'}`,
-        `AI Status:  ${aiStatus}`,
-        `Escalated by: ${reviewerName}`,
-        notes ? `Notes: ${notes}` : '',
-        '',
-        'Please log in to the Rincon Hub and open Insurance Compliance to confirm.',
-      ].filter(l => l !== null).join('\n'),
-    });
+  if (!process.env.DO_EMAIL) return;
+  const addr = rec.property_address_on_policy || 'Unknown property';
+  const result = await sendMail({
+    to: process.env.DO_EMAIL,
+    subject: `Insurance Escalation: ${addr} flagged as ${aiStatus}`,
+    text: [
+      'A policy has been escalated for your review.',
+      '',
+      `Property:   ${addr}`,
+      `Insurer:    ${rec.insurer_name || '—'}`,
+      `Policy #:   ${rec.policy_number || '—'}`,
+      `Expiration: ${rec.expiration_date || '—'}`,
+      `Coverage:   ${rec.coverage_amount ? '$' + Number(rec.coverage_amount).toLocaleString() : '—'}`,
+      `AI Status:  ${aiStatus}`,
+      `Escalated by: ${reviewerName}`,
+      notes ? `Notes: ${notes}` : '',
+      '',
+      'Please log in to the Rincon Hub and open Insurance Compliance to confirm.',
+    ].filter(l => l !== null).join('\n'),
+  });
+  if (result.ok) {
     console.log('[email] Escalation email sent to DO');
-  } catch (err) {
-    console.error('[email] Failed to send escalation email:', err.message);
+  } else {
+    console.error(`[email] Failed to send escalation email: ${result.error || 'see [HUB-ALERT] above'}`);
   }
 }
 
@@ -991,14 +983,22 @@ router.post('/api/insurance/batch-save', requireInsuranceAccess, async (req, res
         else if (pod === 'Solimar') byPod.Solimar.push(e);
         else byPod.unknown.push(e);
       });
+      // Same two pod-team addresses as before, now resolved from
+      // shared_inboxes (Neo's migration) instead of hardcoded literals.
+      // Until Peter adds the 'faria_pod_team' / 'solimar_pod_team' rows
+      // there, these resolve to null and sendPMQueueEmail is a no-op for
+      // that pod — same "not configured yet" behavior as DO_EMAIL being
+      // unset elsewhere in this file, not an error.
+      const fariaEmail = await getSharedInbox('faria_pod_team');
+      const solimarEmail = await getSharedInbox('solimar_pod_team');
       if (byPod.Faria.length > 0)
-        await sendPMQueueEmail('fariateam@rinconmanagement.com', byPod.Faria);
+        await sendPMQueueEmail(fariaEmail, byPod.Faria);
       if (byPod.Solimar.length > 0)
-        await sendPMQueueEmail('solimarteam@rinconmanagement.com', byPod.Solimar);
+        await sendPMQueueEmail(solimarEmail, byPod.Solimar);
       // Unmatched properties go to both pod inboxes
       if (byPod.unknown.length > 0) {
-        await sendPMQueueEmail('fariateam@rinconmanagement.com', byPod.unknown);
-        await sendPMQueueEmail('solimarteam@rinconmanagement.com', byPod.unknown);
+        await sendPMQueueEmail(fariaEmail, byPod.unknown);
+        await sendPMQueueEmail(solimarEmail, byPod.unknown);
       }
     } catch (emailErr) {
       console.error(`[${ts}] PM email error:`, emailErr.message);
@@ -1458,36 +1458,33 @@ internalRouter.post('/api/insurance/internal/check-new-properties', async (req, 
     if (insErr) console.warn(`[${ts}] no_policy insert warn (${prop.name}):`, insErr.message);
   }
 
-  // Email all inspection coordinators — sourced from the new shared tables
-  // (team_member_tool_roles) instead of the old insurance_user_roles.
+  // Email the inspections shared inbox — previously emailed every
+  // 'inspection_coordinator' role-holder for tool='insurance_compliance'
+  // via getRoleHolders, but nobody holds that role today, so this always
+  // resolved to zero recipients. Peter confirmed this should go to a
+  // shared team inbox instead (shared_inboxes key: 'inspections'), same
+  // pattern as the faria_pod_team/solimar_pod_team lookups above. Until
+  // Peter adds that row, this resolves to null and the email below is
+  // skipped — same "not configured yet" behavior as those, not an error.
   try {
-    const mailer = createMailer();
-    if (mailer) {
-      const { data: icRows } = await supabase
-        .from('team_member_tool_roles')
-        .select('team_members ( email, is_active )')
-        .eq('tool', 'insurance_compliance')
-        .eq('role', 'inspection_coordinator');
-
-      const icEmails = (icRows || [])
-        .filter(r => r.team_members && r.team_members.is_active)
-        .map(r => r.team_members.email);
-
-      if (icEmails.length) {
-        const list = uninsured.map(p => `- ${p.name || p.address}`).join('\n');
-        await mailer.sendMail({
-          from: process.env.GMAIL_USER,
-          to: icEmails.join(', '),
-          subject: `Action Required: ${uninsured.length} New ${uninsured.length === 1 ? 'Property' : 'Properties'} — Insurance Documents Needed`,
-          text: [
-            `${uninsured.length} new ${uninsured.length === 1 ? 'property has' : 'properties have'} been added to the portfolio and need insurance documents:`,
-            '',
-            list,
-            '',
-            'Please log in to the Rincon Hub, open Insurance Compliance, and upload the declaration page for each.',
-          ].join('\n'),
-        });
-        console.log(`[${ts}] check-new-properties: notified ${icEmails.length} inspection coordinator(s)`);
+    const inspectionsInbox = await getSharedInbox('inspections');
+    if (inspectionsInbox) {
+      const list = uninsured.map(p => `- ${p.name || p.address}`).join('\n');
+      const result = await sendMail({
+        to: inspectionsInbox,
+        subject: `Action Required: ${uninsured.length} New ${uninsured.length === 1 ? 'Property' : 'Properties'} — Insurance Documents Needed`,
+        text: [
+          `${uninsured.length} new ${uninsured.length === 1 ? 'property has' : 'properties have'} been added to the portfolio and need insurance documents:`,
+          '',
+          list,
+          '',
+          'Please log in to the Rincon Hub, open Insurance Compliance, and upload the declaration page for each.',
+        ].join('\n'),
+      });
+      if (result.ok) {
+        console.log(`[${ts}] check-new-properties: notified inspections inbox (${inspectionsInbox})`);
+      } else {
+        console.error(`[${ts}] check-new-properties: notification email failed — ${result.error || 'see [HUB-ALERT] above'}`);
       }
     }
   } catch (emailErr) {

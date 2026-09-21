@@ -135,9 +135,29 @@ Environment variables required (.env file):
   HUB_BASE_URL                 (optional — used to build the password-reset
                               link; defaults to http://localhost:<HUB_PORT>)
 
-Optional (Insurance Compliance email notifications — degrades gracefully
-if unset, see insurance/router.js):
+Optional (email notifications — degrades gracefully if unset, see each
+tool's own router.js and lib/notify.js):
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, HUB_NOTIFY_REFRESH_TOKEN
+                              lib/notify.js's shared sendMail() — used by
+                              Insurance Compliance, Security Deposit, and
+                              Archive Search for their normal escalation/
+                              reminder emails, sent via the Gmail API from
+                              noreply@rinconmanagement.com. See
+                              setup-notify-oauth.js and .env.example.
   GMAIL_USER, GMAIL_APP_PASSWORD, DO_EMAIL, CRON_SECRET
+                              Security Deposit's and Archive Search's OWN
+                              independent "something is fundamentally
+                              broken" fallback alert only
+                              (sendFailureAlertEmail in each router.js) —
+                              deliberately still on the old SMTP method so
+                              a bug in lib/notify.js can't also silence
+                              this alert. No longer used for their normal
+                              escalation/reminder emails (see above).
+  PETER_EMAIL                 Archive Search's escalation mechanism only
+                              (email-intake/archive-search-escalation-
+                              mechanism-spec.md, Section 5) — sent
+                              alongside DO_EMAIL, not instead of it. See
+                              .env.example for the full reasoning.
 
 Optional (Security Deposit — degrades gracefully if unset, see
 security-deposit/router.js and .env.example):
@@ -704,7 +724,16 @@ app.post('/reset-password', async (req, res) => {
 
 // ─── Health check — no login required ──────────────────────────────────────
 app.get('/healthz', (req, res) => {
-  res.json({ ok: true, service: 'hub' });
+  res.json({
+    ok: true,
+    service: 'hub',
+    // All three must be set (non-empty) for lib/notify.js's sendMail() to
+    // be able to send anything — same check that module's own
+    // getGmailClient() makes. Read directly from the environment here
+    // rather than importing lib/notify.js, so this endpoint stays a
+    // simple, dependency-free check.
+    mailer_configured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.HUB_NOTIFY_REFRESH_TOKEN),
+  });
 });
 
 

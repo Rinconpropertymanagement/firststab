@@ -25,7 +25,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 
 const assert = require('node:assert/strict');
 
-const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
+const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, exclusionReason, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
 const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails, applyRadiusTiering } = require('./lib/rentcast');
 const {
   mapComparable: mapCrmlsComparable,
@@ -351,6 +351,63 @@ async function main() {
     const allSameType = comps.slice(0, 3);
     assert.deepEqual(computeRawRange(allSameType, 4, 'single_family'), computeRawRange(allSameType, 4));
     assert.deepEqual(computeRecommendedRange(allSameType, 4, 'single_family'), computeRecommendedRange(allSameType, 4));
+  });
+
+  console.log('--- lib/weighting.js exclusionReason() ---');
+
+  await check('exclusionReason() returns null for a comp that contributes full weight (exact bedroom and property type match)', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns null for a comp that contributes partial weight (1 bedroom off is still counted, just at half weight)', () => {
+    assert.equal(exclusionReason({ bedrooms: 3, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns "rincon_managed" for a Rincon-managed comp not from a trusted, self-sourced source, even when its type/bedrooms match perfectly', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: true, source_name: 'RentCast' }, 4, 'single_family'), 'rincon_managed');
+  });
+
+  await check('exclusionReason() returns null for a Rincon-managed comp from a trusted, self-sourced source (e.g. LeadSimple Move-Ins) — it counts, so it is never "excluded"', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: true, source_name: 'LeadSimple Move-Ins' }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns "property_type_mismatch" for a known, different property type', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'townhouse', is_rincon_managed: false }, 4, 'single_family'), 'property_type_mismatch');
+  });
+
+  await check('exclusionReason() returns "size_mismatch" for a 2+ bedroom gap', () => {
+    assert.equal(exclusionReason({ bedrooms: 2, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), 'size_mismatch');
+  });
+
+  await check('exclusionReason() prioritizes "rincon_managed" over a property-type/size mismatch when a comp fails more than one check at once (real shape: 530 Coronado Street\'s duplex analysis had a 3bd Rincon-managed townhouse comp against a 1bd duplex subject — wrong on all three)', () => {
+    assert.equal(
+      exclusionReason({ bedrooms: 3, property_type: 'townhouse', is_rincon_managed: true, source_name: 'RentCast' }, 1, 'duplex'),
+      'rincon_managed',
+      'rincon_managed must win over property_type_mismatch/size_mismatch, since it is a different KIND of problem (not real outside market data), not just a worse match'
+    );
+  });
+
+  await check('exclusionReason() prioritizes "property_type_mismatch" over "size_mismatch" when both apply (property type has no partial-credit tier, so it is the more fundamental reason)', () => {
+    assert.equal(
+      exclusionReason({ bedrooms: 1, property_type: 'townhouse', is_rincon_managed: false }, 4, 'single_family'),
+      'property_type_mismatch'
+    );
+  });
+
+  await check('exclusionReason() reproduces the real 530 Coronado Street duplex bug Judge found live (2026-09-20): single-family and townhouse comps the old narrative cited as "supporting the upper end"/"a real current floor" were actually zero-weighted for a 1bd duplex subject', () => {
+    // Real stored comp data (rental_comps for analysis
+    // 90403536-726d-4d08-8175-8642ccddb525) — subject is 1bd/duplex.
+    const dosCaminos263 = { bedrooms: 1, property_type: 'single_family', is_rincon_managed: false }; // "Comp 5" in the old rationale
+    const dosCaminos264 = { bedrooms: 1, property_type: 'single_family', is_rincon_managed: false }; // "Comp 6"
+    const arcadeDr404   = { bedrooms: 2, property_type: 'townhouse',     is_rincon_managed: false }; // "Comp 15"
+    const evaSt211       = { bedrooms: 2, property_type: 'single_family', is_rincon_managed: false }; // "Comp 13"
+    for (const comp of [dosCaminos263, dosCaminos264, arcadeDr404, evaSt211]) {
+      assert.equal(exclusionReason(comp, 1, 'duplex'), 'property_type_mismatch', JSON.stringify(comp));
+    }
+    // And the one comp the old rationale correctly treated as real evidence
+    // (1078 S Seaward, unknown property type, exact bedroom match) must
+    // still NOT be excluded.
+    assert.equal(exclusionReason({ bedrooms: 1, property_type: null, is_rincon_managed: false }, 1, 'duplex'), null);
   });
 
   console.log('--- lib/rentcast.js ---');
@@ -772,6 +829,58 @@ async function main() {
     assert.equal(deduped[0].source_name, 'LeadSimple Move-Ins', 'leased (3x) must still beat active (2x) regardless of trusted-source status');
   });
 
+  console.log('--- lib/property-matching.js dedupeComps() exclusion-aware tie-break (subjectBedrooms/subjectPropertyType) ---');
+
+  await check('dedupeComps() called with no subjectBedrooms/subjectPropertyType behaves EXACTLY as before (backward compatible) — keeps the higher-weight (leased) duplicate even though it would actually be excluded from the range, since the caller never opted in to the exclusion-aware check', () => {
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'off_market', monthly_rent: 2000, bedrooms: 1, property_type: 'single_family' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 4000, bedrooms: 4, property_type: 'townhouse' },
+    ];
+    const deduped = dedupeComps(comps);
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'with no subject context passed, the old status-weight-only rule must still decide this, unchanged');
+  });
+
+  await check('dedupeComps() WITH subjectBedrooms/subjectPropertyType prefers the duplicate that would actually count toward the range over a higher-weight one that would be excluded — the exact bug this build fixes: two sources disagreeing on the same real unit\'s type/bedrooms', () => {
+    const comps = [
+      // Same real unit, reported differently by two sources: RentCast says
+      // a 4bd townhouse (wrong on both counts vs. a 1bd single_family
+      // subject) and leased (highest status weight); CRMLS says the real
+      // 1bd single_family truth, but only active (lower status weight).
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 4000, bedrooms: 4, property_type: 'townhouse', source_name: 'RentCast' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2100, bedrooms: 1, property_type: 'single_family', source_name: 'CRMLS' },
+    ];
+    const withoutSubjectContext = dedupeComps(comps);
+    assert.equal(withoutSubjectContext[0].source_name, 'RentCast', 'sanity check: without subject context, the old status-weight rule keeps the (wrong) leased townhouse');
+
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].source_name, 'CRMLS', 'the comp that would actually count toward the range must survive, even though it has a lower status weight');
+  });
+
+  await check('dedupeComps() exclusion-aware check is a genuine no-op when both duplicates agree on excluded status — falls through to the unchanged status-weight tie-break', () => {
+    // Both candidates are a matching type/bedroom count for the subject
+    // (neither excluded) -> step 0 has nothing to decide, so the ordinary
+    // status-weight rule (leased beats active) must still apply.
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2000, bedrooms: 1, property_type: 'single_family' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 2050, bedrooms: 1, property_type: 'single_family' },
+    ];
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'neither candidate is excluded, so the status-weight tie-break must still decide this, unchanged');
+  });
+
+  await check('dedupeComps() exclusion-aware check also fires when BOTH duplicates would be excluded (both wrong type) — falls through to the unchanged status-weight tie-break rather than making an arbitrary choice', () => {
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2000, bedrooms: 4, property_type: 'townhouse' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 2050, bedrooms: 4, property_type: 'condo' },
+    ];
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'both candidates are excluded either way, so status-weight still decides which single row is kept for display');
+  });
+
   console.log('--- lib/rentcast.js pullRentCastComps() coordinates ---');
 
   // pullRentCastComps() calls the real global fetch(), so these mock it the
@@ -1014,6 +1123,41 @@ async function main() {
   await check('describeComp() says nothing about Rincon-managed status at all for a comp that is not Rincon-managed', () => {
     const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', is_rincon_managed: false, source_name: 'RentCast' }, 0);
     assert.doesNotMatch(desc, /Rincon-managed/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "property_type_mismatch" as NOT COUNTED — the real bug this build fixes (Claude previously had no way to know a comp had been zero-weighted)', () => {
+    const desc = describeComp({ address: '404 Arcade Drive', monthly_rent: 3475, listing_status: 'leased', bedrooms: 2, property_type: 'townhouse', exclusion_reason: 'property_type_mismatch' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "size_mismatch" as NOT COUNTED', () => {
+    const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'off_market', bedrooms: 5, exclusion_reason: 'size_mismatch' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "rincon_managed" as NOT COUNTED, taking priority over the older is_rincon_managed-only wording (exclusion_reason is always the authoritative, server-computed answer)', () => {
+    const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', is_rincon_managed: true, source_name: 'RentCast', exclusion_reason: 'rincon_managed' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+    assert.match(desc, /internal reference only/);
+  });
+
+  await check('describeComp() with exclusion_reason explicitly null (the normal "counted" case from server.js/router.js) behaves exactly like exclusion_reason being absent', () => {
+    const withNull = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', bedrooms: 3, exclusion_reason: null }, 0);
+    const withoutField = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', bedrooms: 3 }, 0);
+    assert.equal(withNull, withoutField);
+    assert.doesNotMatch(withNull, /NOT COUNTED/);
+  });
+
+  await check('buildPrompt() hard rules explicitly tell Claude never to cite a NOT COUNTED comp as evidence for the range — the exact instruction added to fix the 530 Coronado Street duplex bug (Judge found live, 2026-09-20)', () => {
+    const prompt = buildPrompt({
+      ...narrativePromptFixture,
+      comps: [
+        { address: '2 Comp St', bedrooms: 3, bathrooms: 2, sqft: 1450, monthly_rent: 3000, listing_status: 'leased', exclusion_reason: null },
+        { address: '404 Arcade Drive', bedrooms: 2, bathrooms: 1.8, sqft: 1000, monthly_rent: 3475, listing_status: 'leased', property_type: 'townhouse', exclusion_reason: 'property_type_mismatch' },
+      ],
+    });
+    assert.match(prompt, /NEVER cite a NOT COUNTED comp as a reason, a floor, a ceiling, support, or justification/);
+    assert.match(prompt, /COMP 1: 404 Arcade Drive.*NOT COUNTED in the range/);
   });
 
   console.log('--- lib/sources.js ---');

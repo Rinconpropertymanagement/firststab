@@ -39,6 +39,31 @@ function fmtMoney(n) {
   return n === null || n === undefined ? 'unknown' : `$${Number(n).toLocaleString()}`;
 }
 
+// Plain-English label for each exclusionReason() code (lib/weighting.js),
+// written for Claude's benefit (goes straight into the prompt) — needs to
+// be unambiguous about the one fact that matters here: this comp
+// contributes NOTHING to the computed range.
+const EXCLUSION_LABELS = {
+  rincon_managed: 'this is a Rincon-managed property, not outside competition — internal reference only, NOT COUNTED in the range',
+  property_type_mismatch: `this comp's property type does not match the subject's — NOT COUNTED in the range`,
+  size_mismatch: `this comp's bedroom count is too different from the subject's (2+ bedrooms off) — NOT COUNTED in the range`,
+};
+
+// c.exclusion_reason is set by the caller (server.js/router.js, POST /run)
+// via lib/weighting.js's exclusionReason() — the one shared place this is
+// decided, so this function prefers it over re-deriving anything. null
+// means the comp contributes weight to the range (an exact match, or a
+// partial-credit 1-bedroom-off match) and gets no special callout here.
+//
+// exclusion_reason is left undefined only when describeComp() is called
+// directly without going through server.js/router.js first (e.g. these
+// unit tests) — that fallback path re-derives the SAME answer
+// isExcludedRinconManaged() would give, so behavior for a caller that
+// doesn't pass exclusion_reason is identical to before this reason-string
+// concept existed. It only ever covers the Rincon-managed case (the only
+// one of the three exclusion checks that doesn't need subjectBedrooms/
+// subjectPropertyType to evaluate) — a caller not passing exclusion_reason
+// still gets no property-type/size callout, same as before.
 function describeComp(c, i) {
   const bits = [
     `COMP ${i}: ${c.address}`,
@@ -49,17 +74,18 @@ function describeComp(c, i) {
     c.distance_miles != null ? `${c.distance_miles} mi away` : null,
     c.days_on_market != null ? `${c.days_on_market} days on market` : null,
     c.had_price_cut ? `had a price cut${c.original_price ? ` (from ${fmtMoney(c.original_price)})` : ''}` : null,
-    // A Rincon-managed comp is "internal reference only, not counted" UNLESS
-    // it came from a trusted, self-sourced source (e.g. LeadSimple Move-Ins)
-    // that was deliberately built to report Rincon's own confirmed,
-    // new-tenant leases — that kind of comp IS counted, at full weight, and
-    // must never be described as excluded. See lib/weighting.js's
-    // isExcludedRinconManaged() — the one place this distinction is decided.
-    c.is_rincon_managed
-      ? (isExcludedRinconManaged(c)
-        ? 'this is a Rincon-managed property, not outside competition — internal reference only'
-        : 'this is a Rincon-managed property, but a real, confirmed new-tenant lease from Rincon\'s own records — counted in the range like any other leased comp, not excluded')
-      : null,
+    c.exclusion_reason
+      ? (EXCLUSION_LABELS[c.exclusion_reason] || 'NOT COUNTED in the range')
+      // A Rincon-managed comp from a trusted, self-sourced source (e.g.
+      // LeadSimple Move-Ins, deliberately built to report Rincon's own
+      // confirmed new-tenant leases) IS counted, at full weight, and must
+      // never be described as excluded — same distinction
+      // exclusionReason()/isExcludedRinconManaged() already make.
+      : (c.is_rincon_managed
+        ? (isExcludedRinconManaged(c)
+          ? 'this is a Rincon-managed property, not outside competition — internal reference only'
+          : 'this is a Rincon-managed property, but a real, confirmed new-tenant lease from Rincon\'s own records — counted in the range like any other leased comp, not excluded')
+        : null),
   ].filter(Boolean);
   return bits.join(' | ');
 }
@@ -74,6 +100,7 @@ HARD RULES:
   - "leased" = a real, confirmed transaction (the strongest signal) — describe it as an actual lease with confidence, not a guess.
   - "active" = a real, current asking price, not yet confirmed by a transaction — describe it as currently available, not as leased.
   - "off_market" = delisted with no way to confirm what actually happened (could have leased, could have simply expired) — describe it as delisted/off-market, never as leased or rented.
+- Some comps below are marked "NOT COUNTED in the range" (a different property type than the subject, a bedroom count too far from the subject's, or a Rincon-managed property that isn't real outside competition). These contributed ZERO weight to both the raw and recommended ranges below — they are not weak evidence, they are NO evidence. You may mention one for context (e.g. "nearby but a different property type"), but you must NEVER cite a NOT COUNTED comp as a reason, a floor, a ceiling, support, or justification for either range — doing so would misrepresent numbers that were computed without it. If you're not certain whether a comp counted, check for "NOT COUNTED in the range" in that comp's line below — its absence means the comp DID contribute to the range.
 - If there are few comps (fewer than ${MIN_COMPS_FOR_NARROW_RADIUS}) or only one source was used, say so plainly in the rationale and describe the recommendation as a rough/preliminary estimate rather than a confident one. Do not manufacture confidence the data doesn't support.
 
 SUBJECT PROPERTY:

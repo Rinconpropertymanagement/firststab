@@ -29,11 +29,12 @@
  * Radius tiering: requests comps out to WIDE_SEARCH_RADIUS_MILES via
  * RentCast's own documented `maxRadius` query param ("The maximum distance
  * between comparable listings and the subject property, in miles" — one
- * real network call, not two), then locally prefers the
- * NARROW_SEARCH_RADIUS_MILES subset when it meets MIN_COMPS_FOR_NARROW_RADIUS,
- * falling back to the full wide set otherwise — see applyRadiusTiering()
- * below and lib/constants.js for the shared numbers. Same policy as
- * lib/crmls.js and lib/leadsimple.js, decided independently per source.
+ * real network call, not two) and always returns the full set it gets back,
+ * with real distance_miles on each. This file no longer decides narrow vs.
+ * wide for itself — that decision is now made once, across all three comp
+ * sources together, by applyCombinedRadiusTiering() in lib/sources.js, after
+ * every active source has reported back. See lib/constants.js for the
+ * shared NARROW_SEARCH_RADIUS_MILES/MIN_COMPS_FOR_NARROW_RADIUS numbers.
  *
  * A third RentCast endpoint, /v1/markets (zip-code-level market stats, not
  * property/comp-level), is a separate concern handled by lib/market-data.js,
@@ -42,7 +43,7 @@
  * exported below so that file can reuse them instead of duplicating.
  */
 
-const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+const { WIDE_SEARCH_RADIUS_MILES } = require('./constants');
 
 const RENTCAST_BASE_URL = 'https://api.rentcast.io/v1';
 const DEFAULT_COMP_COUNT = 10; // RentCast allows 5-25 per request; 10 balances sample size against payload/API cost
@@ -133,17 +134,6 @@ function assessPlausibility(data) {
     }
   }
   return { plausible: true, reason: null };
-}
-
-// Prefers the tight NARROW_SEARCH_RADIUS_MILES subset when it has enough
-// comps (MIN_COMPS_FOR_NARROW_RADIUS); otherwise keeps the full
-// WIDE_SEARCH_RADIUS_MILES set already pulled via maxRadius above — no
-// second request either way. A comp with no distance_miles (shouldn't
-// happen on a real RentCast response, but never assumed) is only ever kept
-// via the wide-set fallback, never counted toward the narrow subset.
-function applyRadiusTiering(comps) {
-  const narrow = comps.filter(c => typeof c.distance_miles === 'number' && c.distance_miles <= NARROW_SEARCH_RADIUS_MILES);
-  return narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS ? narrow : comps;
 }
 
 function assertConfigured() {
@@ -271,7 +261,7 @@ async function pullRentCastComps(subject) {
     // for what that zip is then used for. No top-level fallback documented
     // for this field (unlike lat/long), so this is the one source.
     subjectZip: typeof subjectProperty.zipCode === 'string' ? subjectProperty.zipCode : null,
-    comps: applyRadiusTiering(comparables.map(mapComparable)),
+    comps: comparables.map(mapComparable),
   };
 }
 
@@ -343,7 +333,6 @@ module.exports = {
   toDateOnly,
   assessPlausibility,
   assertConfigured,
-  applyRadiusTiering,
   TO_RENTCAST_PROPERTY_TYPE,
   FROM_RENTCAST_PROPERTY_TYPE,
   RENTCAST_BASE_URL,

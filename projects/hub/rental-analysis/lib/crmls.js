@@ -33,9 +33,13 @@ const COMPS_PER_STATUS = 10;
 // How far out to search when the subject's coordinates are known (see
 // pullCrmlsComps()) — a bounding box is queried at this radius (unchanged:
 // still ONE network call), then post-filtered to a true circle (see
-// haversineMiles()/buildBoundingBox() below) and tiered down to
-// NARROW_SEARCH_RADIUS_MILES when there are enough comps there — see
-// applyRadiusTiering() below and lib/constants.js for the shared numbers.
+// haversineMiles()/buildBoundingBox() below). This file always returns
+// everything that survives the circle filter, out to WIDE_SEARCH_RADIUS_MILES
+// — it no longer decides narrow vs. wide for itself. That decision is now
+// made once, across all three comp sources together, by
+// applyCombinedRadiusTiering() in lib/sources.js, after every active source
+// has reported back. See lib/constants.js for the shared
+// NARROW_SEARCH_RADIUS_MILES/MIN_COMPS_FOR_NARROW_RADIUS numbers.
 
 const SELECT_FIELDS = [
   'ListingKey', 'ListingId', 'StandardStatus', 'PropertySubType',
@@ -310,17 +314,7 @@ async function pullCrmlsComps(subject) {
       .filter(record => typeof record._distanceMiles !== 'number' || record._distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
   }
 
-  let comps = records.map(record => mapComparable(record, record._distanceMiles)).filter(Boolean);
-
-  // Tiering: prefer the tight NARROW_SEARCH_RADIUS_MILES subset when it has
-  // enough comps, otherwise keep the full WIDE_SEARCH_RADIUS_MILES set
-  // already queried above — no second request either way. Zip-fallback path
-  // has no distance data to tier on (every comp there has distance_miles
-  // null), so this only ever changes anything on the box-search path.
-  if (scope.type === 'box') {
-    const narrow = comps.filter(c => typeof c.distance_miles === 'number' && c.distance_miles <= NARROW_SEARCH_RADIUS_MILES);
-    if (narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS) comps = narrow;
-  }
+  const comps = records.map(record => mapComparable(record, record._distanceMiles)).filter(Boolean);
 
   return {
     comps,

@@ -27,6 +27,20 @@
  * latchel_job_id WHERE resolved_at IS NULL) — this file's own check is the
  * first line of defense, the index is the backstop for the race between
  * webhook and poll firing close together.
+ *
+ * ALSO AS OF THIS BUILD: Work Order Notes Alert (work-order-notes-alert-
+ * SPEC.md), a second, independent feature riding the same webhook and the
+ * same checkCronSecret()/CRON_SECRET pattern, per that spec's own
+ * instruction to extend this endpoint rather than build a new,
+ * separately-secured one. It does not touch, reorder, or depend on the
+ * "Needs Approval" (state 27) logic described above — see the webhook
+ * handler's own comment for exactly where its branch sits, and
+ * lib/work-order-notes-alert.js for the feature itself. Its own backstop
+ * poll lives at a new, separate route (POST .../internal/reconcile-work-
+ * order-notes, below /internal/reconcile) rather than as a branch on the
+ * existing reconcile route, because that route's own Latchel query
+ * (state 27 only) is structurally different from this feature's
+ * (updated-since a rolling window).
  */
 
 const express = require('express');
@@ -35,6 +49,7 @@ const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 const latchel = require('../maintenance-history/lib/latchel-connector');
+const { handleWorkOrderJob, reconcileWorkOrderNotes } = require('./lib/work-order-notes-alert');
 
 const missing = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'CRON_SECRET'].filter(k => !process.env[k]);
 if (missing.length > 0) {
@@ -203,6 +218,23 @@ internalRouter.post('/api/approval-briefing/internal/webhook', webhookLimiter, a
   if (objectType !== 'Job' || !job) {
     return res.status(200).json({ ok: true, action: 'discarded', reason: 'not_a_job' });
   }
+
+  // Work Order Notes Alert — independent branch (work-order-notes-alert-
+  // SPEC.md Section 2.1): "the parsed job object feeds two independent
+  // branches... in either order, since neither reads or writes anything
+  // the other touches." Deliberately runs on EVERY Job delivery, not just
+  // ones reaching state 27 below — a brand-new work order (this feature's
+  // whole trigger) will almost never be in "Needs Approval" yet. Fire-
+  // and-forget, same reasoning as gatherInBackground further down: never
+  // let this feature's own latency (a Layer 2 Claude call, a Supabase
+  // write, an email send) or a failure inside it delay the webhook's ack
+  // to Latchel or affect the approval-briefing logic that follows.
+  // handleWorkOrderJob() never throws (see its own header), so this
+  // .catch() is defense-in-depth, not a real expectation.
+  handleWorkOrderJob(job, 'webhook').catch((err) => {
+    console.error(`[${ts}] work-order-notes-alert webhook branch: unexpected error for job ${job.job_id}:`, err.message);
+  });
+
   const stateId = job.state_id;
   const stateName = job.state_name || job.state;
   if (stateId !== 27 && stateName !== 'Needs Approval') {
@@ -260,6 +292,39 @@ internalRouter.post('/api/approval-briefing/internal/reconcile', async (req, res
   }
 
   console.log(`[${ts}] approval-briefing reconcile: ${JSON.stringify(summary)}`);
+  return res.status(200).json({ ok: true, ...summary });
+});
+
+/**
+ * POST /api/approval-briefing/internal/reconcile-work-order-notes
+ * Work Order Notes Alert's own hourly backstop poll (work-order-notes-
+ * alert-SPEC.md Section 2.4) — a separate route from /internal/reconcile
+ * above because that one pulls a structurally different query
+ * (listJobsNeedingApproval, state 27 only); this pulls
+ * listJobsUpdatedSince() over a rolling lookback window and runs every
+ * returned job through lib/work-order-notes-alert.js's resolve -> dedup
+ * -> content-check -> send pipeline. Same checkCronSecret()/CRON_SECRET
+ * auth as /internal/reconcile, reused exactly, not reinvented. Safe to
+ * run repeatedly or on overlapping windows — the dedup/retry logic in
+ * lib/work-order-notes-alert.js makes re-scanning a job already sent (or
+ * one that still doesn't qualify) a guaranteed no-op.
+ *
+ * Actually scheduling this on a cron is Scotty's job, not built here —
+ * see the build report to Jarvis.
+ */
+internalRouter.post('/api/approval-briefing/internal/reconcile-work-order-notes', async (req, res) => {
+  if (!checkCronSecret(req, res)) return;
+  const ts = new Date().toISOString();
+
+  let summary;
+  try {
+    summary = await reconcileWorkOrderNotes();
+  } catch (err) {
+    console.error(`[${ts}] work-order-notes-alert reconcile: Latchel fetch failed:`, err.message);
+    return res.status(502).json({ error: 'Failed to pull jobs from Latchel.', detail: err.message });
+  }
+
+  console.log(`[${ts}] work-order-notes-alert reconcile: ${JSON.stringify(summary)}`);
   return res.status(200).json({ ok: true, ...summary });
 });
 

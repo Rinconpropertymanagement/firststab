@@ -1,0 +1,163 @@
+-- ============================================================
+-- Migration: 20260921010000_drop_duplicate_significance_driver_cursor_check_overload
+-- Created:   2026-09-21
+-- Author:    Neo (database specialist)
+--
+-- WHY THIS EXISTS — PRODUCTION INCIDENT, OUT-OF-ORDER MIGRATION APPLICATION
+-- ============================================================
+-- Two migrations for the significance driver's cursor-check RPC were applied
+-- to production out of chronological order, leaving TWO overloads of
+-- archive_search_missive_clear_branch_cursor_check coexisting when only one
+-- was ever meant to exist. This migration is the corrective fix.
+--
+-- The two migrations involved, in the order they were WRITTEN (not the order
+-- they were APPLIED):
+--   1. 20260920010000 (baseline) — created the 1-argument version,
+--      archive_search_missive_clear_branch_cursor_check(p_cursor_id UUID),
+--      via CREATE OR REPLACE FUNCTION. No prior DROP, because at the time it
+--      was written no other overload of this function existed anywhere.
+--   2. 20260920020000 (refinement) — replaced that function with a 3-argument
+--      overload (p_cursor_id, p_established_floor_id DEFAULT NULL, p_as_of
+--      DEFAULT NULL). That migration's own header correctly identified that
+--      Postgres treats a differently-arity CREATE OR REPLACE as a NEW
+--      overload, not a true replacement of the 1-argument version — so it
+--      defensively runs `DROP FUNCTION IF EXISTS
+--      archive_search_missive_clear_branch_cursor_check(UUID)` immediately
+--      before creating the 3-argument version, specifically to prevent both
+--      versions coexisting.
+--
+-- What actually happened in production, in APPLICATION order:
+--   - 20260920020000 was applied FIRST, days ago, while 20260920010000 had
+--     NOT yet been applied. Its defensive DROP FUNCTION IF EXISTS(UUID) was
+--     therefore a no-op (there was nothing to drop) — after this, only the
+--     3-argument version existed, which was the correct end state.
+--   - 20260920010000 was applied TODAY, out of order, long after
+--     20260920020000. Its CREATE OR REPLACE FUNCTION for the 1-argument
+--     signature does not match the 3-argument signature already in the
+--     database, so Postgres created it as a brand-new, second overload
+--     rather than replacing anything. From that moment, BOTH the 1-argument
+--     and 3-argument versions existed simultaneously.
+--
+-- CONFIRMED LIVE IN PRODUCTION: calling
+-- archive_search_missive_clear_branch_cursor_check with only p_cursor_id
+-- supplied by name (the shape PostgREST/Postgres uses when a caller names
+-- just that one argument) now fails with:
+--   Could not choose the best candidate function between:
+--   public.archive_search_missive_clear_branch_cursor_check(p_cursor_id => uuid),
+--   public.archive_search_missive_clear_branch_cursor_check(p_cursor_id => uuid,
+--     p_established_floor_id => uuid, p_as_of => timestamp with time zone)
+-- Both candidates match a call that only names p_cursor_id, because the
+-- other two parameters on the 3-argument version have defaults — Postgres
+-- cannot pick one over the other and raises 42725 (ambiguous function).
+--
+-- THE FIX
+-- ============================================================
+-- Re-run the exact same defensive drop 20260920020000 already intended to be
+-- the final word on this, now that the ambiguity it was written to prevent
+-- has actually occurred:
+--   DROP FUNCTION IF EXISTS archive_search_missive_clear_branch_cursor_check(UUID);
+-- This removes only the erroneously-recreated 1-argument overload. The
+-- 3-argument version (with its established_floor_id/as_of NULL defaults) is
+-- untouched — it was never affected by today's out-of-order apply, since
+-- CREATE OR REPLACE only ever touches the exact-arity match.
+--
+-- This migration does NOT modify 20260920010000 or 20260920020000. Both are
+-- left exactly as originally written — this repo's standing convention is to
+-- never edit an already-applied migration, only ever add a new corrective
+-- one on top. This file is that new migration.
+--
+-- VERIFICATION REASONING
+-- ============================================================
+-- After this migration runs, exactly one function named
+-- archive_search_missive_clear_branch_cursor_check exists in the database:
+-- the 3-argument version from 20260920020000
+-- (p_cursor_id UUID, p_established_floor_id UUID DEFAULT NULL,
+-- p_as_of TIMESTAMPTZ DEFAULT NULL). A call naming only p_cursor_id has
+-- exactly one candidate again and resolves unambiguously to it, with both
+-- optional parameters defaulting to NULL — which collapses its WHERE clause
+-- to `WHERE id <= p_cursor_id` with no time-bound applied, byte-identical to
+-- the old 1-argument version's behavior for that exact call shape. Nothing
+-- about the escalation-exclusion digest function
+-- (archive_search_escalation_exclusion_digest_check) is affected — it was
+-- never overloaded and is untouched by either the original incident or this
+-- fix.
+--
+-- Checked every caller of this RPC in the codebase (grepped the full repo):
+-- the only application call site is fetchClearBranchDigest() in
+-- projects/hub/archive-search/lib/significance-pass.js, which always invokes
+-- supabase.rpc('archive_search_missive_clear_branch_cursor_check', {
+-- p_cursor_id, p_established_floor_id, p_as_of }) — all three named keys are
+-- always present in the request body (p_established_floor_id/p_as_of are
+-- explicitly `null` rather than omitted when resolveDriverStartCursor()
+-- calls it for verification), so that specific call path was not hitting
+-- the ambiguity itself. The ambiguity was confirmed via a call naming only
+-- p_cursor_id (e.g. direct SQL/PostgREST testing), and is a real, live
+-- defect regardless: two overloads of the same function existing at all is
+-- not the intended end state, is a standing hazard for any future caller or
+-- manual query that omits the newer parameters, and is exactly what
+-- 20260920020000's own defensive DROP was written to prevent. No caller
+-- anywhere in the codebase depends on the old 1-argument-only signature's
+-- distinct identity or on floor/as_of being ABSENT rather than NULL — the
+-- 3-argument version with both defaulting to NULL already reproduces the
+-- 1-argument version's exact behavior for a p_cursor_id-only call, which is
+-- precisely 20260920020000's own designed and already-governance-reviewed
+-- backward-compatibility guarantee.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file. (Rollback recreates the
+--       1-argument overload, restoring today's broken, ambiguous state —
+--       documented for completeness only; there is no scenario where running
+--       it is desirable.)
+--   [x] Does this break any existing data? No. No table, row, or column is
+--       touched. This drops one function overload only.
+--   [x] Does this touch a table other code depends on? No table is touched.
+--       The function being dropped is STABLE/read-only (SQL, no writes) and
+--       was never the version any current application code path relied on
+--       for its distinct 1-argument identity (see VERIFICATION REASONING
+--       above) — the 3-argument version remains, unchanged, as the sole
+--       surviving definition.
+--   [x] Additive or destructive? Narrowly destructive (drops one function
+--       overload) but restores the already-designed, already-approved final
+--       state from 20260920020000 — not new behavior, not a new decision.
+--       No exclusion criteria, decision authority, or human-review timing is
+--       touched, matching 20260920020000's own governance reasoning; no
+--       fresh Asimov/Mason review is needed for this cleanup.
+--   [x] Is this safe to apply directly? Yes — DROP FUNCTION IF EXISTS is
+--       idempotent (safe to re-run, safe even if the erroneous overload is
+--       somehow already gone by the time this is applied) and cannot affect
+--       any row of data.
+-- ============================================================
+
+DROP FUNCTION IF EXISTS archive_search_missive_clear_branch_cursor_check(UUID);
+
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration — NOT recommended;
+-- see MIGRATION GATE SELF-CHECK above. This exists only to document how to
+-- reverse this file, matching this project's convention that every
+-- migration ships a rollback, not as an action anyone should actually take.)
+-- ============================================================
+--
+-- CREATE OR REPLACE FUNCTION archive_search_missive_clear_branch_cursor_check(p_cursor_id UUID)
+-- RETURNS TABLE (row_count BIGINT, digest TEXT)
+-- LANGUAGE sql
+-- STABLE
+-- SET search_path = public
+-- AS $$
+--   SELECT
+--     COUNT(*)::BIGINT AS row_count,
+--     md5(COALESCE(string_agg(id::text, ',' ORDER BY id ASC), '')) AS digest
+--   FROM missive_message_intake_search_safe_clear_branch
+--   WHERE id <= p_cursor_id;
+-- $$;
+--
+-- REVOKE ALL ON FUNCTION archive_search_missive_clear_branch_cursor_check(UUID) FROM PUBLIC;
+-- GRANT EXECUTE ON FUNCTION archive_search_missive_clear_branch_cursor_check(UUID) TO service_role;
+--
+-- -- WARNING: running this rollback recreates the exact ambiguous, broken
+-- -- production state this migration was written to fix (two overloads of
+-- -- the same function name coexisting again). Only ever do this as a step
+-- -- toward some other deliberate fix, never as a standalone action.
+--
+-- ============================================================

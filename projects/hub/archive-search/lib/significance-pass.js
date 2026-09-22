@@ -11,13 +11,34 @@
  * discipline, a single hand-bumped version constant, a per-conversation
  * try/catch loop, a batch-summary audit_log event. Two real differences
  * from that file, both deliberate:
- *   1. This module NEVER reads the raw base table directly — every query
- *      here goes through missive_message_intake_search_safe or (added
+ *   1. This module never itself embeds a raw-base-table query — every
+ *      query here goes through missive_message_intake_search_safe or (added
  *      2026-09-18, migration 20260918020000, fetchDriverPage() only)
  *      missive_message_intake_search_safe_clear_branch — the Finding-1
  *      guardrail, test/no-raw-table-access-check.js, applies to this file
  *      exactly as it does to every other file under archive-search/lib/
- *      except screening-pass.js itself.
+ *      except screening-pass.js itself. UPDATED 2026-09-21 (migration
+ *      20260921020000, performance fix — see fetchDriverPage()'s own header
+ *      comment): fetchDriverPage() no longer queries the clear_branch view
+ *      at all — it now calls a service-role-only SQL function,
+ *      archive_search_significance_driver_next_clear_page(), which reads
+ *      the raw base table directly with the identical
+ *      screening_result = 'clear' filter baked into the function itself
+ *      (Neo's design, to escape a security_barrier planner problem the view
+ *      had no other fix for). This file's own source no longer names the
+ *      raw table at all (so the Finding-1 guardrail's literal-string check
+ *      still passes clean), but the underlying read is, functionally, a
+ *      filtered raw-table read now, one level removed — flagged here
+ *      plainly rather than left implied by the (unchanged) sentence above.
+ *      Reviewed and approved by Asimov — see compliance/archive-search-
+ *      significance-driver-clear-page-rpc-asimov-review.md for the full
+ *      review (confirmed no new exposure, independently verified against
+ *      the base table's own RLS/grants history, not just the migration's
+ *      own narrative) and its one follow-up condition, closed in this same
+ *      change: the Finding-1 guardrail's literal-string check couldn't see
+ *      this RPC-based read either, so test/no-raw-table-access-check.js now
+ *      also names this specific function in its own
+ *      KNOWN_RAW_TABLE_RPC_FUNCTIONS allow-list.
  *   2. The "already processed" check is against a DIFFERENT table
  *      (missive_conversation_significance's own UNIQUE(mailbox_key,
  *      missive_conversation_id) — spec Section 4), not a column on the row
@@ -888,15 +909,37 @@ const DRIVER_PAGE_SIZE = 500;
 // passesEscalationExclusion() below, and fetchNextEligibleConversations()'s
 // own use of both, applied BEFORE dedupeNewPairs(), same discipline as the
 // existing passesSinceDate() filter.
+//
+// UPDATED 2026-09-21 (real production EXPLAIN evidence, Neo's migration
+// 20260921020000): the clear_branch view above stopped being fast. Real
+// EXPLAIN output against production showed this exact query shape — the
+// view has security_barrier = true set on it — forces Postgres into a full
+// parallel sequential scan of the whole table plus an in-memory sort on
+// EVERY page fetch (1030ms, confirmed non-cache-related by a repeat run at
+// 986ms), rather than using the existing partial index on the raw table's
+// own (screening_result, id) columns, which the identical query shape
+// uses in 76ms when run directly against the raw table. This is a confirmed,
+// reproducible cause of the timeouts that were crashing scans. The fix does
+// not touch the view, security_barrier, or anything about the database
+// itself (Neo's call, not this file's) — it swaps HOW this one page of rows
+// is fetched: this function now calls
+// archive_search_significance_driver_next_clear_page(p_cursor_id, p_limit),
+// a plain SQL function that queries the raw base table directly (same
+// filter — screening_result = 'clear' — same ORDER BY id ASC, same bare
+// id > cursor, same LIMIT, same three-plus-id columns),
+// bypassing the security_barrier planner problem entirely. Granted to
+// service_role only, same as every other RPC this file already calls
+// (fetchClearBranchDigest, fetchEscalationExclusionDigest, below). Nothing
+// else about this file's driver logic changes: same pagination, same
+// caller, same return shape, same error handling, same escalation exclusion
+// still applied by the caller (the RPC, like the view before it, is Branch 1
+// only — screening_result = 'clear', nothing else).
 // ============================================================
 async function fetchDriverPage(cursor) {
-  let query = supabase
-    .from('missive_message_intake_search_safe_clear_branch')
-    .select('id, mailbox_key, missive_conversation_id, delivered_at') // delivered_at is included so passesSinceDate() (below) can filter client-side — it is NEVER used as a query filter here, by design; see the comment above.
-    .order('id', { ascending: true })
-    .limit(DRIVER_PAGE_SIZE);
-  if (cursor !== null) query = query.gt('id', cursor);
-  const { data, error } = await query;
+  const { data, error } = await supabase.rpc('archive_search_significance_driver_next_clear_page', {
+    p_cursor_id: cursor, // null is fine — the RPC's own default (and its `p_cursor_id IS NULL OR id > p_cursor_id` WHERE clause) handles "start from the beginning," same as the old `if (cursor !== null) query = query.gt(...)` branch did.
+    p_limit: DRIVER_PAGE_SIZE,
+  });
   if (error) throw error;
   return data || [];
 }
@@ -1019,6 +1062,259 @@ function dedupeNewPairs(pageRows, alreadySeenKeys) {
   return pairs;
 }
 
+// ============================================================
+// Resumable driver cursor — migration 20260920010000 (Neo). Lets
+// fetchNextEligibleConversations() below skip re-walking an already-
+// exhausted region of missive_message_intake_search_safe_clear_branch on a
+// FRESH call, instead of restarting from id=null every single time (this
+// file's own PAGINATION NOTE above fetchDriverPage() already documents why
+// that was fine when a page fetch was 200-330ms; it stopped being fine once
+// page fetches regressed to 10-17s against a front ~44%-exhausted table).
+//
+// THE CORRECTNESS ARGUMENT — why a saved cursor can never cause a silent,
+// permanent skip. id is gen_random_uuid(), with zero correlation to
+// insertion, delivery, or screening-completion time. TWO independent things
+// can change a row's TRUE eligibility while it sits at or below a
+// previously-saved cursor id, with the id itself never changing:
+//   1. screening_result can leave 'clear' and later come back to 'clear'
+//      with the SAME id — not hypothetical: reset-layer1-removal-310.js
+//      already did exactly this to 310 real conversations.
+//   2. An archive_search_escalations exclusion (status='open', or
+//      status='confirmed' with reopened_at IS NULL) can resolve or reopen
+//      (20260912040000's real, live reopened_at/status lifecycle),
+//      changing a conversation's true eligibility with NO change to
+//      screening_result at all.
+// So a saved cursor is NEVER trusted on its own. Before it is used to start
+// fetchDriverPage(cursor_id) instead of fetchDriverPage(null),
+// resolveDriverStartCursor() below recomputes BOTH a fresh clear-branch
+// digest and a fresh escalation-exclusion digest, live, and compares them
+// to what was recorded the last time this cursor was confirmed safe
+// (cursorIsSafeToResume()). Either mismatch — or no saved cursor at all, or
+// any error reading/verifying one — means: ignore it, walk from id=null
+// this run, exactly like every run did before this feature existed. This
+// is self-healing, never a fatal error: the only consequence of a stale or
+// unverifiable cursor is that this one run pays the full, already-proven-
+// correct cost instead of the fast-forwarded one. Symmetrically,
+// persistDriverCursor() below never throws either — a failure to save only
+// costs the NEXT run its fast-forward, never a skipped conversation, since
+// the scan this run just performed is already complete and correct on its
+// own regardless of whether its result gets cached.
+//
+// THIRD GAP, found on a later review pass, fixed here rather than merely
+// flagged: sinceDate. fetchDriverPage() never sends sinceDate to Postgres —
+// passesSinceDate() filters client-side, AFTER the cursor has already
+// advanced past those raw rows (see the PERFORMANCE NOTE above
+// fetchDriverPage() for why). Neither digest says anything about date
+// scope: a row that failed an OLDER, stricter sinceDate and sits at/below a
+// saved cursor id would never be reconsidered by a LATER call sharing the
+// same cursor if that later call passed a LOOSER sinceDate — both digests
+// would still match (screening_result and the escalation-exclusion set
+// never changed), so the fast-forward would silently skip it forever. This
+// is directly live, not a remote hypothetical: Peter's own plan is to run
+// the historical backfill in date-scoped stages (last 1 year first, then
+// widen), which is exactly this trigger condition.
+//
+// THE FIX — fold sinceDate into the cursor's scope key itself
+// (driverCursorScopeKey(), below), so a run with a different sinceDate
+// can never look up (or overwrite) a cursor established under a different
+// window in the first place. This needs no schema change and does not
+// touch cursorIsSafeToResume() or either digest at all — it only changes
+// which saved row a given call is even allowed to consider trusting. A
+// sinceDate a caller has never used before on this driver simply finds no
+// saved row for its own scope key and pays a fresh full walk the first
+// time, exactly the same already-proven-safe fallback as any other
+// unverifiable cursor — never a new risk, only a (bounded, one-time-per-
+// distinct-sinceDate) cost.
+//
+// FOURTH GAP, found on Neo's review of a follow-up fix and fixed via a
+// SEPARATE migration (20260920020000, not this one): a naive fix for a real
+// mid-run race — a new 'clear' row landing at a low id, between
+// verification and persist, during a fast-forward — applied a
+// `screening_completed_at <= run_started_at` time-bound to the ENTIRE
+// id<=cursor range at persist time. Neo's objection: screening-pass.js's
+// markConversationScreened() re-screens an ENTIRE conversation thread on
+// every new reply, with no per-row filter, so it routinely bumps
+// screening_completed_at forward on old, already-verified 'clear' rows that
+// never actually changed eligibility — a global time-bound would eventually
+// overlap one of these routine touches, wrongly invalidate an
+// already-persisted digest, force a full walk, and permanently disable the
+// fast-forward optimization with no error, ever. See migration
+// 20260920020000's own header for the full reasoning and the fix: scope the
+// time-bound to only the territory THIS RUN newly swept (id > the cursor
+// this run STARTED from), never the whole cumulative range — implemented by
+// fetchClearBranchDigest()'s establishedFloorId/asOf parameters and
+// fetchNextEligibleConversations()'s own startingCursorFloor/runStartedAt,
+// below.
+//
+// Same review pass also confirmed the escalation-digest half of this
+// mechanism needed a snapshot-ORDERING fix, not a schema or logic change:
+// persistDriverCursor() used to re-fetch the escalation digest fresh at the
+// END of a run, independent of whatever fetchEscalationExclusionSet() had
+// already fetched at the START of the same run for actually filtering rows.
+// Escalation exclusion has no id-range/floor split to worry about (it is
+// one global set, not scoped by any cursor), so re-fetching it "fresher"
+// minutes later only risked persisting a digest that no longer matches what
+// this run actually filtered against. Fixed by fetching both once, together,
+// at the top of fetchNextEligibleConversations(), and threading that one
+// snapshot through unchanged to every persistDriverCursor() call the run
+// makes — see escalationDigest below.
+// ============================================================
+
+const DRIVER_CURSOR_SCOPE = 'missive_message_intake_search_safe_clear_branch';
+
+// Pure — directly unit-testable. null/undefined sinceDate (the "no cutoff"
+// default every existing caller already uses) maps to a fixed, explicit
+// 'none' token rather than being folded in as the literal string "null" or
+// "undefined" — cheap insurance against a future refactor accidentally
+// passing the wrong falsy value and silently landing on a different scope
+// key than intended.
+function driverCursorScopeKey(sinceDate) {
+  return `${DRIVER_CURSOR_SCOPE}::sinceDate=${sinceDate == null ? 'none' : sinceDate}`;
+}
+
+// Pure — the actual trust decision, directly unit-testable with no DB. Both
+// digests must match; either mismatch (or no saved row at all) means "do
+// not trust this cursor."
+function cursorIsSafeToResume(savedCursorRow, freshClearBranch, freshEscalation) {
+  if (!savedCursorRow) return false;
+  return savedCursorRow.established_clear_branch_digest === freshClearBranch.digest
+    && savedCursorRow.established_escalation_digest === freshEscalation.digest;
+}
+
+// Both verification RPCs (migration 20260920010000) return the same
+// TABLE(row_count BIGINT, digest TEXT) shape — PostgREST's JS client
+// returns that as a one-row array.
+function normalizeDigestRpcResult(data) {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row.digest !== 'string') throw new Error('driver-cursor verification RPC returned an unexpected shape');
+  return { rowCount: Number(row.row_count) || 0, digest: row.digest };
+}
+
+// Fix #2 (Neo's review of migration 20260920020000 — read that file's own
+// header before changing anything here): p_established_floor_id/p_as_of
+// both default to null, which collapses the RPC's WHERE clause to exactly
+// the original, unscoped 20260920010000 behavior — this is what the
+// VERIFICATION call site (resolveDriverStartCursor, below) always uses, by
+// calling this function with no second argument at all. Only the PERSIST
+// call site (persistDriverCursor) ever passes real floor/asOf values,
+// scoping the time-bound to the territory the run that's persisting
+// actually swept, not the whole cumulative range — see that migration's own
+// header for why a global (unscoped) time-bound is unsafe.
+async function fetchClearBranchDigest(cursorId, { establishedFloorId = null, asOf = null } = {}) {
+  const { data, error } = await supabase.rpc('archive_search_missive_clear_branch_cursor_check', {
+    p_cursor_id: cursorId,
+    p_established_floor_id: establishedFloorId,
+    p_as_of: asOf,
+  });
+  if (error) throw error;
+  return normalizeDigestRpcResult(data);
+}
+
+async function fetchEscalationExclusionDigest() {
+  const { data, error } = await supabase.rpc('archive_search_escalation_exclusion_digest_check');
+  if (error) throw error;
+  return normalizeDigestRpcResult(data);
+}
+
+async function fetchSavedDriverCursor(scopeKey) {
+  const { data, error } = await supabase
+    .from('archive_search_significance_driver_cursors')
+    .select('*')
+    .eq('scope', scopeKey)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+// Never throws — see this section's own header for why "no usable cursor"
+// (null) is always a safe fallback, never a correctness risk. scopeKey
+// (driverCursorScopeKey(sinceDate)) means a call can only ever resume a
+// cursor saved by an earlier call that used the SAME sinceDate — see this
+// section's own "THIRD GAP" note above for why that, not the two digests,
+// is what makes date-scope safe.
+async function resolveDriverStartCursor(scopeKey) {
+  try {
+    const saved = await fetchSavedDriverCursor(scopeKey);
+    if (!saved) return null;
+    const [freshClearBranch, freshEscalation] = await Promise.all([
+      fetchClearBranchDigest(saved.cursor_id),
+      fetchEscalationExclusionDigest(),
+    ]);
+    if (cursorIsSafeToResume(saved, freshClearBranch, freshEscalation)) return saved.cursor_id;
+    console.error(`[significance-pass] driver cursor for scope '${scopeKey}' exists but no longer matches live state (a screening reset or an escalation resolve/reopen happened behind it) — falling back to a full walk from the beginning this run. Expected/self-healing, not an error.`);
+    return null;
+  } catch (err) {
+    console.error(`[significance-pass] could not verify saved driver cursor for scope '${scopeKey}' (${err.message}) — falling back to a full walk from the beginning this run.`);
+    return null;
+  }
+}
+
+// Never throws — see this section's own header for why a failed save can
+// only cost the NEXT run its fast-forward, never a skipped conversation.
+// scopeKey (driverCursorScopeKey(sinceDate)) is written as the row's own
+// scope column, so a later call with a DIFFERENT sinceDate can never read
+// this row back as if it applied to its own window.
+//
+// Fix #2 (floor/runStartedAt — migration 20260920020000): floorId is the
+// cursor THIS RUN started from (captured by the caller BEFORE its
+// pagination loop mutates its own cursor variable — see
+// fetchNextEligibleConversations()'s own use of startingCursorFloor, below)
+// and runStartedAt is this run's own start time. Passed straight through to
+// fetchClearBranchDigest() so the persisted clear-branch digest only applies
+// the screening_completed_at time-bound to territory this run actually
+// swept (id > floorId), never to the whole cumulative id <= cursorId range —
+// see that migration's own header for why a global bound is unsafe (routine
+// re-screen-on-reply touches an old, unchanged 'clear' row's
+// screening_completed_at with no real change to its eligibility). Both
+// default to null, reproducing 20260920010000's original, unscoped
+// behavior for any caller that doesn't pass them.
+//
+// Fix #3 (escalation snapshot reordering — Neo confirmed sound, no schema
+// change): escalationDigest is no longer fetched fresh in here. The caller
+// (fetchNextEligibleConversations) fetches it once, at the same moment it
+// fetches fetchEscalationExclusionSet() for this run's own row-filtering,
+// and threads that SAME snapshot through to every persistDriverCursor()
+// call this run makes — never a second, independent fetch minutes later.
+// Escalation exclusion has no id-range/floor split to worry about (it's one
+// global set, not scoped by cursor), so a single start-of-run snapshot is
+// simply correct, and reusing it (rather than re-fetching "fresher" state at
+// the end of a long run) is what keeps the persisted digest consistent with
+// the actual set this run filtered against.
+//
+// escalationDigest can be null (the caller's own best-effort fetch of it
+// failed) — that is treated exactly like any other unpersistable state: skip
+// the save entirely and log why, never throw. This matters more than it did
+// before this fix: escalationDigest is now fetched once, up front, outside
+// any per-call try/catch of its own (see fetchNextEligibleConversations()),
+// specifically so a failure there can NEVER take down real eligibility
+// scanning — only the ability to persist a cursor for THIS run.
+async function persistDriverCursor(cursorId, scopeKey, { exhausted, floorId = null, runStartedAt = null, escalationDigest = null } = {}) {
+  if (!escalationDigest) {
+    console.error(`[significance-pass] skipping driver-cursor persist for scope '${scopeKey}' — no escalation-exclusion digest snapshot was available for this run; next run will simply re-walk from the beginning instead of fast-forwarding; no conversation is at risk from this.`);
+    return;
+  }
+  try {
+    const clearBranch = await fetchClearBranchDigest(cursorId, { establishedFloorId: floorId, asOf: runStartedAt });
+    const escalation = escalationDigest;
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from('archive_search_significance_driver_cursors')
+      .upsert({
+        scope: scopeKey,
+        cursor_id: cursorId,
+        established_clear_branch_count: clearBranch.rowCount,
+        established_clear_branch_digest: clearBranch.digest,
+        established_escalation_count: escalation.rowCount,
+        established_escalation_digest: escalation.digest,
+        last_confirmed_at: nowIso,
+        exhausted_at: exhausted ? nowIso : null,
+      }, { onConflict: 'scope' });
+    if (error) throw error;
+  } catch (err) {
+    console.error(`[significance-pass] could not persist driver cursor for scope '${scopeKey}' (${err.message}) — next run will simply re-walk from the beginning instead of fast-forwarding; no conversation is at risk from this failure.`);
+  }
+}
+
 /**
  * @param {number} targetCount
  * @param {string|null} [sinceDate] ISO date string, or null/undefined for
@@ -1032,28 +1328,150 @@ function dedupeNewPairs(pageRows, alreadySeenKeys) {
 async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
   const found = [];
   const foundKeys = new Set();
-  let lastId = null; // one bare-id cursor — fetchDriverPage() never branches on sinceDate, so there is only ever one cursor shape now.
+
+  // escalationKeys is REQUIRED — the actual row-filtering predicate this
+  // whole function's real job (finding eligible conversations) depends on;
+  // if this fails, the caller has no safe way to guess exclusion, so this
+  // still throws and fails the whole call, exactly as it always has.
   const escalationKeys = await fetchEscalationExclusionSet(); // fetched ONCE per call, not once per page — see that function's own header comment.
+
+  // Fix #3 (Neo's review, migration 20260920020000): fetch the escalation
+  // DIGEST from the SAME moment as escalationKeys above, so the digest
+  // persisted at the end of this run matches the actual set this run
+  // filtered against — never a second, independent fetch minutes later (see
+  // persistDriverCursor()'s own comment for why that matters). Deliberately
+  // best-effort, NOT awaited alongside escalationKeys in the same
+  // Promise.all/try: this digest only feeds the PERSIST side of this
+  // mechanism, never eligibility itself, so a failure here must never take
+  // down real scanning — null just means this run's cursor won't be
+  // persisted (no fast-forward next time), the same safe degradation every
+  // other part of this mechanism already uses.
+  let escalationDigest = null;
+  try {
+    escalationDigest = await fetchEscalationExclusionDigest();
+  } catch (err) {
+    console.error(`[significance-pass] could not snapshot an escalation-exclusion digest at the start of this run (${err.message}) — this run's cursor will not be persisted, but eligibility scanning itself is unaffected.`);
+  }
+
+  // Fix #2 (Neo's review, migration 20260920020000): run_started_at and the
+  // STARTING cursor ("floor") are what let persistDriverCursor() scope its
+  // time-bound to only the territory THIS RUN newly swept, instead of the
+  // entire cumulative id<=cursor range. floor MUST be captured here, right
+  // after resolveDriverStartCursor() resolves it and BEFORE the pagination
+  // loop below starts reassigning lastId — lastId ends the loop pointing at
+  // the run's FINAL cursor, never the one it started from. On a genuine
+  // first-ever run (no saved cursor to resume), floor is null, which
+  // correctly degenerates the RPC's time-bound to the original, whole-range
+  // bound — the entire walked range really is new territory in that case.
+  const runStartedAt = new Date().toISOString();
+  const cursorScopeKey = driverCursorScopeKey(sinceDate); // this call can only ever resume/overwrite a cursor saved by an earlier call using the SAME sinceDate — see the "THIRD GAP" note above cursorIsSafeToResume() for why.
+  let lastId = await resolveDriverStartCursor(cursorScopeKey); // null = full walk from the beginning (no saved cursor for this scope, or it failed verification — see that function's own header for why this is always safe).
+  const startingCursorFloor = lastId; // captured NOW — before the loop below ever reassigns lastId.
+
+  const persistThisRunsCursor = (cursorId, { exhausted }) =>
+    persistDriverCursor(cursorId, cursorScopeKey, { exhausted, floorId: startingCursorFloor, runStartedAt, escalationDigest });
 
   for (;;) {
     const page = await fetchDriverPage(lastId);
-    if (page.length === 0) break;
-    lastId = page[page.length - 1].id; // advance from the RAW page, before the date/escalation filters below — pagination must progress through every message row regardless of whether it passes either filter, or a long run of filtered-out messages would re-fetch the same page forever.
+    if (page.length === 0) {
+      if (lastId !== null) await persistThisRunsCursor(lastId, { exhausted: true }); // nothing new since lastId — record it as confirmed-current, not just confirmed-at-a-past-moment.
+      break;
+    }
+    lastId = page[page.length - 1].id; // advance from the RAW page, before the date/escalation filters below — pagination must progress through every message row regardless of whether it passes either filter, or a long run of filtered-out messages would re-fetch the same page forever. NOTE: this is only a safe cursor value once the WHOLE page has actually been walked (the two persistThisRunsCursor() calls below this line, both reached only after the per-pair loop runs to completion) — see firstRowIdForPair below for the mid-page early-exit case, where it is NOT safe.
 
     const datePassingRows = page.filter((row) => passesSinceDate(row, sinceDate));
     const eligibleRows = datePassingRows.filter((row) => passesEscalationExclusion(row, escalationKeys));
+
+    // Bug fix (TARS repro, mid-page targetCount stop): mirrors dedupeNewPairs'
+    // own first-seen-wins dedup below, purely to remember which RAW row id
+    // each surviving pair FIRST appeared at in this page — kept as a separate
+    // pass rather than changing dedupeNewPairs' own return shape (its unit
+    // tests below assert the exact {mailbox_key, missive_conversation_id}
+    // shape, untouched here). Needed because `lastId` above is the id of the
+    // page's LAST row, computed before any row in this page has actually been
+    // examined for eligibility — correct to persist only once the per-pair
+    // loop below runs to completion (every row in the page really was
+    // examined). If that loop instead returns early because targetCount was
+    // hit partway through, persisting `lastId` would tell the NEXT run to
+    // fast-forward past rows this run never looked at — rows 4-500 of a
+    // 500-row page, in TARS's repro, silently and permanently skipped. The
+    // fix: when stopping early, persist the id of the row where the LAST
+    // pair actually added to `found` first appeared, not the page's end — so
+    // the next run resumes exactly where examination left off, not past it.
+    const firstRowIdForPair = new Map();
+    for (const row of eligibleRows) {
+      const key = `${row.mailbox_key}::${row.missive_conversation_id}`;
+      if (!firstRowIdForPair.has(key)) firstRowIdForPair.set(key, row.id);
+    }
+
     const pairs = dedupeNewPairs(eligibleRows, foundKeys);
     const eligible = await filterAlreadyProcessed(pairs);
     for (const pair of eligible) {
       const key = `${pair.mailbox_key}::${pair.missive_conversation_id}`;
       foundKeys.add(key);
       found.push(pair);
-      if (found.length >= targetCount) return found;
+      if (found.length >= targetCount) {
+        // Stopped early (hit target): rows after this pair's first-seen row
+        // were never examined this run (not filtered, not checked, not
+        // returned) — persist THAT row's id, not this page's end, so they
+        // are re-examined, not skipped, next run.
+        const examinedThroughId = firstRowIdForPair.get(key);
+        await persistThisRunsCursor(examinedThroughId, { exhausted: false });
+        return found;
+      }
     }
 
-    if (page.length < DRIVER_PAGE_SIZE) break; // exhausted the view
+    if (page.length < DRIVER_PAGE_SIZE) { // exhausted the view — the per-pair loop above ran to completion, so every row in this page really was examined; lastId (this page's true last row) is a safe resume point.
+      await persistThisRunsCursor(lastId, { exhausted: true });
+      break;
+    }
   }
   return found;
+}
+
+// ============================================================
+// countDistinctEligibleConversations — the conversation-level counting half
+// of estimateExpectedEligiblePool() (below), added 2026-09-21 to fix the
+// message-vs-conversation bug documented in that function's own header.
+// Reuses fetchDriverPage() and passesSinceDate() exactly as
+// fetchNextEligibleConversations() itself does — same underlying data
+// source (2026-09-21: fetchDriverPage() itself switched from the
+// clear_branch view to an equivalent RPC function; see that function's own
+// header comment for why — this function needed no change of its own
+// because it never queried anything directly, it only ever called
+// fetchDriverPage()), same plain `ORDER BY id ASC` / bare `id > cursor`
+// query shape, same three-plus-id columns back. sinceDate is therefore
+// never sent to Postgres here either — it is applied client-side, per row,
+// via passesSinceDate(), the same as the real scan.
+//
+// Walks every page to exhaustion — unlike fetchNextEligibleConversations(),
+// this needs the TRUE total, not "enough to fill one batch," so it never
+// stops early at a target count. Returns the number of DISTINCT
+// `${mailbox_key}::${missive_conversation_id}` pairs seen, using the same
+// composite-key convention already used elsewhere in this file
+// (dedupeNewPairs, passesEscalationExclusion, filterAlreadyProcessed). This
+// is a metadata-only walk (id/mailbox_key/missive_conversation_id/
+// delivered_at only — no escalation-set fetch, no filterAlreadyProcessed
+// round trip, no AI call), so even a full walk of the view stays cheap
+// relative to an actual submission pass. A single COUNT-only query would be
+// faster still, but PostgREST/supabase-js has no way to ask Postgres for a
+// DISTINCT count of a composite key without a new database function or
+// view — a schema change, out of scope for this fix (see
+// estimateExpectedEligiblePool()'s own header).
+// ============================================================
+async function countDistinctEligibleConversations(sinceDate) {
+  const seen = new Set();
+  let cursor = null;
+  for (;;) {
+    const page = await fetchDriverPage(cursor);
+    if (page.length === 0) break;
+    cursor = page[page.length - 1].id; // advance from the RAW page, same discipline fetchNextEligibleConversations() uses — see that function's own comment for why.
+    for (const row of page) {
+      if (passesSinceDate(row, sinceDate)) seen.add(`${row.mailbox_key}::${row.missive_conversation_id}`);
+    }
+    if (page.length < DRIVER_PAGE_SIZE) break; // exhausted the view
+  }
+  return seen.size;
 }
 
 // ============================================================
@@ -1075,25 +1493,32 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
 // — see that file's own EXPECTED_POOL_MIN_RATIO comment for the threshold
 // reasoning; this function only produces the estimate.
 //
-// Deliberately NOT another row-by-row pass over the same clear-branch
-// search-safe view fetchDriverPage() itself pages through — that would just
-// pay the same expensive, hours-long cost a second time, defeating the
-// whole point of a FAST sanity check. Instead, exactly two cheap COUNT-only
-// queries, using the same `count: 'exact', head: true` pattern already used
-// elsewhere in this
-// codebase for a fast row count with no rows actually returned (e.g.
-// significance-batch.js's own pending-item count in
-// checkAndResumeOneBatch()):
-//   1. How many rows in missive_message_intake_search_safe_clear_branch —
-//      the SAME table fetchDriverPage() itself pages through — match the
-//      same delivered_at >= sinceDate condition passesSinceDate() applies
-//      client-side (a single, one-shot .gte() filter, never an id-ordered
-//      keyset scan). fetchDriverPage()'s own header comment documents why
-//      COMBINING an id-ordered keyset cursor with a delivered_at filter
-//      broke the query planner (confirmed live, twice) — but that failure
-//      mode is specific to a repeated, paginated ORDER BY id query. A
-//      single one-shot count with no ordering at all is a fundamentally
-//      different query shape, not subject to that same problem.
+// FIXED 2026-09-21 (Neo's finding, database specialist): term (1) below
+// used to count MESSAGE rows matching the date cutoff via a single
+// COUNT-only query, not distinct CONVERSATIONS — one conversation routinely
+// contributes several matching message rows, and Neo measured the real
+// production messages-per-conversation ratio at 2.513x. That inflated (1)
+// by roughly 2.5x before the subtraction below ever happened, which
+// inflated expectedPool by the same ~2.5x — the false-alarm direction this
+// safeguard must never produce (see the "safer direction to be wrong"
+// reasoning below, which the old message-counting approach violated,
+// despite an earlier version of this comment incorrectly rationalizing it
+// as "conservative"). Confirmed live: a verified-correct real count of
+// 10,107 eligible conversations for since_date=2025-09-17 looked like only
+// ~16.7% of the old, message-counted ~60,544 estimate, tripping the 70%
+// guard and forcing an unnecessary manual --force override.
+//
+// (1) now counts DISTINCT conversations — via
+// countDistinctEligibleConversations(), immediately above — matching how
+// the actual eligibility scan (fetchNextEligibleConversations(), above)
+// itself counts things. This can no longer be a single COUNT-only query the
+// way (2) still is; see countDistinctEligibleConversations()'s own header
+// for why:
+//   1. How many DISTINCT (mailbox_key, missive_conversation_id) pairs in
+//      missive_message_intake_search_safe_clear_branch — the SAME table
+//      fetchDriverPage() itself pages through — have at least one row
+//      matching the same delivered_at >= sinceDate condition
+//      passesSinceDate() applies client-side.
 //   2. How many rows exist, TOTAL, in missive_conversation_significance —
 //      every conversation this pass has ever fully processed, table-wide,
 //      deliberately NOT scoped by sinceDate (this task's own explicit
@@ -1102,12 +1527,9 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
 //
 // expectedPool = max(0, (1) - (2)) — an APPROXIMATION, stated plainly, not
 // a second authoritative computation:
-//   - (1) counts MESSAGES matching the date cutoff, not distinct
-//     CONVERSATIONS (one conversation can contribute several matching
-//     message rows), so (1) runs a bit HIGH relative to the true
-//     conversation-level pool. This only makes the resulting estimate MORE
-//     conservative (harder to silently pass a real undercount) — never
-//     less.
+//   - (1) now counts CONVERSATIONS, matching the true grain of the pool
+//     this estimate approximates — no longer inflated by
+//     messages-per-conversation.
 //   - (2) is NOT scoped to sinceDate at all, so it can push the other way:
 //     whenever a meaningful share of already-processed conversations sit
 //     outside this run's own date window, expectedPool comes out LOWER
@@ -1122,23 +1544,18 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
 //     relative to the ~60% gap this check exists to catch.
 // @param {string|null} [sinceDate] same ISO-date-string/null semantics as
 //   fetchNextEligibleConversations' own sinceDate parameter.
-// @returns {Promise<{expectedPool:number, totalMatchingMessages:number, totalAlreadyProcessed:number}>}
+// @returns {Promise<{expectedPool:number, totalMatchingConversations:number, totalAlreadyProcessed:number}>}
 // ============================================================
 async function estimateExpectedEligiblePool(sinceDate = null) {
-  let matchingMessagesQuery = supabase
-    .from('missive_message_intake_search_safe_clear_branch')
-    .select('id', { count: 'exact', head: true });
-  if (sinceDate != null) matchingMessagesQuery = matchingMessagesQuery.gte('delivered_at', sinceDate);
-  const { count: totalMatchingMessages, error: messagesErr } = await matchingMessagesQuery;
-  if (messagesErr) throw messagesErr;
+  const totalMatchingConversations = await countDistinctEligibleConversations(sinceDate);
 
   const { count: totalAlreadyProcessed, error: processedErr } = await supabase
     .from('missive_conversation_significance')
     .select('id', { count: 'exact', head: true });
   if (processedErr) throw processedErr;
 
-  const expectedPool = Math.max(0, (totalMatchingMessages || 0) - (totalAlreadyProcessed || 0));
-  return { expectedPool, totalMatchingMessages: totalMatchingMessages || 0, totalAlreadyProcessed: totalAlreadyProcessed || 0 };
+  const expectedPool = Math.max(0, totalMatchingConversations - (totalAlreadyProcessed || 0));
+  return { expectedPool, totalMatchingConversations, totalAlreadyProcessed: totalAlreadyProcessed || 0 };
 }
 
 // ============================================================
@@ -1842,7 +2259,16 @@ module.exports = {
   passesEscalationExclusion,
   fetchEscalationExclusionSet,
   fetchNextEligibleConversations,
+  countDistinctEligibleConversations,
   estimateExpectedEligiblePool,
+  // Resumable driver cursor (migration 20260920010000) — exported for direct
+  // unit tests (cursorIsSafeToResume) and for the real, end-to-end
+  // fake-Supabase scenario tests proving the fallback actually fires (see
+  // this section's own header comment, above fetchNextEligibleConversations).
+  cursorIsSafeToResume,
+  driverCursorScopeKey,
+  resolveDriverStartCursor,
+  persistDriverCursor,
   fetchIncompleteSignificanceRows,
   retryCall2ForExistingRow,
   dedupeNewPairs,

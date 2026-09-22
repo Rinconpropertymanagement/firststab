@@ -25,6 +25,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto'); // PART 20 (resumable driver cursor) needs a real md5, matching the digest shape the real Postgres functions in migration 20260920010000 compute.
 
 const results = [];
 const asyncResults = [];
@@ -2139,6 +2140,16 @@ test('passesSinceDate — uses Date.parse, not raw string comparison, so a date-
 // dedicated fake client (makeEscalationAwareFakeClient, below) instead of
 // growing this one further, matching this suite's own convention of one
 // small fake per concern.
+//
+// UPDATED 2026-09-21 (migration 20260921020000, performance fix):
+// fetchDriverPage() no longer queries missive_message_intake_search_safe_
+// clear_branch via .from() — it calls the
+// archive_search_significance_driver_next_clear_page RPC instead (see that
+// function's own header comment in significance-pass.js). rpc() below
+// serves that call directly out of tableData's own
+// missive_message_intake_search_safe_clear_branch entry — same backing
+// fixture data every test below already builds, just read through the new
+// call shape instead of the old .from() chain.
 function makeFilteringFakeClient(tableData) {
   function makeChain(table) {
     const filters = [];
@@ -2168,7 +2179,19 @@ function makeFilteringFakeClient(tableData) {
     };
     return chain;
   }
-  return { from: (table) => makeChain(table) };
+  function rpc(name, args) {
+    if (name === 'archive_search_significance_driver_next_clear_page') {
+      const cursor = args && args.p_cursor_id != null ? args.p_cursor_id : null;
+      const limitN = args && args.p_limit;
+      let rows = (tableData.missive_message_intake_search_safe_clear_branch || []).slice();
+      if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
+      rows = rows.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (limitN != null) rows = rows.slice(0, limitN);
+      return Promise.resolve({ data: rows, error: null });
+    }
+    return Promise.reject(new Error(`makeFilteringFakeClient: unexpected rpc '${name}'`));
+  }
+  return { from: (table) => makeChain(table), rpc };
 }
 
 // The exact edge case this task named: an OLD first message + a RECENT
@@ -2314,6 +2337,14 @@ asyncTest('significance-pass driver — sinceDate pagination advances past a FUL
 // argument spy on .or() against that one table specifically, matching this
 // suite's established convention of one small, purpose-built fake per
 // concern rather than one shared mock accreting every feature.
+//
+// UPDATED 2026-09-21 (migration 20260921020000, performance fix): same
+// change as makeFilteringFakeClient above — fetchDriverPage() now calls the
+// archive_search_significance_driver_next_clear_page RPC instead of
+// .from('missive_message_intake_search_safe_clear_branch'), so rpc() below
+// serves that page fetch directly, reading the same
+// missive_message_intake_search_safe_clear_branch fixture entry every test
+// in this section already builds.
 // ============================================================
 function makeEscalationAwareFakeClient(tableData) {
   const calls = { escalationOrCalls: [] }; // one entry per real .or() call against archive_search_escalations — length IS the fetch count.
@@ -2348,15 +2379,28 @@ function makeEscalationAwareFakeClient(tableData) {
     };
     return chain;
   }
-  return { client: { from: (table) => makeChain(table) }, calls };
+  function rpc(name, args) {
+    if (name === 'archive_search_significance_driver_next_clear_page') {
+      const cursor = args && args.p_cursor_id != null ? args.p_cursor_id : null;
+      const limitN = args && args.p_limit;
+      let rows = (tableData.missive_message_intake_search_safe_clear_branch || []).slice();
+      if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
+      rows = rows.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (limitN != null) rows = rows.slice(0, limitN);
+      return Promise.resolve({ data: rows, error: null });
+    }
+    return Promise.reject(new Error(`makeEscalationAwareFakeClient: unexpected rpc '${name}'`));
+  }
+  return { client: { from: (table) => makeChain(table), rpc }, calls };
 }
 
-test('significance-pass — fetchDriverPage() queries missive_message_intake_search_safe_clear_branch, not the wider missive_message_intake_search_safe (migration 20260918020000, point 1 — source-scanned, matching this suite\'s own established convention for a single, unambiguous call-site check)', () => {
+test('significance-pass — fetchDriverPage() calls the archive_search_significance_driver_next_clear_page RPC, not the clear_branch view or the wider missive_message_intake_search_safe (migration 20260921020000, performance fix — source-scanned, matching this suite\'s own established convention for a single, unambiguous call-site check)', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'significance-pass.js'), 'utf8');
   const start = source.indexOf('async function fetchDriverPage');
   assert.ok(start !== -1, 'expected to find fetchDriverPage()');
   const body = source.slice(start, source.indexOf('\n}', start));
-  assert.ok(body.includes(".from('missive_message_intake_search_safe_clear_branch')"), 'expected fetchDriverPage() to query the new clear_branch view');
+  assert.ok(body.includes(".rpc('archive_search_significance_driver_next_clear_page'"), 'expected fetchDriverPage() to call the new, faster RPC function');
+  assert.ok(!body.includes(".from('missive_message_intake_search_safe_clear_branch')"), 'expected fetchDriverPage() to no longer query the clear_branch view directly — the security_barrier view forced a slow sequential scan');
   assert.ok(!body.includes(".from('missive_message_intake_search_safe')"), 'expected fetchDriverPage() to no longer query the wider, anti-join view directly');
 });
 
@@ -2462,6 +2506,580 @@ test('passesEscalationExclusion — an empty exclusion set never excludes anythi
 test('passesEscalationExclusion — matches on the FULL composite key, not mailbox_key or missive_conversation_id alone (same mailbox, different conversation)', () => {
   const keys = new Set(['mb1::conv-a']);
   assert.strictEqual(significancePass.passesEscalationExclusion({ mailbox_key: 'mb1', missive_conversation_id: 'conv-z' }, keys), true);
+});
+
+// ============================================================
+// PART 20 — Resumable driver cursor (migration 20260920010000, Neo).
+// fetchNextEligibleConversations() now persists a keyset resume point so a
+// fresh call does not have to re-walk missive_message_intake_search_safe_
+// clear_branch from id=null every single time (see that function's own
+// header comment in significance-pass.js, above cursorIsSafeToResume(),
+// for the full correctness argument). TWO independent things must each
+// stay unchanged for a saved cursor to be safe to reuse — screening-result
+// membership below the cursor, and the escalation-exclusion set applied on
+// top of it — and this suite proves BOTH real failure shapes end-to-end,
+// not just the pure digest-comparison logic in isolation:
+//   1. A screening reset-and-reclear (reset-layer1-removal-310.js's real,
+//      already-executed shape): a conversation becomes newly 'clear' with
+//      an id sitting behind an already-saved cursor.
+//   2. An escalation reopening (20260912040000's real reopened_at/status
+//      lifecycle — the SECOND gap, found on review, distinct from #1): a
+//      conversation's escalation-exclusion status changes with NO change
+//      to screening_result at all.
+// Both must cause the NEXT call to fall back to a full walk and actually
+// FIND the newly-eligible conversation — proven below by asserting on the
+// real pairs returned AND on the real cursor value fetchDriverPage() was
+// called with, so a test cannot pass "by accident" (a design that always
+// falls back would trivially pass the two failure-shape tests without
+// proving the fast-forward optimization exists at all — the first test
+// below, the happy path, is what rules that out).
+//
+// sinceDate varying across separate calls sharing this cursor scope IS
+// tested — see "Failure shape #3" further down this same PART, added after
+// Asimov's review found this exact gap. driverCursorScopeKey() folds
+// sinceDate into the scope key itself, so a call with a different sinceDate
+// can never reuse another call's cursor — see significance-pass.js's own
+// comment above driverCursorScopeKey() for the full reasoning.
+//
+// A dedicated, purpose-built fake client (not a reuse of
+// makeFilteringFakeClient/makeEscalationAwareFakeClient) — this is the
+// first thing in this suite that needs the archive_search_escalations fake
+// to apply the REAL status/reopened_at predicate rather than "any row
+// present is excluded," because these tests mutate that predicate BETWEEN
+// two separate calls to fetchNextEligibleConversations() and need the fake
+// escalation-exclusion RPC digest and the fake fetchEscalationExclusionSet
+// query to agree with each other, exactly like the real database's own
+// view and function must agree. State lives in one mutable object so a
+// test can mutate it between two calls, simulating two genuinely separate
+// invocations (a fresh process, a fresh HTTP request) sharing only the
+// database — never any in-process cache, matching this design's own real
+// architecture (see significance-pass.js's own header: the mechanism is
+// specifically NOT an in-process running total, always a fresh query).
+// ============================================================
+
+function md5Hex(text) {
+  return crypto.createHash('md5').update(text).digest('hex');
+}
+
+// TARS addition (migration 20260920020000): a fixed, safely-in-the-past
+// screening_completed_at for every PART 20 fixture row that isn't itself
+// the thing being raced in. Needed because persistDriverCursor() now
+// ALWAYS passes a real run_started_at as p_as_of — even on a genuine
+// first-ever run (only p_established_floor_id can be null) — so once
+// makeResumableCursorFakeClient's rpc() actually honors that parameter
+// (rather than ignoring it, as it did before this fix), any fixture row
+// with no screening_completed_at at all would silently fail the new
+// `screening_completed_at <= p_as_of` check and never make it into a
+// persisted digest — breaking every existing fast-forward assertion below
+// for reasons that have nothing to do with what each test actually means
+// to prove. This constant is deliberately a fixed date in the past, not
+// "now," so it is unconditionally <= any run_started_at these tests ever
+// capture.
+const RESUMABLE_CURSOR_OLD_TS = '2020-01-01T00:00:00.000Z';
+
+// The exact predicate archive_search_escalation_exclusion_digest_check()
+// and fetchEscalationExclusionSet() both use (status = 'open' OR
+// (status = 'confirmed' AND reopened_at IS NULL)) — applied for REAL here,
+// unlike makeEscalationAwareFakeClient's deliberate "any row present"
+// shortcut, because these tests need this predicate to actually change
+// between two calls.
+function realEscalationExcludes(row) {
+  return row.status === 'open' || (row.status === 'confirmed' && row.reopened_at == null);
+}
+
+function resumableCursorTableKey(table) {
+  if (table === 'missive_message_intake_search_safe_clear_branch') return 'clearBranch';
+  if (table === 'missive_conversation_significance') return 'significance';
+  if (table === 'archive_search_escalations') return 'escalations';
+  if (table === 'archive_search_significance_driver_cursors') return 'cursors';
+  throw new Error(`makeResumableCursorFakeClient: unexpected table '${table}'`);
+}
+
+// state: { clearBranch: [], significance: [], escalations: [], cursors: [] }
+// — a plain mutable object a test can edit BETWEEN two calls to
+// fetchNextEligibleConversations(), standing in for two separate real
+// invocations sharing only the database.
+function makeResumableCursorFakeClient(state) {
+  const calls = { clearBranchPageCursors: [], rpcCalls: [] }; // clearBranchPageCursors: one entry per real driver-page fetch, in order — null means "started from the beginning," a real id means "fast-forwarded from that saved cursor." THE key observable for proving which path a run actually took.
+
+  function makeChain(table) {
+    const filters = [];
+    let orderField = null;
+    let orderAsc = true;
+    let limitN = null;
+    let pendingUpsert = null;
+
+    const chain = {
+      select() { return chain; },
+      order(field, opts) { orderField = field; orderAsc = !(opts && opts.ascending === false); return chain; },
+      limit(n) { limitN = n; return chain; },
+      gt(field, value) { filters.push((row) => row[field] > value); return chain; },
+      eq(field, value) { filters.push((row) => row[field] === value); return chain; },
+      in(field, values) { filters.push((row) => values.includes(row[field])); return chain; },
+      or() { return chain; }, // archive_search_escalations is filtered for real in then()/maybeSingle(), below — see this section's own header for why this fake can't use the other fakes' "any row present" shortcut.
+      maybeSingle() {
+        const rows = (state[resumableCursorTableKey(table)] || []).filter((row) => filters.every((f) => f(row)));
+        return Promise.resolve({ data: rows[0] || null, error: null });
+      },
+      upsert(row, opts) { pendingUpsert = { row, opts }; return chain; },
+      then(resolve, reject) {
+        if (pendingUpsert) {
+          const key = resumableCursorTableKey(table);
+          const arr = state[key] || (state[key] = []);
+          const onConflict = pendingUpsert.opts && pendingUpsert.opts.onConflict;
+          const idx = onConflict ? arr.findIndex((r) => r[onConflict] === pendingUpsert.row[onConflict]) : -1;
+          if (idx >= 0) arr[idx] = { ...arr[idx], ...pendingUpsert.row }; else arr.push({ ...pendingUpsert.row });
+          return Promise.resolve({ data: [pendingUpsert.row], error: null }).then(resolve, reject);
+        }
+
+        let rows = state[resumableCursorTableKey(table)] || [];
+        if (table === 'archive_search_escalations') rows = rows.filter(realEscalationExcludes); // the REAL predicate, not "any row present" — see this section's own header.
+        rows = rows.filter((row) => filters.every((f) => f(row)));
+        if (orderField) {
+          rows = rows.slice().sort((a, b) => {
+            if (a[orderField] < b[orderField]) return orderAsc ? -1 : 1;
+            if (a[orderField] > b[orderField]) return orderAsc ? 1 : -1;
+            return 0;
+          });
+        }
+        if (limitN != null) rows = rows.slice(0, limitN);
+
+        return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  // TARS addition (migration 20260920020000): the REAL WHERE clause, not the
+  // old ignore-floor-and-asOf shortcut this fake shipped with. Read
+  // literally off the migration's own SQL (three OR'd escape hatches):
+  //   p_as_of IS NULL
+  //     -> the verification call site (resolveDriverStartCursor -> fetchClearBranchDigest,
+  //        called with no floor/asOf) — unscoped, byte-for-byte the original
+  //        20260920010000 behavior.
+  //   p_established_floor_id IS NOT NULL AND id <= p_established_floor_id
+  //     -> OLD territory (already covered before this run started) always
+  //        counts, time-bound or not.
+  //   screening_completed_at <= p_as_of
+  //     -> NEW territory (id > floor, what THIS run actually swept) only
+  //        counts if it was screened before this run began — this is what
+  //        excludes a row that raced in mid-run, after verification/start
+  //        but before persist.
+  function realClearBranchCursorCheck(cursorId, establishedFloorId, asOf) {
+    const rows = (state.clearBranch || []).filter((r) => {
+      if (!(r.id <= cursorId)) return false;
+      if (asOf == null) return true;
+      if (establishedFloorId != null && r.id <= establishedFloorId) return true;
+      return r.screening_completed_at != null && r.screening_completed_at <= asOf;
+    });
+    const ids = rows.map((r) => r.id).sort();
+    return { row_count: ids.length, digest: md5Hex(ids.join(',')) };
+  }
+
+  function rpc(name, args) {
+    calls.rpcCalls.push({ name, args });
+    // UPDATED 2026-09-21 (migration 20260921020000, performance fix):
+    // fetchDriverPage() itself now calls this RPC instead of .from(
+    // 'missive_message_intake_search_safe_clear_branch') — this branch
+    // replaces what used to be the .from() chain's own clear-branch
+    // handling in makeChain()/then() above (see that function's own
+    // now-simplified body). clearBranchPageCursors tracking and the
+    // onClearBranchPageFetched race-repro hook move here with it, same
+    // semantics as before: cursor null means "started from the beginning,"
+    // a real id means "fast-forwarded"; onClearBranchPageFetched still
+    // fires AFTER this page's own rows are read out of state.clearBranch
+    // into a filtered/sliced COPY, so a mutation it makes can never leak
+    // into the page currently resolving — see this section's own header
+    // comment (TARS addition, migration 20260920020000) for why that
+    // ordering matters.
+    if (name === 'archive_search_significance_driver_next_clear_page') {
+      const cursor = args && args.p_cursor_id != null ? args.p_cursor_id : null;
+      calls.clearBranchPageCursors.push(cursor);
+      let rows = (state.clearBranch || []).filter((row) => cursor === null || row.id > cursor);
+      rows = rows.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      const limitN = args && args.p_limit;
+      if (limitN != null) rows = rows.slice(0, limitN);
+      if (typeof state.onClearBranchPageFetched === 'function') state.onClearBranchPageFetched(cursor);
+      return Promise.resolve({ data: rows, error: null });
+    }
+    if (name === 'archive_search_missive_clear_branch_cursor_check') {
+      const result = realClearBranchCursorCheck(args.p_cursor_id, args.p_established_floor_id ?? null, args.p_as_of ?? null);
+      return Promise.resolve({ data: [result], error: null });
+    }
+    if (name === 'archive_search_escalation_exclusion_digest_check') {
+      const keys = (state.escalations || []).filter(realEscalationExcludes).map((r) => `${r.mailbox_key}::${r.missive_conversation_id}`).sort();
+      return Promise.resolve({ data: [{ row_count: keys.length, digest: md5Hex(keys.join(',')) }], error: null });
+    }
+    return Promise.reject(new Error(`makeResumableCursorFakeClient: unexpected rpc '${name}'`));
+  }
+
+  return { client: { from: (table) => makeChain(table), rpc }, calls };
+}
+
+// ─── cursorIsSafeToResume — pure unit tests, no DB ─────────────────────────
+test('cursorIsSafeToResume — both digests matching returns true (the only case a saved cursor may be trusted)', () => {
+  const saved = { established_clear_branch_digest: 'AAA', established_escalation_digest: 'BBB' };
+  assert.strictEqual(significancePass.cursorIsSafeToResume(saved, { digest: 'AAA' }, { digest: 'BBB' }), true);
+});
+
+test('cursorIsSafeToResume — a clear-branch digest mismatch alone is unsafe, even when the escalation digest still matches', () => {
+  const saved = { established_clear_branch_digest: 'AAA', established_escalation_digest: 'BBB' };
+  assert.strictEqual(significancePass.cursorIsSafeToResume(saved, { digest: 'CHANGED' }, { digest: 'BBB' }), false);
+});
+
+test('cursorIsSafeToResume — an escalation digest mismatch alone is unsafe, even when the clear-branch digest still matches — the second gap found on review of the first draft of this design, distinct from the screening-reset gap above', () => {
+  const saved = { established_clear_branch_digest: 'AAA', established_escalation_digest: 'BBB' };
+  assert.strictEqual(significancePass.cursorIsSafeToResume(saved, { digest: 'AAA' }, { digest: 'CHANGED' }), false);
+});
+
+test('cursorIsSafeToResume — no saved cursor row at all is always unsafe (first-ever run for this scope)', () => {
+  assert.strictEqual(significancePass.cursorIsSafeToResume(null, { digest: 'AAA' }, { digest: 'BBB' }), false);
+});
+
+// ─── The happy path — proves the optimization actually engages, not just
+// that it fails safe ────────────────────────────────────────────────────
+asyncTest('significance-pass driver — resumable cursor: an unchanged region behind a saved cursor is FAST-FORWARDED on the next run (the real performance win — rules out a design that always falls back)', async () => {
+  const state = {
+    clearBranch: [
+      { id: 'id-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+      { id: 'id-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+    ],
+    significance: [], escalations: [], cursors: [],
+  };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.deepStrictEqual(run1.map((p) => p.missive_conversation_id).sort(), ['conv-1', 'conv-2'], 'run 1: expected both conversations found on a fresh, cursor-less walk');
+    assert.strictEqual(calls.clearBranchPageCursors[0], null, 'run 1: expected the very first page fetch to start from null — no saved cursor exists yet');
+    assert.strictEqual(state.cursors.length, 1, 'expected run 1 to persist exactly one cursor row for this scope');
+
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.deepStrictEqual(run2, [], 'run 2: nothing new exists beyond the saved cursor, so nothing should be (re)found');
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], 'id-2', 'run 2: expected the fast-forward to actually engage — the page fetch should start from the SAVED cursor (id-2), not null, since nothing changed underneath it');
+  });
+});
+
+// ─── Failure shape #1 — screening reset-and-reclear (reset-layer1-removal-
+// 310.js's real, already-executed shape) ────────────────────────────────
+asyncTest('significance-pass driver — resumable cursor: a screening reset-and-reclear BEHIND the saved cursor is caught, and the newly-eligible conversation IS found on the very next run — never silently, permanently skipped', async () => {
+  const state = {
+    clearBranch: [
+      { id: 'id-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+      { id: 'id-3', mailbox_key: 'mb1', missive_conversation_id: 'conv-3', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+    ],
+    significance: [], escalations: [], cursors: [],
+  };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.deepStrictEqual(run1.map((p) => p.missive_conversation_id).sort(), ['conv-2', 'conv-3']);
+
+    // Between runs: conv-1 becomes newly 'clear' (screening_result reset, then re-screened — reset-layer1-removal-310.js's real shape) with an id sitting BEHIND the cursor run 1 just saved ('id-3'). id is gen_random_uuid() in production; nothing about it correlates to when a row was screened.
+    state.clearBranch.unshift({ id: 'id-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-02-01T00:00:00.000Z', screening_completed_at: '2026-02-01T00:00:00.000Z' });
+
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.ok(run2.some((p) => p.missive_conversation_id === 'conv-1'), 'expected conv-1 to be found on run 2 — a naive fast-forward past id-3 would never re-fetch id-1 at all and would permanently miss it');
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], null, 'expected run 2 to fall back to a full walk from null (the clear-branch digest must have detected the mismatch below the cursor) rather than trusting the stale cursor');
+  });
+});
+
+// ─── Failure shape #2 — an escalation reopening (20260912040000's real
+// reopened_at/status lifecycle) — the SECOND gap, distinct from #1, found
+// on review of the first draft of this design ───────────────────────────
+asyncTest('significance-pass driver — resumable cursor: an escalation reopening BEHIND the saved cursor is caught, and the newly-eligible conversation IS found on the very next run — the second gap found on review of the first draft of this design, with screening_result never changing at all', async () => {
+  const state = {
+    clearBranch: [
+      { id: 'id-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+      { id: 'id-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+    ],
+    significance: [],
+    escalations: [
+      { mailbox_key: 'mb1', missive_conversation_id: 'conv-1', status: 'confirmed', reopened_at: null }, // status='confirmed' with reopened_at IS NULL still excludes, per 20260912040000 — conv-1 stays hidden until reopened.
+    ],
+    cursors: [],
+  };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.deepStrictEqual(run1, [{ mailbox_key: 'mb1', missive_conversation_id: 'conv-2' }], 'run 1: expected conv-1 excluded (active escalation) and conv-2 found — both rows are already screening_result=\'clear\' the whole time in this test');
+
+    // Between runs: a human reopens the confirmed escalation (20260912040000's real reversal path) — conv-1 becomes newly eligible with NO change to screening_result, and its id (id-1) sits BEHIND the saved cursor ('id-2').
+    state.escalations[0].reopened_at = '2026-03-01T00:00:00.000Z';
+
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.ok(run2.some((p) => p.missive_conversation_id === 'conv-1'), 'expected conv-1 to be found on run 2 — a cursor design that only watches screening_result (Gap 1 alone) would fast-forward past id-2 since it never changed, and would never reconsider conv-1 at all');
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], null, 'expected run 2 to fall back to a full walk from null — the escalation-exclusion digest must have detected the reopening even though the clear-branch digest alone would have matched');
+  });
+});
+
+// ─── Failure shape #3 — mid-page targetCount stop (TARS repro, found live
+// while testing this same PART 20 driver): a saved cursor is worthless if
+// the value persisted under it is wrong in the first place. Distinct from
+// the two failure shapes above (both about whether a STALE cursor is
+// correctly distrusted) — this one is about whether a cursor persisted from
+// a run that stopped PARTWAY THROUGH a page (hit targetCount before reaching
+// the page's own end) points at the right place at all. Before this fix,
+// fetchNextEligibleConversations() persisted the RAW page's last row id
+// (captured before the per-pair loop ever ran) regardless of where the
+// early-exit actually happened — so a 500-row page with targetCount=3 would
+// persist a cursor at row 500 after returning only 3, and the very next run
+// would fast-forward straight past the other 497 genuinely eligible,
+// never-processed conversations in that same page, forever. ────────────────
+asyncTest('significance-pass driver — resumable cursor: hitting targetCount PARTWAY THROUGH a single page persists a cursor at the LAST row actually examined, not the page boundary — the next run finds the rest of that same page instead of silently, permanently skipping it (TARS repro)', async () => {
+  const PAGE_SIZE = 500;
+  const clearBranch = [];
+  for (let i = 0; i < PAGE_SIZE; i++) {
+    const n = String(i).padStart(4, '0');
+    clearBranch.push({
+      id: `id-${n}`,
+      mailbox_key: 'mb1',
+      missive_conversation_id: `conv-${n}`,
+      delivered_at: '2026-01-01T00:00:00.000Z',
+      screening_completed_at: RESUMABLE_CURSOR_OLD_TS,
+    });
+  }
+  const state = { clearBranch, significance: [], escalations: [], cursors: [] };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const targetCount = 3;
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(targetCount);
+    assert.strictEqual(run1.length, targetCount, 'run 1: expected exactly targetCount conversations, stopping mid-page (500 eligible were available)');
+    assert.strictEqual(state.cursors.length, 1, 'expected run 1 to persist exactly one cursor row for this scope');
+
+    const persistedCursorId = state.cursors[0].cursor_id;
+    const lastRealIdInPage = clearBranch[clearBranch.length - 1].id;
+    assert.notStrictEqual(persistedCursorId, lastRealIdInPage, 'bug: cursor was persisted at the full page boundary even though only 3 of 500 eligible conversations in that page were ever returned — the other 497 were never examined by this run and would be permanently skipped by the next one');
+
+    // Later, real production run resuming with the same scope — nothing in
+    // the underlying clear-branch or escalation state has changed, so the
+    // saved cursor should verify as safe and be fast-forwarded to.
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(PAGE_SIZE);
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], persistedCursorId, 'run 2: expected the fast-forward to actually engage, resuming from the cursor run 1 persisted — proves this is exercising the real resume path, not an accidental full walk');
+
+    const foundSoFar = new Set([...run1, ...run2].map((p) => p.missive_conversation_id));
+    const neverFound = clearBranch.map((r) => r.missive_conversation_id).filter((id) => !foundSoFar.has(id));
+    assert.strictEqual(run2.length, PAGE_SIZE - targetCount, 'run 2: expected every remaining eligible conversation from run 1\'s page that run 1 itself never returned');
+    assert.strictEqual(neverFound.length, 0, `expected no conversations lost across run 1 + run 2, but ${neverFound.length} were never found (first few: ${neverFound.slice(0, 5).join(', ')})`);
+  });
+});
+
+// ─── driverCursorScopeKey — pure unit tests, no DB. Reads the real
+// DRIVER_CURSOR_SCOPE constant out of the source (same technique as
+// DRIVER_PAGE_SIZE_FOR_TEST above) so this test tracks a real rename of
+// that constant rather than silently going stale against a hardcoded
+// duplicate ────────────────────────────────────────────────────────────
+const DRIVER_CURSOR_SCOPE_FOR_TEST = (() => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'significance-pass.js'), 'utf8');
+  const m = source.match(/const DRIVER_CURSOR_SCOPE = '([^']+)';/);
+  if (!m) throw new Error('significance-pass.js: could not find "const DRIVER_CURSOR_SCOPE = \'...\';" — update this test if that constant was renamed.');
+  return m[1];
+})();
+
+test('driverCursorScopeKey — folds a real sinceDate into the scope key', () => {
+  assert.strictEqual(significancePass.driverCursorScopeKey('2025-09-17'), `${DRIVER_CURSOR_SCOPE_FOR_TEST}::sinceDate=2025-09-17`);
+});
+
+test('driverCursorScopeKey — null and undefined both map to the SAME explicit "none" token, not the literal strings "null"/"undefined"', () => {
+  assert.strictEqual(significancePass.driverCursorScopeKey(null), significancePass.driverCursorScopeKey(undefined));
+  assert.strictEqual(significancePass.driverCursorScopeKey(null), `${DRIVER_CURSOR_SCOPE_FOR_TEST}::sinceDate=none`);
+});
+
+test('driverCursorScopeKey — two different real sinceDate values produce two different keys', () => {
+  assert.notStrictEqual(significancePass.driverCursorScopeKey('2025-01-01'), significancePass.driverCursorScopeKey('2025-09-17'));
+});
+
+test('driverCursorScopeKey — a real sinceDate and the no-cutoff default produce different keys — a run must never accidentally share a cursor across the two', () => {
+  assert.notStrictEqual(significancePass.driverCursorScopeKey('2025-09-17'), significancePass.driverCursorScopeKey(null));
+});
+
+// ─── Failure shape #3 — a LATER call reusing this driver with a DIFFERENT
+// (wider) sinceDate than the run that established the saved cursor. The
+// third gap, found on a later review pass: neither digest says anything
+// about date scope, and Peter's own real staged-by-recency backfill plan
+// (last 1 year first, then widen) is exactly this trigger condition, not a
+// remote hypothetical ────────────────────────────────────────────────────
+asyncTest('significance-pass driver — resumable cursor: a later call with a DIFFERENT sinceDate never reuses an earlier call\'s cursor, so a conversation excluded by the OLDER, stricter window is still found once a looser window actually asks for it — and a repeated, UNCHANGED sinceDate still gets the fast-forward, so this fix does not cost the existing optimization', async () => {
+  const STRICT_CUTOFF = '2025-01-01T00:00:00.000Z';
+  const state = {
+    clearBranch: [
+      { id: 'id-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-old', delivered_at: '2020-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS }, // fails STRICT_CUTOFF; would pass no cutoff at all.
+      { id: 'id-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-recent', delivered_at: '2026-06-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS }, // passes STRICT_CUTOFF.
+    ],
+    significance: [], escalations: [], cursors: [],
+  };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(10, STRICT_CUTOFF);
+    assert.deepStrictEqual(run1, [{ mailbox_key: 'mb1', missive_conversation_id: 'conv-recent' }], 'run 1 (strict cutoff): expected only conv-recent — conv-old correctly excluded by the date filter itself, nothing cursor-related yet');
+
+    // A second call with the SAME sinceDate must still get the fast-forward — this fix must not cost the existing optimization for the ordinary, unchanged-sinceDate case (an ongoing live loop, or a single backfill stage calling repeatedly with the same cutoff).
+    const run1b = await freshSignificancePass.fetchNextEligibleConversations(10, STRICT_CUTOFF);
+    assert.deepStrictEqual(run1b, [], 'run 1b (same strict cutoff, nothing changed): expected nothing new');
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], 'id-2', 'run 1b: expected the fast-forward to still engage for a repeated, unchanged sinceDate');
+
+    // Now: a LATER call shares the same underlying driver but asks with a WIDER window (no cutoff at all) — Peter's own real staged-backfill plan (last 1 year first, then widen).
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10, null);
+    assert.ok(run2.some((p) => p.missive_conversation_id === 'conv-old'), 'expected conv-old to be found once a looser sinceDate actually asks for it — reusing run 1\'s cursor (established under the stricter window) would silently and permanently skip it, since it would never be re-fetched at all');
+    assert.strictEqual(calls.clearBranchPageCursors[calls.clearBranchPageCursors.length - 1], null, 'expected the different-sinceDate run to fall back to a full walk from null — it must not find (or trust) a cursor saved under a different sinceDate scope');
+    assert.strictEqual(state.cursors.length, 2, 'expected TWO independent saved cursor rows to now exist — one per distinct sinceDate scope, neither overwriting the other');
+  });
+});
+
+// ─── Failure shape #4 (TARS repro, migration 20260920020000) — the ORIGINAL
+// mid-run race this whole migration exists to fix: a low-id 'clear' row
+// appears BETWEEN two page fetches of the SAME run (not between two
+// separate runs, unlike Failure shapes #1-#3 above), landing behind this
+// run's own advancing cursor before persistDriverCursor() ever runs. Forced
+// onto a real second page via the DRIVER_PAGE_SIZE_FOR_TEST filler
+// technique (see the sinceDate pagination test, above the "Escalation
+// exclusion" PART). Uses makeResumableCursorFakeClient's new
+// state.onClearBranchPageFetched hook (added for this repro) to inject the
+// race row the instant page 1's own snapshot has already been read — i.e.
+// too late for THIS run's own pagination to ever see it, exactly modeling
+// "became clear mid-run."
+//
+// Without Fix #2 (floor/asOf), the digest computed at persist time is
+// captured live, AFTER the race row already exists in the table — so it
+// gets silently baked into the persisted digest despite never having been
+// scanned by this run's own fetchDriverPage() calls. The very next run's
+// verification would then find that "baked-in" digest still matches a
+// fresh, live recheck (nothing has changed since persist), wrongly trust
+// the cursor, and permanently skip the race row. WITH the fix: on a
+// genuine first-ever run, floor is null, so the WHERE clause degenerates to
+// a plain global time-bound (migration 20260920020000's own header) — the
+// race row's screening_completed_at lands strictly AFTER this run's own
+// run_started_at, so it is excluded from what gets persisted, the next
+// run's verification catches the resulting drift, falls back to a full
+// walk, and actually finds it. ──────────────────────────────────────────
+asyncTest('significance-pass driver — resumable cursor: a low-id \'clear\' row injected BETWEEN two pages of the SAME first-ever (null-cursor) run is excluded from what gets persisted, so the next run\'s verification catches the drift and still finds it — the original mid-run race this whole migration chain exists to fix', async () => {
+  const fillerCount = DRIVER_PAGE_SIZE_FOR_TEST; // exactly one full page, forcing a real page 2 — same technique as the sinceDate pagination test above.
+  const fillerRows = [];
+  for (let i = 0; i < fillerCount; i++) {
+    fillerRows.push({
+      id: `filler-${String(i).padStart(6, '0')}`, // sorts before 'zz-real' below under plain ascending id order.
+      mailbox_key: 'mb1',
+      missive_conversation_id: `conv-filler-${i}`,
+      delivered_at: '2026-01-01T00:00:00.000Z',
+      screening_completed_at: RESUMABLE_CURSOR_OLD_TS,
+    });
+  }
+  const realRow = {
+    id: 'zz-real', mailbox_key: 'mb1', missive_conversation_id: 'conv-real', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS,
+  };
+  const state = { clearBranch: [...fillerRows, realRow], significance: [], escalations: [], cursors: [] };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  // The race: injected the instant page 1's own snapshot has already been
+  // read, landing at an id ('0-race-row') that sorts BEFORE every filler
+  // row — behind this run's own advancing cursor, so this run's own page 2
+  // fetch (id > the last filler's id) can never see it. screening_completed_at
+  // is set safely in the FUTURE relative to whatever run_started_at this
+  // real run captures (captured before the page loop even starts),
+  // modeling "became clear mid-run, after this run had already started."
+  let injected = false;
+  state.onClearBranchPageFetched = (cursorUsed) => {
+    if (cursorUsed === null && !injected) { // fires once, right after page 1 (the null-cursor fetch) is read
+      injected = true;
+      state.clearBranch.push({
+        id: '0-race-row', mailbox_key: 'mb1', missive_conversation_id: 'conv-race', delivered_at: '2026-01-01T00:00:00.000Z',
+        screening_completed_at: new Date(Date.now() + 60000).toISOString(), // 1 minute in the future — guaranteed after run_started_at regardless of clock resolution.
+      });
+    }
+  };
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(fillerCount + 1000);
+    assert.strictEqual(run1.length, fillerCount + 1, 'run 1: expected every filler plus the one real row — nothing else yet');
+    assert.ok(!run1.some((p) => p.missive_conversation_id === 'conv-race'), 'run 1: conv-race was injected AFTER page 1 already advanced past it — this run\'s own pagination must never see it (models the real race: it appeared too late for this run\'s own scan)');
+
+    const cursorsBeforeRun2 = calls.clearBranchPageCursors.length;
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.strictEqual(calls.clearBranchPageCursors[cursorsBeforeRun2], null, 'run 2: expected the drift to be caught — a full walk from null, not a fast-forward trusting a cursor that silently baked the race row in');
+    assert.ok(run2.some((p) => p.missive_conversation_id === 'conv-race'), 'run 2: expected conv-race to be found — the original mid-run race this whole migration chain exists to fix (a low-id row landing between two pages of the SAME null-cursor run, before persist ever runs)');
+  });
+});
+
+// ─── Failure shape #5 (TARS repro, migration 20260920020000) — Neo's
+// specific follow-up: the shape Failure shape #4 above does NOT cover. #4's
+// race row lands behind a null floor on a first-ever run. This one injects
+// a low-id 'clear' row into a genuine FAST-FORWARD run's own NEW-TERRITORY
+// delta — between the floor it resumed from and the new cursor it ends on
+// — which is the exact case migration 20260920020000's floor/as_of
+// scoping was built for (its established_floor_id/as_of parameters would
+// be no-ops if every race row always landed behind an existing floor).
+//
+// Run 1 establishes a real floor at 'id-2'. Run 2 is a genuine fast-forward
+// (floor='id-2'): it legitimately finds one real new row (conv-5, id-5,
+// already screened long before run 2 starts). The race row (conv-race,
+// id-3) sorts BETWEEN the floor and that new cursor, but is injected via
+// the hook only after run 2's own single page fetch has already resolved —
+// too late for run 2's own scan to see it, with a screening_completed_at
+// strictly after run 2's own run_started_at. Without the floor/asOf fix, a
+// naive unscoped digest computed at persist time (i.e. after the race
+// already happened) would already include the race row, matching a fresh
+// recheck perfectly and permanently hiding it. With the fix, the race row
+// is neither old territory (id-3 > floor id-2) nor screened before run 2
+// started, so persistDriverCursor() correctly excludes it — the next run's
+// verification catches the drift and finds it on a full walk. ───────────
+asyncTest('significance-pass driver — resumable cursor: a low-id \'clear\' row injected into a FAST-FORWARD run\'s own NEW-TERRITORY delta (between its floor and its new cursor) is excluded from what gets persisted, so the next run\'s verification catches the drift and still finds it — the exact case Neo\'s floor-scoping fix (migration 20260920020000) targets, distinct from the null-cursor case above', async () => {
+  const state = {
+    clearBranch: [
+      { id: 'id-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+      { id: 'id-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS },
+    ],
+    significance: [], escalations: [], cursors: [],
+  };
+  const { client: fakeClient, calls } = makeResumableCursorFakeClient(state);
+
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    // Run 1 — establishes a real, trusted floor at 'id-2'.
+    const run1 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.deepStrictEqual(run1.map((p) => p.missive_conversation_id).sort(), ['conv-1', 'conv-2']);
+    assert.strictEqual(calls.clearBranchPageCursors[0], null, 'run 1: no saved cursor yet');
+
+    // Run 2 — a genuine fast-forward (floor='id-2'). Seed the one REAL
+    // new-territory row it should legitimately find (conv-5, id-5, already
+    // screened well before this run starts). The race row (conv-race,
+    // id-3 — deliberately between the floor and id-5) is injected via the
+    // hook the instant run 2's own (one and only) page fetch has already
+    // been read.
+    state.clearBranch.push({ id: 'id-5', mailbox_key: 'mb1', missive_conversation_id: 'conv-5', delivered_at: '2026-01-01T00:00:00.000Z', screening_completed_at: RESUMABLE_CURSOR_OLD_TS });
+    let injected = false;
+    state.onClearBranchPageFetched = (cursorUsed) => {
+      if (cursorUsed === 'id-2' && !injected) {
+        injected = true;
+        state.clearBranch.push({
+          id: 'id-3', mailbox_key: 'mb1', missive_conversation_id: 'conv-race', delivered_at: '2026-01-01T00:00:00.000Z',
+          screening_completed_at: new Date(Date.now() + 60000).toISOString(), // future relative to run 2's own run_started_at
+        });
+      }
+    };
+
+    const cursorsBeforeRun2 = calls.clearBranchPageCursors.length;
+    const run2 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.strictEqual(calls.clearBranchPageCursors[cursorsBeforeRun2], 'id-2', 'run 2: expected the fast-forward to actually engage, starting from the floor established by run 1 — this test is meaningless if run 2 doesn\'t genuinely fast-forward');
+    assert.deepStrictEqual(run2, [{ mailbox_key: 'mb1', missive_conversation_id: 'conv-5' }], 'run 2: expected only conv-5 to be found by this run\'s OWN scan — conv-race was injected only after run 2\'s one page fetch already resolved, so it must not appear in run 2\'s own result, same as the real race it\'s modeling');
+
+    // Run 3 — the proof. If the fix is working, run 2's persisted digest
+    // must have EXCLUDED conv-race (screening_completed_at is after run
+    // 2's own run_started_at, and it is NOT old territory — id-3 > floor
+    // id-2) — so a fresh, live verification digest (which DOES see
+    // conv-race, now sitting in the table) mismatches what was persisted,
+    // and run 3 falls back to a full walk that actually finds it. Without
+    // the floor/asOf fix, persisting an unscoped digest computed live
+    // (i.e. AFTER conv-race already existed) would have matched a fresh
+    // recheck perfectly, trusted the cursor, and permanently skipped
+    // conv-race.
+    const cursorsBeforeRun3 = calls.clearBranchPageCursors.length;
+    const run3 = await freshSignificancePass.fetchNextEligibleConversations(10);
+    assert.strictEqual(calls.clearBranchPageCursors[cursorsBeforeRun3], null, 'run 3: expected the drift to be caught — a full walk from null, not a fast-forward from run 2\'s cursor');
+    assert.ok(run3.some((p) => p.missive_conversation_id === 'conv-race'), 'run 3: expected conv-race to be found — the exact case migration 20260920020000\'s floor-scoping was built for: a low-id clear row landing in a fast-forward run\'s own NEW-TERRITORY delta (between its floor and its new cursor), not merely behind an already-established floor');
+  });
 });
 
 // ─── PENDING — override-branch exclusion (migration 20260918020000, point
@@ -3214,67 +3832,140 @@ test('evaluatePoolRatio — EXPECTED_POOL_MIN_RATIO is exported and is 0.7 (70%)
 
 // ============================================================
 // PART 20b — estimateExpectedEligiblePool (lib/significance-pass.js): the
-// real, DB-touching half of the sanity check's estimate. A small, dedicated
-// fake client (count-mode selects only — no ordering, no pagination, unlike
-// makeFilteringFakeClient above) via the same generic withFakeSupabaseClient
-// harness PART 13-17 already use against this same module.
+// real, DB-touching half of the sanity check's estimate.
+//
+// FIXED 2026-09-21 (Neo's finding): this used to be a single COUNT-only
+// query per table (see git history / this function's own header comment for
+// the incident story) — the old makeCountFakeClient this block used to use
+// only had to fake a .select().gte() count. Now that term (1) walks
+// missive_message_intake_search_safe_clear_branch page by page (reusing
+// fetchDriverPage()'s exact query shape) to count DISTINCT conversations
+// instead of raw message rows, this fake client has to serve BOTH real
+// query shapes this function now issues: an RPC page fetch for the
+// clear-branch data, and a count-mode .from().select() for
+// missive_conversation_significance — same split PART 13-17's
+// makeFilteringFakeClient and this file's count-mode fakes already model
+// separately, combined here because one real function call now hits both
+// shapes in a row.
+//
+// UPDATED 2026-09-21, SAME DAY (migration 20260921020000, performance fix):
+// fetchDriverPage() — which countDistinctEligibleConversations() (and so
+// estimateExpectedEligiblePool()) reuses exactly as
+// fetchNextEligibleConversations() does — no longer queries the clear-branch
+// view via .from(); it calls the archive_search_significance_driver_next_
+// clear_page RPC instead. The pagination logic that used to live in
+// makePaginatedChain() (returned from from() for that one table) moves into
+// rpc() below, unchanged in behavior — same sort, same cursor, same limit.
 // ============================================================
-function makeCountFakeClient(tableData) {
-  function makeChain(table) {
-    let gteField = null, gteValue = null;
+function makeEstimatePoolFakeClient(tableData) {
+  function makeCountChain(rows) {
     const chain = {
-      select() { return chain; }, // count/head mode is a select() option in the real client, but the actual count is entirely determined by the filtered row count below — this fake never needs to inspect the options object itself.
-      gte(field, value) { gteField = field; gteValue = value; return chain; },
+      select() { return chain; }, // count/head mode is a select() option in the real client — the actual count is just the fake table's row count, this fake never needs to inspect the options object.
       then(resolve, reject) {
-        const rows = (tableData[table] || []).filter((row) => gteField == null || (row[gteField] != null && row[gteField] >= gteValue));
         return Promise.resolve({ data: null, error: null, count: rows.length }).then(resolve, reject);
       },
     };
     return chain;
   }
-  return { from: (table) => makeChain(table) };
+  function rpc(name, args) {
+    if (name === 'archive_search_significance_driver_next_clear_page') {
+      const cursor = args && args.p_cursor_id != null ? args.p_cursor_id : null;
+      let rows = (tableData.missive_message_intake_search_safe_clear_branch || []).slice()
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
+      const limitN = args && args.p_limit;
+      if (limitN != null) rows = rows.slice(0, limitN);
+      return Promise.resolve({ data: rows, error: null });
+    }
+    return Promise.reject(new Error(`makeEstimatePoolFakeClient: unexpected rpc '${name}'`));
+  }
+  return {
+    from(table) { return makeCountChain(tableData[table] || []); },
+    rpc,
+  };
 }
 
-asyncTest('significance-pass — estimateExpectedEligiblePool: counts matching messages (scoped by sinceDate) minus ALL already-processed conversations (table-wide, not date-scoped)', async () => {
-  const fakeClient = makeCountFakeClient({
+asyncTest('significance-pass — estimateExpectedEligiblePool: counts DISTINCT conversations (scoped by sinceDate), not raw message rows — the exact bug Neo found (2.513x messages-per-conversation inflation) — minus ALL already-processed conversations (table-wide, not date-scoped)', async () => {
+  const fakeClient = makeEstimatePoolFakeClient({
     missive_message_intake_search_safe_clear_branch: [
-      { id: 'm1', delivered_at: '2026-08-01T00:00:00.000Z' }, // on/after cutoff
-      { id: 'm2', delivered_at: '2026-09-01T00:00:00.000Z' }, // on/after cutoff
-      { id: 'm3', delivered_at: '2020-01-01T00:00:00.000Z' }, // before cutoff — excluded
+      { id: 'm1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-08-01T00:00:00.000Z' }, // on/after cutoff
+      { id: 'm2', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-09-01T00:00:00.000Z' }, // on/after cutoff, SAME conversation as m1 — must be deduped, not double-counted
+      { id: 'm3', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', delivered_at: '2020-01-01T00:00:00.000Z' }, // before cutoff — excluded
     ],
     missive_conversation_significance: [{ id: 's1' }, { id: 's2' }],
   });
   await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
     const result = await freshSignificancePass.estimateExpectedEligiblePool('2025-09-17');
-    assert.strictEqual(result.totalMatchingMessages, 2, 'expected only the 2 messages on/after the cutoff to be counted');
+    assert.strictEqual(result.totalMatchingConversations, 1, 'expected the 2 on/after-cutoff messages (m1, m2) to collapse into 1 distinct conversation (conv-1), not counted as 2');
     assert.strictEqual(result.totalAlreadyProcessed, 2, 'expected the full, table-wide already-processed count, not scoped by date');
-    assert.strictEqual(result.expectedPool, 0, 'expected 2 - 2 = 0');
+    assert.strictEqual(result.expectedPool, 0, 'expected max(0, 1 - 2) = 0');
   });
 });
 
-asyncTest('significance-pass — estimateExpectedEligiblePool: sinceDate omitted counts every message row, no gte filter applied at all (same "no cutoff" default as fetchNextEligibleConversations)', async () => {
-  const fakeClient = makeCountFakeClient({
+asyncTest('significance-pass — estimateExpectedEligiblePool: sinceDate omitted counts every DISTINCT conversation with no date filter applied at all (same "no cutoff" default as fetchNextEligibleConversations) — still deduped across multiple messages per conversation', async () => {
+  const fakeClient = makeEstimatePoolFakeClient({
     missive_message_intake_search_safe_clear_branch: [
-      { id: 'm1', delivered_at: '2020-01-01T00:00:00.000Z' },
-      { id: 'm2', delivered_at: '2026-01-01T00:00:00.000Z' },
+      { id: 'm1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2020-01-01T00:00:00.000Z' },
+      { id: 'm2', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2020-02-01T00:00:00.000Z' },
+      { id: 'm3', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2020-03-01T00:00:00.000Z' },
+      { id: 'm4', mailbox_key: 'mb2', missive_conversation_id: 'conv-2', delivered_at: '2026-01-01T00:00:00.000Z' },
     ],
     missive_conversation_significance: [],
   });
   await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
     const result = await freshSignificancePass.estimateExpectedEligiblePool();
-    assert.strictEqual(result.totalMatchingMessages, 2, 'expected both rows counted with no date cutoff at all');
+    assert.strictEqual(result.totalMatchingConversations, 2, 'expected 4 messages across 2 conversations to count as 2, not 4 — the old message-counting bug would have returned 4 here');
     assert.strictEqual(result.expectedPool, 2);
   });
 });
 
-asyncTest('significance-pass — estimateExpectedEligiblePool: floors expectedPool at 0 rather than going negative when already-processed exceeds matching messages', async () => {
-  const fakeClient = makeCountFakeClient({
-    missive_message_intake_search_safe_clear_branch: [{ id: 'm1', delivered_at: '2026-01-01T00:00:00.000Z' }],
+asyncTest('significance-pass — estimateExpectedEligiblePool: the composite (mailbox_key, missive_conversation_id) key is what defines a distinct conversation, not missive_conversation_id alone — two different mailboxes sharing the same conversation id count as 2, matching the same composite-key convention dedupeNewPairs()/passesEscalationExclusion() already use elsewhere in this file', async () => {
+  const fakeClient = makeEstimatePoolFakeClient({
+    missive_message_intake_search_safe_clear_branch: [
+      { id: 'm1', mailbox_key: 'mb1', missive_conversation_id: 'conv-shared', delivered_at: '2026-01-01T00:00:00.000Z' },
+      { id: 'm2', mailbox_key: 'mb2', missive_conversation_id: 'conv-shared', delivered_at: '2026-01-01T00:00:00.000Z' },
+    ],
+    missive_conversation_significance: [],
+  });
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const result = await freshSignificancePass.estimateExpectedEligiblePool();
+    assert.strictEqual(result.totalMatchingConversations, 2, 'expected the same missive_conversation_id in two different mailboxes to count as 2 distinct conversations, not 1');
+  });
+});
+
+asyncTest('significance-pass — estimateExpectedEligiblePool: floors expectedPool at 0 rather than going negative when already-processed exceeds matching conversations', async () => {
+  const fakeClient = makeEstimatePoolFakeClient({
+    missive_message_intake_search_safe_clear_branch: [{ id: 'm1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', delivered_at: '2026-01-01T00:00:00.000Z' }],
     missive_conversation_significance: [{ id: 's1' }, { id: 's2' }, { id: 's3' }],
   });
   await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
     const result = await freshSignificancePass.estimateExpectedEligiblePool();
     assert.strictEqual(result.expectedPool, 0, 'expected max(0, 1 - 3) = 0, never a negative pool');
+  });
+});
+
+asyncTest('significance-pass — estimateExpectedEligiblePool: walks past a full page boundary using the same plain id cursor as fetchDriverPage(), still finding and deduping a conversation whose messages land on page 2', async () => {
+  const fillerCount = DRIVER_PAGE_SIZE_FOR_TEST; // exactly one full page of distinct, unmatched-by-nothing-in-particular filler conversations, forcing the real conversation below onto page 2.
+  const fillerRows = [];
+  for (let i = 0; i < fillerCount; i++) {
+    fillerRows.push({
+      id: `filler-${String(i).padStart(6, '0')}`, // sorts before 'zz-*' below under plain ascending id order.
+      mailbox_key: 'mb1',
+      missive_conversation_id: `conv-filler-${i}`,
+      delivered_at: '2026-01-01T00:00:00.000Z',
+    });
+  }
+  const page2Rows = [
+    { id: 'zz-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-page2', delivered_at: '2026-01-01T00:00:00.000Z' },
+    { id: 'zz-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-page2', delivered_at: '2026-02-01T00:00:00.000Z' }, // same conversation as zz-1, second message, must still dedupe across the page boundary
+  ];
+  const fakeClient = makeEstimatePoolFakeClient({
+    missive_message_intake_search_safe_clear_branch: [...fillerRows, ...page2Rows],
+    missive_conversation_significance: [],
+  });
+  await withFakeSupabaseClient(fakeClient, '../lib/significance-pass', async (freshSignificancePass) => {
+    const result = await freshSignificancePass.estimateExpectedEligiblePool();
+    assert.strictEqual(result.totalMatchingConversations, fillerCount + 1, 'expected every filler conversation (1 each) plus exactly 1 for conv-page2, despite its 2 messages spanning the page-1/page-2 boundary');
   });
 });
 
@@ -4030,7 +4721,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   // chunk-cutting, not the sanity check, so the estimate is stubbed to
   // exactly match eligible_count (ratio 1.0), guaranteeing a pass. PART 19h/
   // 19j-19l test the sanity check itself.
-  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingConversations: runRow.eligible_count, totalAlreadyProcessed: 0 }));
   let createCount = 0;
   const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
     create: async () => { createCount++; return { id: `msgbatch_chunk${createCount}`, processing_status: 'in_progress' }; },
@@ -4069,7 +4760,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
   // Neutralizes the 2026-09-19 expected-pool sanity check — see 19c's own
   // identical comment; this test's own subject is byte-size chunk-cutting.
-  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingConversations: runRow.eligible_count, totalAlreadyProcessed: 0 }));
   let createCount = 0;
   const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
     create: async () => { createCount++; return { id: `msgbatch_bytecut${createCount}`, processing_status: 'in_progress' }; },
@@ -4119,7 +4810,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
   // Neutralizes the 2026-09-19 expected-pool sanity check — see 19c's own
   // identical comment; this test's own subject is resumability.
-  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingConversations: runRow.eligible_count, totalAlreadyProcessed: 0 }));
   const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
     create: async () => ({ id: 'msgbatch_resumed', processing_status: 'in_progress' }),
   });
@@ -4158,7 +4849,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   // across BOTH dispatchRunChunks calls below (the initial rate-limited
   // attempt and the later retry) since both have undispatched items and so
   // both now run the check.
-  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingMessages: runRow.eligible_count, totalAlreadyProcessed: 0 }));
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: runRow.eligible_count, totalMatchingConversations: runRow.eligible_count, totalAlreadyProcessed: 0 }));
 
   try {
     let createCallCount = 0;
@@ -4345,7 +5036,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   // 337 / 842 ≈ 40.0% — the same ratio as the real 2026-09-18 incident.
   const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async (sinceDate) => {
     assert.strictEqual(sinceDate, '2025-09-17', 'expected the run\'s own since_date to be threaded through to the estimate');
-    return { expectedPool: 842, totalMatchingMessages: 900, totalAlreadyProcessed: 58 };
+    return { expectedPool: 842, totalMatchingConversations: 900, totalAlreadyProcessed: 58 };
   });
   const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => { throw new Error('buildConversationContext should NEVER be called — a failing sanity check must block BEFORE any per-conversation dispatch work begins'); });
   const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({});
@@ -4438,7 +5129,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   const runItemRows = [{ id: 'ri-1', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-1', chunk_number: null, batch_id: null, dispatched_at: null }];
   const { client: supabaseClient } = makeRunTrackingFakeClient({ runRow, runItemRows });
 
-  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: 100, totalMatchingMessages: 100, totalAlreadyProcessed: 0 })); // 71/100 = 71%, just above the 70% threshold
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => ({ expectedPool: 100, totalMatchingConversations: 100, totalAlreadyProcessed: 0 })); // 71/100 = 71%, just above the 70% threshold
   const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}` }));
   const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
   const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({

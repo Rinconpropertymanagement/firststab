@@ -1222,9 +1222,9 @@ function evaluatePoolRatio({ eligibleCount, expectedPool, minRatio = EXPECTED_PO
 // comparison logic can be unit-tested with plain numbers, with no
 // significancePass dependency or fake Supabase client required at all.
 async function checkEligiblePoolSanity({ eligibleCount, sinceDate }) {
-  const { expectedPool, totalMatchingMessages, totalAlreadyProcessed } = await significancePass.estimateExpectedEligiblePool(sinceDate);
+  const { expectedPool, totalMatchingConversations, totalAlreadyProcessed } = await significancePass.estimateExpectedEligiblePool(sinceDate);
   const evaluation = evaluatePoolRatio({ eligibleCount, expectedPool });
-  return { ...evaluation, eligibleCount, expectedPool, totalMatchingMessages, totalAlreadyProcessed };
+  return { ...evaluation, eligibleCount, expectedPool, totalMatchingConversations, totalAlreadyProcessed };
 }
 
 // ============================================================
@@ -1295,7 +1295,7 @@ async function dispatchRunChunks({ runId, maxRequests = MAX_BATCH_REQUESTS, maxB
   if (!force) {
     const sanityCheck = await checkEligiblePoolSanity({ eligibleCount: run.eligible_count, sinceDate: run.since_date });
     if (!sanityCheck.passed) {
-      console.error(`[significance-batch] SANITY CHECK FAILED for run ${runId}: eligible_count=${sanityCheck.eligibleCount} is only ${(sanityCheck.ratio * 100).toFixed(1)}% of the estimated expected pool (~${sanityCheck.expectedPool}, from ${sanityCheck.totalMatchingMessages} matching message(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)) — below the ${(EXPECTED_POOL_MIN_RATIO * 100).toFixed(0)}% threshold. Refusing to dispatch anything to Anthropic for this run — this looks like the same class of silent undercount seen on 2026-09-18 (33,755 found vs. ~84,192 expected). Pass force: true (CLI: --force) once a human has reviewed this run and confirmed the low count is real.`);
+      console.error(`[significance-batch] SANITY CHECK FAILED for run ${runId}: eligible_count=${sanityCheck.eligibleCount} is only ${(sanityCheck.ratio * 100).toFixed(1)}% of the estimated expected pool (~${sanityCheck.expectedPool}, from ${sanityCheck.totalMatchingConversations} matching conversation(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)) — below the ${(EXPECTED_POOL_MIN_RATIO * 100).toFixed(0)}% threshold. Refusing to dispatch anything to Anthropic for this run — this looks like the same class of silent undercount seen on 2026-09-18 (33,755 found vs. ~84,192 expected). Pass force: true (CLI: --force) once a human has reviewed this run and confirmed the low count is real.`);
       return { ...summary, blockedBySanityCheck: true, sanityCheck };
     }
   }

@@ -322,7 +322,7 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
     console.error('SANITY CHECK FAILED — NOTHING WAS SENT TO ANTHROPIC FOR THIS RUN');
     console.error('!'.repeat(72));
     console.error(`Found:    ${sanityCheck.eligibleCount} eligible conversation(s) (this run's real, already-scanned result).`);
-    console.error(`Expected: roughly ${sanityCheck.expectedPool} (a fast estimate: ${sanityCheck.totalMatchingMessages} matching message(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)).`);
+    console.error(`Expected: roughly ${sanityCheck.expectedPool} (a fast estimate: ${sanityCheck.totalMatchingConversations} matching conversation(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)).`);
     console.error(`That's only ${ratioPct}% of the expected pool — below the ${thresholdPct}% threshold.`);
     console.error('This is the same shape as the real 2026-09-18 incident (33,755 found vs. ~84,192 expected, 40% of the pool) — an unexplained silent undercount.');
     console.error('\nThe run itself is safe: its full eligible list is already durably saved (nothing was lost), and nothing has been dispatched to Anthropic yet.');

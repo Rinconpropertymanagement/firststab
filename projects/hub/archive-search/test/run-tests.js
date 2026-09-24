@@ -1049,16 +1049,43 @@ test('router.js — GET /api/archive-search/message/:id is gated on requireArchi
   assert.ok(line.includes('requireArchiveSearchAccess'), 'expected the message route to use requireArchiveSearchAccess');
 });
 
-test('router.js — the search route queries missive_message_intake_search_safe only, sorts delivered_at DESC, and uses websearch full-text search — never the raw table', () => {
+test('router.js — the search route defaults to missive_message_intake_search_safe, only moves to archive_search_corpus behind ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED plus a healthy kill-switch check, sorts delivered_at DESC, and uses websearch full-text search — never the raw table', () => {
+  // Updated 2026-09-24 for the archive_search_corpus build (supabase/
+  // migrations/20260924010000_archive_search_corpus_schema.sql): the route
+  // no longer hardcodes a single literal `.from('missive_message_intake_
+  // search_safe')` call — it queries a variable, searchTable, which
+  // defaults to the safe view and only ever moves to archive_search_corpus
+  // after an explicit, successful, request-time kill-switch check, gated
+  // behind ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED (default OFF). This is an
+  // intentional change to the route's contract, not a regression of the
+  // original "never the raw table" guarantee — archive_search_corpus is
+  // itself never the raw table (missive_message_intake), it's a second,
+  // trigger-maintained, eligible-content-only table (see that migration's
+  // own header). The assertions below cover the new contract directly.
   const source = fs.readFileSync(path.join(__dirname, '..', 'router.js'), 'utf8');
   const start = source.indexOf("router.get('/api/archive-search/search'");
   const end = source.indexOf("router.get('/api/archive-search/message/:id'");
   assert.ok(start !== -1 && end !== -1 && end > start, 'expected to find both route boundaries');
   const body = source.slice(start, end);
-  assert.ok(body.includes(".from('missive_message_intake_search_safe')"), 'expected the search route to query the safe view');
+  assert.ok(body.includes("let searchTable = 'missive_message_intake_search_safe'"), 'expected the search route to default searchTable to the safe view');
+  assert.ok(body.includes('ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED'), 'expected the corpus cutover to be gated behind the ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED flag');
+  assert.ok(body.includes("searchTable = 'archive_search_corpus'"), 'expected the route to be able to move to archive_search_corpus once enabled and healthy');
+  assert.ok(body.includes('kill_switch_active'), 'expected the route to consult the reconciliation kill-switch before trusting archive_search_corpus');
+  assert.ok(body.includes('.from(searchTable)'), 'expected the actual query to run against the resolved searchTable variable, not two separately-written queries');
   assert.ok(body.includes("type: 'websearch'"), "expected websearch_to_tsquery via textSearch's websearch type");
   assert.ok(body.includes(".order('delivered_at', { ascending: false })"), 'expected newest-first ordering, not relevance-ranked');
   assert.ok(body.includes("if (!q)") && body.includes('status(400)'), 'expected an empty/missing q to be rejected with a 400');
+});
+
+test('router.js — with ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED unset (the real default), the search route source contains no unconditional path to archive_search_corpus — searchTable only ever reassigns inside the flag\'s own if-block', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'router.js'), 'utf8');
+  const start = source.indexOf("router.get('/api/archive-search/search'");
+  const end = source.indexOf("router.get('/api/archive-search/message/:id'");
+  const body = source.slice(start, end);
+  const flagBlockStart = body.indexOf('if (ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED)');
+  const reassignIdx = body.indexOf("searchTable = 'archive_search_corpus'");
+  assert.ok(flagBlockStart !== -1, 'expected an if (ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED) guard');
+  assert.ok(reassignIdx !== -1 && reassignIdx > flagBlockStart, 'expected the archive_search_corpus reassignment to appear textually after (i.e. nested inside) the flag guard, so the flag defaulting to false is what keeps the original view as the only real query target today');
 });
 
 test('router.js — the message route queries missive_message_intake_search_safe only and 404s (never 500s) on a missing or malformed id', () => {
@@ -2150,6 +2177,22 @@ test('passesSinceDate — uses Date.parse, not raw string comparison, so a date-
 // missive_message_intake_search_safe_clear_branch entry — same backing
 // fixture data every test below already builds, just read through the new
 // call shape instead of the old .from() chain.
+
+// withAbortSignalStub — added 2026-09-22 alongside DB_CALL_ABORT_TIMEOUT_MS.
+// fetchDriverPage() now chains .abortSignal(AbortSignal.timeout(...)) onto
+// its RPC call, same as filterAlreadyProcessed() does onto its .in() call
+// (that one's covered by each fake .from() chain's own abortSignal() method
+// instead — see makeFilteringFakeClient's chain below). A plain
+// Promise.resolve(...) has no .abortSignal method, so every fake rpc()
+// below that serves archive_search_significance_driver_next_clear_page
+// wraps its return value with this — same no-op-passthrough shape as the
+// real client's .abortSignal(), just ignoring the signal since these fakes
+// never hang.
+function withAbortSignalStub(promise) {
+  promise.abortSignal = () => promise;
+  return promise;
+}
+
 function makeFilteringFakeClient(tableData) {
   function makeChain(table) {
     const filters = [];
@@ -2164,6 +2207,7 @@ function makeFilteringFakeClient(tableData) {
       eq(field, value) { filters.push((row) => row[field] === value); return chain; },
       in(field, values) { filters.push((row) => values.includes(row[field])); return chain; },
       or() { return chain; },
+      abortSignal() { return chain; }, // added 2026-09-22 alongside DB_CALL_ABORT_TIMEOUT_MS — filterAlreadyProcessed() now chains .abortSignal() onto every .in() call; this fake just needs to accept and ignore it, same as the real client does for a signal that never fires.
       then(resolve, reject) {
         let rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
         if (orderField) {
@@ -2187,7 +2231,7 @@ function makeFilteringFakeClient(tableData) {
       if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
       rows = rows.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       if (limitN != null) rows = rows.slice(0, limitN);
-      return Promise.resolve({ data: rows, error: null });
+      return withAbortSignalStub(Promise.resolve({ data: rows, error: null }));
     }
     return Promise.reject(new Error(`makeFilteringFakeClient: unexpected rpc '${name}'`));
   }
@@ -2364,6 +2408,7 @@ function makeEscalationAwareFakeClient(tableData) {
         if (table === 'archive_search_escalations') calls.escalationOrCalls.push(condition);
         return chain;
       },
+      abortSignal() { return chain; }, // added 2026-09-22 alongside DB_CALL_ABORT_TIMEOUT_MS — see withAbortSignalStub's own comment above makeFilteringFakeClient.
       then(resolve, reject) {
         let rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
         if (orderField) {
@@ -2387,7 +2432,7 @@ function makeEscalationAwareFakeClient(tableData) {
       if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
       rows = rows.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       if (limitN != null) rows = rows.slice(0, limitN);
-      return Promise.resolve({ data: rows, error: null });
+      return withAbortSignalStub(Promise.resolve({ data: rows, error: null }));
     }
     return Promise.reject(new Error(`makeEscalationAwareFakeClient: unexpected rpc '${name}'`));
   }
@@ -2617,6 +2662,7 @@ function makeResumableCursorFakeClient(state) {
       eq(field, value) { filters.push((row) => row[field] === value); return chain; },
       in(field, values) { filters.push((row) => values.includes(row[field])); return chain; },
       or() { return chain; }, // archive_search_escalations is filtered for real in then()/maybeSingle(), below — see this section's own header for why this fake can't use the other fakes' "any row present" shortcut.
+      abortSignal() { return chain; }, // added 2026-09-22 alongside DB_CALL_ABORT_TIMEOUT_MS — see withAbortSignalStub's own comment above makeFilteringFakeClient.
       maybeSingle() {
         const rows = (state[resumableCursorTableKey(table)] || []).filter((row) => filters.every((f) => f(row)));
         return Promise.resolve({ data: rows[0] || null, error: null });
@@ -2700,7 +2746,7 @@ function makeResumableCursorFakeClient(state) {
       const limitN = args && args.p_limit;
       if (limitN != null) rows = rows.slice(0, limitN);
       if (typeof state.onClearBranchPageFetched === 'function') state.onClearBranchPageFetched(cursor);
-      return Promise.resolve({ data: rows, error: null });
+      return withAbortSignalStub(Promise.resolve({ data: rows, error: null }));
     }
     if (name === 'archive_search_missive_clear_branch_cursor_check') {
       const result = realClearBranchCursorCheck(args.p_cursor_id, args.p_established_floor_id ?? null, args.p_as_of ?? null);
@@ -3875,7 +3921,7 @@ function makeEstimatePoolFakeClient(tableData) {
       if (cursor !== null) rows = rows.filter((row) => row.id > cursor);
       const limitN = args && args.p_limit;
       if (limitN != null) rows = rows.slice(0, limitN);
-      return Promise.resolve({ data: rows, error: null });
+      return withAbortSignalStub(Promise.resolve({ data: rows, error: null }));
     }
     return Promise.reject(new Error(`makeEstimatePoolFakeClient: unexpected rpc '${name}'`));
   }

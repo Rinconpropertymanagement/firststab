@@ -116,6 +116,23 @@ if (missing.length > 0) {
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
+// ─── ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED — same feature-flag shape as
+// ARCHIVE_SEARCH_SIGNIFICANCE_CRON_ENABLED (.env.example's own precedent):
+// deliberately defaults OFF (unset, empty, or anything other than the
+// literal string 'true' means disabled). Gates GET /api/archive-search/
+// search reading from archive_search_corpus (supabase/migrations/
+// 20260924010000_archive_search_corpus_schema.sql) instead of
+// missive_message_intake_search_safe — see that route's own comment for
+// the full DEPLOY-ORDER DEPENDENCY this flag exists to make safe rather
+// than merely documented: this code can ship with the flag unset and
+// change nothing about search's live behavior until Peter has (1) applied
+// both 20260924010000 and 20260924020000, (2) run
+// run-archive-search-corpus-backfill.js, and (3) TARS has run its
+// real-data comparison pass (per Asimov's design confirmation — the one
+// thing the shadow-mode waiver does NOT skip). Only then does turning
+// this to 'true' actually take effect.
+const ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED = process.env.ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED === 'true';
+
 // ============================================================
 // SECTION 1: Access — spec, "Access / Roles in the Hub." The exact same
 // attach.../require...Access/require...Admin three-function shape every
@@ -424,6 +441,51 @@ const SEARCH_PAGE_SIZE = 50;
 // spec's own deliberate call ("a search query is an act, not archive
 // content... 'who searched what' is the entire mechanism by which this
 // tool's own use gets audited").
+//
+// ============================================================
+// CORPUS CUTOVER — DEPLOY-ORDER DEPENDENCY, READ BEFORE CHANGING THIS
+// ROUTE OR THE ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED FLAG
+// ============================================================
+// This route can read from either missive_message_intake_search_safe (the
+// original, security_barrier'd view — slow/500ing on full-text queries,
+// the reason this build exists) or archive_search_corpus (supabase/
+// migrations/20260924010000_archive_search_corpus_schema.sql — a separate,
+// trigger-maintained, eligible-content-only table with no security_barrier
+// to fight the planner). Per projects/hub/email-intake/archive-search-
+// search-performance-security-barrier-spec.md and Asimov's CLEARED WITH
+// CONDITIONS design confirmation:
+//
+//   1. archive_search_corpus does not exist until Peter applies
+//      20260924010000 AND 20260924020000 (Supabase's SQL Editor, per this
+//      project's standing convention — this code never applies a
+//      migration itself).
+//   2. Even once it exists, it starts EMPTY — it has real content only
+//      after Peter runs run-archive-search-corpus-backfill.js.
+//   3. Even once backfilled, per Peter's signed shadow-mode waiver
+//      (compliance/archive-search-search-performance-security-barrier-
+//      shadow-mode-owner-risk-acceptance.md), TARS's real-data comparison
+//      pass (sampling actual queries against both tables, confirming
+//      identical result sets — the one check that waiver does NOT skip)
+//      still needs to run once, for real, before this is relied on.
+//
+// ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED (defaults to OFF/false, same
+// feature-flag shape as ARCHIVE_SEARCH_SIGNIFICANCE_CRON_ENABLED) is the
+// explicit, code-level gate for step 3 above — this file can be deployed
+// today, with this route's logic already in place, and it changes NOTHING
+// about live search behavior (still reads the original
+// missive_message_intake_search_safe view, exactly as before) until Peter
+// sets that env var to 'true' himself, which he should only do after 1-3
+// above are actually done. This is a
+// runtime guard, not just a comment: deploying this code before the
+// migration/backfill exist can never break search by querying a missing/
+// empty table, because the flag defaults to leaving the old behavior in
+// place.
+//
+// Even with the flag on, archive_search_corpus_reconciliation_state's own
+// kill_switch_active is checked on every request and falls back to
+// missive_message_intake_search_safe automatically — see
+// archive_search_corpus_reconcile() (20260924010000) for what sets it.
+// ============================================================
 router.get('/api/archive-search/search', requireArchiveSearchAccess, async (req, res) => {
   try {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
@@ -435,12 +497,44 @@ router.get('/api/archive-search/search', requireArchiveSearchAccess, async (req,
     const page = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
     const offset = (page - 1) * SEARCH_PAGE_SIZE;
 
+    // Default: the original view — unconditionally correct/safe, even if
+    // every check below is skipped or fails. searchTable only ever moves
+    // to 'archive_search_corpus' after an explicit, successful,
+    // just-read-this-request confirmation that it's safe to.
+    let searchTable = 'missive_message_intake_search_safe';
+    let corpusFallbackReason = ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED ? null : 'flag_disabled';
+
+    if (ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED) {
+      try {
+        // The kill-switch consult (Section 5/6, 20260924010000) — a plain
+        // single-row PK lookup, cheap on every request. Any failure here
+        // (table doesn't exist yet, network error, etc.) falls back to the
+        // view rather than guessing the corpus is healthy.
+        const { data: stateRow, error: stateErr } = await supabase
+          .from('archive_search_corpus_reconciliation_state')
+          .select('kill_switch_active')
+          .eq('id', true)
+          .maybeSingle();
+        if (stateErr) throw stateErr;
+        if (stateRow && stateRow.kill_switch_active) {
+          corpusFallbackReason = 'kill_switch_active';
+        } else {
+          searchTable = 'archive_search_corpus';
+        }
+      } catch (killSwitchErr) {
+        console.error('[archive-search] corpus kill-switch check failed — falling back to missive_message_intake_search_safe for this request:', killSwitchErr.message);
+        corpusFallbackReason = 'health_check_failed';
+      }
+    }
+
     // Fetch one extra row past the page boundary to answer has_more
     // without a separate COUNT query — same "avoid a second round trip for
     // a yes/no answer" reasoning as the batched-fetch helpers above, applied
-    // to search instead.
+    // to search instead. Identical query shape against either table —
+    // archive_search_corpus carries the same column set this route already
+    // selects (20260924010000's own schema).
     const { data, error } = await supabase
-      .from('missive_message_intake_search_safe')
+      .from(searchTable)
       .select('id, mailbox_key, missive_conversation_id, subject, from_address, delivered_at, body_text')
       .textSearch('search_document', q, { type: 'websearch', config: 'english' })
       .order('delivered_at', { ascending: false })
@@ -470,7 +564,13 @@ router.get('/api/archive-search/search', requireArchiveSearchAccess, async (req,
       actor_type: 'human',
       risk_level: 'medium',
       privacy_category: 'processing',
-      details: { query_text: q, page, result_count: results.length },
+      details: {
+        query_text: q,
+        page,
+        result_count: results.length,
+        search_source: searchTable,
+        ...(corpusFallbackReason ? { corpus_fallback_reason: corpusFallbackReason } : {}),
+      },
     });
 
     res.json({ query: q, page, page_size: SEARCH_PAGE_SIZE, has_more: hasMore, results });
@@ -1786,6 +1886,84 @@ internalRouter.post('/api/archive-search/process-pending', async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     screeningPassRunning = false;
+  }
+});
+
+// In-process overlap guard — same reasoning as screeningPassRunning below,
+// for the corpus reconciliation job.
+let corpusReconciliationRunning = false;
+
+/**
+ * POST /api/archive-search/process-corpus-reconciliation
+ * The reconciliation job named in projects/hub/email-intake/archive-
+ * search-search-performance-security-barrier-spec.md Section 5, "as a
+ * function/RPC Peter or a cron can call" (this build's own task). The real
+ * mechanism — self-heal, subset-guarantee enforcement, the drift check
+ * (Asimov's Condition 2), audit logging, kill-switch activation — all
+ * lives in the Postgres function archive_search_corpus_reconcile()
+ * (supabase/migrations/20260924010000_archive_search_corpus_schema.sql),
+ * callable directly by Peter via Supabase's SQL Editor
+ * (SELECT archive_search_corpus_reconcile();) with zero dependency on this
+ * route. This route exists only because plain SQL cannot send email: it
+ * calls that RPC, then sends sendFailureAlertEmail() when the returned
+ * summary flags a condition worth a human's immediate attention — same
+ * "reuse the one alert mechanism, don't invent a second one" reasoning
+ * as process-pending's own circuit-breaker alert above.
+ *
+ * x-cron-secret-gated, same pattern as process-pending. NOT itself put on
+ * an automatic schedule by this build — that's Scotty's call, same as
+ * process-pending's own cron-archive-search-screening.sh wrapper (not in
+ * git). Proposed cadence, per the spec: every 15 minutes — TARS should
+ * confirm real run time first (see this function's own COMMENT).
+ *
+ * Deliberately does nothing until archive_search_corpus_reconcile() exists
+ * in production (i.e., until 20260924010000 is applied) — the RPC call
+ * below fails with a normal Postgres "function does not exist" error,
+ * caught and returned as a 500, same as any other route calling a
+ * not-yet-applied migration's object. No corpus-cutover flag gates this
+ * route the way ARCHIVE_SEARCH_CORPUS_SEARCH_ENABLED gates GET
+ * /api/archive-search/search — running reconciliation against an empty or
+ * partially-backfilled corpus is safe and expected (the RPC's own header
+ * comment covers this), unlike serving live search results from it.
+ */
+internalRouter.post('/api/archive-search/process-corpus-reconciliation', async (req, res) => {
+  if (!checkCronSecret(req, res)) return;
+  if (corpusReconciliationRunning) {
+    return res.status(409).json({ skipped: true, reason: 'already_running', message: 'A previous corpus reconciliation run is still in progress.' });
+  }
+  corpusReconciliationRunning = true;
+  const ts = new Date().toISOString();
+  try {
+    const { data: summary, error } = await supabase.rpc('archive_search_corpus_reconcile');
+    if (error) throw error;
+    console.log(`[${ts}] archive-search corpus reconciliation complete:`, summary);
+
+    // Alert conditions — every one of these is a case the spec's own
+    // severity table (Section 5) says should reach a human immediately,
+    // not just self-heal silently: a systemic superset violation (the
+    // kill-switch itself, already flipped by the RPC by this point), a
+    // gap that repeated across consecutive runs (a routinely-failing
+    // becoming-eligible trigger, not a one-off), or any drift-check
+    // mismatch (Asimov's Condition 2 — the one check standing in for the
+    // 7-day observation window Peter's waiver skipped).
+    const alertReasons = [];
+    if (summary && summary.systemic_violation) alertReasons.push('systemic superset violation — kill-switch activated, search now falls back to missive_message_intake_search_safe');
+    if (summary && summary.gap_repeated_across_consecutive_runs) alertReasons.push('sync gap repeated across consecutive reconciliation runs — the becoming-eligible trigger may be failing routinely');
+    if (summary && summary.drift_mismatch_count > 0) alertReasons.push(`corpus/view drift detected — ${summary.drift_mismatch_count} of ${summary.drift_sample_size} sampled row(s) disagreed with missive_message_intake_search_safe's real predicate`);
+
+    if (alertReasons.length > 0) {
+      await sendFailureAlertEmail(
+        'Archive Search: corpus reconciliation found a condition needing review',
+        `archive_search_corpus_reconcile() flagged:\n\n${alertReasons.map((r) => `- ${r}`).join('\n')}\n\nFull run summary:\n${JSON.stringify(summary, null, 2)}\n\nSee audit_log (action LIKE 'archive_search.corpus_%') for the full detail on this run and prior ones. If the kill-switch is active, clear it only after confirming corpus health (see archive_search_corpus_reconciliation_state's own COMMENT for the clear statement).`
+      );
+    }
+
+    res.json({ ok: true, ...summary, alerted: alertReasons.length > 0 });
+  } catch (err) {
+    console.error(`[${ts}] archive-search corpus reconciliation failed:`, err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    corpusReconciliationRunning = false;
   }
 });
 

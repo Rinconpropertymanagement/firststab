@@ -1,0 +1,58 @@
+# Asimov — Governance Review: Removing/Weakening `security_barrier` to Fix Full-Text Search Performance
+
+**Date:** 2026-09-24. Reviews whether letting Postgres push `search_document @@ tsquery(...)` down past `missive_message_intake_search_safe`'s `security_barrier = true` — by any of dropping `security_barrier`, marking a wrapper function `LEAKPROOF`, or restructuring the exclusion mechanism so the barrier no longer matters for this path — is engineering Neo can just build, or a compliance question requiring Mason and likely a fresh attorney opinion.
+
+---
+
+**VERDICT: NOT CLEARED / ATTORNEY REQUIRED.**
+
+## 1. What `security_barrier` is actually protecting here — read from its own origin, not inferred
+
+`20260910030000_archive_search_schema.sql` (Section B/C, Neo, 2026-09-10) is explicit about why this view — alone among this schema's views — carries `security_barrier = true`: `search_document` is a `GENERATED` column computed over **every** row, including `held` and `flagged_protected_class` ones. Quoting the migration's own column comment directly: *"the GIN index built on this column physically contains tokenized privileged/Fair-Housing content even though `missive_message_intake_search_safe` is the only thing meant to stand between a query and it."* `security_barrier` exists for exactly one reason: to stop a future externally-supplied, non-leakproof predicate from being evaluated against that raw index **before** the view's own exclusion logic (clear/override union, minus open/confirmed escalations) runs.
+
+That is not a hypothetical future risk this migration was hedging against in the abstract. `search_document @@ tsquery(<user's search term>)` **is** that predicate. The feature isn't colliding with an unrelated performance bug — it is doing exactly the job it was built to do, on exactly the operation it was built to constrain. `20260912040000_fix_search_safe_view_seq_scan.sql` reached the same conclusion when this was last touched and left `security_barrier` alone on purpose, for the same reason. That's the fact that makes this a compliance question rather than a query-plan question.
+
+## 2. The leakage question is real, not abstract, and matches Postgres's own documented threat model
+
+Postgres's own rationale for `security_barrier`/`LEAKPROOF` is that a non-leakproof predicate evaluated ahead of a security-relevant filter can reveal facts about excluded rows — via error behavior, side effects, or timing — even when the final result set is correctly filtered. This isn't a Rincon-specific worry; it's the textbook case the feature was designed around.
+
+Applied to this view: if pushdown is allowed, the tsquery match runs against the full index — held (legal-hold/privileged), escalated (open/confirmed Fair Housing concern), and suppressed rows included — before the anti-joins remove them. Even with a correct final result set, that ordering opens real channels an authorized-but-untrusted-with-everything searcher could use to infer that hidden content exists for a given term: timing differences between a term with many hidden matches and one with none; execution-plan/row-scan differences that surface the moment anything (a result count, a "did you mean," future ranking/pagination) is built on top of this view without knowing the pool it's now drawing from includes pre-filter matches; and, longer-term, every future engineer's assumption that "this view already only ever shows safe rows" silently stops being true at the implementation level even though it stays true in the final SELECT. That last point matters most: the risk isn't bounded to today's code, it's a change to what any future code built on this view is allowed to assume.
+
+For a searcher population of 8 people specifically trained and authorized because they're expected to encounter *some* sensitive material responsibly, the thing being protected against isn't "can they read the email" — it's "can they detect, through search behavior alone, that a Fair-Housing-flagged or legal-hold conversation exists for a specific tenant/property/term they searched." That is itself Fair-Housing-adjacent signal, not a neutral performance artifact.
+
+## 3. Rule 6 tier: Critical, and this is a bigger version of a question this repo has already answered consistently
+
+GOVERNANCE.md Rule 6 Critical covers "decision criteria, compliance logic, permission tiers, **guardrails**." `security_barrier` on this view is not incidental implementation detail — it is the literal technical enforcement of the guardrail between 8 searchers and this schema's highest-PII-density, partially-unscreened table. Every prior time this repo touched the *policy* content of that same boundary, it was treated as Critical tier and routed through Asimov + Mason + owner sign-off, sometimes with a fresh attorney question:
+
+- `archive-search-held-release-asimov-confirmation.md` (2026-09-13): removing the hold gate's effect on Fair Housing screening — Critical, required fresh owner decision, found a spoliation issue counsel had never been asked about.
+- `archive-search-escalation-mechanism-review.md`, Round 3 (2026-09-12): reopening a *confirmed* escalation — re-classified from "product question" to compliance question specifically because it re-exposes content a human already determined was a real Fair Housing concern; required a DB-level second-admin check before shipping.
+- The flagged-release gate-removal thread (`feature/archive-search-flagged-release-gate-removal`, unmerged — see integrity note below) treated even a *policy* change to what's searchable as Critical requiring two rounds each of Asimov and Mason plus a fresh outside-counsel opinion.
+
+This proposal is not a policy change to *what* gets excluded — it's a mechanism change to *how reliably the exclusion can be bypassed by a query itself*. That is the same category as those precedents at minimum, and arguably more fundamental: those changed which rows are excluded; this changes whether the exclusion mechanism can be trusted to hold under an ordinary user-supplied search term at all.
+
+## 4. No existing legal opinion covers this question
+
+`archive-search-fair-housing-outside-counsel-opinion.md`'s ten safeguards (topic screen, full AI review on catches, ~8 trained users, policy/training, escalation mechanism, search/access logging, periodic sampling, revision) govern *content policy* — who sees flagged material, when, and under what process. None of them, and nothing in counsel's reasoning, addresses whether the search infrastructure itself can leak the existence of excluded content through query timing or planner behavior. `archive-search-held-release-outside-counsel-opinion.md` is privilege doctrine specifically — also not this, and that document says so about itself. Stretching either to cover a database side-channel question would be exactly the mistake `archive-search-held-release-asimov-confirmation.md` already flagged once this session's history: an opinion answering a different question doesn't close this gate just because it's adjacent. This needs its own attorney read — it can be scoped narrowly (a single infrastructure question, not a re-litigation of the whole architecture) so it doesn't have to be slow.
+
+## 5. One option should probably be ruled out on engineering-security grounds regardless of what counsel says
+
+Marking a wrapper function `LEAKPROOF` when it isn't actually leakproof isn't a clever workaround — Postgres's own documentation is direct that an incorrect `LEAKPROOF` marking "may allow malicious users to see part of confidential data," because the optimizer trusts the marking without verifying it. A tsquery match's cost and behavior does vary with its input's content; claiming otherwise to force pushdown would be asserting something false to the query planner on the one view in this schema explicitly built to assume adversarial inputs. Recommend Sentinel weigh in specifically on this option if it's pursued further — this isn't just a governance objection, it's a correctness one.
+
+Of the options named, restructuring the exclusion mechanism so protected content is never in the fast-searchable index in the first place (e.g., a search index/materialized structure that only ever contains rows already known to be clear, kept in sync on every hold/escalate/suppress/override transition) looks like the most promising direction, because it sidesteps the leakage question rather than trying to safely query around it. But "kept in sync on every transition" is exactly the kind of correctness requirement this system's own threat model cares about — a stale fast-index entry for a row that was subsequently escalated or suppressed would recreate the identical leak this migration would be trying to close, just moved one layer over. That needs a concrete design (from Neo) covering every transition path before it's something to send to Mason or counsel, not a one-line summary of the idea.
+
+## 6. What can ship today without waiting on any of this
+
+The date-bounded stopgap does not need this review. It uses ordinary equality/range comparisons on `delivered_at` — built-in scalar types, leakproof by Postgres's own default marking, confirmed directly in `20260912040000`'s own header ("plain equality on built-in scalar types... IS marked leakproof"). It doesn't touch `security_barrier`, doesn't touch the index-pushdown question, and leaves every protection this document is reviewing fully intact. Shipping it now isn't "settling" — it's the only version of a fix available today that doesn't ask the business to accept a new, unreviewed information-leakage risk against Fair-Housing/legal-hold content on the same day that content's protections are the exact subject of scrutiny.
+
+## Integrity note, not part of the verdict above
+
+`compliance/archive-search-flagged-release-*.md` and `archive-search-flagged-release-gate-removal-spec.md` (my assigned reading list) do not exist in this working directory or on `main` — they exist only in commit `b5fe4ae` on the unmerged branch `feature/archive-search-flagged-release-gate-removal` ("Retire per-item human review gate for Fair Housing-flagged Archive Search content," authored by Peter, 2026-09-23). I read them via `git show` to use as precedent for house style and prior reasoning, which is a legitimate use — but they are not currently part of the reviewed, merged compliance record, and nothing in that branch's contents should be treated as an already-cleared precedent for this or any other build until it's actually merged. Worth Jarvis/Peter's attention on its own: that branch documents a real, already-signed Rule 6 Critical decision (Peter's owner-risk-acceptance, Asimov/Mason both CLEARED WITH CONDITIONS, outside counsel opinion) sitting unmerged, which is a real place for that decision to quietly go stale or get lost between sessions.
+
+---
+
+**VERDICT: NOT CLEARED / ATTORNEY REQUIRED.**
+
+1. Mason confirms Fair-Housing-adjacency (expect concurrence, given Section 2 above).
+2. A narrow, fresh attorney question: can search infrastructure reveal the existence of excluded (held/escalated/suppressed) content via timing or behavior, for this specific architecture — not a re-ask of the existing Fair Housing opinion.
+3. Before either of those: Neo specifies one concrete technical design (the denormalized/separate-searchable-index direction in Section 5 is the strongest candidate), with an explicit answer for how every hold/escalate/suppress/override transition evicts a row from the fast path synchronously — so what goes to Mason and counsel is a real design, not a menu of four options.
+4. Ship the date-bounded stopgap today — it needs none of the above and fully preserves current protections.

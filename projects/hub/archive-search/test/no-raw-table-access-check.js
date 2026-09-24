@@ -152,6 +152,16 @@ const KNOWN_RAW_TABLE_RPC_FUNCTIONS = [
   // and approved by Asimov — compliance/archive-search-significance-driver-
   // clear-page-rpc-asimov-review.md.
   'archive_search_significance_driver_next_clear_page',
+  // archive_search_corpus_reconcile — migration 20260924010000_archive_
+  // search_corpus_schema.sql. Reads missive_message_intake directly (both
+  // the gap self-heal INSERT...SELECT and, per-row, via
+  // archive_search_message_is_eligible()), with no caller-supplied
+  // predicate — every filter is hardcoded inside the function itself.
+  // Part of the search-corpus build reviewed and CLEARED WITH CONDITIONS
+  // by Asimov — compliance/archive-search-search-performance-security-
+  // barrier-design-asimov-confirmation.md. Called from router.js's
+  // POST /api/archive-search/process-corpus-reconciliation only.
+  'archive_search_corpus_reconcile',
 ];
 
 // RPCs already called from these files today, confirmed — by reading

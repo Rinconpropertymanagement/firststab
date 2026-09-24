@@ -145,6 +145,19 @@
     .header-maintenance-notes .fl { color: #dc2626; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; font-size: 11px; }
     .header-maintenance-notes-text { margin-top: 4px; white-space: pre-wrap; line-height: 1.4; font-weight: 700; font-size: 14.5px; color: #b91c1c; }
 
+    /* Maintenance Limit — parallel box to Maintenance Notes above (same
+       shape: colored left-edge stripe, all-caps label, bold colored
+       value), styled green instead of red and positioned right beside it
+       (Peter's explicit ask). Value text is larger than the notes text
+       (24px vs 14.5px) since this is one short dollar figure, not a
+       paragraph, and Peter asked for it to read as prominent ("bright
+       green, large"). Renders even when the real value is $0.00 (a
+       genuine limit, not a missing one) — omitted only when NULL, see
+       renderHeaderMaintenanceLimit(). */
+    .header-maintenance-limit { margin-top: 12px; padding: 10px 14px; background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 6px; text-align: left; }
+    .header-maintenance-limit .fl { color: #16a34a; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; font-size: 11px; }
+    .header-maintenance-limit-value { margin-top: 4px; line-height: 1.2; font-weight: 800; font-size: 24px; color: #15803d; }
+
     /* ── Maintenance section: summary + one collapsed-by-default
        subsection (Needs Privacy Review) ─────────────────── */
     details.subsection { border-top: 1px solid #f3f4f6; margin-top: 16px; padding-top: 14px; }
@@ -410,6 +423,25 @@
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Maintenance Limit — plain mirror of AppFolio's own property-level
+    // maintenance_limit field (supabase/migrations/20260828000000_add_
+    // year_built_and_maintenance_limit_to_properties.sql) — the dollar
+    // amount a PM can approve for a repair without owner sign-off. Read
+    // from data.cards.maintenance.data.maintenance_limit, the same card
+    // renderHeaderMaintenanceNotes above already reads. CRITICAL: NULL
+    // means "AppFolio has no limit configured for this property" (omit
+    // the box entirely); 0 means a REAL $0.00 limit (zero approval
+    // authority without the owner) and must still render — checked with
+    // `== null` below, never a falsy check, so a genuine $0.00 doesn't
+    // get treated as "nothing to show."
+    // ────────────────────────────────────────────────────────────────
+    function renderHeaderMaintenanceLimit(limit) {
+      if (limit == null) return ''; // NULL only — a real 0 must still render
+      return '<div class="header-maintenance-limit"><span class="fl">Maintenance Limit:</span>' +
+        '<div class="header-maintenance-limit-value">' + formatMoney(limit) + '</div></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Header — property-360-SPEC.md "What You'll See": name/address/
     // city, real occupancy + nearest upcoming lease-end, owner name/
     // phone/email. Same visual shape as Maintenance History's own
@@ -425,6 +457,7 @@
       const occ = data.occupancy || { occupied: 0, total: 0 };
       const maintCard = data.cards && data.cards.maintenance;
       const maintenanceNotes = (maintCard && maintCard.status === 'ok') ? maintCard.data.maintenance_notes : null;
+      const maintenanceLimit = (maintCard && maintCard.status === 'ok') ? maintCard.data.maintenance_limit : null;
       let html = '<div class="card">';
       html += '<div class="ov-header-row"><div>';
       html += '<div class="ov-header-title">' + escapeHtml(p.name || p.address || 'Unnamed property') + '</div>';
@@ -438,6 +471,7 @@
         html += '<div style="font-size:12.5px;color:#9ca3af;">No linked owner on file</div>';
       }
       html += renderHeaderMaintenanceNotes(maintenanceNotes);
+      html += renderHeaderMaintenanceLimit(maintenanceLimit);
       html += '</div></div>';
       if (data.has_owner_history_gap) {
         html += '<div class="ov-owner-note">Showing current ownership only &mdash; this system does not track ownership history.</div>';

@@ -391,7 +391,14 @@ async function fetchMaintenanceCard(req) {
   // the notes block standalone with no chart beside it — see that
   // function's own "No spend data to chart" comment — so no frontend
   // change is needed to show it once this card stops being collapsed.
-  if (body && body.has_data === false && !body.maintenance_notes) {
+  // Maintenance Limit joins the same exemption, same reasoning — also a
+  // plain property-level passthrough unrelated to ticket/spend activity
+  // (supabase/migrations/20260828000000_add_year_built_and_maintenance_
+  // limit_to_properties.sql), and 0 is a real, meaningful value here (a
+  // genuine $0.00 limit), not "nothing to show" — checked with `== null`,
+  // not a falsy check, so a real $0.00 limit doesn't fall through to
+  // no_data the way a falsy check would wrongly treat it.
+  if (body && body.has_data === false && !body.maintenance_notes && body.maintenance_limit == null) {
     return { status: 'no_data' };
   }
   return { status: 'ok', data: body };

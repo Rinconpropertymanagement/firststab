@@ -1174,7 +1174,7 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
 
   const { data: property, error: propErr } = await supabase
     .from('properties')
-    .select('id, name, address, city, appfolio_id, maintenance_notes')
+    .select('id, name, address, city, appfolio_id, maintenance_notes, maintenance_limit')
     .eq('id', propertyId)
     .maybeSingle();
   if (propErr) return res.status(500).json({ error: propErr.message });
@@ -1407,6 +1407,14 @@ async function getMaintenanceHistoryPropertySummary(req, res) {
     // by design — see that migration's own "Why this is a plain field"
     // section.
     maintenance_notes: property.maintenance_notes || null,
+    // Maintenance Limit — plain mirror of AppFolio's own property-level
+    // maintenance_limit field (supabase/migrations/20260828000000_add_
+    // year_built_and_maintenance_limit_to_properties.sql). CRITICAL: NULL
+    // means "never synced/not configured," 0 means a real $0.00 limit —
+    // these are NOT the same thing, so this is an explicit null-check, not
+    // `|| null` (which would silently collapse a genuine $0.00 into NULL,
+    // since 0 is falsy in JS — see that migration's own gotcha comment).
+    maintenance_limit: property.maintenance_limit == null ? null : Number(property.maintenance_limit),
     // Real data exists if ANY source has it — a real Latchel-ticket row,
     // real AppFolio actual-spend tracking for this property (see the
     // appfolioMaintenanceSpend comment above; hasAppfolioActualData is

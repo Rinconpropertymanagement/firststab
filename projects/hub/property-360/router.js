@@ -594,6 +594,36 @@ function computeNeedsAttentionAndOrder(cards) {
   return { summary, items: items.map((i) => ({ key: i.key, message: i.message })), card_order: cardOrder };
 }
 
+// ─── Usage logging — audits/router.js's "Property 360 Views" section reads
+// these rows. Sibling implementation, same house style every router.js in
+// this codebase already uses (not a shared import) — matching
+// owner-tenant-notes/router.js's own writeAuditLog/lookupUserId exactly.
+async function lookupUserId(email) {
+  const { data } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  return data ? data.id : null;
+}
+
+async function writeAuditLog({ action, entity_type, entity_id, actor_email, actor_type, risk_level, privacy_category, property_id, details }) {
+  const performed_by = await lookupUserId(actor_email);
+  const { error } = await supabase.from('audit_log').insert({
+    action,
+    entity_type,
+    entity_id,
+    performed_by,
+    actor_type: actor_type || 'human',
+    actor_id: actor_email,
+    privacy_category: privacy_category || 'processing',
+    risk_level: risk_level || 'low',
+    property_id: property_id || null,
+    details: details || {},
+  });
+  if (error) {
+    console.error(`[property-360] audit_log insert failed for ${action}:`, error.message);
+    return false;
+  }
+  return true;
+}
+
 // ─── Router: everyone reaching here is already hub-logged-in (server.js
 // mounts this after requireLogin) — see file header, "no gate of this
 // page itself."
@@ -710,6 +740,21 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
     return res.status(500).json({ error: 'Could not load this property right now.' });
   }
   if (!header) return res.status(404).json({ error: 'Property not found.' });
+
+  // Usage logging — one row per real page view, once the property is
+  // confirmed to exist. Fire-and-forget-adjacent: awaited so a genuine
+  // insert failure is visible in logs, but writeAuditLog() itself never
+  // throws, so this can't slow down or break the actual page.
+  writeAuditLog({
+    action: 'property_360.viewed',
+    entity_type: 'property',
+    entity_id: propertyId,
+    actor_email: req.user.email,
+    actor_type: 'human',
+    risk_level: 'low',
+    privacy_category: 'processing',
+    property_id: propertyId,
+  });
 
   // ── Access Control — run each tool's own real gate function in-process
   // against this one request. insuranceRouter and securityDepositRouter

@@ -122,6 +122,14 @@ GET  /scorecard               Scoreboard — the business's weekly metrics,
                               login + a role in tool='scorecard' — see
                               scorecard/router.js)
      /api/scorecard/*         Scoreboard API routes
+GET  /audits                  Audits & Admin Tools — internal oversight
+                              tools, starting with Property 360 Views (who
+                              viewed which property, and when). Requires
+                              login + role='admin' for tool='archive_search'
+                              (reused, not a new role — see audits/router.js's
+                              own ACCESS CONTROL comment for why). Linked
+                              from the Hub home page only for admins.
+     /api/audits/*            Audits API routes
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -245,6 +253,7 @@ const { internalRouter: emailIntakeInternalRouter } = require('./email-intake/ro
 const { router: complaintTrackingRouter, internalRouter: complaintTrackingInternalRouter } = require('./complaint-tracking/router');
 const { router: archiveSearchRouter, internalRouter: archiveSearchInternalRouter } = require('./archive-search/router');
 const { router: scorecardRouter, internalRouter: scorecardInternalRouter } = require('./scorecard/router');
+const { router: auditsRouter } = require('./audits/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const PORT = process.env.HUB_PORT || 3500;
@@ -876,6 +885,7 @@ app.get('/', (req, res) => {
             <span>The business's weekly numbers, one row per metric, with the person accountable for each</span>
           </a>
           <span id="complaint-tracking-tile-slot"></span>
+          <span id="audits-tile-slot"></span>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
         <script>
@@ -912,6 +922,37 @@ app.get('/', (req, res) => {
                   });
               })
               .catch(function () { /* role lookup or count failed — tile stays absent, rest of the home page still works */ });
+          })();
+
+          // Audits & Admin Tools tile — audits/router.js's own GET /audits.
+          // Same "check first, mount only on success, no hint it exists
+          // otherwise" discipline as the two tiles just above. This page
+          // reuses Archive Search's own admin gate rather than a role of
+          // its own (see audits/router.js's file header, "ACCESS CONTROL"),
+          // so this check calls that same already-built, already-gated
+          // GET /api/archive-search/auth/me — not a new /api/audits/auth/me
+          // round trip for a tile that would just ask the identical
+          // question a second time. The page's OWN routes (GET /audits and
+          // everything under /api/audits/*) still re-check this for real,
+          // server-side, every time — this is only what decides whether the
+          // tile itself renders. No role lookup happens in server.js
+          // itself — team_member_tool_roles is never queried here.
+          (function () {
+            fetch('/api/archive-search/auth/me', { credentials: 'include' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (me) {
+                if (!me || me.role !== 'admin') return; // not an admin — tile never appears, no hint it exists
+
+                var slot = document.getElementById('audits-tile-slot');
+                if (!slot) return;
+                var el = document.createElement('a');
+                el.className = 'section-link';
+                el.href = '/audits';
+                el.innerHTML = '<strong>Audits &amp; Admin Tools</strong>' +
+                  '<span>Internal oversight tools — starting with who viewed which property on Property 360, and when</span>';
+                slot.replaceWith(el);
+              })
+              .catch(function () { /* role lookup failed — tile stays absent, rest of the home page still works */ });
           })();
         </script>
       `,
@@ -1047,6 +1088,23 @@ app.use(complaintTrackingRouter);
 // message-view routes the spec names are themselves deliberately not
 // built in this pass either (see archive-search/router.js's own header).
 app.use(archiveSearchRouter);
+
+// ─── Audits & Admin Tools section ──────────────────────────────────────
+// audits/router.js — a new shell page for internal oversight/admin
+// tooling, starting with "Property 360 Views" (audit_log rows written by
+// property-360/router.js's own writeAuditLog() call, action=
+// 'property_360.viewed'). Mounted here, right after archiveSearchRouter,
+// because this router reuses THAT tool's own real, unmodified
+// attachArchiveSearchRole/requireArchiveSearchAdmin gate (tool=
+// 'archive_search', role='admin') rather than a new team_member_tool_roles
+// `tool` value of its own — see audits/router.js's own file header,
+// "ACCESS CONTROL," for the full reasoning and the trade-off it names.
+// Mount order relative to archiveSearchRouter doesn't actually matter for
+// correctness (audits/router.js calls router.use(attachArchiveSearchRole)
+// on its own router, not relying on middleware already having run), but
+// sits here for readability, next to the tool whose access check it's
+// borrowing.
+app.use(auditsRouter);
 
 // ─── Scoreboard section ────────────────────────────────────────────────
 // supabase/migrations/20260912000000_scorecard_weekly.sql, and the final

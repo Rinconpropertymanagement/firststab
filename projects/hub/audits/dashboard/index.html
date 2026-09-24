@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audits &amp; Admin Tools — Rincon Management</title>
+  <style>
+    /* Same verified house palette as every other real Hub tool dashboard —
+       gray/blue tokens (#f9fafb bg, #111827 text, #6b7280 muted, #e5e7eb/
+       #d1d5db borders, #1d4ed8/#2563eb accent), reused verbatim from
+       archive-search/dashboard/compliance-review.html (this page's closest
+       sibling — also an admin-only internal oversight page reached by
+       typing its URL, not a day-to-day tool). NOT the "stone" palette
+       lib/global-search-widget.js's own comment claims every dashboard
+       matches — property-360/dashboard/index.html's own header comment
+       already corrected that: "stone" only ever described server.js's own
+       page() shell (login/home) and the search-bar widget itself, checked
+       live against every real tool dashboard. Matching the real thing, not
+       the stale comment about it. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 8px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13px; line-height: 1.5; }
+
+    .notice { border-radius: 8px; padding: 14px 16px; font-size: 13.5px; line-height: 1.5; margin-bottom: 16px; }
+    .notice-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .notice-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .notice button {
+      margin-top: 10px; font-size: 12.5px; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; font-family: inherit;
+    }
+    .notice button:hover { background: #f3f4f6; }
+
+    /* ── Section shell — the repeatable unit. Copy this <section> block
+       (see index.html's own "ADD THE NEXT SECTION HERE" marker further
+       down) for a second audit view later. ─────────────────────────── */
+    .section { margin-bottom: 28px; }
+    .section-title { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+    .section-sub { color: #6b7280; font-size: 12.5px; margin-bottom: 12px; line-height: 1.4; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
+    th { text-align: left; color: #6b7280; font-weight: 600; padding: 9px 10px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; background: #f9fafb; position: sticky; top: 0; }
+    td { padding: 9px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    .col-date { white-space: nowrap; color: #374151; }
+    .col-property strong { display: block; color: #111827; }
+    .col-property span { display: block; color: #6b7280; font-size: 12px; margin-top: 2px; }
+    .col-viewer strong { display: block; color: #111827; }
+    .col-viewer span { display: block; color: #6b7280; font-size: 12px; margin-top: 2px; }
+    .muted { color: #9ca3af; }
+
+    .empty { color: #9ca3af; padding: 32px; text-align: center; }
+    .loading { color: #6b7280; padding: 24px; text-align: center; font-size: 13px; }
+
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+    .pager-count { color: #6b7280; font-size: 12.5px; }
+    .pager-buttons { display: flex; gap: 8px; }
+    .btn { font-size: 12.5px; padding: 6px 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; font-family: inherit; white-space: nowrap; }
+    .btn:hover:not(:disabled) { background: #f3f4f6; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Where the next section goes — a plain placeholder card, visible
+       only so this isn't a mystery empty space; delete this whole <div>
+       the moment a real second section replaces it. ──────────────────── */
+    .coming-soon { border: 1px dashed #d1d5db; border-radius: 8px; padding: 16px; color: #9ca3af; font-size: 12.5px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Audits &amp; Admin Tools</h1>
+    <p class="sub">
+      Internal oversight tools — not part of day-to-day property management work. This page is restricted to Hub
+      admins.
+    </p>
+
+    <div id="page-status-area"></div>
+
+    <div id="sections-area" hidden>
+
+      <!-- ============================================================
+           SECTION 1 — Property 360 Views. Who viewed which property on
+           Property 360, and when (audit_log, action='property_360.viewed').
+           ============================================================ -->
+      <div class="section">
+        <div class="section-title">Property 360 Views</div>
+        <div class="section-sub">Most recent views first, 50 at a time.</div>
+        <div id="p360-views-area">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           ADD THE NEXT SECTION HERE — copy the <div class="section">
+           block above:
+             1. Give it its own heading/sub text and an empty content <div>
+                with a fresh id (e.g. id="my-new-section-area").
+             2. Write a loadMyNewSection(offset) function below, shaped
+                like loadPropertyThreeSixtyViews(offset) — fetch its own
+                GET /api/audits/<section-slug> route (see audits/router.js's
+                own "HOW THE NEXT SECTION PLUGS IN" comment for the
+                matching backend half), render into its own content <div>.
+             3. Call it once from init(), alongside
+                loadPropertyThreeSixtyViews(0) below.
+           Nothing about section 1 needs to change for this — each section
+           fetches and renders independently, same as property-360's own
+           per-card composition.
+           ============================================================ -->
+      <div class="section">
+        <div class="coming-soon">More audits and admin tools will show up here.</div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function formatDateTime(iso) {
+      if (!iso) return '—';
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      });
+    }
+
+    function noticeBox(message, kind) {
+      var div = document.createElement('div');
+      div.className = 'notice notice-' + kind;
+      div.textContent = message;
+      return div;
+    }
+
+    // ============================================================
+    // SECTION 1 — Property 360 Views
+    // ============================================================
+    var P360_PAGE_SIZE = 50;
+
+    function renderPropertyThreeSixtyViews(body) {
+      var area = document.getElementById('p360-views-area');
+      area.innerHTML = '';
+
+      if (!body.rows || !body.rows.length) {
+        var empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = body.offset > 0 ? 'No more views.' : 'No Property 360 views recorded yet.';
+        area.appendChild(empty);
+        return;
+      }
+
+      var wrap = document.createElement('div');
+      wrap.className = 'table-wrap';
+      var rowsHtml = body.rows.map(function (row) {
+        var property = row.property;
+        var propertyCell = property
+          ? '<strong>' + escapeHtml(property.name || property.address || 'Unknown property') + '</strong>' +
+            (property.address && property.address !== property.name
+              ? '<span>' + escapeHtml([property.address, property.city].filter(Boolean).join(', ')) + '</span>'
+              : '')
+          : '<span class="muted">Unknown property</span>';
+
+        var viewer = row.viewer;
+        var viewerCell = viewer && (viewer.name || viewer.email)
+          ? '<strong>' + escapeHtml(viewer.name || viewer.email) + '</strong>' +
+            (viewer.name && viewer.email ? '<span>' + escapeHtml(viewer.email) + '</span>' : '')
+          : '<span class="muted">' + escapeHtml((viewer && viewer.name) || 'Unknown') + '</span>';
+
+        return (
+          '<tr>' +
+            '<td class="col-date">' + escapeHtml(formatDateTime(row.viewed_at)) + '</td>' +
+            '<td class="col-property">' + propertyCell + '</td>' +
+            '<td class="col-viewer">' + viewerCell + '</td>' +
+          '</tr>'
+        );
+      }).join('');
+
+      wrap.innerHTML =
+        '<table>' +
+          '<thead><tr><th>Viewed</th><th>Property</th><th>Viewed by</th></tr></thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+        '</table>';
+      area.appendChild(wrap);
+
+      var pager = document.createElement('div');
+      pager.className = 'pager';
+      var from = body.offset + 1;
+      var to = body.offset + body.rows.length;
+      var countLabel = document.createElement('div');
+      countLabel.className = 'pager-count';
+      countLabel.textContent = 'Showing ' + from + '–' + to + ' of ' + body.total;
+      pager.appendChild(countLabel);
+
+      var buttons = document.createElement('div');
+      buttons.className = 'pager-buttons';
+
+      var prevBtn = document.createElement('button');
+      prevBtn.type = 'button';
+      prevBtn.className = 'btn';
+      prevBtn.textContent = 'Newer';
+      prevBtn.disabled = body.offset <= 0;
+      prevBtn.addEventListener('click', function () {
+        loadPropertyThreeSixtyViews(Math.max(0, body.offset - P360_PAGE_SIZE));
+      });
+      buttons.appendChild(prevBtn);
+
+      var nextBtn = document.createElement('button');
+      nextBtn.type = 'button';
+      nextBtn.className = 'btn';
+      nextBtn.textContent = 'Older';
+      nextBtn.disabled = to >= body.total;
+      nextBtn.addEventListener('click', function () {
+        loadPropertyThreeSixtyViews(body.offset + P360_PAGE_SIZE);
+      });
+      buttons.appendChild(nextBtn);
+
+      pager.appendChild(buttons);
+      area.appendChild(pager);
+    }
+
+    function loadPropertyThreeSixtyViews(offset) {
+      var area = document.getElementById('p360-views-area');
+      area.innerHTML = '';
+      area.appendChild((function () { var d = document.createElement('div'); d.className = 'loading'; d.textContent = 'Loading…'; return d; })());
+
+      fetch('/api/audits/property-360-views?limit=' + P360_PAGE_SIZE + '&offset=' + offset, { credentials: 'include' })
+        .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+        .then(function (result) {
+          area.innerHTML = '';
+          if (!result.ok) {
+            area.appendChild(noticeBox(result.body.error || 'Could not load Property 360 view history.', 'error'));
+            return;
+          }
+          renderPropertyThreeSixtyViews(result.body);
+        })
+        .catch(function () {
+          area.innerHTML = '';
+          area.appendChild(noticeBox('Network error — could not load Property 360 view history.', 'error'));
+        });
+    }
+
+    // ============================================================
+    // Page init — a single shared GET /api/audits/auth/me check, run once
+    // (same pattern archive-search/dashboard/compliance-review.html's own
+    // init() uses): only mount section content on success, otherwise show
+    // a plain "restricted" message and stop.
+    // ============================================================
+    function init() {
+      var statusArea = document.getElementById('page-status-area');
+      statusArea.innerHTML = '';
+
+      fetch('/api/audits/auth/me', { credentials: 'include' })
+        .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+        .then(function (result) {
+          if (!result.ok) {
+            statusArea.appendChild(noticeBox(
+              result.body.error || 'This page is restricted to Hub admins. Ask an admin to grant you access.',
+              'info'
+            ));
+            return;
+          }
+          document.getElementById('sections-area').hidden = false;
+          loadPropertyThreeSixtyViews(0);
+        })
+        .catch(function () {
+          statusArea.appendChild(noticeBox('Network error — could not check your access.', 'error'));
+        });
+    }
+
+    init();
+  </script>
+</body>
+</html>

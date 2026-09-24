@@ -213,6 +213,12 @@
       font-size: 13.5px; font-family: inherit; color: #111827;
     }
     .as-search-row input[type="text"]:focus { outline: 2px solid #bfdbfe; border-color: #1d4ed8; }
+    .as-search-row button {
+      padding: 7px 14px; border: 1px solid #1d4ed8; border-radius: 6px;
+      background: #1d4ed8; color: #fff; font-size: 13.5px; font-family: inherit;
+      font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .as-search-row button:hover { background: #1e40af; border-color: #1e40af; }
     .as-hint { font-size: 11.5px; color: #9ca3af; margin: 4px 0 10px; }
     .as-results { margin-top: 8px; }
     .as-result { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
@@ -1518,6 +1524,7 @@
         '<div class="section-title">Archive Search</div>' +
         '<div class="as-search-row">' +
         '<input type="text" id="asSearchInput" autocomplete="off" placeholder="Search archived Missive correspondence&hellip;">' +
+        '<button type="button" id="asSearchBtn">Search</button>' +
         '</div>' +
         '<div class="as-hint">Searches the same screened archive as Archive Search &mdash; not limited to this property.</div>' +
         '<div class="as-results" id="asResults"></div>' +
@@ -1559,6 +1566,7 @@
     function wireArchiveSearchSection() {
       var input = document.getElementById('asSearchInput');
       var results = document.getElementById('asResults');
+      var searchBtn = document.getElementById('asSearchBtn');
       if (!input || !results) return; // no access — section wasn't rendered
 
       var debounceTimer = null;
@@ -1587,6 +1595,21 @@
         clearTimeout(debounceTimer);
         if (!q) { results.innerHTML = ''; return; }
         debounceTimer = setTimeout(function () { runSearch(q); }, 250);
+      });
+
+      // Explicit trigger — a button and Enter key both fire immediately,
+      // skipping the 250ms debounce, so there's always an obvious way to
+      // force a search rather than relying only on type-ahead timing.
+      function forceSearch() {
+        var q = input.value.trim();
+        currentQuery = q;
+        clearTimeout(debounceTimer);
+        if (!q) { results.innerHTML = ''; return; }
+        runSearch(q);
+      }
+      if (searchBtn) searchBtn.addEventListener('click', forceSearch);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') forceSearch();
       });
 
       // Event delegation — result rows (and their message-body expansions)

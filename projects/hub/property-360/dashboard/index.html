@@ -77,6 +77,55 @@
     /* ── Needs-attention banner ────────────────────────────────────── */
     .attention-banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.5; }
 
+    /* ── Complaint Tracking — Issues section (Tron's addition). Big-deal
+       items only, flat, no toggle at all (product doc: "shows only its
+       big-deal complaints, flat and visible the moment the page loads —
+       no toggle, no click-through" — unlike every other collapsible
+       section on this page, this one is never a <details>). Built
+       entirely client-side (see loadComplaintTrackingSection below) —
+       property-360/router.js is untouched: this section calls complaint-
+       tracking/router.js's own already-built, already-gated routes
+       directly, the same way the Owner & Tenant Notes section above
+       calls owner-tenant-notes/router.js's routes directly rather than
+       going through this page's own aggregate /summary endpoint. Same
+       category/subject-type color vocabulary as complaint-tracking/
+       dashboard/index.html's own, kept consistent across the Hub. ── */
+    .ct-section { margin-bottom: 16px; }
+    .ct-card { border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db; border-radius: 8px; padding: 11px 13px; margin-bottom: 8px; }
+    .ct-card.subj-owner       { border-left-color: #7c3aed; }
+    .ct-card.subj-tenant       { border-left-color: #0284c7; }
+    .ct-card.subj-team_member  { border-left-color: #0d9488; }
+    .ct-card.subj-property, .ct-card.subj-unmatched { border-left-color: #6b7280; }
+    .ct-card.is-held { border-left-color: #111827; background: #fafafa; }
+    .ct-top { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+    .ct-badges { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+    .ct-date { font-size: 11px; color: #9ca3af; white-space: nowrap; }
+    .ct-desc { font-size: 12.5px; color: #111827; line-height: 1.4; margin-bottom: 4px; }
+    .ct-desc.empty { color: #9ca3af; font-style: italic; }
+    .ct-held-box { background: #111827; color: #f9fafb; border-radius: 6px; padding: 5px 9px; font-size: 10.5px; font-weight: 700; margin-bottom: 6px; display: inline-block; letter-spacing: 0.01em; }
+    .ct-held-box.closed { background: #f3f4f6; color: #374151; }
+    .ct-cat { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+    .ct-cat-legal_compliance          { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .ct-cat-blocked_resolution        { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .ct-cat-churn_risk                { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
+    .ct-cat-escalation_recurrence     { background: #fdf2f8; color: #9d174d; border: 1px solid #fbcfe8; }
+    .ct-cat-major_money_property_risk { background: #fef2f2; color: #7f1d1d; border: 1px solid #fca5a5; font-weight: 700; }
+    .ct-cat-owner_instruction_one_off { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .ct-status { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 10.5px; font-weight: 700; color: #fff; }
+    .ct-status-open        { background: #1d4ed8; }
+    .ct-status-in_progress { background: #d97706; }
+    .ct-status-blocked     { background: #dc2626; }
+    .ct-status-resolved    { background: #16a34a; }
+    .ct-status-held        { background: #374151; }
+    .ct-subj { font-weight: 700; }
+    .ct-link { font-size: 11.5px; color: #1d4ed8; text-decoration: none; }
+    .ct-link:hover { text-decoration: underline; }
+    .ct-group-heading { font-size: 11px; font-weight: 700; color: #374151; text-transform: uppercase; letter-spacing: 0.03em; margin: 10px 0 6px; display: flex; align-items: center; gap: 6px; }
+    .ct-group-heading .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .ct-group-heading.owner .dot  { background: #7c3aed; }
+    .ct-group-heading.tenant .dot { background: #0284c7; }
+    .ct-group-heading.other .dot  { background: #6b7280; }
+
     /* ── Insurance / Security Deposit / LeadSimple card grid ──────── */
     .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px; }
     .summary-card h3 { font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #374151; margin-bottom: 10px; }
@@ -144,6 +193,42 @@
     .header-maintenance-notes { margin-top: 12px; padding: 10px 14px; background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #dc2626; border-radius: 6px; text-align: left; }
     .header-maintenance-notes .fl { color: #dc2626; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; font-size: 11px; }
     .header-maintenance-notes-text { margin-top: 4px; white-space: pre-wrap; line-height: 1.4; font-weight: 700; font-size: 14.5px; color: #b91c1c; }
+
+    /* ── Archive Search widget — compliance/archive-search-property-360-
+       embed-owner-risk-acceptance.md (all three addenda),
+       compliance/archive-search-property-360-embed-asimov-confirmation.md,
+       compliance/archive-search-property-360-embed-mason-confirmation.md
+       (both CLEARED WITH CONDITIONS). Placed directly under the
+       Maintenance section (which itself ends with Maintenance Notes) —
+       alongside, not replacing, the Complaint Tracking / Issues section
+       above. Real markup only ever renders once property-360/router.js's
+       own archive_search_access flag (a real searcher/admin role check,
+       not a bypass) is true — same "no hint it exists otherwise"
+       discipline as every other gated section on this page. Reuses this
+       page's own .card/.section-title shell rather than inventing a new
+       container style. ────────────────────────────────────────────── */
+    .as-search-row { display: flex; gap: 8px; margin-bottom: 4px; }
+    .as-search-row input[type="text"] {
+      flex: 1; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 13.5px; font-family: inherit; color: #111827;
+    }
+    .as-search-row input[type="text"]:focus { outline: 2px solid #bfdbfe; border-color: #1d4ed8; }
+    .as-hint { font-size: 11.5px; color: #9ca3af; margin: 4px 0 10px; }
+    .as-results { margin-top: 8px; }
+    .as-result { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+    .as-result:hover { border-color: #d1d5db; background: #f9fafb; }
+    .as-result-top { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .as-result-subject { font-weight: 700; font-size: 13.5px; color: #111827; }
+    .as-result-date { font-size: 11px; color: #9ca3af; white-space: nowrap; }
+    .as-result-from { font-size: 12px; color: #6b7280; margin-top: 2px; }
+    .as-result-snippet { font-size: 12.5px; color: #374151; margin-top: 5px; line-height: 1.4; }
+    .as-result-snippet mark { background: #fef08a; color: inherit; border-radius: 2px; }
+    .as-message-body {
+      border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;
+      margin: -8px 0 8px; padding: 12px; background: #f9fafb;
+      font-size: 12.5px; color: #111827; white-space: pre-wrap; line-height: 1.5;
+    }
+    .as-message-body a { color: #1d4ed8; }
 
     /* ── Maintenance section: summary + one collapsed-by-default
        subsection (Needs Privacy Review) ─────────────────── */
@@ -453,6 +538,134 @@
     function renderAttentionBanner(needsAttention) {
       if (!needsAttention) return '';
       return '<div class="attention-banner">' + escapeHtml(needsAttention.summary) + '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Complaint Tracking — Issues section (product doc Section 2/5:
+    // big-deal items only, flat and prominent, no toggle at all). Calls
+    // complaint-tracking/router.js's own real routes directly (already
+    // built, already gated to admin/director_of_operations) — no change
+    // to this page's own aggregate /summary route. GET /api/complaint-
+    // tracking/property/:id already queries complaints_needing_attention
+    // (is_big_deal, not resolved, not merged, tenant-lease-end auto-
+    // dropped), so this section never needs to re-derive "is this still
+    // active" logic — it just renders what the route returns.
+    // ────────────────────────────────────────────────────────────────
+    var CT_CATEGORY_LABELS = {
+      legal_compliance: 'Legal / Compliance',
+      blocked_resolution: 'Blocked Resolution',
+      churn_risk: 'Relationship / Churn Risk',
+      escalation_recurrence: 'Escalation / Recurrence',
+      major_money_property_risk: 'Major Money / Property Risk',
+      owner_instruction_one_off: 'Owner Instruction',
+    };
+    var CT_STATUS_LABELS = { open: 'Open', in_progress: 'In Progress', blocked: 'Blocked', resolved: 'Resolved', held: 'Held' };
+    var CT_SUBJECT_LABELS = { owner: 'Owner', tenant: 'Tenant', team_member: 'Team Member', property: 'Property' };
+
+    // Design Decision 4 — "confirmed refusal" vs. "inferred from silence"
+    // must stay visibly distinct wherever a blocked complaint is shown,
+    // including here — never one generic "Blocked" badge. Same "2+ days"
+    // wording as complaint-tracking/dashboard/index.html's own (the
+    // documented, Peter-confirmed blocked_resolution_silence_days value;
+    // this page has no route exposing the live config to read instead).
+    function ctBlockedBadge(c) {
+      if (c.category !== 'blocked_resolution' || !c.blocked_reason) return '';
+      var party = c.blocked_party ? (CT_SUBJECT_LABELS[c.blocked_party] || c.blocked_party) : 'Someone';
+      return c.blocked_reason === 'explicit_refusal'
+        ? '<span class="badge badge-red">Blocked &mdash; ' + escapeHtml(party) + ' Refused</span>'
+        : '<span class="badge badge-amber">Blocked &mdash; No Response (2+ days)</span>';
+    }
+
+    function ctCard(c) {
+      // held_legal_fair_housing, not status — see complaint-tracking/
+      // dashboard/index.html's own renderCard comment on why (status
+      // becomes 'resolved' once a held item is closed, but the label
+      // must stay permanent). In practice complaints_needing_attention
+      // already drops a CLOSED held row (status != 'resolved' is part of
+      // that view's own filter) — this still checks the real flag rather
+      // than assuming, since this section renders whatever the route
+      // hands back.
+      var isHeld = c.held_legal_fair_housing;
+      var subjCls = c.subject_type ? 'subj-' + c.subject_type : (c.needs_matching ? 'subj-unmatched' : '');
+      var badges = '<span class="ct-status ct-status-' + c.status + '">' + (CT_STATUS_LABELS[c.status] || c.status) + '</span>';
+      if (c.subject_type) {
+        var subjectName = (c.display && c.display.subject_name) ? ': ' + escapeHtml(c.display.subject_name) : '';
+        badges += ' <span class="badge badge-blue ct-subj">' + (CT_SUBJECT_LABELS[c.subject_type] || c.subject_type) + subjectName + '</span>';
+      }
+      if (c.category) badges += ' <span class="ct-cat ct-cat-' + c.category + '">' + escapeHtml(CT_CATEGORY_LABELS[c.category] || c.category) + '</span>';
+      if (!c.category && c.needs_human_call) badges += ' <span class="badge badge-amber">Needs a Human Call</span>';
+      badges += ' ' + ctBlockedBadge(c);
+      if (c.tone_trend === 'escalating') badges += ' <span class="badge badge-amber">Tone: Escalating</span>';
+      if (c.flagged_protected_class) {
+        badges += ' <span class="badge badge-amber">&#9888; Fair Housing flag' + (c.flagged_category ? ': ' + escapeHtml(c.flagged_category) : '') + '</span>';
+      }
+
+      var body;
+      if (isHeld) {
+        var closed = c.resolution_note != null;
+        body = '<div class="ct-held-box' + (closed ? ' closed' : '') + '">Held &mdash; Legal / Fair Housing' + (closed ? ' (Closed)' : '') + '</div>' +
+          (closed ? '<div class="ct-desc">' + escapeHtml(c.resolution_note) + '</div>' : '<div class="ct-desc empty">Awaiting closure &mdash; handled outside this system, per policy. No content shown here by design.</div>');
+      } else {
+        body = c.description ? '<div class="ct-desc">' + escapeHtml(c.description) + '</div>' : '<div class="ct-desc empty">No description on file.</div>';
+      }
+
+      return '<div class="ct-card ' + subjCls + (isHeld ? ' is-held' : '') + '">' +
+        '<div class="ct-top"><div class="ct-badges">' + badges + '</div><div class="ct-date">' + formatDate(c.created_at) + '</div></div>' +
+        body +
+        '<a class="ct-link" href="/complaint-tracking">Open in Complaint Tracking &rarr;</a>' +
+        '</div>';
+    }
+
+    // Owner-tied vs. tenant-tied visual separation (product doc Section
+    // 4), same grouping this Hub's central Complaint Tracking tool uses —
+    // kept consistent rather than inventing a second layout for the same
+    // requirement.
+    function ctGroupsHtml(items) {
+      var groups = { owner: [], tenant: [], other: [] };
+      items.forEach(function (c) {
+        if (c.subject_type === 'owner') groups.owner.push(c);
+        else if (c.subject_type === 'tenant') groups.tenant.push(c);
+        else groups.other.push(c);
+      });
+      var html = '';
+      if (groups.owner.length) html += '<div class="ct-group-heading owner"><span class="dot"></span>Owner-Tied</div>' + groups.owner.map(ctCard).join('');
+      if (groups.tenant.length) html += '<div class="ct-group-heading tenant"><span class="dot"></span>Tenant-Tied</div>' + groups.tenant.map(ctCard).join('');
+      if (groups.other.length) html += '<div class="ct-group-heading other"><span class="dot"></span>Other</div>' + groups.other.map(ctCard).join('');
+      return html;
+    }
+
+    // Entirely self-contained: checks this tool's own /auth/me first and
+    // only ever mounts real markup on success, same "no hint it exists to
+    // anyone without access" discipline as wireOwnerTenantNotesSection
+    // below — the difference is this page's own aggregate /summary route
+    // has no complaint_tracking key to gate on (property-360/router.js is
+    // untouched by this build), so the check happens here instead of
+    // being inherited from that response.
+    function loadComplaintTrackingSection(propertyId, mountEl) {
+      fetch('/api/complaint-tracking/auth/me', { credentials: 'include' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (me) {
+          if (!me) return; // no access — mount stays empty, no hint this section exists
+          return fetch('/api/complaint-tracking/property/' + encodeURIComponent(propertyId), { credentials: 'include' })
+            .then(function (r) { return r.ok ? r.json() : { complaints: [] }; })
+            .then(function (body) {
+              var items = body.complaints || [];
+              var heldItems = items.filter(function (c) { return c.held_legal_fair_housing; });
+              var others = items.filter(function (c) { return !c.held_legal_fair_housing; });
+              var html = '<div class="card ct-section"><div class="section-title">Issues (Complaint Tracking)</div>';
+              if (!items.length) {
+                html += '<p class="sub" style="margin:4px 0 0;">No big-deal complaints on file for this property right now.</p>';
+              } else {
+                if (heldItems.length) {
+                  html += '<div class="ct-group-heading"><span class="dot" style="background:#111827;"></span>Held &mdash; Legal / Fair Housing</div>' + heldItems.map(ctCard).join('');
+                }
+                html += ctGroupsHtml(others);
+              }
+              html += '</div>';
+              if (mountEl && mountEl.parentNode) mountEl.outerHTML = html;
+            });
+        })
+        .catch(function () { /* role lookup or data fetch failed — section stays absent, rest of the page still works */ });
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -1277,6 +1490,143 @@
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Archive Search widget — compliance/archive-search-property-360-
+    // embed-owner-risk-acceptance.md, -asimov-confirmation.md,
+    // -mason-confirmation.md (both CLEARED WITH CONDITIONS). Placed
+    // directly under the Maintenance section above (which itself ends in
+    // Maintenance Notes), alongside — not replacing — the Complaint
+    // Tracking / Issues section mounted near the top of this page.
+    //
+    // Gated on data.archive_search_access (property-360/router.js's own
+    // real searcher/admin role check, run in-process via
+    // attachArchiveSearchRole — imported unmodified from archive-
+    // search/router.js, same compose-only pattern as every other card
+    // on this page). This function returns '' — no section, no hint it
+    // exists — when that flag is false, same discipline as
+    // maintenanceSectionHtml above.
+    //
+    // Search input + results list + "open full message," wired to
+    // archive-search's own already-gated GET /api/archive-search/search
+    // and GET /api/archive-search/message/:id — not a new API, not a
+    // second access check invented here. Those two routes independently
+    // re-verify the same searcher/admin role on every call, so this
+    // widget's rendering is a convenience, not the real gate.
+    // ────────────────────────────────────────────────────────────────
+    function archiveSearchSectionHtml(hasAccess) {
+      if (!hasAccess) return ''; // no Archive Search role — no section, no hint it exists
+      return '<div class="card" id="archive-search-section">' +
+        '<div class="section-title">Archive Search</div>' +
+        '<div class="as-search-row">' +
+        '<input type="text" id="asSearchInput" autocomplete="off" placeholder="Search archived Missive correspondence&hellip;">' +
+        '</div>' +
+        '<div class="as-hint">Searches the same screened archive as Archive Search &mdash; not limited to this property.</div>' +
+        '<div class="as-results" id="asResults"></div>' +
+        '</div>';
+    }
+
+    // A short, dependency-free highlighter for the search term inside a
+    // snippet/subject — cosmetic only; the real matching already happened
+    // server-side (missive_message_intake_search_safe's full-text search).
+    // Escapes first, then wraps whole-word-ish matches, so this can never
+    // introduce unescaped HTML from message content.
+    function asHighlight(text, query) {
+      var escaped = escapeHtml(text);
+      var terms = String(query || '').trim().split(/\s+/).filter(Boolean).map(function (t) {
+        return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      });
+      if (!terms.length) return escaped;
+      var re = new RegExp('(' + terms.join('|') + ')', 'ig');
+      return escaped.replace(re, '<mark>$1</mark>');
+    }
+
+    function asResultRow(r, query) {
+      return '<div class="as-result" data-message-id="' + escapeHtml(r.id) + '">' +
+        '<div class="as-result-top">' +
+        '<span class="as-result-subject">' + asHighlight(r.subject || '(no subject)', query) + '</span>' +
+        '<span class="as-result-date">' + formatDateTime(r.delivered_at) + '</span>' +
+        '</div>' +
+        (r.from_address ? '<div class="as-result-from">' + escapeHtml(r.from_address) + '</div>' : '') +
+        (r.snippet ? '<div class="as-result-snippet">' + asHighlight(r.snippet, query) + '</div>' : '') +
+        '</div>';
+    }
+
+    // Wires the search box: debounced fetch against the real, already-
+    // gated search route, and a click-to-expand full message view inline
+    // below whichever result was clicked (no modal — matches this page's
+    // existing <details>-based expand pattern elsewhere rather than
+    // inventing new overlay UI). Fails quietly on a network error, same
+    // convention as lib/global-search-widget.js's own hub-wide search box.
+    function wireArchiveSearchSection() {
+      var input = document.getElementById('asSearchInput');
+      var results = document.getElementById('asResults');
+      if (!input || !results) return; // no access — section wasn't rendered
+
+      var debounceTimer = null;
+      var currentQuery = '';
+      var openMessageId = null;
+
+      function runSearch(q) {
+        fetch('/api/archive-search/search?q=' + encodeURIComponent(q), { credentials: 'include' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (body) {
+            if (q !== currentQuery || !body) return; // a newer keystroke already fired — drop this stale response
+            openMessageId = null;
+            if (!body.results || !body.results.length) {
+              results.innerHTML = '<p class="sub" style="margin:4px 0 0;">No archived messages match &ldquo;' + escapeHtml(q) + '&rdquo;.</p>';
+              return;
+            }
+            results.innerHTML = body.results.map(function (r) { return asResultRow(r, q); }).join('') +
+              (body.has_more ? '<p class="sub" style="margin:6px 0 0;">More results exist &mdash; refine your search to narrow it down.</p>' : '');
+          })
+          .catch(function () { /* search is a convenience on this page; fail quietly, same as the hub-wide search widget */ });
+      }
+
+      input.addEventListener('input', function () {
+        var q = input.value.trim();
+        currentQuery = q;
+        clearTimeout(debounceTimer);
+        if (!q) { results.innerHTML = ''; return; }
+        debounceTimer = setTimeout(function () { runSearch(q); }, 250);
+      });
+
+      // Event delegation — result rows (and their message-body expansions)
+      // are re-rendered on every search, so one listener on the container
+      // handles all of them rather than re-binding per row.
+      results.addEventListener('click', function (e) {
+        var row = e.target.closest ? e.target.closest('.as-result') : null;
+        if (!row) return;
+        var id = row.getAttribute('data-message-id');
+        var existingBody = row.nextElementSibling;
+        if (existingBody && existingBody.classList && existingBody.classList.contains('as-message-body') && openMessageId === id) {
+          // Already open — collapse it.
+          existingBody.remove();
+          openMessageId = null;
+          return;
+        }
+        // Collapse any other open message first — one open at a time.
+        var prevOpen = results.querySelector('.as-message-body');
+        if (prevOpen) prevOpen.remove();
+
+        var bodyEl = document.createElement('div');
+        bodyEl.className = 'as-message-body';
+        bodyEl.textContent = 'Loading…';
+        row.insertAdjacentElement('afterend', bodyEl);
+        openMessageId = id;
+
+        fetch('/api/archive-search/message/' + encodeURIComponent(id), { credentials: 'include' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (msg) {
+            if (!msg || openMessageId !== id) return;
+            bodyEl.innerHTML = escapeHtml(msg.body_text || '(no message body on file)') +
+              (msg.missive_link ? '<div style="margin-top:8px;"><a href="' + escapeHtml(msg.missive_link) + '" target="_blank" rel="noopener">Open in Missive &rarr;</a></div>' : '');
+          })
+          .catch(function () {
+            if (openMessageId === id) bodyEl.textContent = "Couldn't load this message right now.";
+          });
+      });
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Multi-year maintenance snapshot subsection — property-360-SPEC.md
     // "Multi-year maintenance snapshot": a short, chronological list of
     // historical AppFolio bill-history facts for this property (up to 5
@@ -1841,6 +2191,17 @@
       document.getElementById('app').innerHTML =
         renderHeader(data) +
         renderAttentionBanner(data.needs_attention) +
+        // Complaint Tracking's Issues section — placed here, right after
+        // the header/attention banner and before the card-grid, so a
+        // big-deal complaint is the first real content a viewer with
+        // access sees (product doc: "visible the moment the page
+        // loads"). An empty, id-only mount point — real markup (or
+        // nothing at all, for a viewer without access) is filled in by
+        // loadComplaintTrackingSection below, after its own /auth/me
+        // check, the same "check first, mount on success only" order
+        // wireOwnerTenantNotesSection uses for its own section further
+        // down this page.
+        '<div id="complaint-tracking-mount"></div>' +
         (cardsHtml ? '<div class="card-grid">' + cardsHtml + '</div>' : '') +
         // Owner & Tenant Operational Notes placed right after the card-grid
         // (Insurance/Security Deposit/LeadSimple) and before Maintenance,
@@ -1848,12 +2209,20 @@
         // from its original position after Maintenance.
         ownerTenantNotesSectionHtml(data.cards.owner_tenant_notes) +
         maintenanceSectionHtml(data.cards.maintenance) +
+        // Archive Search — placed directly under Maintenance (which ends
+        // in Maintenance Notes), alongside the Complaint Tracking/Issues
+        // section mounted above, not replacing it. See
+        // archiveSearchSectionHtml's own comment for the full access-
+        // control story.
+        archiveSearchSectionHtml(data.archive_search_access) +
         (data.maintenance_admin ? '<div class="card" id="admin-section"><div class="section-title">Maintenance History — Users (admin only)</div><div id="users-body"></div></div>' : '') +
         (!anyCards ? '<div class="empty">Nothing on file for this property in any tool you have access to yet.</div>' : '') +
         '<div class="callstats-note">Call Stats tracks staff phone activity by pod, not by property, so it isn\'t part of this page.</div>';
 
       wireMaintenanceSection(propertyId, data);
       wireOwnerTenantNotesSection(propertyId, data);
+      wireArchiveSearchSection();
+      loadComplaintTrackingSection(propertyId, document.getElementById('complaint-tracking-mount'));
       pushRecent(data.property);
     }
 

@@ -26,6 +26,47 @@
  * tools sees a real, honest 'nothing to show you here' page instead of
  * a 403").
  *
+ * ARCHIVE SEARCH — added per compliance/archive-search-property-360-
+ * embed-owner-risk-acceptance.md (all three addenda) and the CLEARED
+ * WITH CONDITIONS confirmations it records:
+ * compliance/archive-search-property-360-embed-asimov-confirmation.md
+ * and compliance/archive-search-property-360-embed-mason-confirmation.md.
+ * Same compose-only shape as the other four tools, on purpose — Asimov's
+ * confirmation is explicit that a real `searcher`/`admin` role check via
+ * attachArchiveSearchRole (imported from archive-search/router.js,
+ * unmodified) is required here specifically so this page's own stated
+ * design principle keeps holding: this must stay a real re-check of
+ * that tool's own access table, never a bypass that hands out search
+ * just because someone can open this page. archiveSearchRouter is
+ * mounted AFTER this router in server.js (see that file's own mount-
+ * order comments), so — like attachMaintenanceHistoryRole and
+ * attachLeadSimpleDelinquencyRole below — the gate is called explicitly
+ * here every time, not inherited from an earlier middleware run.
+ * `archive_search_access` is reported as a plain boolean flag on the
+ * response (same shape as `maintenance_admin` below), not folded into
+ * `cards` — it carries no data of its own from this route (the search
+ * widget calls archive-search's own already-gated
+ * /api/archive-search/search and /api/archive-search/message/:id
+ * directly, which independently re-check the same role), and per
+ * Asimov's condition it must never feed computeNeedsAttentionAndOrder
+ * (search access is not an urgency signal).
+ *
+ * IMPORTANT — READ BEFORE ASSUMING THIS MEANS THE POPULATION IS FULLY
+ * SETTLED: Mason's confirmation (linked above) clears the population
+ * question itself but leaves two conditions open, and is explicit that
+ * neither blocks building this page — they gate treating the
+ * population as fully authorized, not the code. (1) The specific
+ * accommodation/harassment/eviction thread TARS's validation sample
+ * found should be run through the existing archive_search_escalations
+ * mechanism before the broader population can reach it — Peter has
+ * explicitly declined this (owner-risk-acceptance's third addendum,
+ * verbatim: "no dont suppress"), so that thread remains reachable by
+ * design, not by oversight. (2) Asimov was asked to independently
+ * verify that Fair Housing/system-use training and a real escalation
+ * path actually exist today for the Hub population this ships to —
+ * nothing in this chain confirms that was done. Both are Peter's and
+ * Asimov's open items, not this file's to resolve.
+ *
  * ============================================================
  * WHY THE PER-TOOL SUMMARY FUNCTIONS ARE IMPORTED, NOT RE-QUERIED HERE
  * ============================================================
@@ -93,6 +134,10 @@ const {
   attachOwnerTenantNotesRole,
   roleHasAnyAccess: ownerTenantNotesRoleHasAnyAccess,
 } = require('../owner-tenant-notes/router');
+const {
+  attachArchiveSearchRole,
+  ARCHIVE_SEARCH_SEARCH_ROLES,
+} = require('../archive-search/router');
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const missing = [];
@@ -693,6 +738,12 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
   const gates = [
     runGate(attachMaintenanceHistoryRole, req),
     runGate(attachLeadSimpleDelinquencyRole, req),
+    // Archive Search — see file header "ARCHIVE SEARCH" above. Explicit
+    // call, not a defensive undefined-check, because archiveSearchRouter
+    // mounts AFTER this router (server.js) and its own
+    // `router.use(attachArchiveSearchRole)` has not run yet on this
+    // request.
+    runGate(attachArchiveSearchRole, req),
   ];
   if (typeof req.insuranceRole === 'undefined') gates.push(runGate(attachInsuranceRole, req));
   if (typeof req.securityDepositRole === 'undefined') gates.push(runGate(attachSecurityDepositRole, req));
@@ -791,6 +842,13 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
     // instead of a new, duplicate one). This flag just tells the
     // frontend whether to render/call that section at all.
     maintenance_admin: req.maintenanceHistoryRole === 'admin',
+    // Archive Search — see file header "ARCHIVE SEARCH" above. A plain
+    // access flag, same shape as maintenance_admin: this route carries
+    // no search data of its own; the widget calls archive-search's own
+    // already-gated routes directly, which independently re-check this
+    // exact same role. Real `searcher`/`admin` membership only — never a
+    // bypass.
+    archive_search_access: ARCHIVE_SEARCH_SEARCH_ROLES.includes(req.archiveSearchRole),
   });
 });
 

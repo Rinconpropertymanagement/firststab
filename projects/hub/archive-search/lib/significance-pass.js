@@ -2004,7 +2004,7 @@ async function runCall2Phase({
       const lastMessageDate = rows[rows.length - 1] && rows[rows.length - 1].delivered_at;
       complaintId = await createComplaintRow({
         mailbox_key, missive_conversation_id, discoveryContext,
-        category, call2Fields,
+        category, why, call2Fields,
         keywordCheck: { flagged_protected_class: flaggedProtectedClass, flagged_category: flaggedCategory },
         property_id, vendor_id, addressMatch,
         blockedSinceIso: lastMessageDate || new Date().toISOString(),
@@ -2104,7 +2104,17 @@ async function findExistingComplaintForConversation(missive_conversation_id) {
 // only (complaints_config_required_unless_held's historical exemption);
 // DO assignment is live_pipeline only (spec Section 6's hard gate).
 // ============================================================
-async function createComplaintRow({ mailbox_key, missive_conversation_id, discoveryContext, category, call2Fields, keywordCheck, property_id, vendor_id, addressMatch, blockedSinceIso }) {
+async function createComplaintRow({ mailbox_key, missive_conversation_id, discoveryContext, category, why, call2Fields, keywordCheck, property_id, vendor_id, addressMatch, blockedSinceIso }) {
+  // Real pilot bug found live 2026-09-29: this row never set `description`
+  // at all, so every AI-created complaint rendered with no visible text
+  // (dashboard has no fallback) and could never match router.js's own
+  // `ilike('description', ...)` search. `why` is Call 1's own plain-English
+  // summary of the conversation — already validated non-empty by
+  // parseCall1Response() above and passed all the way down through
+  // runCall2Phase() for exactly this purpose, so no extra DB read is
+  // needed here. Still defensive (`?.trim() || null`, never a placeholder
+  // string) in case a pre-validation-era row is ever retried.
+  const description = (why && why.trim()) || null;
   const insertRow = {
     property_id,
     vendor_id,
@@ -2112,6 +2122,7 @@ async function createComplaintRow({ mailbox_key, missive_conversation_id, discov
     subject_id: addressMatch.subject_id || null,
     needs_matching: !property_id && !addressMatch.subject_type && !vendor_id,
     category,
+    description,
     needs_human_call: call2Fields.needs_human_call,
     held_legal_fair_housing: false,
     blocked_reason: call2Fields.blocked_reason,

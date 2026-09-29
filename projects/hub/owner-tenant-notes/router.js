@@ -11,12 +11,28 @@
  * WHAT THIS FILE DOES NOT BUILD (explicitly out of scope for this pass —
  * see the build report for the full reasoning)
  * ============================================================
- *   - The AI email-extraction pipeline (spec Section 8) — no code here
- *     ever populates `source='ai_proposed'`, `extracted_by`, or
- *     `approval_status`. Manual notes only.
+ *   - UPDATED (this pass): `source='ai_proposed'` rows can now be CREATED
+ *     — via `proposeAINote`, an exported, in-process function, NOT an HTTP
+ *     route — and REVIEWED, via the `/:id/approve`, `/:id/decline`, and
+ *     `/property/:property_id/pending-approval` routes below. This closes
+ *     the gap the file's header used to describe ("no code here ever
+ *     populates source='ai_proposed'...") — that sentence is no longer
+ *     true and has been removed.
+ *   - STILL NOT BUILT: the actual AI pipeline that would call
+ *     `proposeAINote` — the email-reading/extraction logic, and the
+ *     judgment about WHEN a piece of content is worth proposing as a note
+ *     (e.g. the complaint-tracking tool's Category 6, "a one-off
+ *     instruction from an owner that falls outside normal procedure" —
+ *     `projects/hub/email-intake/complaint-tracking-v1-scope.md`, itself
+ *     still an unbuilt draft scope document as of this pass). This pass
+ *     only builds the capability such a pipeline will call into — the
+ *     drafting/detection logic, the email connection, and the decision of
+ *     what counts as worth proposing all remain entirely unbuilt here.
  *   - Grouped/bulk review (spec Section 5's own fast-follow deferral) —
  *     the flagged-queue route below is per-property, one item at a time,
- *     matching this being "a new, low-volume-at-launch data source."
+ *     matching this being "a new, low-volume-at-launch data source." The
+ *     new pending-approval queue below follows the same per-property,
+ *     one-item-at-a-time shape for the same reason.
  *   - A portfolio-wide notes/review page. This tool's only surface is the
  *     Property 360 collapsible section (spec Section 2/9 UI item) — no
  *     standalone dashboard page, matching the spec's own framing
@@ -42,7 +58,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const { scanText, TERMS_VERSION } = require('../maintenance-history/lib/protected-class-terms');
 const { scanDerogatoryLanguage } = require('./lib/derogatory-language-terms');
-const { checkManualNoteContent } = require('./lib/note-content-check');
+const { checkManualNoteContent, checkAIProposedNoteContent } = require('./lib/note-content-check');
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const missing = [];
@@ -230,19 +246,29 @@ function requireOwnerTenantNotesRole(...roles) {
 // audit_log exactly, no new logging mechanism").
 // ============================================================
 async function lookupUserId(email) {
-  const { data } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  const { data } = await supabase.from('users').select('id').or(`email.eq.${email},alt_email.eq.${email}`).maybeSingle();
   return data ? data.id : null;
 }
 
-async function writeAuditLog({ action, entity_type, entity_id, actor_email, actor_type, risk_level, privacy_category, property_id, details }) {
-  const performed_by = await lookupUserId(actor_email);
+// actor_id defaults to actor_email (every existing call site's behavior,
+// unchanged) but can be overridden — needed starting this pass for the
+// operational_notes.ai_proposed event, whose actor is a pipeline, not a
+// human with an email/Hub login. Mirrors the real precedent already in
+// this codebase for a non-human actor (maintenance-history/router.js's
+// ingestion-run audit insert: `actor_id: extractClaims.EXTRACTOR_ACTOR_ID`,
+// no `performed_by`) rather than forcing an AI actor through the
+// human-email shape. performed_by is looked up only when actor_email is
+// actually given — there is no Hub user row to resolve for an AI actor,
+// and forcing lookupUserId(undefined) would be a wasted/wrong query.
+async function writeAuditLog({ action, entity_type, entity_id, actor_email, actor_id, actor_type, risk_level, privacy_category, property_id, details }) {
+  const performed_by = actor_email ? await lookupUserId(actor_email) : null;
   const { error } = await supabase.from('audit_log').insert({
     action,
     entity_type,
     entity_id,
     performed_by,
     actor_type: actor_type || 'human',
-    actor_id: actor_email,
+    actor_id: actor_id || actor_email,
     privacy_category: privacy_category || 'processing',
     risk_level: risk_level || 'low',
     property_id: property_id || null,
@@ -381,30 +407,60 @@ router.post('/api/owner-tenant-notes/tier-access/acknowledge', requireOwnerTenan
 const DEROGATORY_LANGUAGE_WARNING =
   "This note may describe a characterization rather than an objectively stated fact — for example, 'difficult tenant' describes the person, while 'tenant declined the last three proposed access times' describes what happened. Words like these aren't always wrong (e.g. 'difficult access due to a locked gate' is a legitimate fact) — but if this note labels a person rather than describing an event, consider rephrasing to state what was said or done, and when. This is a suggestion only — your note was saved as written.";
 
+// Shared field validation — the property/unit/subject_type/subject_id/
+// note_text/access_tier checks every note-creation path needs, regardless
+// of source. Factored out this pass (previously inline only in the manual
+// POST route below) so `proposeAINote` (the new ai_proposed creation path)
+// runs the exact same checks rather than a second hand-typed copy that
+// could quietly drift from this one over time — the same "derive, don't
+// duplicate" discipline this file already uses for
+// OWNER_TENANT_NOTES_REVIEW_ROLES. Returns { error, status } on the first
+// failing check, or { ok: true } — every check here is presence/shape
+// validation and existence lookups, not a role/authorship decision (those
+// differ by source and stay in each route/function separately).
+async function validateNoteCoreFields({ property_id, unit_id, subject_type, subject_id, note_text, access_tier }) {
+  if (!isValidUuid(property_id)) {
+    return { error: 'property_id is required and must be a valid property ID.', status: 400 };
+  }
+  if (unit_id != null && unit_id !== '' && !isValidUuid(unit_id)) {
+    return { error: 'unit_id must be a valid unit ID, or omitted.', status: 400 };
+  }
+  if (!['owner', 'tenant', 'property'].includes(subject_type)) {
+    return { error: "subject_type must be 'owner', 'tenant', or 'property'.", status: 400 };
+  }
+  if (subject_type === 'property' && subject_id) {
+    return { error: "subject_id must be omitted when subject_type is 'property'.", status: 400 };
+  }
+  if (subject_id != null && subject_id !== '' && !isValidUuid(subject_id)) {
+    return { error: 'subject_id must be a valid ID, or omitted.', status: 400 };
+  }
+  if (typeof note_text !== 'string' || !note_text.trim()) {
+    return { error: 'note_text is required.', status: 400 };
+  }
+  if (!NOTE_TIERS.includes(access_tier)) {
+    return { error: `access_tier must be one of: ${NOTE_TIERS.join(', ')}.`, status: 400 };
+  }
+
+  const { data: property, error: propErr } = await supabase
+    .from('properties').select('id').eq('id', property_id).maybeSingle();
+  if (propErr) return { error: propErr.message, status: 500 };
+  if (!property) return { error: 'Property not found.', status: 404 };
+
+  if (unit_id) {
+    const { data: unit, error: unitErr } = await supabase
+      .from('units').select('id').eq('id', unit_id).eq('property_id', property_id).maybeSingle();
+    if (unitErr) return { error: unitErr.message, status: 500 };
+    if (!unit) return { error: 'That unit was not found on this property.', status: 404 };
+  }
+
+  return { ok: true };
+}
+
 router.post('/api/owner-tenant-notes', requireOwnerTenantNotesAccess, async (req, res) => {
   const { property_id, unit_id, subject_type, subject_id, note_text, category, access_tier } = req.body;
 
-  if (!isValidUuid(property_id)) {
-    return res.status(400).json({ error: 'property_id is required and must be a valid property ID.' });
-  }
-  if (unit_id != null && unit_id !== '' && !isValidUuid(unit_id)) {
-    return res.status(400).json({ error: 'unit_id must be a valid unit ID, or omitted.' });
-  }
-  if (!['owner', 'tenant', 'property'].includes(subject_type)) {
-    return res.status(400).json({ error: "subject_type must be 'owner', 'tenant', or 'property'." });
-  }
-  if (subject_type === 'property' && subject_id) {
-    return res.status(400).json({ error: "subject_id must be omitted when subject_type is 'property'." });
-  }
-  if (subject_id != null && subject_id !== '' && !isValidUuid(subject_id)) {
-    return res.status(400).json({ error: 'subject_id must be a valid ID, or omitted.' });
-  }
-  if (typeof note_text !== 'string' || !note_text.trim()) {
-    return res.status(400).json({ error: 'note_text is required.' });
-  }
-  if (!NOTE_TIERS.includes(access_tier)) {
-    return res.status(400).json({ error: `access_tier must be one of: ${NOTE_TIERS.join(', ')}.` });
-  }
+  const validation = await validateNoteCoreFields({ property_id, unit_id, subject_type, subject_id, note_text, access_tier });
+  if (!validation.ok) return res.status(validation.status).json({ error: validation.error });
 
   // Spec Section 3: maintenance_coordinator's whole grant on this tool
   // excludes tenant-subject content, authorship included — see
@@ -429,18 +485,6 @@ router.post('/api/owner-tenant-notes', requireOwnerTenantNotesAccess, async (req
   // before they see SOMEONE ELSE'S restricted content for the first time;
   // authoring your own note isn't "seeing" restricted content, it's
   // writing text the author already knows. Not an oversight.
-
-  const { data: property, error: propErr } = await supabase
-    .from('properties').select('id').eq('id', property_id).maybeSingle();
-  if (propErr) return res.status(500).json({ error: propErr.message });
-  if (!property) return res.status(404).json({ error: 'Property not found.' });
-
-  if (unit_id) {
-    const { data: unit, error: unitErr } = await supabase
-      .from('units').select('id').eq('id', unit_id).eq('property_id', property_id).maybeSingle();
-    if (unitErr) return res.status(500).json({ error: unitErr.message });
-    if (!unit) return res.status(404).json({ error: 'That unit was not found on this property.' });
-  }
 
   // ── The two-layer content check (spec Section 5) — Layer 1
   // (protected-class-terms.js, unchanged) + Layer 2 (this build's new
@@ -534,6 +578,215 @@ router.post('/api/owner-tenant-notes', requireOwnerTenantNotesAccess, async (req
     warnings: derogatoryScan.flagged ? { derogatory_language: true, message: DEROGATORY_LANGUAGE_WARNING } : null,
   });
 });
+
+// ============================================================
+// SECTION 6b: proposeAINote — the ai_proposed creation path (spec Section
+// 8, not itself built by this pass — see the file header). NOT an HTTP
+// route: an exported, in-process function, same "reuse across tools"
+// pattern already established in this codebase for property-360 importing
+// getInsurancePropertySummary/getMaintenanceHistoryPropertySummary/etc.
+// directly from other tools' router.js files — here the caller is a
+// future AI pipeline (e.g. complaint-tracking's Category 6, still unbuilt)
+// rather than another Hub tool's route, but the "call the function
+// in-process, don't stand up a second HTTP hop for code that's already in
+// the same server" shape is the same.
+//
+// Throws a plain Error (with a caller-readable .message) on invalid input
+// or a database failure, rather than writing an HTTP response — there is
+// no res object here. A caller wraps this in try/catch, same as
+// property-360's own fetchInsuranceCard/etc. wrappers do around the
+// functions they call in-process.
+// ============================================================
+
+// ── A REAL, GENUINE SPEC GAP, AND THE DECISION MADE HERE TO CLOSE IT ──
+// operational_notes.author_team_member_id is UUID NOT NULL REFERENCES
+// team_members(id). The column's own comment (migration + spec Section 4)
+// says it means "who typed it (manual), or who approved the AI's draft
+// (ai_proposed)" — but neither the spec nor the migration ever says what
+// value this column should hold WHILE a proposal is still
+// pending_approval, before anyone has approved anything yet. There is no
+// sentinel/system team_members row anywhere in this schema, and NOT NULL
+// requires something at insert time. This is a real gap in the spec
+// itself, not a check this build is skipping.
+//
+// DECISION (made in this build pass, recorded here plainly as a decision,
+// not a discovered fact — this has NOT been through Oracle for a spec
+// amendment or through Mason/Asimov review, and should be before this
+// path is ever activated for real use, per Rule 6/7 and spec Section 11):
+// at proposal time, author_team_member_id is set to the team_member_id of
+// whoever the proposal is routed to for review — passed in by the caller
+// as `routed_to_team_member_id`, REQUIRED, not inferred or defaulted. On
+// approval (see the /:id/approve route below), author_team_member_id is
+// OVERWRITTEN to the real approver's team_member_id, matching the column's
+// own stated final meaning once approved (which may or may not be the
+// same person as who it was routed to). On decline, author_team_member_id
+// is left exactly as it already is (the routed-to person) — nobody
+// "approved" anything, and approval_status='declined' is itself what
+// signals this was never really authored by anyone in the accountable
+// sense; there is no reason to touch the column on a decline.
+//
+// A DELIBERATE NON-CHECK, EXPLAINED: this function does NOT require
+// routed_to_team_member_id to hold any particular role on this tool (e.g.
+// it does not have to be a director_of_operations, even though that's the
+// complaint-tracker's own intended routing target). Being "routed to" for
+// review is not the same claim as "authoring" a note — the authorship-time
+// rules elsewhere in this file (roleCanAccessSubjectType,
+// legal_privileged-requires-admin) are about a human who is actively
+// exercising judgment about the CONTENT of a note they are creating right
+// now, which is exactly what has NOT happened yet for a still-pending
+// proposal. The rule that actually matters — can this specific person act
+// on a note at this specific tier — is enforced once, correctly, at
+// /:id/approve and /:id/decline below (the same tier-reach check every
+// other reviewer-facing route in this file already uses), not duplicated
+// or half-applied here at creation time.
+//
+// LEGAL_PRIVILEGED AT CREATION TIME: spec Section 3's "only admin may
+// author a note declared legal_privileged" is an AUTHORSHIP rule, and
+// nobody has authored this note yet — an AI pipeline proposing a
+// legal_privileged draft is not "admin" and isn't meant to be; the
+// eventual human accountable for it is not known at creation time (it
+// could be whoever `routed_to_team_member_id` names, or, after escalation,
+// someone else entirely). So this function does NOT check
+// routed_to_team_member_id's role against 'admin' for a legal_privileged
+// proposal — that would incorrectly treat "routed to" as "authored by."
+// Instead, the admin-only rule is enforced at the one point it actually
+// applies: only admin can ever APPROVE a legal_privileged proposal, via
+// the same roleMaxTierRank tier-ceiling check already used everywhere else
+// in this file (only admin's roleMaxTierRank reaches legal_privileged at
+// all — no separate special-case check is needed, same reasoning
+// /:id/redact's own comment already gives for the identical pattern).
+//
+// @param {object} params
+// @param {string} params.property_id
+// @param {string} [params.unit_id]
+// @param {'owner'|'tenant'|'property'} params.subject_type
+// @param {string} [params.subject_id]
+// @param {string} params.note_text
+// @param {string} [params.category]
+// @param {'operational'|'management_compliance_restricted'|'legal_privileged'} params.access_tier
+// @param {string} params.extracted_by - REQUIRED. The model version string for this proposal (mirrors maintenance_claims.extracted_by / extract-claims.js's own `response.model` convention) — also reused below as this audit event's actor_id/actor_version, since it already identifies which model/pipeline version drafted the note and this build does not add a second, separate "which pipeline is this" parameter the task didn't ask for.
+// @param {string} params.routed_to_team_member_id - REQUIRED. A real, active team_members.id — see the design-decision comment above. The caller (e.g. the complaint-tracker) decides who this is; this function only validates that the row is real and active.
+// @param {boolean} [params.modelFlag] - the drafting pipeline's own Layer-2 self-report (extract-claims.js's protected_class_flag convention). Defaults to false if omitted — Layer 1 still runs regardless.
+// @param {string|null} [params.modelCategory] - paired with modelFlag (extract-claims.js's protected_class_category convention).
+// @returns {Promise<{ success: true, note: object }>}
+// @throws {Error} on invalid input, a missing property/unit/team member, or a database failure
+async function proposeAINote({
+  property_id, unit_id, subject_type, subject_id, note_text, category, access_tier,
+  extracted_by, routed_to_team_member_id, modelFlag, modelCategory,
+}) {
+  if (typeof extracted_by !== 'string' || !extracted_by.trim()) {
+    throw new Error('extracted_by is required for an AI-proposed note (the drafting model\'s version string).');
+  }
+  if (!isValidUuid(routed_to_team_member_id)) {
+    throw new Error('routed_to_team_member_id is required and must be a valid team member ID.');
+  }
+
+  const validation = await validateNoteCoreFields({ property_id, unit_id, subject_type, subject_id, note_text, access_tier });
+  if (!validation.ok) throw new Error(validation.error);
+
+  // Confirm the routed-to team member is real and active — the FK
+  // constraint would catch a nonexistent id at insert time regardless, but
+  // a clear error here (same "check existence explicitly, don't rely on a
+  // raw FK error" discipline validateNoteCoreFields already uses for
+  // property_id/unit_id) is far more useful to a calling pipeline than a
+  // raw Postgres constraint-violation message. Also rejects an inactive
+  // member — same is_active gate attachOwnerTenantNotesRole already
+  // applies to a human's own access to this tool; someone no longer active
+  // shouldn't be the value routed to for review either.
+  const { data: routedToMember, error: memberErr } = await supabase
+    .from('team_members').select('id, is_active').eq('id', routed_to_team_member_id).maybeSingle();
+  if (memberErr) throw new Error(memberErr.message);
+  if (!routedToMember || !routedToMember.is_active) {
+    throw new Error('routed_to_team_member_id must be a real, active team member.');
+  }
+
+  // The two-layer content check (spec Section 5) — Layer 1 independent and
+  // unconditional; Layer 2 is the caller's own self-report, not a fresh
+  // classification call (see checkAIProposedNoteContent's own header for
+  // why this differs from the manual path's checkManualNoteContent).
+  const check = checkAIProposedNoteContent(note_text, { modelFlag, modelCategory });
+
+  const insertRow = {
+    property_id,
+    unit_id: unit_id || null,
+    subject_type,
+    subject_id: subject_type === 'property' ? null : (subject_id || null),
+    note_text: note_text.trim(),
+    category: category ? String(category).trim() : null,
+    access_tier,
+    source: 'ai_proposed',
+    author_team_member_id: routed_to_team_member_id, // see design-decision comment above
+    extracted_by: extracted_by.trim(),
+    approval_status: 'pending_approval',
+    flagged_protected_class: check.flagged_protected_class,
+    flagged_category: check.flagged_category,
+  };
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from('operational_notes').insert(insertRow).select().single();
+  if (insertErr) throw new Error(insertErr.message);
+
+  // Rule 1 audit trail (spec Section 9: "Note proposed (AI)" —
+  // operational_notes.ai_proposed, actor_type: ai_agent, privacy_category:
+  // collection, risk_level: medium). No actor_email/performed_by — the
+  // actor is a pipeline, not a Hub user; actor_id/actor_version both reuse
+  // extracted_by, the one identifier this function already requires (see
+  // the @param comment above for why no second identifier is added).
+  await writeAuditLog({
+    action: 'operational_notes.ai_proposed',
+    entity_type: 'operational_note',
+    entity_id: inserted.id,
+    actor_type: 'ai_agent',
+    actor_id: extracted_by.trim(),
+    property_id,
+    risk_level: 'medium',
+    privacy_category: 'collection',
+    details: {
+      access_tier, subject_type, extracted_by: extracted_by.trim(),
+      routed_to_team_member_id,
+    },
+  });
+
+  // Same dual audit-log behavior the manual path uses (spec Section 9's
+  // "Content-check flag" row applies to any note, not just manual ones) —
+  // GOVERNANCE.md Rule 9 requires logging a protected-class exclusion/flag
+  // regardless of a note's source.
+  if (check.flagged_protected_class) {
+    await writeAuditLog({
+      action: 'operational_notes.protected_class_flagged',
+      entity_type: 'operational_note',
+      entity_id: inserted.id,
+      actor_type: check.matched_layer === 'keyword' ? 'system' : 'ai_agent',
+      actor_id: extracted_by.trim(),
+      property_id,
+      risk_level: 'high',
+      details: {
+        flagged_category: check.flagged_category,
+        matched_layer: check.matched_layer,
+        terms_version: TERMS_VERSION,
+      },
+    });
+  }
+
+  return {
+    success: true,
+    note: {
+      id: inserted.id,
+      property_id: inserted.property_id,
+      unit_id: inserted.unit_id,
+      subject_type: inserted.subject_type,
+      subject_id: inserted.subject_id,
+      note_text: inserted.note_text,
+      category: inserted.category,
+      access_tier: inserted.access_tier,
+      source: inserted.source,
+      approval_status: inserted.approval_status,
+      extracted_by: inserted.extracted_by,
+      flagged_protected_class: inserted.flagged_protected_class,
+      created_at: inserted.created_at,
+    },
+  };
+}
 
 // ============================================================
 // SECTION 7: Best-effort subject-name resolution — display only, never
@@ -736,6 +989,23 @@ router.get(
       .order('created_at', { ascending: true });
     if (error) return res.status(500).json({ error: error.message });
 
+    // Added this pass, now that ai_proposed rows can actually exist: a
+    // still-pending (or declined) AI proposal that also happens to trip
+    // the content check must NOT surface its real note_text here just
+    // because it's flagged — that would let a Fair Housing content
+    // reviewer read an AI draft's full text before anyone has approved its
+    // very existence as a note at all, contradicting this file's own
+    // "AI drafts stay invisible until approved, always" rule
+    // (classifyNoteForViewer's first check, and operational_notes_visible's
+    // own first WHERE condition). This route queries the raw table
+    // directly (not the view) and, until now, had no reason to also check
+    // source/approval_status — nothing could produce an ai_proposed row
+    // yet. Same exclusion the view already applies, reproduced here since
+    // this route bypasses the view (same "one rule, two evaluation sites"
+    // situation classifyNoteForViewer's own header comment already
+    // documents for the same reason).
+    const reviewEligibleRows = (allRows || []).filter((row) => row.source === 'manual' || row.approval_status === 'approved');
+
     // Being in OWNER_TENANT_NOTES_REVIEW_ROLES (Management/Compliance-
     // Restricted tier or above) does NOT mean every tier is within this
     // specific viewer's reach — e.g. a property_manager/pod_lead/reviewer/
@@ -745,7 +1015,7 @@ router.get(
     // spec Section 3). A plain per-row tier check, same as
     // classifyNoteForViewer uses elsewhere.
     const viewerMaxRank = roleMaxTierRank(role);
-    const rows = (allRows || []).filter((row) => (NOTE_TIER_RANK[row.access_tier] || 0) <= viewerMaxRank);
+    const rows = reviewEligibleRows.filter((row) => (NOTE_TIER_RANK[row.access_tier] || 0) <= viewerMaxRank);
 
     const names = await resolveSubjectNames(rows || []);
     const items = (rows || []).map((row) => ({
@@ -916,6 +1186,226 @@ router.post(
         actor_role: req.ownerTenantNotesRole,
         previous_access_tier: before.access_tier,
         new_access_tier: updated.access_tier,
+      },
+    });
+
+    return res.json({ success: true, note: updated });
+  }
+);
+
+// ============================================================
+// SECTION 9b: AI-proposal review — approve/decline a pending ai_proposed
+// note, plus the queue route a reviewer uses to find one (added this pass;
+// proposeAINote above is what creates the rows these routes act on).
+//
+// Gated the same way as /:id/review and /:id/correct above:
+// OWNER_TENANT_NOTES_REVIEW_ROLES at the route level (a role must reach at
+// least Management/Compliance-Restricted tier to review ANYTHING on this
+// tool, same as every other reviewer-facing route here — spec Section 5:
+// "a human reviewer holding Management/Compliance-Restricted tier or
+// above"), then a per-row tier-ceiling check against the SPECIFIC note's
+// own access_tier. That second check is also, with no separate
+// special-case code, exactly how "legal_privileged specifically requires
+// admin" is enforced here — only admin's roleMaxTierRank reaches
+// legal_privileged at all (Section 1 above), same reasoning /:id/redact's
+// own comment already gives for the identical pattern.
+// ============================================================
+
+// ─── GET /api/owner-tenant-notes/property/:property_id/pending-approval ──
+// Mirrors the flagged-queue route's shape exactly (per-property, real
+// content not a placeholder, REVIEW_ROLES-gated) — the queue a reviewer
+// uses to find an ai_proposed note actually awaiting their decision,
+// requested explicitly per the task brief ("so a reviewer can actually
+// find what needs approving").
+router.get(
+  '/api/owner-tenant-notes/property/:property_id/pending-approval',
+  requireOwnerTenantNotesRole(...OWNER_TENANT_NOTES_REVIEW_ROLES),
+  async (req, res) => {
+    const propertyId = req.params.property_id;
+    const role = req.ownerTenantNotesRole;
+    if (!isValidUuid(propertyId)) {
+      return res.status(400).json({ error: 'That property ID is not valid.' });
+    }
+    if (!(await requireTierAccessAcknowledgment(req, res))) return;
+
+    const { data: allRows, error } = await supabase
+      .from('operational_notes')
+      .select('*')
+      .eq('property_id', propertyId)
+      .eq('source', 'ai_proposed')
+      .eq('approval_status', 'pending_approval')
+      .order('created_at', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Same tier-reach filter as the flagged-queue route above — being
+    // REVIEW-capable at all does not mean every tier is within THIS
+    // viewer's own reach.
+    const viewerMaxRank = roleMaxTierRank(role);
+    const rows = (allRows || []).filter((row) => (NOTE_TIER_RANK[row.access_tier] || 0) <= viewerMaxRank);
+
+    const names = await resolveSubjectNames(rows || []);
+    const items = (rows || []).map((row) => ({
+      id: row.id,
+      property_id: row.property_id,
+      unit_id: row.unit_id,
+      subject_type: row.subject_type,
+      subject_id: row.subject_id,
+      subject_name: row.subject_id ? (names[row.subject_id] || null) : null,
+      note_text: row.note_text,
+      category: row.category,
+      access_tier: row.access_tier,
+      flagged_protected_class: row.flagged_protected_class,
+      flagged_category: row.flagged_category,
+      extracted_by: row.extracted_by,
+      created_at: row.created_at,
+    }));
+
+    await logNotesViewed(rows || [], req);
+    return res.json({ items });
+  }
+);
+
+// Shared existence/eligibility/tier-reach load for both /:id/approve and
+// /:id/decline below — same "one place the rule lives" reasoning as
+// validateNoteCoreFields above, so the two routes' guards can't drift
+// apart. Returns { before } on success, or writes the error response
+// itself and returns { before: null } (caller returns immediately on
+// that, same calling convention requireTierAccessAcknowledgment already
+// uses in this file).
+async function loadPendingAIProposalForReview(req, res) {
+  if (!isValidUuid(req.params.id)) {
+    res.status(400).json({ error: 'That id is not valid.' });
+    return { before: null };
+  }
+
+  const { data: before, error: beforeErr } = await supabase
+    .from('operational_notes')
+    .select('id, access_tier, source, approval_status, author_team_member_id, property_id, note_text')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (beforeErr) {
+    res.status(500).json({ error: beforeErr.message });
+    return { before: null };
+  }
+  if (!before) {
+    res.status(404).json({ error: 'Note not found.' });
+    return { before: null };
+  }
+
+  if (before.source !== 'ai_proposed' || before.approval_status !== 'pending_approval') {
+    res.status(409).json({ error: 'This note is not an AI proposal currently awaiting approval.' });
+    return { before: null };
+  }
+
+  // Same tier-reach check as /:id/review, /:id/correct, /:id/redact above.
+  if ((NOTE_TIER_RANK[before.access_tier] || 0) > roleMaxTierRank(req.ownerTenantNotesRole)) {
+    res.status(403).json({ error: 'Your role cannot review a note at this access tier.' });
+    return { before: null };
+  }
+
+  if (!(await requireTierAccessAcknowledgment(req, res))) return { before: null };
+
+  // Approving/declining means reading this note's real content to decide
+  // — same read-event audit logging every other route that exposes a
+  // Tier 2/3 note's real text already does (logNotesViewed itself already
+  // no-ops for Operational-tier rows).
+  await logNotesViewed([before], req);
+
+  return { before };
+}
+
+// ─── POST /api/owner-tenant-notes/:id/approve ────────────────────────────
+router.post(
+  '/api/owner-tenant-notes/:id/approve',
+  requireOwnerTenantNotesRole(...OWNER_TENANT_NOTES_REVIEW_ROLES),
+  async (req, res) => {
+    const { before } = await loadPendingAIProposalForReview(req, res);
+    if (!before) return; // loadPendingAIProposalForReview already wrote the error response
+
+    const approverTeamMemberId = req.teamMemberId;
+    const { data: updated, error: updateErr } = await supabase
+      .from('operational_notes')
+      .update({
+        approval_status: 'approved',
+        // Overwrite to the real approver — matches author_team_member_id's
+        // own stated final meaning once approved (see proposeAINote's
+        // design-decision comment above for the full reasoning; this is
+        // the other half of that same decision).
+        author_team_member_id: approverTeamMemberId,
+      })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+    // Rule 1 audit trail (spec Section 9: "AI proposal approved/declined" —
+    // operational_notes.approval_decided, actor_type: human,
+    // privacy_category: processing, risk_level: low).
+    await writeAuditLog({
+      action: 'operational_notes.approval_decided',
+      entity_type: 'operational_note',
+      entity_id: before.id,
+      actor_email: req.user.email,
+      property_id: before.property_id,
+      risk_level: 'low',
+      privacy_category: 'processing',
+      details: {
+        outcome: 'approved',
+        actor_role: req.ownerTenantNotesRole,
+        approver_team_member_id: approverTeamMemberId,
+        previous_author_team_member_id: before.author_team_member_id,
+      },
+    });
+
+    return res.json({ success: true, note: updated });
+  }
+);
+
+// ─── POST /api/owner-tenant-notes/:id/decline ────────────────────────────
+// note_text/access_tier/author_team_member_id all left exactly as they
+// are — never delete a declined proposal (this file's own "never silently
+// drop anything" discipline, same reasoning as applyStandardRedaction's
+// comment above); it simply stays permanently invisible via
+// classifyNoteForViewer's/operational_notes_visible's existing
+// "ai_proposed AND NOT approved" exclusion — no new visibility code was
+// needed for this, it already works (see the file header note on this
+// pass).
+router.post(
+  '/api/owner-tenant-notes/:id/decline',
+  requireOwnerTenantNotesRole(...OWNER_TENANT_NOTES_REVIEW_ROLES),
+  async (req, res) => {
+    const { before } = await loadPendingAIProposalForReview(req, res);
+    if (!before) return; // loadPendingAIProposalForReview already wrote the error response
+
+    const { decline_reason } = req.body;
+    const { data: updated, error: updateErr } = await supabase
+      .from('operational_notes')
+      .update({ approval_status: 'declined' })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+    // decline_reason (optional, free text from the reviewer) is recorded
+    // only in the audit log's details — never written onto the row itself,
+    // per the task's own "note_text/everything else untouched" instruction
+    // (reviewer_notes is this table's own column for the /:id/review
+    // disposition workflow's reviewer commentary, a different, unrelated
+    // workflow — reusing it here would blur two genuinely separate review
+    // concerns, the same distinction spec Section 5 already draws between
+    // this table's approval_status and review_status columns).
+    await writeAuditLog({
+      action: 'operational_notes.approval_decided',
+      entity_type: 'operational_note',
+      entity_id: before.id,
+      actor_email: req.user.email,
+      property_id: before.property_id,
+      risk_level: 'low',
+      privacy_category: 'processing',
+      details: {
+        outcome: 'declined',
+        actor_role: req.ownerTenantNotesRole,
+        decline_reason: typeof decline_reason === 'string' && decline_reason.trim() ? decline_reason.trim() : null,
       },
     });
 
@@ -1130,4 +1620,8 @@ module.exports = {
   roleHasAnyAccess,
   OWNER_TENANT_NOTES_ROLE_MAX_TIER,
   NOTE_TIER_RANK,
+  // Added this pass — the in-process AI-proposal creation function a
+  // future pipeline (e.g. complaint-tracking's Category 6, not yet built)
+  // calls into. Not an HTTP route.
+  proposeAINote,
 };

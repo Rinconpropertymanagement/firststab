@@ -221,7 +221,7 @@ const PRIVACY_QUEUE_ACK_MESSAGE =
 // if that context is ever needed again. Returns null (a valid "system
 // action" performed_by) if no matching `users` row exists for this email.
 async function lookupUserId(email) {
-  const { data } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  const { data } = await supabase.from('users').select('id').or(`email.eq.${email},alt_email.eq.${email}`).maybeSingle();
   return data ? data.id : null;
 }
 
@@ -2998,7 +2998,10 @@ router.get('/api/maintenance-history/property/:property_id/budget', requireMaint
 // (granting/changing/removing someone else's role in this tool) — see the
 // build notes for why director_of_operations wasn't added there too.
 const VALID_ROLES = ['admin', 'reviewer', 'director_of_operations'];
-const ALLOWED_DOMAIN = 'rinconmanagement.com';
+// quickturnmaintenance.com added 2026-09-09 — Peter confirmed it's a sister
+// company he owns (not an unaffiliated outside vendor), same trust level as
+// rinconmanagement.com for Hub access purposes.
+const ALLOWED_DOMAINS = ['rinconmanagement.com', 'quickturnmaintenance.com'];
 
 router.get('/api/maintenance-history/users', requireMaintenanceHistoryRole('admin'), async (req, res) => {
   const { data, error } = await supabase
@@ -3030,8 +3033,8 @@ router.post('/api/maintenance-history/users', requireMaintenanceHistoryRole('adm
   if (!email || !role) return res.status(400).json({ error: 'email and role are required.' });
 
   const normalizedEmail = String(email).toLowerCase().trim();
-  if (!normalizedEmail.endsWith('@' + ALLOWED_DOMAIN)) {
-    return res.status(400).json({ error: 'Only @' + ALLOWED_DOMAIN + ' accounts allowed.' });
+  if (!ALLOWED_DOMAINS.some(d => normalizedEmail.endsWith('@' + d))) {
+    return res.status(400).json({ error: 'Only ' + ALLOWED_DOMAINS.map(d => '@' + d).join(' or ') + ' accounts allowed.' });
   }
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role.' });
 

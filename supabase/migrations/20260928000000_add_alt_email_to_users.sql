@@ -1,0 +1,148 @@
+-- ============================================================
+-- Migration: 20260928000000_add_alt_email_to_users
+-- Created:   2026-09-28
+-- Author:    Neo (database specialist)
+--
+-- Adds one nullable column, `alt_email`, to `users`.
+--
+-- Why: every audit-logging write path in this codebase identifies "who
+-- did this" by matching the login email against users.email — a single
+-- column (see e.g. property-360/router.js's lookupUserId(), which does
+-- .from('users').select('id').eq('email', email).maybeSingle(), and
+-- audits/router.js's own note that audit_log.performed_by is a real FK
+-- to this table, 20260720000003_foundation.sql). One real staff member,
+-- Regina Franco Mendez, genuinely logs into the Hub under two different
+-- real email addresses: her current rinconmanagement.com address and an
+-- old quickturnmaintenance.com vendor address, which is the only one
+-- currently on file for her in users.email. Anything she does under the
+-- second address fails the single-column match and gets logged as an
+-- unattributed/unknown actor. `alt_email` gives that lookup a second real
+-- address to check for the same person. This is deliberately the smaller
+-- fix for one person having one alternate email today — a second column
+-- on the existing table, not a new join table and not a general
+-- multi-email-per-user system. If a second person ever needs the same
+-- treatment, or one person needs a third address, that is a reason to
+-- revisit this design, not to overload this column further.
+--
+-- This migration is schema-only: it adds the column and its lookup
+-- index, nothing else. It does NOT set Regina's actual alt_email value
+-- and does NOT touch any existing audit_log row — a separate Node
+-- backfill script (not part of this migration) does both of those once
+-- this column exists.
+--
+-- ============================================================
+-- Column: alt_email
+-- ============================================================
+--
+-- TEXT, nullable — matches the type of the existing `email` column
+-- exactly (20260720000003_foundation.sql: `email TEXT NOT NULL`).
+-- Nullable because this only applies to the one person who currently
+-- needs it; every other existing row gets NULL, meaning "no alternate
+-- login email on file," which is the correct, expected state for
+-- everyone else on the team.
+--
+-- No format/CHECK constraint is added beyond nullability — `email`
+-- itself has none in this schema (no CHECK, no format validation), so
+-- `alt_email` mirrors that precedent rather than inventing a new house
+-- rule for email columns.
+--
+-- ============================================================
+-- Index: idx_users_alt_email
+-- ============================================================
+--
+-- `email` carries exactly one index in this schema: a UNIQUE index
+-- (idx_users_email, 20260720000003_foundation.sql) that does double
+-- duty as both the "no two people share a login email" constraint and
+-- the lookup key for every .eq('email', ...) query. `alt_email` will be
+-- checked the same way going forward (.eq()/.or() lookups alongside
+-- `email`, matching how audit-logging actor resolution already works),
+-- so it gets the same kind of index for the same reason.
+--
+-- Because `alt_email` is nullable and only one row will be non-NULL
+-- today, this uses a PARTIAL unique index (WHERE alt_email IS NOT
+-- NULL) rather than a plain unique index — the same pattern already
+-- established in this schema for nullable-but-should-be-unique columns
+-- (20260720000000_add_appfolio_id.sql: "Partial unique index: enforces
+-- uniqueness only for non-NULL values, so manually-entered rows
+-- [appfolio_id = NULL] never collide"). Without WHERE, a plain unique
+-- index still allows any number of NULLs in Postgres, so this isn't
+-- strictly required for correctness — it's included to make the intent
+-- explicit and to match this codebase's existing convention for this
+-- exact situation, rather than relying on that implicit behavior. Net
+-- effect: two different people can never be assigned the same
+-- alt_email, but any number of people can have no alt_email at all.
+-- The partial index also serves as the lookup index for
+-- .eq('alt_email', ...) / .or('alt_email.eq...') queries — no separate
+-- index needed, mirroring how idx_users_email is the only index `email`
+-- has.
+--
+-- ============================================================
+-- Rule 4 (GOVERNANCE.md) — no new data inventory entry needed
+-- ============================================================
+--
+-- Same precedent as 20260828000000 (properties.year_built /
+-- maintenance_limit): this is one additive nullable column on an
+-- already-existing, already-governed table (`users`, RLS enabled since
+-- 20260720000003_foundation.sql), not a new table — Rule 4's
+-- registration requirement is for new tables storing personal data.
+-- `alt_email` is a second real work-login email for an internal Hub
+-- staff member, not a tenant, applicant, or protected-class data point,
+-- so this does not touch Fair Housing concerns and does not need its
+-- own Asimov/Mason gate beyond whatever already cleared the underlying
+-- request.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist, run before any
+-- migration is handed off for Peter to apply)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. ADD COLUMN IF NOT EXISTS
+--       on one brand-new, nullable column with no default — every
+--       existing row gets NULL; nothing already stored is read, moved,
+--       or overwritten.
+--   [x] Does this touch a table other code depends on? Yes — `users` is
+--       the FK target for audit_log.performed_by and is read by every
+--       actor-lookup path in the codebase. That is exactly why this
+--       migration adds nothing but one nullable column with no default
+--       and touches no existing column, constraint, or index — nothing
+--       already reading or writing `users` changes behavior. An
+--       existing `SELECT *` caller gains one new NULL-valued column;
+--       nothing breaks by getting an extra column back.
+--   [x] Additive or destructive? Purely additive. No column dropped, no
+--       type changed, no existing constraint tightened, no default that
+--       could alter existing INSERT/UPDATE behavior. RLS is untouched —
+--       already enabled on `users` (20260720000003_foundation.sql), no
+--       policy added, changed, or removed here. The existing
+--       trg_users_updated_at trigger already covers this column — no
+--       new trigger needed.
+--   [x] Tested on a copy of the data first? Not yet — standard practice
+--       before applying to the real database, same as every migration
+--       in this repo. Peter (or whoever applies this) should run it
+--       against a Supabase branch/copy first, same as always.
+--
+-- Explicitly OUT of scope for this migration (by design, per the task
+-- that produced it): no UPDATE/INSERT statements of any kind. Setting
+-- Regina's actual alt_email value, and fixing any already-orphaned
+-- audit_log rows from before this column existed, are both handled by a
+-- separate Node backfill script, not by this file.
+-- ============================================================
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS alt_email TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_alt_email
+  ON users(alt_email)
+  WHERE alt_email IS NOT NULL;
+
+COMMENT ON COLUMN users.alt_email IS
+  'A second real login email for the same person, checked alongside `email` at actor-lookup time (e.g. audit-log attribution). Added for one staff member (Regina Franco Mendez) who genuinely logs into the Hub under two different real email addresses — her current rinconmanagement.com address (stored in `email`) and an old quickturnmaintenance.com vendor address (stored here). NULL for everyone else, meaning "no alternate login email on file" — the expected, normal state. This is a deliberate single-column fix for one person having one alternate email today, not a general multi-email-per-user feature; do not overload this column for unrelated purposes.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements to undo this migration)
+-- ============================================================
+--
+-- DROP INDEX IF EXISTS idx_users_alt_email;
+-- ALTER TABLE users DROP COLUMN IF EXISTS alt_email;
+--
+-- ============================================================

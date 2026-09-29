@@ -26,6 +26,47 @@
  * tools sees a real, honest 'nothing to show you here' page instead of
  * a 403").
  *
+ * ARCHIVE SEARCH — added per compliance/archive-search-property-360-
+ * embed-owner-risk-acceptance.md (all three addenda) and the CLEARED
+ * WITH CONDITIONS confirmations it records:
+ * compliance/archive-search-property-360-embed-asimov-confirmation.md
+ * and compliance/archive-search-property-360-embed-mason-confirmation.md.
+ * Same compose-only shape as the other four tools, on purpose — Asimov's
+ * confirmation is explicit that a real `searcher`/`admin` role check via
+ * attachArchiveSearchRole (imported from archive-search/router.js,
+ * unmodified) is required here specifically so this page's own stated
+ * design principle keeps holding: this must stay a real re-check of
+ * that tool's own access table, never a bypass that hands out search
+ * just because someone can open this page. archiveSearchRouter is
+ * mounted AFTER this router in server.js (see that file's own mount-
+ * order comments), so — like attachMaintenanceHistoryRole and
+ * attachLeadSimpleDelinquencyRole below — the gate is called explicitly
+ * here every time, not inherited from an earlier middleware run.
+ * `archive_search_access` is reported as a plain boolean flag on the
+ * response (same shape as `maintenance_admin` below), not folded into
+ * `cards` — it carries no data of its own from this route (the search
+ * widget calls archive-search's own already-gated
+ * /api/archive-search/search and /api/archive-search/message/:id
+ * directly, which independently re-check the same role), and per
+ * Asimov's condition it must never feed computeNeedsAttentionAndOrder
+ * (search access is not an urgency signal).
+ *
+ * IMPORTANT — READ BEFORE ASSUMING THIS MEANS THE POPULATION IS FULLY
+ * SETTLED: Mason's confirmation (linked above) clears the population
+ * question itself but leaves two conditions open, and is explicit that
+ * neither blocks building this page — they gate treating the
+ * population as fully authorized, not the code. (1) The specific
+ * accommodation/harassment/eviction thread TARS's validation sample
+ * found should be run through the existing archive_search_escalations
+ * mechanism before the broader population can reach it — Peter has
+ * explicitly declined this (owner-risk-acceptance's third addendum,
+ * verbatim: "no dont suppress"), so that thread remains reachable by
+ * design, not by oversight. (2) Asimov was asked to independently
+ * verify that Fair Housing/system-use training and a real escalation
+ * path actually exist today for the Hub population this ships to —
+ * nothing in this chain confirms that was done. Both are Peter's and
+ * Asimov's open items, not this file's to resolve.
+ *
  * ============================================================
  * WHY THE PER-TOOL SUMMARY FUNCTIONS ARE IMPORTED, NOT RE-QUERIED HERE
  * ============================================================
@@ -93,6 +134,10 @@ const {
   attachOwnerTenantNotesRole,
   roleHasAnyAccess: ownerTenantNotesRoleHasAnyAccess,
 } = require('../owner-tenant-notes/router');
+const {
+  attachArchiveSearchRole,
+  ARCHIVE_SEARCH_SEARCH_ROLES,
+} = require('../archive-search/router');
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const missing = [];
@@ -391,7 +436,14 @@ async function fetchMaintenanceCard(req) {
   // the notes block standalone with no chart beside it — see that
   // function's own "No spend data to chart" comment — so no frontend
   // change is needed to show it once this card stops being collapsed.
-  if (body && body.has_data === false && !body.maintenance_notes) {
+  // Maintenance Limit joins the same exemption, same reasoning — also a
+  // plain property-level passthrough unrelated to ticket/spend activity
+  // (supabase/migrations/20260828000000_add_year_built_and_maintenance_
+  // limit_to_properties.sql), and 0 is a real, meaningful value here (a
+  // genuine $0.00 limit), not "nothing to show" — checked with `== null`,
+  // not a falsy check, so a real $0.00 limit doesn't fall through to
+  // no_data the way a falsy check would wrongly treat it.
+  if (body && body.has_data === false && !body.maintenance_notes && body.maintenance_limit == null) {
     return { status: 'no_data' };
   }
   return { status: 'ok', data: body };
@@ -549,6 +601,36 @@ function computeNeedsAttentionAndOrder(cards) {
   return { summary, items: items.map((i) => ({ key: i.key, message: i.message })), card_order: cardOrder };
 }
 
+// ─── Usage logging — audits/router.js's "Property 360 Views" section reads
+// these rows. Sibling implementation, same house style every router.js in
+// this codebase already uses (not a shared import) — matching
+// owner-tenant-notes/router.js's own writeAuditLog/lookupUserId exactly.
+async function lookupUserId(email) {
+  const { data } = await supabase.from('users').select('id').or(`email.eq.${email},alt_email.eq.${email}`).maybeSingle();
+  return data ? data.id : null;
+}
+
+async function writeAuditLog({ action, entity_type, entity_id, actor_email, actor_type, risk_level, privacy_category, property_id, details }) {
+  const performed_by = await lookupUserId(actor_email);
+  const { error } = await supabase.from('audit_log').insert({
+    action,
+    entity_type,
+    entity_id,
+    performed_by,
+    actor_type: actor_type || 'human',
+    actor_id: actor_email,
+    privacy_category: privacy_category || 'processing',
+    risk_level: risk_level || 'low',
+    property_id: property_id || null,
+    details: details || {},
+  });
+  if (error) {
+    console.error(`[property-360] audit_log insert failed for ${action}:`, error.message);
+    return false;
+  }
+  return true;
+}
+
 // ─── Router: everyone reaching here is already hub-logged-in (server.js
 // mounts this after requireLogin) — see file header, "no gate of this
 // page itself."
@@ -666,6 +748,21 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
   }
   if (!header) return res.status(404).json({ error: 'Property not found.' });
 
+  // Usage logging — one row per real page view, once the property is
+  // confirmed to exist. Fire-and-forget-adjacent: awaited so a genuine
+  // insert failure is visible in logs, but writeAuditLog() itself never
+  // throws, so this can't slow down or break the actual page.
+  writeAuditLog({
+    action: 'property_360.viewed',
+    entity_type: 'property',
+    entity_id: propertyId,
+    actor_email: req.user.email,
+    actor_type: 'human',
+    risk_level: 'low',
+    privacy_category: 'processing',
+    property_id: propertyId,
+  });
+
   // ── Access Control — run each tool's own real gate function in-process
   // against this one request. insuranceRouter and securityDepositRouter
   // are both mounted (server.js) BEFORE property360Router with no path
@@ -693,6 +790,12 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
   const gates = [
     runGate(attachMaintenanceHistoryRole, req),
     runGate(attachLeadSimpleDelinquencyRole, req),
+    // Archive Search — see file header "ARCHIVE SEARCH" above. Explicit
+    // call, not a defensive undefined-check, because archiveSearchRouter
+    // mounts AFTER this router (server.js) and its own
+    // `router.use(attachArchiveSearchRole)` has not run yet on this
+    // request.
+    runGate(attachArchiveSearchRole, req),
   ];
   if (typeof req.insuranceRole === 'undefined') gates.push(runGate(attachInsuranceRole, req));
   if (typeof req.securityDepositRole === 'undefined') gates.push(runGate(attachSecurityDepositRole, req));
@@ -791,6 +894,13 @@ router.get('/api/property-360/:propertyId/summary', async (req, res) => {
     // instead of a new, duplicate one). This flag just tells the
     // frontend whether to render/call that section at all.
     maintenance_admin: req.maintenanceHistoryRole === 'admin',
+    // Archive Search — see file header "ARCHIVE SEARCH" above. A plain
+    // access flag, same shape as maintenance_admin: this route carries
+    // no search data of its own; the widget calls archive-search's own
+    // already-gated routes directly, which independently re-check this
+    // exact same role. Real `searcher`/`admin` membership only — never a
+    // bypass.
+    archive_search_access: ARCHIVE_SEARCH_SEARCH_ROLES.includes(req.archiveSearchRole),
   });
 });
 

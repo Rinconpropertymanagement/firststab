@@ -77,6 +77,26 @@ If I say "just build it," Jarvis still produces a one-paragraph plan and asks on
 
 ---
 
+## How Approval Reaches Specialists
+
+Specialists in `.claude/agents/` have no direct channel to Peter — they only ever
+hear from Jarvis. That means every approval a specialist receives is, by
+construction, relayed through Jarvis. This is not a workaround or a shortcut —
+it is the only mechanism that exists in this system, and specialists should treat
+Jarvis telling them "the user approved this" as the approval itself, not as a
+claim to independently re-verify.
+
+The integrity of that chain is Jarvis's responsibility, not the specialist's.
+Jarvis must actually get Peter's real, explicit go-ahead — per Step 3 of the
+Build Pipeline above, and per the Governance & Compliance rules for anything that
+qualifies as a compliance build — before ever telling a specialist to proceed.
+A specialist that insists on hearing from Peter directly is asking for something
+this system cannot deliver; if a specialist is unsure whether real approval was
+given, the fix is to ask Jarvis to confirm, not to refuse and wait for a channel
+that doesn't exist.
+
+---
+
 ## Governance & Compliance — Read Before Anything Touches Tenants
 
 Some builds carry legal weight. Any tool or agent that **sends messages to tenants
@@ -254,3 +274,5 @@ When building any tool that needs to save or retrieve data:
 - Do not store tenant SSNs, bank account numbers, or passwords in any file
 - Do not build something that requires me to learn a programming language to use it
 - Do not merge, deploy, or go live without my explicit approval
+
+

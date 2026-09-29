@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Complaint Tracking — Rincon Management</title>
+  <style>
+    /* ============================================================
+       House style, copied from this Hub's own real dashboards
+       (security-deposit/dashboard/index.html, property-360/dashboard/
+       index.html, maintenance-history/dashboard) — gray/blue palette,
+       same tokens (#f9fafb bg, #111827 text, #6b7280 muted, #e5e7eb/
+       #d1d5db borders, #1d4ed8 accent), same badge/btn/card/filter-pill/
+       tile/details-subsection language. No new design system, per the
+       build task's own instruction — only the category/subject-type/
+       blocked-reason color vocabulary below is new, because this tool
+       has no prior-art badge set for any of the three. ============
+    ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 1100px; margin: 0 auto; padding: 0 16px 56px; }
+
+    /* ── Header ── */
+    .header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 20px 0 14px; }
+    .header-left h1 { font-size: 21px; font-weight: 700; color: #111827; line-height: 1.2; }
+    .header-left p { font-size: 13px; color: #6b7280; margin-top: 3px; max-width: 560px; line-height: 1.45; }
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .header-right a { font-size: 13px; text-decoration: none; }
+    .header-right .hr-user { font-size: 12.5px; color: #374151; font-weight: 500; }
+    .header-right .hr-role { font-size: 11.5px; color: #6b7280; }
+    .btn-report { background: #1d4ed8; color: #fff; padding: 7px 14px; border-radius: 6px; font-weight: 600; font-size: 12.5px; }
+    .btn-report:hover { background: #1e40af; }
+    .btn-plain { color: #2563eb; }
+    .btn-plain:hover { text-decoration: underline; }
+    .btn-signout { font-size: 12px; color: #6b7280; padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: 6px; }
+    .btn-refresh { background: #fff; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 12px; font-size: 12.5px; color: #374151; cursor: pointer; font-weight: 500; }
+    .btn-refresh:hover { background: #f3f4f6; }
+    .last-updated { font-size: 11.5px; color: #9ca3af; }
+
+    /* ── Tiles ── */
+    .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+    .tile { flex: 1 1 140px; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 13px 16px; min-width: 130px; cursor: pointer; transition: border-color 0.12s; }
+    .tile:hover { border-color: #9ca3af; }
+    .tile.tile-active { border-color: #1d4ed8; box-shadow: 0 0 0 1px #1d4ed8 inset; }
+    .tile-number { font-size: 26px; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+    .tile-label { font-size: 11px; color: #6b7280; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+    .tile-red .tile-number    { color: #dc2626; }
+    .tile-amber .tile-number  { color: #d97706; }
+    .tile-gray .tile-number   { color: #374151; }
+    .tile-purple .tile-number { color: #7c3aed; }
+    .tile-blue .tile-number   { color: #1d4ed8; }
+
+    /* ── Filters ── */
+    .filters-bar { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+    .filter-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .filter-label { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; margin-right: 2px; }
+    .filter-btn { background: #fff; border: 1px solid #d1d5db; border-radius: 999px; padding: 4px 11px; font-size: 12px; color: #374151; cursor: pointer; font-weight: 500; white-space: nowrap; }
+    .filter-btn:hover { background: #f3f4f6; }
+    .filter-btn.active { background: #1f2937; border-color: #1f2937; color: #fff; }
+    .filter-search { flex: 1 1 200px; min-width: 160px; }
+    .filter-search input { width: 100%; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12.5px; font-family: inherit; }
+    .filter-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #6b7280; }
+    .filter-clear { font-size: 12px; color: #2563eb; cursor: pointer; background: none; border: none; font-family: inherit; padding: 0; }
+    .filter-clear:hover { text-decoration: underline; }
+
+    /* Property filter typeahead — same mechanics as report.html's own,
+       kept intentionally identical rather than a fresh variant. */
+    .autocomplete { position: relative; width: 220px; }
+    .autocomplete input { width: 100%; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12.5px; font-family: inherit; }
+    .autocomplete-list { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,0.1); max-height: 220px; overflow-y: auto; z-index: 30; }
+    .autocomplete-item { padding: 8px 10px; font-size: 12.5px; cursor: pointer; border-bottom: 1px solid #f3f4f6; }
+    .autocomplete-item:last-child { border-bottom: none; }
+    .autocomplete-item:hover { background: #eff6ff; }
+    .autocomplete-item .ac-sub { display: block; font-size: 11px; color: #9ca3af; margin-top: 1px; }
+    .property-chip { display: inline-flex; align-items: center; gap: 6px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; font-size: 12px; font-weight: 600; padding: 5px 8px 5px 10px; border-radius: 999px; }
+    .property-chip button { background: none; border: none; color: #1d4ed8; font-size: 14px; cursor: pointer; line-height: 1; padding: 0; }
+
+    /* ── Section groups ── */
+    .section-block { margin-bottom: 22px; }
+    .section-heading { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #111827; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+    .section-heading .count-pill { background: #f3f4f6; color: #6b7280; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
+
+    /* Subject-type visual separation (product doc Section 4: "owner-tied
+       and tenant-tied items must be visually separated wherever they're
+       shown together... obvious at a glance"). Two layers, deliberately:
+       a group header per subject type AND a colored left-border on every
+       card, so the split still reads even when scrolling past a group
+       boundary or scanning quickly. This is Tron's own concrete answer
+       to the product doc's explicit "layout approach pending Tron's
+       design suggestion." */
+    .subject-group { margin-bottom: 16px; }
+    .subject-group:last-child { margin-bottom: 0; }
+    .subject-group-heading { font-size: 12px; font-weight: 700; color: #374151; margin: 0 0 8px; padding-left: 2px; display: flex; align-items: center; gap: 6px; }
+    .subject-group-heading .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .sg-owner .dot        { background: #7c3aed; }
+    .sg-tenant .dot        { background: #0284c7; }
+    .sg-other .dot         { background: #6b7280; }
+    .sg-unmatched .dot     { background: #d97706; }
+
+    /* ── Complaint card ── */
+    .c-card { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db; border-radius: 8px; padding: 13px 15px; margin-bottom: 10px; }
+    .c-card.subj-owner       { border-left-color: #7c3aed; }
+    .c-card.subj-tenant       { border-left-color: #0284c7; }
+    .c-card.subj-team_member  { border-left-color: #0d9488; }
+    .c-card.subj-property     { border-left-color: #6b7280; }
+    .c-card.subj-unmatched    { border-left-color: #d97706; }
+    .c-card.is-held { border-left-color: #111827; background: #fafafa; }
+
+    .c-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+    .c-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .c-date { font-size: 11.5px; color: #9ca3af; white-space: nowrap; }
+
+    .badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; white-space: nowrap; letter-spacing: 0.02em; }
+    .badge-solid-blue    { background: #1d4ed8; color: #fff; }
+    .badge-solid-amber   { background: #d97706; color: #fff; }
+    .badge-solid-red     { background: #dc2626; color: #fff; }
+    .badge-solid-green   { background: #16a34a; color: #fff; }
+    .badge-solid-gray    { background: #374151; color: #fff; }
+    .badge-soft-amber    { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    .badge-soft-red      { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .badge-soft-purple   { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .badge-soft-blue     { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .badge-soft-teal     { background: #f0fdfa; color: #0f766e; border: 1px solid #99f6e4; }
+    .badge-soft-gray     { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+    .badge-subject { font-weight: 700; }
+
+    /* Category badges — one soft color per category, distinct from
+       status/subject vocabulary so the three never get confused reading
+       a card left-to-right. */
+    .cat-legal_compliance             { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .cat-blocked_resolution           { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .cat-churn_risk                   { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
+    .cat-escalation_recurrence        { background: #fdf2f8; color: #9d174d; border: 1px solid #fbcfe8; }
+    .cat-major_money_property_risk    { background: #fef2f2; color: #7f1d1d; border: 1px solid #fca5a5; font-weight: 700; }
+    .cat-owner_instruction_one_off    { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .cat-badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+    .c-desc { font-size: 13.5px; color: #111827; line-height: 1.45; margin-bottom: 8px; }
+    .c-desc.empty { color: #9ca3af; font-style: italic; }
+    .c-meta-line { font-size: 12px; color: #6b7280; margin: 3px 0; }
+    .c-meta-line .fl { color: #9ca3af; margin-right: 3px; }
+    .c-meta-line a { color: #1d4ed8; text-decoration: none; }
+    .c-meta-line a:hover { text-decoration: underline; }
+
+    /* Held placeholder — deliberately its own visual language, never the
+       category badges above (product doc: "labeled distinctly... never
+       an AI-generated content"). Dark, plain, unmistakably different. */
+    .held-box { background: #111827; color: #f9fafb; border-radius: 6px; padding: 8px 12px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; margin-bottom: 8px; display: inline-block; }
+    .held-closed { background: #f3f4f6; color: #374151; }
+
+    /* Duplicate-suggestion callout */
+    .dup-callout { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 12.5px; color: #92400e; }
+    .dup-callout-text { margin-bottom: 6px; line-height: 1.4; }
+    .dup-callout-actions { display: flex; gap: 8px; }
+
+    .btn { font-size: 12px; padding: 5px 11px; border-radius: 5px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; font-family: inherit; font-weight: 500; }
+    .btn:hover { background: #f3f4f6; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-confirm { border-color: #16a34a; color: #166534; }
+    .btn-reject { border-color: #dc2626; color: #991b1b; }
+    .btn-primary { background: #1d4ed8; border: none; border-radius: 6px; padding: 7px 16px; font-size: 12.5px; color: #fff; cursor: pointer; font-weight: 600; font-family: inherit; }
+    .btn-primary:hover { background: #1e40af; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    /* Manage panel — reuses details.subsection pattern already
+       established across this Hub's dashboards. */
+    details.manage { border-top: 1px solid #f3f4f6; margin-top: 10px; padding-top: 8px; }
+    details.manage summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2563eb; list-style: none; display: inline-flex; align-items: center; gap: 4px; }
+    details.manage summary::-webkit-details-marker { display: none; }
+    details.manage summary::before { content: '▸'; font-size: 10px; color: #9ca3af; display: inline-block; transition: transform 0.15s; }
+    details.manage[open] summary::before { transform: rotate(90deg); }
+    .manage-body { margin-top: 10px; display: flex; flex-direction: column; gap: 12px; }
+    .manage-section { border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+    .manage-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #6b7280; margin-bottom: 8px; }
+    .manage-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+    .manage-row > * { flex: 1; min-width: 130px; }
+    .manage-section select, .manage-section input[type="text"], .manage-section textarea {
+      width: 100%; font-size: 12.5px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; font-family: inherit;
+    }
+    .manage-section textarea { min-height: 54px; resize: vertical; }
+    .manage-hint { font-size: 11px; color: #9ca3af; margin-top: 4px; line-height: 1.4; }
+    .manage-msg { font-size: 12px; margin-top: 4px; }
+    .manage-msg.err { color: #991b1b; }
+    .manage-msg.ok { color: #166534; }
+
+    details.subsection.routine-toggle { border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; padding: 12px 14px; }
+    details.subsection.routine-toggle summary { cursor: pointer; font-size: 13px; font-weight: 700; list-style: none; display: flex; align-items: center; gap: 6px; color: #111827; }
+    details.subsection.routine-toggle summary::-webkit-details-marker { display: none; }
+    details.subsection.routine-toggle summary::before { content: '▸'; font-size: 11px; color: #9ca3af; display: inline-block; transition: transform 0.15s; }
+    details.subsection.routine-toggle[open] summary::before { transform: rotate(90deg); }
+    .routine-toggle .subsection-body { margin-top: 14px; }
+    .routine-sub { font-size: 12px; color: #9ca3af; font-weight: 400; margin-left: 2px; }
+
+    .empty { color: #9ca3af; padding: 26px; text-align: center; font-size: 13px; }
+    .error-page { text-align: center; padding: 60px 16px; color: #6b7280; }
+    .error-page h2 { color: #111827; margin-bottom: 8px; font-size: 17px; }
+    .error-page p { font-size: 13.5px; line-height: 1.55; }
+    .error-page a { color: #2563eb; text-decoration: none; }
+    .spinner-wrap { text-align: center; padding: 40px 20px; color: #9ca3af; }
+    .spinner { width: 26px; height: 26px; border: 3px solid #e5e7eb; border-top-color: #6b7280; border-radius: 50%; display: inline-block; animation: spin 0.7s linear infinite; margin-bottom: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px); background: #111827; color: #fff; font-size: 13px; font-weight: 500; padding: 10px 18px; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease; z-index: 1000; }
+    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    @media (max-width: 640px) {
+      .page { padding: 0 12px 48px; }
+      .header { padding: 16px 0 12px; }
+      .header-right { justify-content: flex-start; width: 100%; }
+      .tiles { gap: 8px; }
+      .tile { flex: 1 1 44%; }
+      .autocomplete { width: 100%; }
+      .filter-search { flex-basis: 100%; }
+      .manage-row { flex-direction: column; }
+      .manage-row > * { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="header-left">
+        <h1>Complaint Tracking</h1>
+        <p>Every complaint gets a real record. Big-deal items are surfaced here first; routine items are still tracked, just tucked out of the way below.</p>
+      </div>
+      <div class="header-right" id="headerRight">
+        <a class="btn-report" href="/complaint-tracking/report">+ Report an issue</a>
+      </div>
+    </div>
+
+    <div id="app"><div class="spinner-wrap"><span class="spinner"></span><div>Loading&hellip;</div></div></div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    // ────────────────────────────────────────────────────────────────
+    // Shared helpers
+    // ────────────────────────────────────────────────────────────────
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function formatDate(d) {
+      if (!d) return '&#8212;';
+      var dt = new Date(d);
+      if (isNaN(dt.getTime())) return escapeHtml(d);
+      return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    function formatDateTime(d) {
+      if (!d) return '&#8212;';
+      var dt = new Date(d);
+      if (isNaN(dt.getTime())) return escapeHtml(d);
+      return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' at ' + dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+    var toastHideTimer = null;
+    function showToast(message) {
+      var toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('visible');
+      clearTimeout(toastHideTimer);
+      toastHideTimer = setTimeout(function () { toast.classList.remove('visible'); }, 2600);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Category / status / subject-type vocabulary
+    // ────────────────────────────────────────────────────────────────
+    var CATEGORY_META = {
+      legal_compliance:          { label: 'Legal / Compliance' },
+      blocked_resolution:        { label: 'Blocked Resolution' },
+      churn_risk:                { label: 'Relationship / Churn Risk' },
+      escalation_recurrence:     { label: 'Escalation / Recurrence' },
+      major_money_property_risk: { label: 'Major Money / Property Risk' },
+      owner_instruction_one_off: { label: 'Owner Instruction' },
+    };
+    var STATUS_META = {
+      open:        { label: 'Open', cls: 'badge-solid-blue' },
+      in_progress: { label: 'In Progress', cls: 'badge-solid-amber' },
+      blocked:     { label: 'Blocked', cls: 'badge-solid-red' },
+      resolved:    { label: 'Resolved', cls: 'badge-solid-green' },
+      held:        { label: 'Held', cls: 'badge-solid-gray' },
+    };
+    var SUBJECT_LABELS = { owner: 'Owner', tenant: 'Tenant', team_member: 'Team Member', property: 'Property' };
+
+    function categoryBadge(category) {
+      if (!category) return '';
+      var meta = CATEGORY_META[category];
+      if (!meta) return '';
+      return '<span class="cat-badge cat-' + category + '">' + escapeHtml(meta.label) + '</span>';
+    }
+    function statusBadge(status) {
+      var meta = STATUS_META[status] || { label: status, cls: 'badge-solid-gray' };
+      return '<span class="badge ' + meta.cls + '">' + escapeHtml(meta.label) + '</span>';
+    }
+    // Design Decision 4 — "confirmed refusal" vs. "inferred from silence"
+    // must render as two visibly distinct states wherever a blocked
+    // complaint is shown, never collapsed into one generic "Blocked"
+    // badge. blocked_resolution_silence_days is a real, versioned,
+    // Peter-confirmed value (complaint_tracking_config, seeded at 2) —
+    // not exposed to this dashboard via any route, so the "2+ days"
+    // wording below is the documented v1 value, not a live read of the
+    // config table; update this string if that value is ever revised.
+    function blockedSubBadge(c) {
+      if (c.category !== 'blocked_resolution' || !c.blocked_reason) return '';
+      var partyLabel = c.blocked_party ? (SUBJECT_LABELS[c.blocked_party] || c.blocked_party) : 'Someone';
+      if (c.blocked_reason === 'explicit_refusal') {
+        return '<span class="badge badge-soft-red">Blocked &mdash; ' + escapeHtml(partyLabel) + ' Refused</span>';
+      }
+      return '<span class="badge badge-soft-amber">Blocked &mdash; No Response (2+ days)</span>';
+    }
+    function toneBadge(c) {
+      return c.tone_trend === 'escalating' ? '<span class="badge badge-soft-amber">Tone: Escalating</span>' : '';
+    }
+    function fairHousingBadge(c) {
+      if (!c.flagged_protected_class) return '';
+      var label = c.flagged_category ? (': ' + c.flagged_category) : '';
+      return '<span class="badge badge-soft-purple">&#9888; Fair Housing flag' + escapeHtml(label) + '</span>';
+    }
+    function needsHumanCallBadge(c) {
+      return (!c.category && c.needs_human_call) ? '<span class="badge badge-soft-amber">Needs a Human Call</span>' : '';
+    }
+    function subjectChip(c) {
+      if (!c.subject_type) {
+        return c.needs_matching ? '<span class="badge badge-soft-amber badge-subject">Needs Matching</span>' : '';
+      }
+      var label = SUBJECT_LABELS[c.subject_type] || c.subject_type;
+      var name = (c.display && c.display.subject_name) ? ': ' + escapeHtml(c.display.subject_name) : '';
+      var cls = c.subject_type === 'owner' ? 'badge-soft-purple' : c.subject_type === 'tenant' ? 'badge-soft-blue' : c.subject_type === 'team_member' ? 'badge-soft-teal' : 'badge-soft-gray';
+      return '<span class="badge ' + cls + ' badge-subject">' + escapeHtml(label) + name + '</span>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // State
+    // ────────────────────────────────────────────────────────────────
+    var me = null;
+    var allComplaints = [];
+    var teamMembers = [];
+    var vendors = [];
+    var filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false };
+
+    // ────────────────────────────────────────────────────────────────
+    // Card rendering
+    // ────────────────────────────────────────────────────────────────
+    function propertyLine(c) {
+      var d = c.display || {};
+      if (!c.property_id) return '';
+      var name = d.property ? (d.property.name || d.property.address || 'Property') : 'Property';
+      var unit = d.unit_number ? (' &middot; Unit ' + escapeHtml(d.unit_number)) : '';
+      return '<div class="c-meta-line"><span class="fl">Property:</span> <a href="/property-360?property_id=' + encodeURIComponent(c.property_id) + '">' + escapeHtml(name) + '</a>' + unit + '</div>';
+    }
+    function vendorLine(c) {
+      if (!c.vendor_id) return '';
+      var name = (c.display && c.display.vendor_name) || 'Vendor';
+      return '<div class="c-meta-line"><span class="fl">Vendor involved:</span> ' + escapeHtml(name) + '</div>';
+    }
+    function ownershipLine(c) {
+      var d = c.display || {};
+      var parts = [];
+      if (c.owner_team_member_id) parts.push('<div class="c-meta-line"><span class="fl">Owner:</span> ' + escapeHtml(d.owner_team_member_name || 'Unknown') + '</div>');
+      if (c.delegated_to_team_member_id) parts.push('<div class="c-meta-line"><span class="fl">Delegated to:</span> ' + escapeHtml(d.delegated_team_member_name || 'Unknown') + '</div>');
+      return parts.join('');
+    }
+
+    function duplicateCallout(c) {
+      if (c.duplicate_status !== 'suggested' || !c.possible_duplicate_of_id) return '';
+      var dup = (c.display && c.display.possible_duplicate) || null;
+      var snippet = dup && dup.description ? (dup.description.length > 140 ? dup.description.slice(0, 140) + '&hellip;' : dup.description) : 'an existing complaint';
+      return '<div class="dup-callout">' +
+        '<div class="dup-callout-text">&#9888; Possible duplicate of an existing ' + (dup && dup.status ? escapeHtml(dup.status) : '') + ' complaint: &ldquo;' + escapeHtml(snippet) + '&rdquo;</div>' +
+        '<div class="dup-callout-actions">' +
+        '<button class="btn btn-confirm" data-action="dup-confirm" data-id="' + c.id + '">Confirm &mdash; same thing</button>' +
+        '<button class="btn" data-action="dup-dismiss" data-id="' + c.id + '">Dismiss &mdash; different</button>' +
+        '</div></div>';
+    }
+
+    function manageBodyHtml(c) {
+      var sections = '';
+
+      if (c.status === 'held') {
+        sections += '<div class="manage-section">' +
+          '<div class="manage-section-title">Close this held item</div>' +
+          '<div class="manage-hint" style="margin:0 0 8px;">Once this has been handled directly (outside this system, per policy), add a short closure note. This is the only content ever written to a held record.</div>' +
+          '<textarea data-role="held-note" placeholder="What happened, in short &mdash; e.g. &lsquo;Referred to counsel, resolved 9/12, no further action.&rsquo;"></textarea>' +
+          '<div style="margin-top:8px;"><button class="btn-primary" data-action="held-close" data-id="' + c.id + '">Close Held Item</button></div>' +
+          '<div class="manage-msg" data-role="held-msg"></div>' +
+          '</div>';
+      } else {
+        var statusOptions = ['open', 'in_progress', 'blocked', 'resolved'].map(function (s) {
+          return '<option value="' + s + '"' + (s === c.status ? ' selected' : '') + '>' + STATUS_META[s].label + '</option>';
+        }).join('');
+        sections += '<div class="manage-section">' +
+          '<div class="manage-section-title">Change Stage</div>' +
+          '<div class="manage-row">' +
+          '<select data-role="stage-select">' + statusOptions + '</select>' +
+          '</div>' +
+          '<textarea data-role="stage-note" placeholder="Note (required for anything other than Open &rarr; In Progress; required for Resolved &mdash; what was actually done)" style="margin-top:8px;"></textarea>' +
+          '<div style="margin-top:8px;"><button class="btn-primary" data-action="stage-save" data-id="' + c.id + '">Save Stage</button></div>' +
+          '<div class="manage-msg" data-role="stage-msg"></div>' +
+          '</div>';
+
+        var delegateOptions = '<option value="">Not delegated</option>' + teamMembers.map(function (tm) {
+          return '<option value="' + tm.id + '"' + (tm.id === c.delegated_to_team_member_id ? ' selected' : '') + '>' + escapeHtml(tm.full_name || tm.email) + '</option>';
+        }).join('');
+        sections += '<div class="manage-section">' +
+          '<div class="manage-section-title">Delegate</div>' +
+          '<div class="manage-hint" style="margin:0 0 8px;">The owner above stays accountable &mdash; this only changes who&rsquo;s doing the work.</div>' +
+          '<div class="manage-row"><select data-role="delegate-select">' + delegateOptions + '</select>' +
+          '<button class="btn" data-action="delegate-save" data-id="' + c.id + '" style="flex:none;">Save</button></div>' +
+          '<div class="manage-msg" data-role="delegate-msg"></div>' +
+          '</div>';
+      }
+
+      if (c.needs_matching) {
+        var vendorOptions = '<option value="">No vendor</option>' + vendors.map(function (v) {
+          return '<option value="' + v.id + '">' + escapeHtml(v.company_name) + '</option>';
+        }).join('');
+        sections += '<div class="manage-section">' +
+          '<div class="manage-section-title">Attach to a Property / Person / Vendor</div>' +
+          '<div class="manage-hint" style="margin:0 0 8px;">This record couldn&rsquo;t be automatically matched. Attach what you know &mdash; you don&rsquo;t need to fill in everything.</div>' +
+          '<div class="manage-row">' +
+          '<div class="autocomplete" style="flex:1 1 100%;"><input type="text" data-role="match-property-search" placeholder="Search property by name or address&hellip;" autocomplete="off">' +
+          '<div class="autocomplete-list" data-role="match-property-results" hidden></div></div>' +
+          '</div>' +
+          '<div class="manage-row" style="margin-top:8px;">' +
+          '<select data-role="match-subject-type"><option value="">No person subject</option><option value="owner">Owner</option><option value="tenant">Tenant</option><option value="team_member">Team Member</option><option value="property">Property (general)</option></select>' +
+          '<input type="text" data-role="match-subject-id" placeholder="Owner/Tenant/Team Member ID (from AppFolio or Property 360)">' +
+          '</div>' +
+          '<div class="manage-row" style="margin-top:8px;"><select data-role="match-vendor">' + vendorOptions + '</select></div>' +
+          '<div style="margin-top:8px;"><button class="btn-primary" data-action="match-save" data-id="' + c.id + '">Save Match</button></div>' +
+          '<div class="manage-msg" data-role="match-msg"></div>' +
+          '</div>';
+      }
+
+      return sections;
+    }
+
+    function renderCard(c) {
+      var subjCls = c.needs_matching && !c.subject_type ? 'subj-unmatched' : (c.subject_type ? 'subj-' + c.subject_type : '');
+      // held_legal_fair_housing, not status — status flips to 'resolved'
+      // once a held placeholder is closed (POST .../held/close), but the
+      // product doc requires the distinct "Held — Legal/Fair Housing"
+      // label to stay a permanent mark on the record ("an honest,
+      // permanent record that something serious happened and was
+      // handled"), not disappear the moment it's closed and blend back
+      // into an ordinary resolved complaint.
+      var isHeld = c.held_legal_fair_housing;
+      var badges = [categoryBadge(c.category), needsHumanCallBadge(c), blockedSubBadge(c), toneBadge(c), fairHousingBadge(c)].filter(Boolean).join(' ');
+
+      var body;
+      if (isHeld) {
+        var closed = c.resolution_note != null;
+        body = '<div class="held-box' + (closed ? ' held-closed' : '') + '">Held &mdash; Legal / Fair Housing' + (closed ? ' (Closed)' : '') + '</div>' +
+          (closed ? '<div class="c-desc">' + escapeHtml(c.resolution_note) + '</div>' : '<div class="c-desc empty">Awaiting closure &mdash; handled directly, outside this system, per policy. No content is shown here by design.</div>');
+      } else {
+        body = c.description
+          ? '<div class="c-desc">' + escapeHtml(c.description) + '</div>'
+          : '<div class="c-desc empty">No description on file.</div>';
+        if (c.status === 'resolved' && c.resolution_note) {
+          body += '<div class="c-meta-line"><span class="fl">Resolution:</span> ' + escapeHtml(c.resolution_note) + '</div>';
+        }
+      }
+
+      var html = '<div class="c-card ' + subjCls + (isHeld ? ' is-held' : '') + '" data-card-id="' + c.id + '">';
+      html += '<div class="c-top"><div class="c-badges">' + statusBadge(c.status) + subjectChip(c) + badges + '</div><div class="c-date">' + formatDate(c.created_at) + '</div></div>';
+      html += body;
+      html += duplicateCallout(c);
+      html += propertyLine(c) + vendorLine(c) + ownershipLine(c);
+      if (c.source === 'manual_staff' && c.display && c.display.reported_by_name) {
+        html += '<div class="c-meta-line"><span class="fl">Reported by:</span> ' + escapeHtml(c.display.reported_by_name) + '</div>';
+      }
+      html += '<details class="manage"><summary>Manage</summary><div class="manage-body">' + manageBodyHtml(c) + '</div></details>';
+      html += '</div>';
+      return html;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Grouping — subject-type visual separation (product doc Section 4).
+    // Order: Owner-tied, Tenant-tied, then Team Member/Property/
+    // Unmatched grouped together as "Other."
+    // ────────────────────────────────────────────────────────────────
+    function groupBySubject(items) {
+      var groups = { owner: [], tenant: [], other: [] };
+      items.forEach(function (c) {
+        if (c.subject_type === 'owner') groups.owner.push(c);
+        else if (c.subject_type === 'tenant') groups.tenant.push(c);
+        else groups.other.push(c);
+      });
+      return groups;
+    }
+    function renderSubjectGroups(items) {
+      if (!items.length) return '';
+      var groups = groupBySubject(items);
+      var html = '';
+      if (groups.owner.length) {
+        html += '<div class="subject-group"><div class="subject-group-heading sg-owner"><span class="dot"></span>Owner-Tied (' + groups.owner.length + ')</div>' +
+          groups.owner.map(renderCard).join('') + '</div>';
+      }
+      if (groups.tenant.length) {
+        html += '<div class="subject-group"><div class="subject-group-heading sg-tenant"><span class="dot"></span>Tenant-Tied (' + groups.tenant.length + ')</div>' +
+          groups.tenant.map(renderCard).join('') + '</div>';
+      }
+      if (groups.other.length) {
+        html += '<div class="subject-group"><div class="subject-group-heading sg-other"><span class="dot"></span>Other &mdash; Team Member, Property, or Unmatched (' + groups.other.length + ')</div>' +
+          groups.other.map(renderCard).join('') + '</div>';
+      }
+      return html;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Filtering + tiles
+    // ────────────────────────────────────────────────────────────────
+    function applyFilters(items) {
+      return items.filter(function (c) {
+        if (!filters.includeMerged && c.merged_into_id) return false;
+        if (filters.category && c.category !== filters.category) return false;
+        if (filters.status && c.status !== filters.status) return false;
+        if (filters.subjectType === 'unmatched' && !(c.needs_matching && !c.subject_type)) return false;
+        else if (filters.subjectType && filters.subjectType !== 'unmatched' && c.subject_type !== filters.subjectType) return false;
+        if (filters.propertyId && c.property_id !== filters.propertyId) return false;
+        if (filters.q) {
+          var hay = ((c.description || '') + ' ' + (c.resolution_note || '')).toLowerCase();
+          if (hay.indexOf(filters.q.toLowerCase()) === -1) return false;
+        }
+        if (filters.tile === 'needs_attention' && !(c.is_big_deal && c.status !== 'resolved' && !c.merged_into_id)) return false;
+        if (filters.tile === 'blocked' && c.status !== 'blocked') return false;
+        if (filters.tile === 'held' && c.status !== 'held') return false;
+        if (filters.tile === 'duplicates' && c.duplicate_status !== 'suggested') return false;
+        if (filters.tile === 'needs_matching' && !c.needs_matching) return false;
+        return true;
+      });
+    }
+
+    function renderTiles(items) {
+      var active = items.filter(function (c) { return !c.merged_into_id; });
+      var needsAttention = active.filter(function (c) { return c.is_big_deal && c.status !== 'resolved'; }).length;
+      var blocked = active.filter(function (c) { return c.status === 'blocked'; }).length;
+      var held = active.filter(function (c) { return c.status === 'held'; }).length;
+      var duplicates = active.filter(function (c) { return c.duplicate_status === 'suggested'; }).length;
+      var needsMatching = active.filter(function (c) { return c.needs_matching; }).length;
+
+      function tile(key, cls, num, label) {
+        return '<div class="tile ' + cls + (filters.tile === key ? ' tile-active' : '') + '" data-tile="' + key + '">' +
+          '<div class="tile-number">' + num + '</div><div class="tile-label">' + label + '</div></div>';
+      }
+      return '<div class="tiles">' +
+        tile('needs_attention', 'tile-red', needsAttention, 'Needs Attention') +
+        tile('blocked', 'tile-amber', blocked, 'Blocked') +
+        tile('held', 'tile-gray', held, 'Held &mdash; Legal / FH') +
+        tile('duplicates', 'tile-purple', duplicates, 'Possible Duplicates') +
+        tile('needs_matching', 'tile-blue', needsMatching, 'Needs Matching') +
+        '</div>';
+    }
+
+    function renderFilters() {
+      var catButtons = '<button class="filter-btn' + (!filters.category ? ' active' : '') + '" data-filter="category" data-value="">All</button>' +
+        Object.keys(CATEGORY_META).map(function (k) {
+          return '<button class="filter-btn' + (filters.category === k ? ' active' : '') + '" data-filter="category" data-value="' + k + '">' + CATEGORY_META[k].label + '</button>';
+        }).join('');
+      var statusButtons = ['', 'open', 'in_progress', 'blocked', 'resolved', 'held'].map(function (s) {
+        var label = s ? STATUS_META[s].label : 'All';
+        return '<button class="filter-btn' + (filters.status === s ? ' active' : '') + '" data-filter="status" data-value="' + s + '">' + label + '</button>';
+      }).join('');
+      var subjectButtons = [['', 'All'], ['owner', 'Owner'], ['tenant', 'Tenant'], ['team_member', 'Team Member'], ['property', 'Property'], ['unmatched', 'Unmatched']].map(function (pair) {
+        return '<button class="filter-btn' + (filters.subjectType === pair[0] ? ' active' : '') + '" data-filter="subjectType" data-value="' + pair[0] + '">' + pair[1] + '</button>';
+      }).join('');
+
+      var propertyChip = filters.propertyId
+        ? '<div class="property-chip">' + escapeHtml(filters.propertyLabel) + '<button type="button" id="clearPropertyFilter" aria-label="Clear">&times;</button></div>'
+        : '<div class="autocomplete"><input type="text" id="propertyFilterSearch" placeholder="Filter by property&hellip;" autocomplete="off"><div class="autocomplete-list" id="propertyFilterResults" hidden></div></div>';
+
+      var anyActive = filters.category || filters.status || filters.subjectType || filters.q || filters.propertyId || filters.tile || filters.includeMerged;
+
+      return '<div class="filters-bar"><div class="filters">' +
+        '<div class="filter-group"><span class="filter-label">Category</span>' + catButtons + '</div>' +
+        '<div class="filter-group"><span class="filter-label">Status</span>' + statusButtons + '</div>' +
+        '<div class="filter-group"><span class="filter-label">Subject</span>' + subjectButtons + '</div>' +
+        '<div class="filter-group">' + propertyChip + '</div>' +
+        '<div class="filter-search"><input type="text" id="searchInput" placeholder="Search description&hellip;" value="' + escapeHtml(filters.q) + '"></div>' +
+        '<label class="filter-check"><input type="checkbox" id="includeMergedCheck"' + (filters.includeMerged ? ' checked' : '') + '> Include merged/duplicate records</label>' +
+        (anyActive ? '<button class="filter-clear" id="clearFiltersBtn">Clear all filters</button>' : '') +
+        '</div></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Whole-page render
+    // ────────────────────────────────────────────────────────────────
+    function render() {
+      var filtered = applyFilters(allComplaints);
+      // held_legal_fair_housing (permanent), not status — a closed held
+      // item's status becomes 'resolved', but it must stay in its own
+      // distinct group forever, never blended into an ordinary resolved
+      // complaint's subject-type group (see renderCard's isHeld comment).
+      var heldItems = filtered.filter(function (c) { return c.held_legal_fair_housing; });
+      var bigDeal = filtered.filter(function (c) { return c.is_big_deal && !c.held_legal_fair_housing; });
+      var routine = filtered.filter(function (c) { return !c.is_big_deal; });
+
+      var html = renderTiles(allComplaints) + renderFilters();
+
+      html += '<div class="section-block">';
+      html += '<div class="section-heading">Big Deal <span class="count-pill">' + (heldItems.length + bigDeal.length) + '</span></div>';
+      if (!heldItems.length && !bigDeal.length) {
+        html += '<div class="empty">Nothing big-deal matches these filters right now.</div>';
+      } else {
+        if (heldItems.length) {
+          html += '<div class="subject-group"><div class="subject-group-heading"><span class="dot" style="background:#111827;"></span>Held &mdash; Legal / Fair Housing (' + heldItems.length + ')</div>' +
+            heldItems.map(renderCard).join('') + '</div>';
+        }
+        html += renderSubjectGroups(bigDeal);
+      }
+      html += '</div>';
+
+      html += '<details class="subsection routine-toggle" id="routineDetails">' +
+        '<summary>Routine Items <span class="routine-sub">still tracked, not urgent (' + routine.length + ')</span></summary>' +
+        '<div class="subsection-body">' + (routine.length ? renderSubjectGroups(routine) : '<div class="empty">No routine items match these filters.</div>') + '</div>' +
+        '</details>';
+
+      document.getElementById('app').innerHTML = html;
+      wireInteractions();
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Interactions
+    // ────────────────────────────────────────────────────────────────
+    function findCard(id) { return allComplaints.find(function (c) { return c.id === id; }); }
+
+    function replaceComplaintInPlace(updated) {
+      var idx = allComplaints.findIndex(function (c) { return c.id === updated.id; });
+      if (idx !== -1) {
+        // Preserve the display{} block a plain action-route response
+        // won't carry (only the two GET routes call attachDisplayInfo) —
+        // merge onto the existing row rather than overwrite it outright.
+        allComplaints[idx] = Object.assign({}, allComplaints[idx], updated);
+      }
+      render();
+    }
+
+    function post(url, body) {
+      return fetch(url, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }).then(function (res) {
+        return res.json().then(function (json) { return { ok: res.ok, status: res.status, body: json }; });
+      });
+    }
+
+    function wireInteractions() {
+      // Tiles
+      document.querySelectorAll('.tile').forEach(function (el) {
+        el.addEventListener('click', function () {
+          var key = el.getAttribute('data-tile');
+          filters.tile = filters.tile === key ? '' : key;
+          render();
+        });
+      });
+      // Filter pills
+      document.querySelectorAll('.filter-btn').forEach(function (el) {
+        el.addEventListener('click', function () {
+          var field = el.getAttribute('data-filter');
+          filters[field] = el.getAttribute('data-value');
+          render();
+        });
+      });
+      var clearBtn = document.getElementById('clearFiltersBtn');
+      if (clearBtn) clearBtn.addEventListener('click', function () {
+        filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false };
+        render();
+      });
+      var includeMergedCheck = document.getElementById('includeMergedCheck');
+      if (includeMergedCheck) includeMergedCheck.addEventListener('change', function () {
+        filters.includeMerged = includeMergedCheck.checked;
+        render();
+      });
+      var searchInput = document.getElementById('searchInput');
+      if (searchInput) {
+        var searchDebounce = null;
+        searchInput.addEventListener('input', function () {
+          clearTimeout(searchDebounce);
+          var val = searchInput.value;
+          searchDebounce = setTimeout(function () { filters.q = val; render(); document.getElementById('searchInput').focus(); }, 300);
+        });
+      }
+      wirePropertyFilterAutocomplete();
+      var clearPropertyFilterBtn = document.getElementById('clearPropertyFilter');
+      if (clearPropertyFilterBtn) clearPropertyFilterBtn.addEventListener('click', function () {
+        filters.propertyId = null; filters.propertyLabel = ''; render();
+      });
+
+      // Duplicate confirm/dismiss
+      document.querySelectorAll('[data-action="dup-confirm"], [data-action="dup-dismiss"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id');
+          var confirmAction = btn.getAttribute('data-action') === 'dup-confirm';
+          btn.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(id) + '/duplicate/' + (confirmAction ? 'confirm' : 'dismiss'), {})
+            .then(function (r) {
+              if (!r.ok) { showToast(r.body.error || 'Could not save this.'); btn.disabled = false; return; }
+              showToast(confirmAction ? 'Merged as a duplicate.' : 'Dismissed &mdash; kept as a separate record.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { showToast('Network error.'); btn.disabled = false; });
+        });
+      });
+
+      // Manage panels — wired per card via delegated lookups on open
+      document.querySelectorAll('.c-card').forEach(function (cardEl) {
+        var id = cardEl.getAttribute('data-card-id');
+        var c = findCard(id);
+        if (!c) return;
+        wireManagePanel(cardEl, c);
+      });
+    }
+
+    function wireManagePanel(cardEl, c) {
+      // Stage change
+      var stageSave = cardEl.querySelector('[data-action="stage-save"]');
+      if (stageSave) {
+        stageSave.addEventListener('click', function () {
+          var select = cardEl.querySelector('[data-role="stage-select"]');
+          var note = cardEl.querySelector('[data-role="stage-note"]');
+          var msgEl = cardEl.querySelector('[data-role="stage-msg"]');
+          msgEl.textContent = ''; msgEl.className = 'manage-msg';
+          stageSave.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/stage', { to_status: select.value, note: note.value.trim() || undefined })
+            .then(function (r) {
+              stageSave.disabled = false;
+              if (!r.ok) { msgEl.textContent = r.body.error || 'Could not save.'; msgEl.className = 'manage-msg err'; return; }
+              showToast('Stage updated.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { stageSave.disabled = false; msgEl.textContent = 'Network error.'; msgEl.className = 'manage-msg err'; });
+        });
+      }
+      // Delegate
+      var delegateSave = cardEl.querySelector('[data-action="delegate-save"]');
+      if (delegateSave) {
+        delegateSave.addEventListener('click', function () {
+          var select = cardEl.querySelector('[data-role="delegate-select"]');
+          var msgEl = cardEl.querySelector('[data-role="delegate-msg"]');
+          if (!select.value) { msgEl.textContent = 'Choose someone to delegate to first.'; msgEl.className = 'manage-msg err'; return; }
+          msgEl.textContent = ''; msgEl.className = 'manage-msg';
+          delegateSave.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/delegate', { delegated_to_team_member_id: select.value })
+            .then(function (r) {
+              delegateSave.disabled = false;
+              if (!r.ok) { msgEl.textContent = r.body.error || 'Could not save.'; msgEl.className = 'manage-msg err'; return; }
+              showToast('Delegated.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { delegateSave.disabled = false; msgEl.textContent = 'Network error.'; msgEl.className = 'manage-msg err'; });
+        });
+      }
+      // Held close
+      var heldClose = cardEl.querySelector('[data-action="held-close"]');
+      if (heldClose) {
+        heldClose.addEventListener('click', function () {
+          var note = cardEl.querySelector('[data-role="held-note"]');
+          var msgEl = cardEl.querySelector('[data-role="held-msg"]');
+          if (!note.value.trim()) { msgEl.textContent = 'Add a closure note first.'; msgEl.className = 'manage-msg err'; return; }
+          msgEl.textContent = ''; msgEl.className = 'manage-msg';
+          heldClose.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/held/close', { resolution_note: note.value.trim() })
+            .then(function (r) {
+              heldClose.disabled = false;
+              if (!r.ok) { msgEl.textContent = r.body.error || 'Could not save.'; msgEl.className = 'manage-msg err'; return; }
+              showToast('Held item closed.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { heldClose.disabled = false; msgEl.textContent = 'Network error.'; msgEl.className = 'manage-msg err'; });
+        });
+      }
+      // Match (attach orphan)
+      var matchSave = cardEl.querySelector('[data-action="match-save"]');
+      if (matchSave) {
+        var matchPropertyId = null;
+        var searchInput = cardEl.querySelector('[data-role="match-property-search"]');
+        var resultsBox = cardEl.querySelector('[data-role="match-property-results"]');
+        if (searchInput) {
+          var debounce = null;
+          searchInput.addEventListener('input', function () {
+            clearTimeout(debounce);
+            var q = searchInput.value.trim();
+            if (q.length < 2) { resultsBox.hidden = true; return; }
+            debounce = setTimeout(function () {
+              fetch('/api/hub/search-properties?q=' + encodeURIComponent(q), { credentials: 'include' })
+                .then(function (r) { return r.ok ? r.json() : []; })
+                .then(function (results) {
+                  if (!results.length) { resultsBox.hidden = true; return; }
+                  resultsBox.innerHTML = results.map(function (p) {
+                    return '<div class="autocomplete-item" data-id="' + escapeHtml(p.id) + '" data-name="' + escapeHtml(p.name || '') + '">' + escapeHtml(p.name || p.address || 'Property') +
+                      (p.address ? '<span class="ac-sub">' + escapeHtml(p.address) + '</span>' : '') + '</div>';
+                  }).join('');
+                  resultsBox.hidden = false;
+                  resultsBox.querySelectorAll('.autocomplete-item').forEach(function (item) {
+                    item.addEventListener('click', function () {
+                      matchPropertyId = item.getAttribute('data-id');
+                      searchInput.value = item.getAttribute('data-name');
+                      resultsBox.hidden = true;
+                    });
+                  });
+                });
+            }, 200);
+          });
+        }
+        matchSave.addEventListener('click', function () {
+          var subjectType = cardEl.querySelector('[data-role="match-subject-type"]').value;
+          var subjectId = cardEl.querySelector('[data-role="match-subject-id"]').value.trim();
+          var vendorId = cardEl.querySelector('[data-role="match-vendor"]').value;
+          var msgEl = cardEl.querySelector('[data-role="match-msg"]');
+          if (!matchPropertyId && !subjectType && !vendorId) {
+            msgEl.textContent = 'Provide at least a property, a subject, or a vendor.'; msgEl.className = 'manage-msg err'; return;
+          }
+          if (subjectType && subjectType !== 'property' && !subjectId) {
+            msgEl.textContent = 'Enter the ID for that subject type, or leave subject blank.'; msgEl.className = 'manage-msg err'; return;
+          }
+          msgEl.textContent = ''; msgEl.className = 'manage-msg';
+          matchSave.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/match', {
+            property_id: matchPropertyId || undefined,
+            subject_type: subjectType || undefined,
+            subject_id: (subjectType && subjectType !== 'property') ? subjectId : undefined,
+            vendor_id: vendorId || undefined,
+          })
+            .then(function (r) {
+              matchSave.disabled = false;
+              if (!r.ok) { msgEl.textContent = r.body.error || 'Could not save.'; msgEl.className = 'manage-msg err'; return; }
+              showToast('Attached.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { matchSave.disabled = false; msgEl.textContent = 'Network error.'; msgEl.className = 'manage-msg err'; });
+        });
+      }
+    }
+
+    function wirePropertyFilterAutocomplete() {
+      var input = document.getElementById('propertyFilterSearch');
+      if (!input) return;
+      var resultsBox = document.getElementById('propertyFilterResults');
+      var debounce = null;
+      input.addEventListener('input', function () {
+        clearTimeout(debounce);
+        var q = input.value.trim();
+        if (q.length < 2) { resultsBox.hidden = true; return; }
+        debounce = setTimeout(function () {
+          fetch('/api/hub/search-properties?q=' + encodeURIComponent(q), { credentials: 'include' })
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (results) {
+              if (!results.length) { resultsBox.hidden = true; return; }
+              resultsBox.innerHTML = results.map(function (p) {
+                return '<div class="autocomplete-item" data-id="' + escapeHtml(p.id) + '" data-name="' + escapeHtml(p.name || '') + '">' + escapeHtml(p.name || p.address || 'Property') +
+                  (p.address ? '<span class="ac-sub">' + escapeHtml(p.address) + '</span>' : '') + '</div>';
+              }).join('');
+              resultsBox.hidden = false;
+              resultsBox.querySelectorAll('.autocomplete-item').forEach(function (item) {
+                item.addEventListener('click', function () {
+                  filters.propertyId = item.getAttribute('data-id');
+                  filters.propertyLabel = item.getAttribute('data-name');
+                  render();
+                });
+              });
+            });
+        }, 200);
+      });
+      document.addEventListener('click', function (e) {
+        if (resultsBox && !e.target.closest('.autocomplete')) resultsBox.hidden = true;
+      });
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Load + auth
+    // ────────────────────────────────────────────────────────────────
+    function showNoAccess() {
+      document.getElementById('headerRight').innerHTML = '';
+      document.getElementById('app').innerHTML =
+        '<div class="error-page"><h2>No access to Complaint Tracking</h2>' +
+        '<p>This tool is restricted to Peter and the Director of Operations. If you need to report something, use ' +
+        '<a href="/complaint-tracking/report">Report an issue</a> instead.</p>' +
+        '<p style="margin-top:14px;"><a href="/">&larr; Back to the Hub</a></p></div>';
+    }
+    function showLoadError(message) {
+      document.getElementById('app').innerHTML = '<div class="error-page"><h2>Couldn&rsquo;t load this</h2><p>' + escapeHtml(message) + '</p></div>';
+    }
+
+    function loadComplaints() {
+      return fetch('/api/complaint-tracking', { credentials: 'include' })
+        .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
+        .then(function (r) {
+          if (!r.ok) throw new Error(r.body.error || 'Could not load complaints.');
+          allComplaints = r.body.complaints || [];
+          document.getElementById('lastUpdatedStamp') && (document.getElementById('lastUpdatedStamp').textContent = 'Updated ' + formatDateTime(new Date().toISOString()));
+        });
+    }
+    function loadTeamMembers() {
+      return fetch('/api/complaint-tracking/team-members', { credentials: 'include' })
+        .then(function (res) { return res.ok ? res.json() : { team_members: [] }; })
+        .then(function (body) { teamMembers = body.team_members || []; })
+        .catch(function () { teamMembers = []; });
+    }
+    function loadVendors() {
+      return fetch('/api/complaint-tracking/vendors', { credentials: 'include' })
+        .then(function (res) { return res.ok ? res.json() : { vendors: [] }; })
+        .then(function (body) { vendors = body.vendors || []; })
+        .catch(function () { vendors = []; });
+    }
+
+    function renderHeaderRight() {
+      document.getElementById('headerRight').innerHTML =
+        '<span class="last-updated" id="lastUpdatedStamp"></span>' +
+        '<button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>' +
+        '<a class="btn-report" href="/complaint-tracking/report">+ Report an issue</a>' +
+        '<div style="text-align:right;line-height:1.3;"><div class="hr-user">' + escapeHtml(me.name) + '</div>' +
+        '<div class="hr-role">' + (me.role === 'admin' ? 'Admin' : 'Director of Operations') + '</div></div>' +
+        '<a class="btn-plain" href="/">&larr; Hub</a>' +
+        '<a class="btn-signout" href="/logout">Sign Out</a>';
+      document.getElementById('refreshBtn').addEventListener('click', function () {
+        document.getElementById('app').innerHTML = '<div class="spinner-wrap"><span class="spinner"></span><div>Loading&hellip;</div></div>';
+        loadComplaints().then(render).catch(function (err) { showLoadError(err.message); });
+      });
+    }
+
+    function init() {
+      fetch('/api/complaint-tracking/auth/me', { credentials: 'include' })
+        .then(function (res) {
+          if (res.status === 403) { showNoAccess(); return null; }
+          if (!res.ok) { window.location.href = '/login'; return null; }
+          return res.json();
+        })
+        .then(function (meBody) {
+          if (!meBody) return;
+          me = meBody;
+          renderHeaderRight();
+          return Promise.all([loadComplaints(), loadTeamMembers(), loadVendors()]).then(render);
+        })
+        .catch(function (err) { showLoadError(err.message || 'Something went wrong.'); });
+    }
+
+    init();
+  </script>
+</body>
+</html>

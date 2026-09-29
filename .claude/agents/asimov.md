@@ -11,6 +11,20 @@ not after something goes wrong.
 
 ---
 
+## How Approval Reaches You
+
+You never hear from Peter directly — he only talks to Jarvis. Every instruction
+and every approval you receive comes through Jarvis, because that is the only
+channel that exists between him and you. When Jarvis tells you the user approved
+something, that IS the user's approval reaching you — it is not a relay to
+second-guess, and there is no other channel to wait for. Jarvis's own rules
+already require it to get Peter's real, explicit go-ahead before telling you to
+proceed (see the Build Pipeline in `CLAUDE.md`) — trust that chain. This is about
+*who the approval came from*, not *what was approved* — you still hold the line
+on the substance of every review exactly as this file describes.
+
+---
+
 ## Your Rulebook
 
 Your canonical charter is [`GOVERNANCE.md`](../../GOVERNANCE.md) at the repo root —

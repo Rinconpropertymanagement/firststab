@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Option A — Directory + Drill-down</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0c; --surface:#131518; --surface-2:#1a1d21;
+    --border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.15);
+    --ink:#f3f4f2; --muted:#9aa0a1; --faint:#5c6265;
+    --accent:#f0a83c; --accent-soft:rgba(240,168,60,.12);
+    --good:#3ddc9a; --good-bg:rgba(61,220,154,.13);
+    --bad:#f66354; --bad-bg:rgba(246,99,84,.14);
+    --shadow-md:0 20px 44px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.4);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:'Bricolage Grotesque',var(--sans);
+  }
+  *,*::before,*::after{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);font-size:14px;background:var(--bg);color:var(--ink);}
+  .strip{display:flex;align-items:center;gap:8px;padding:9px 20px;background:var(--surface);
+    border-bottom:1px solid var(--border);font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;
+    color:var(--muted);text-transform:uppercase;}
+  .strip b{color:var(--accent);font-weight:600;}
+  .page{max-width:800px;margin:0 auto;padding:36px 24px 64px;}
+  h1{font-family:var(--display);font-weight:700;font-size:30px;letter-spacing:-.02em;margin-bottom:5px;}
+  p.sub{color:var(--muted);font-size:13.5px;margin-bottom:30px;}
+  .pod{margin-bottom:24px;}
+  .pod-head{display:flex;align-items:center;gap:9px;margin-bottom:10px;}
+  .dept-dot{width:7px;height:7px;border-radius:50%;flex:none;}
+  .pod-name{font-weight:600;font-size:13px;}
+  .pod-count{font-family:var(--mono);color:var(--faint);font-size:11px;margin-left:auto;}
+  .roster{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+    box-shadow:var(--shadow-md);overflow:hidden;}
+  .person-row{display:flex;align-items:center;gap:12px;padding:12px 16px;
+    border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s ease;}
+  .person-row:last-child{border-bottom:none;}
+  .person-row:hover{background:var(--surface-2);}
+  .avatar{width:28px;height:28px;border-radius:50%;flex:none;display:flex;align-items:center;
+    justify-content:center;color:#0a0b0c;font-family:var(--mono);font-size:10.5px;font-weight:700;}
+  .person-name{font-weight:500;font-size:13.5px;}
+  .person-meta{color:var(--faint);font-size:11.5px;margin-left:9px;font-family:var(--mono);}
+  .row-flag{width:7px;height:7px;border-radius:50%;background:var(--bad);margin-left:auto;flex:none;
+    box-shadow:0 0 8px rgba(246,99,84,.55);}
+  .chev{color:var(--faint);display:flex;margin-left:10px;transition:transform .12s ease, color .12s ease;}
+  .person-row:hover .chev{transform:translateX(2px);color:var(--accent);}
+  .divider{display:flex;align-items:center;gap:12px;margin:38px 0 18px;color:var(--faint);
+    font-size:11px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;}
+  .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--border);}
+  .example-tag{display:inline-block;background:var(--accent-soft);color:var(--accent);
+    font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.05em;padding:3px 9px;
+    border-radius:999px;margin-bottom:10px;text-transform:uppercase;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px 22px 22px;
+    box-shadow:var(--shadow-md);}
+  .card-head{display:flex;align-items:center;gap:11px;margin-bottom:16px;}
+  .card-head .avatar{width:36px;height:36px;font-size:13px;}
+  .card-head .who-name{font-weight:600;font-size:15px;}
+  .card-head .who-pod{color:var(--faint);font-size:11.5px;}
+  .backlink{font-size:12px;color:var(--accent);margin-left:auto;display:inline-flex;
+    align-items:center;gap:5px;font-weight:500;cursor:pointer;}
+  .scroll{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:560px;}
+  th{text-align:right;color:var(--faint);font-weight:600;padding:0 5px 8px;font-family:var(--mono);
+    font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;}
+  th:first-child,td.label{text-align:left;}
+  td{padding:5px;vertical-align:middle;}
+  tr.metric-row td{padding-top:12px;border-top:1px solid var(--border);}
+  tr.metric-row:first-child td{border-top:none;}
+  .metric-label{font-weight:600;font-size:13px;display:block;color:var(--ink);}
+  .metric-flag{color:var(--faint);font-size:10.5px;font-family:var(--mono);display:block;margin-top:2px;}
+  .goal-col{color:var(--muted);font-family:var(--mono);font-size:11.5px;text-align:right;
+    white-space:nowrap;}
+  .cell{text-align:right;font-family:var(--mono);font-weight:600;font-size:12.5px;}
+  .cell .chip{display:inline-block;min-width:44px;padding:4px 7px;border-radius:6px;}
+  .chip.hit{background:var(--good-bg);color:var(--good);}
+  .chip.miss{background:var(--bad-bg);color:var(--bad);}
+  .avg-col{text-align:right;font-family:var(--mono);font-weight:700;font-size:12.5px;}
+  .avg-col .chip{background:var(--surface-2);color:var(--ink);border:1px solid var(--border-strong);}
+  .caption{color:var(--faint);font-size:11.5px;margin-top:16px;line-height:1.6;}
+</style>
+</head>
+<body>
+  <div class="strip"><b>MOCKUP</b>&nbsp;— placeholder people &amp; numbers, static only, nothing here is wired up yet</div>
+  <div class="page">
+    <h1>Scoreboard</h1>
+    <p class="sub">Pick a person to see their weekly numbers against goal.</p>
+
+    <div class="pod">
+      <div class="pod-head"><span class="dept-dot" style="background:#5b8def"></span><span class="pod-name">Property Management</span><span class="pod-count">4 people</span></div>
+      <div class="roster">
+        <div class="person-row"><span class="avatar" style="background:#5b8def">MS</span><span class="person-name">Maria S.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#5b8def">DK</span><span class="person-name">Devon K.<span class="person-meta">3 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#5b8def">PN</span><span class="person-name">Priya N.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#5b8def">CL</span><span class="person-name">Chris L.<span class="person-meta">3 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+      </div>
+    </div>
+
+    <div class="pod">
+      <div class="pod-head"><span class="dept-dot" style="background:#e8935f"></span><span class="pod-name">Maintenance Coordination</span><span class="pod-count">3 people</span></div>
+      <div class="roster">
+        <div class="person-row"><span class="avatar" style="background:#e8935f">ST</span><span class="person-name">Sam T.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#e8935f">JB</span><span class="person-name">Jordan B.<span class="person-meta">3 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#e8935f">ER</span><span class="person-name">Elena R.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+      </div>
+    </div>
+
+    <div class="pod">
+      <div class="pod-head"><span class="dept-dot" style="background:#a78bfa"></span><span class="pod-name">Leasing</span><span class="pod-count">3 people</span></div>
+      <div class="roster">
+        <div class="person-row"><span class="avatar" style="background:#a78bfa">AP</span><span class="person-name">Alex P.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#a78bfa">TW</span><span class="person-name">Taylor W.<span class="person-meta">3 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#a78bfa">MD</span><span class="person-name">Morgan D.<span class="person-meta">3 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+      </div>
+    </div>
+
+    <div class="pod">
+      <div class="pod-head"><span class="dept-dot" style="background:#f472b6"></span><span class="pod-name">Owner Relations &amp; Accounting</span><span class="pod-count">2 people</span></div>
+      <div class="roster">
+        <div class="person-row"><span class="avatar" style="background:#f472b6">NF</span><span class="person-name">Nina F.<span class="person-meta">2 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#f472b6">OG</span><span class="person-name">Owen G.<span class="person-meta">2 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+      </div>
+    </div>
+
+    <div class="pod">
+      <div class="pod-head"><span class="dept-dot" style="background:#2dd4bf"></span><span class="pod-name">Marketing</span><span class="pod-count">2 people</span></div>
+      <div class="roster">
+        <div class="person-row"><span class="avatar" style="background:#2dd4bf">JC</span><span class="person-name">Jamie C.<span class="person-meta">2 metrics</span></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+        <div class="person-row"><span class="avatar" style="background:#2dd4bf">RH</span><span class="person-name">Riley H.<span class="person-meta">2 metrics</span></span><span class="row-flag"></span><span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></span></div>
+      </div>
+    </div>
+
+    <div class="divider">clicking a name would open this</div>
+
+    <span class="example-tag">Example — Maria S.</span>
+    <div class="card">
+      <div class="card-head">
+        <span class="avatar" style="background:#5b8def">MS</span>
+        <div><div class="who-name">Maria S.</div><div class="who-pod">Property Management</div></div>
+        <a class="backlink"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="11 6 5 12 11 18"/></svg> All people</a>
+      </div>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Metric</th><th>Goal</th><th>Aug 18</th><th>Aug 25</th><th>Sep 1</th><th>Sep 8</th><th>Avg</th></tr></thead>
+          <tbody>
+            <tr class="metric-row">
+              <td class="label"><span class="metric-label">Renewal offers sent 60+ days out</span></td>
+              <td class="goal-col">≥ 90%</td>
+              <td class="cell"><span class="chip miss">88%</span></td>
+              <td class="cell"><span class="chip hit">90%</span></td>
+              <td class="cell"><span class="chip hit">94%</span></td>
+              <td class="cell"><span class="chip hit">96%</span></td>
+              <td class="avg-col"><span class="chip">92%</span></td>
+            </tr>
+            <tr class="metric-row">
+              <td class="label"><span class="metric-label">Open maintenance tickets &gt;7 days</span><span class="metric-flag">lower is better</span></td>
+              <td class="goal-col">≤ 3</td>
+              <td class="cell"><span class="chip miss">4</span></td>
+              <td class="cell"><span class="chip hit">3</span></td>
+              <td class="cell"><span class="chip hit">3</span></td>
+              <td class="cell"><span class="chip hit">2</span></td>
+              <td class="avg-col"><span class="chip">3</span></td>
+            </tr>
+            <tr class="metric-row">
+              <td class="label"><span class="metric-label">Resident satisfaction score</span></td>
+              <td class="goal-col">≥ 4.5</td>
+              <td class="cell"><span class="chip hit">4.5</span></td>
+              <td class="cell"><span class="chip hit">4.6</span></td>
+              <td class="cell"><span class="chip hit">4.7</span></td>
+              <td class="cell"><span class="chip hit">4.6</span></td>
+              <td class="avg-col"><span class="chip">4.6</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="caption">Green means the week cleared goal, red means it didn't — this is what opens after picking a name from the directory above.</p>
+    </div>
+  </div>
+</body>
+</html>

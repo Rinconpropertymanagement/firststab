@@ -432,7 +432,6 @@
 
     /* ── Comp map ── */
     .map-wrap {
-      position: relative; /* anchors .maptiler-logo-control to the map, not the page */
       border: 1px solid #e5e7eb;
       border-radius: 8px;
       overflow: hidden;
@@ -440,13 +439,6 @@
     }
     #compMap { height: 340px; width: 100%; background: #f3f4f6; }
     .leaflet-popup-content { font-family: inherit; }
-    /* MapTiler's free-plan terms require this logo (linking to maptiler.com)
-       be shown on the map — see initMap()'s comment for the source. Sized
-       down from MapTiler's own default so it doesn't dominate a map this
-       small; kept out of Leaflet's other bottom-left controls (none exist
-       today) via Leaflet's own control-corner positioning. */
-    .maptiler-logo-control { background: none; }
-    .maptiler-logo-control img { display: block; height: 18px; width: auto; }
 
     /* ── Comp cards ── */
     .comp-cards {
@@ -494,50 +486,6 @@
       padding-top: 8px;
       border-top: 1px solid #f3f4f6;
     }
-
-    /* ── Comps Used / Not Used split (see buildNotUsedRow()) ──
-       This report gets printed/emailed as a static document — no click-to-
-       expand, nothing interactive. Both sections are always fully rendered;
-       "not used" is just visually secondary/compact (smaller, muted,
-       one-line-per-comp) so it doesn't read as a wall of irrelevant
-       properties, not hidden or collapsed. */
-    .comp-subheading {
-      font-size: 13px;
-      font-weight: 700;
-      color: #111827;
-      margin: 4px 0 10px;
-    }
-    .comp-subheading-secondary {
-      color: #6b7280;
-      font-weight: 600;
-    }
-    .comp-notused-list {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-      margin-bottom: 32px;
-    }
-    .comp-notused-row {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      padding: 7px 12px;
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
-      font-size: 12px;
-    }
-    .comp-notused-row .cn-addr {
-      font-weight: 600;
-      color: #4b5563;
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .comp-notused-row .cn-price { font-weight: 600; color: #6b7280; flex: none; }
-    .comp-notused-row .cn-reason { flex: none; color: #9ca3af; font-style: italic; }
 
     /* ── Market Trends (zip-level area context, distinct from the
        property-specific comps/recommendation above it) ── */
@@ -657,15 +605,6 @@
       .report-band, .report-body { padding: 18px 16px; }
       .report-footer { padding: 16px; }
       #compMap { height: 240px; }
-      /* Compact "not used" rows are a single flex line (address, price,
-         reason) at normal width — at phone width there isn't enough room
-         for all three, and address (flex:1) was measured collapsing to
-         0px (confirmed live in the Browser pane at 280px CSS width),
-         silently hiding which property the row is even about. Wrapping
-         lets address take its own full-width line, with price/reason
-         sharing the line below. */
-      .comp-notused-row { flex-wrap: wrap; row-gap: 2px; }
-      .comp-notused-row .cn-addr { flex-basis: 100%; white-space: normal; }
     }
 
     /* ── Print ── */
@@ -1416,31 +1355,8 @@
     );
   }
 
-  // ── Comp map (Leaflet + MapTiler tiles) ─────────────────────────────────
-  // Was OpenStreetMap's own tile servers (no key required) — switched
-  // 2026-09-20 after those servers started returning "Access blocked"
-  // under this tool's real usage (confirmed live via curl: OSM's tile
-  // servers are documented, operations.osmfoundation.org/policies/tiles/,
-  // as casual/personal use only, not for a real application's traffic).
-  // MapTiler tiles need a key, fetched once from this server (which reads
-  // it from MAPTILER_API_KEY) via loadMapConfig() below — see that
-  // function and GET /api/rental-analysis/map-config in server.js for why
-  // this key is handed to the browser at all, unlike RentCast/Google Places.
+  // ── Comp map (Leaflet + OpenStreetMap, no API key required) ────────────
   let compMapInstance = null;
-  let mapTileKey = null;
-
-  async function loadMapConfig() {
-    try {
-      const res = await fetch(API_BASE + '/api/rental-analysis/map-config');
-      if (!res.ok) return;
-      const data = await res.json().catch(() => null);
-      mapTileKey = (data && data.tileKey) || null;
-    } catch (err) {
-      console.error(err);
-      // mapTileKey stays null — initMap() below renders the map without
-      // background tiles rather than failing the whole report.
-    }
-  }
 
   function hasNumericCoords(obj) {
     return obj != null && typeof obj.latitude === 'number' && typeof obj.longitude === 'number';
@@ -1481,36 +1397,10 @@
     const map = L.map(el, { scrollWheelZoom: false });
     compMapInstance = map;
 
-    if (mapTileKey) {
-      // URL format, options (crossOrigin, attribution text) and the
-      // free-plan logo requirement below all verified live against
-      // MapTiler's own current docs (docs.maptiler.com/leaflet/examples/
-      // raster-tiles-in-leaflet-js/ and .../how-to-add-maptiler-
-      // attribution-to-a-map/), 2026-09-20 — not assumed syntax.
-      L.tileLayer('https://api.maptiler.com/maps/streets-v4/256/{z}/{x}/{y}.png?key=' + mapTileKey, {
-        maxZoom: 19,
-        crossOrigin: true,
-        attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank" rel="noopener">&copy; MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">&copy; OpenStreetMap contributors</a>',
-      }).addTo(map);
-
-      // MapTiler's free-plan terms require their logo be shown on the map,
-      // in addition to the text attribution above (which Leaflet's own
-      // attribution control already renders automatically). Not required
-      // on a paid plan — if Rincon ever upgrades, this can come out.
-      const mapTilerLogo = L.control({ position: 'bottomleft' });
-      mapTilerLogo.onAdd = function () {
-        const div = L.DomUtil.create('div', 'maptiler-logo-control leaflet-control');
-        div.innerHTML = '<a href="https://www.maptiler.com" target="_blank" rel="noopener" aria-label="MapTiler"><img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler logo"></a>';
-        return div;
-      };
-      mapTilerLogo.addTo(map);
-    } else {
-      // No key configured (MAPTILER_API_KEY unset, or the config fetch
-      // failed) — render the map without background tiles rather than
-      // requesting tiles MapTiler would reject. Markers/popups below still
-      // work; #compMap's own CSS background (#f3f4f6) fills the gap.
-      console.warn('[rental-analysis] No MapTiler key available — comp map rendering without background tiles.');
-    }
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+    }).addTo(map);
 
     const points = [];
 
@@ -1576,15 +1466,6 @@
     setTimeout(() => map.invalidateSize(), 0);
   }
 
-  // buildCompCard() only ever runs on comps with no exclusion_reason (see
-  // renderReport()'s usedComps/notUsedComps split below) — every comp
-  // rendered as a full card here genuinely contributed weight to the
-  // recommended/raw ranges, so there is no "not counted" case to handle in
-  // this function any more. A Rincon-managed comp can still land here (e.g.
-  // a trusted, self-sourced LeadSimple Move-Ins lease, counted at full
-  // weight) — the RINCON MANAGED badge below stays for that real case, it's
-  // just no longer paired with any "internal reference only" caveat, since
-  // a comp that reaches this function was never excluded to begin with.
   function buildCompCard(c) {
     const sm = statusMeta(c.listing_status);
     let badges = '<span class="comp-badge b-' + sm.cls + '">' +
@@ -1608,34 +1489,18 @@
         '<div class="comp-badges">' + badges + '</div>' +
         (c.narrative ? '<div class="comp-narrative">' + esc(c.narrative) + '</div>' : '') +
         (c.is_estimated_price ? '<div style="font-size:10px;color:#9ca3af;margin-top:6px">*Price is an estimate, not a confirmed listing amount.</div>' : '') +
-      '</div>'
-    );
-  }
-
-  // One-line label per exclusion_reason code (server-computed, lib/
-  // weighting.js's exclusionReason() — see server.js/router.js's POST /run).
-  // Deliberately short: this section is meant to read as compact/secondary,
-  // not a second wall of detail cards (Peter's own framing).
-  const EXCLUSION_REASON_LABELS = {
-    rincon_managed: 'Rincon-managed property',
-    property_type_mismatch: 'different property type',
-    size_mismatch: 'different size',
-  };
-
-  // Compact single-line row for a comp that contributed zero weight to
-  // either range (any exclusion_reason) — address, price, and a short
-  // reason, nothing else. Always fully rendered (this report gets printed/
-  // emailed as a static document — no expand/collapse is possible once
-  // that happens), just visually secondary next to buildCompCard()'s full
-  // detail cards above it.
-  function buildNotUsedRow(c) {
-    const reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
-    const priceLabel = c.monthly_rent != null ? fmtMoney(c.monthly_rent) + '/mo' : 'Price unavailable';
-    return (
-      '<div class="comp-notused-row">' +
-        '<span class="cn-addr">' + esc(c.address || 'Unknown address') + '</span>' +
-        '<span class="cn-price">' + priceLabel + '</span>' +
-        '<span class="cn-reason">' + esc(reasonLabel) + '</span>' +
+        // RINCON MANAGED (badge above) stays true/shown for any Rincon-owned
+        // comp either way. This "not counted" note only applies when the
+        // comp is ALSO excluded from the recommended range — a comp from a
+        // trusted, self-sourced source (e.g. LeadSimple Move-Ins, Rincon's
+        // own confirmed new-tenant leases) is Rincon-managed by construction
+        // but IS counted at full weight, so it must not say "internal
+        // reference only, not counted" here. is_excluded_rincon_managed is
+        // computed server-side (server.js, POST /run) from the one shared
+        // lib/weighting.js#isExcludedRinconManaged() check — this file has
+        // no way to require() that module directly, so it just renders the
+        // verdict server.js already decided, rather than re-deriving it.
+        (c.is_excluded_rincon_managed ? '<div style="font-size:10px;color:var(--violet);margin-top:6px;font-weight:600">Internal reference only &mdash; not an independent market comp.</div>' : '') +
       '</div>'
     );
   }
@@ -1652,25 +1517,9 @@
     const hasRecommendation = analysis.recommended_rent_low != null && analysis.recommended_rent_high != null;
 
     const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(analysis, comps) : '';
-
-    // Two always-visible, statically-rendered parts (this report gets
-    // printed/emailed — no click-to-expand is possible once that happens):
-    // comps that actually contributed weight to the range, and everything
-    // else reviewed but not used, folded into one unified "not used"
-    // concept regardless of which of the three reasons applies (property
-    // type, size, or Rincon-managed — see exclusion_reason, computed
-    // server-side by lib/weighting.js's exclusionReason()).
-    const usedComps = comps.filter(c => !c.exclusion_reason);
-    const notUsedComps = comps.filter(c => c.exclusion_reason);
-
-    const usedCardsHtml = usedComps.length
-      ? usedComps.map(buildCompCard).join('')
-      : '<div style="grid-column:1/-1;color:#9ca3af;font-size:13px;padding:12px 0">' +
-          (comps.length
-            ? 'None of the comps found contributed to this range — see reviewed-but-not-used properties below.'
-            : 'No comparable properties were returned for this analysis.') +
-        '</div>';
-    const notUsedRowsHtml = notUsedComps.map(buildNotUsedRow).join('');
+    const cardsHtml = comps.length
+      ? comps.map(buildCompCard).join('')
+      : '<div style="grid-column:1/-1;color:#9ca3af;font-size:13px;padding:12px 0">No comparable properties were returned for this analysis.</div>';
 
     const html =
       '<div class="report-band">' +
@@ -1706,13 +1555,7 @@
 
         (chartHtml ? '<div class="section-heading">Comparable Rentals</div>' + chartHtml : '') +
 
-        '<div class="comp-subheading">Comps Used in This Range</div>' +
-        '<div class="comp-cards">' + usedCardsHtml + '</div>' +
-
-        (notUsedComps.length ?
-          '<div class="comp-subheading comp-subheading-secondary">Other Nearby Properties Reviewed, Not Used</div>' +
-          '<div class="comp-notused-list">' + notUsedRowsHtml + '</div>'
-        : '') +
+        '<div class="comp-cards">' + cardsHtml + '</div>' +
 
         buildMarketTrendsSection(marketData, analysis) +
 
@@ -1736,7 +1579,6 @@
 
   // ── Init ──────────────────────────────────────────────────────────────
   loadUsers();
-  loadMapConfig();
 </script>
 
 </body>

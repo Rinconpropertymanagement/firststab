@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Report an Issue — Rincon Management</title>
+  <style>
+    /* Same house palette as every other Hub dashboard (security-deposit/
+       dashboard, property-360/dashboard, maintenance-history/dashboard) —
+       gray/blue, Tailwind-ish tokens, reused verbatim, not reinvented.
+       Deliberately the smallest, plainest page in this tool: any team
+       member with a Hub login reaches this — often from a phone in the
+       field — with no complaint-tracking access required (product doc
+       Section 4/5), so this is one screen, one form, nothing to learn. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      background: #f9fafb;
+      color: #111827;
+      min-height: 100vh;
+    }
+    .page { max-width: 560px; margin: 0 auto; padding: 20px 16px 56px; }
+    a.back { font-size: 13px; color: #374151; text-decoration: none; }
+    a.back:hover { text-decoration: underline; }
+    h1 { font-size: 20px; font-weight: 700; margin: 10px 0 4px; }
+    p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13.5px; line-height: 1.5; }
+
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 18px; }
+
+    label { display: block; font-size: 12.5px; font-weight: 600; color: #374151; margin: 16px 0 6px; }
+    label:first-of-type { margin-top: 0; }
+    label .optional { font-weight: 400; color: #9ca3af; text-transform: none; }
+    textarea, input[type="text"], select {
+      width: 100%; font-size: 15px; padding: 10px 12px; border: 1px solid #d1d5db;
+      border-radius: 8px; font-family: inherit; background: #fff; color: #111827;
+    }
+    textarea { min-height: 110px; resize: vertical; line-height: 1.45; }
+    textarea:focus, input:focus, select:focus { outline: 2px solid #93c5fd; outline-offset: 1px; border-color: #93c5fd; }
+    .hint { font-size: 12px; color: #9ca3af; margin-top: 5px; line-height: 1.4; }
+
+    /* Property typeahead */
+    .autocomplete { position: relative; }
+    .autocomplete-list {
+      position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px;
+      background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.08); max-height: 220px; overflow-y: auto; z-index: 20;
+    }
+    .autocomplete-item { padding: 9px 12px; font-size: 13.5px; cursor: pointer; border-bottom: 1px solid #f3f4f6; }
+    .autocomplete-item:last-child { border-bottom: none; }
+    .autocomplete-item:hover, .autocomplete-item.active { background: #eff6ff; }
+    .autocomplete-item .ac-sub { display: block; font-size: 11.5px; color: #9ca3af; margin-top: 1px; }
+    .selected-chip {
+      display: inline-flex; align-items: center; gap: 8px; background: #eff6ff; border: 1px solid #bfdbfe;
+      color: #1d4ed8; font-size: 13px; font-weight: 600; padding: 7px 10px 7px 12px; border-radius: 8px; margin-top: 6px;
+    }
+    .selected-chip button {
+      background: none; border: none; color: #1d4ed8; font-size: 15px; cursor: pointer; line-height: 1; padding: 0;
+    }
+
+    .row-2 { display: flex; gap: 10px; }
+    .row-2 > * { flex: 1; min-width: 0; }
+
+    button[type="submit"] {
+      margin-top: 22px; width: 100%; padding: 13px; background: #1d4ed8; color: #fff; border: none;
+      border-radius: 8px; font-size: 15.5px; font-weight: 700; cursor: pointer; font-family: inherit;
+    }
+    button[type="submit"]:hover { background: #1e40af; }
+    button[type="submit"]:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    .message { font-size: 13.5px; padding: 10px 12px; border-radius: 8px; margin-top: 14px; line-height: 1.5; }
+    .message.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .message.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+
+    .success-screen { text-align: center; padding: 40px 8px 8px; }
+    .success-icon {
+      width: 52px; height: 52px; border-radius: 50%; background: #dcfce7; color: #16a34a;
+      font-size: 26px; line-height: 52px; margin: 0 auto 14px;
+    }
+    .success-screen h2 { font-size: 18px; margin-bottom: 6px; }
+    .success-screen p { color: #6b7280; font-size: 13.5px; line-height: 1.55; margin-bottom: 4px; }
+    .success-ref { font-size: 11.5px; color: #9ca3af; margin-top: 14px; font-family: ui-monospace, monospace; }
+    .success-screen .btn-again {
+      margin-top: 22px; display: inline-block; padding: 9px 18px; border: 1px solid #d1d5db; border-radius: 8px;
+      color: #374151; text-decoration: none; font-size: 13.5px; font-weight: 600;
+    }
+
+    @media (max-width: 480px) {
+      .page { padding: 16px 12px 48px; }
+      .row-2 { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <a class="back" href="/">&larr; Rincon Hub</a>
+    <h1>Report an Issue</h1>
+    <p class="sub">Tell us what happened. This goes straight to the Director of Operations — you won&rsquo;t see it in a tracker, and there&rsquo;s no status to check back on, but it&rsquo;s recorded with your name attached in case anyone needs more detail from you.</p>
+
+    <div class="card" id="formCard">
+      <form id="reportForm">
+        <label for="description">What happened? <span class="optional">(required)</span></label>
+        <textarea id="description" name="description" required placeholder="Be as specific as you can — who's involved, what they said, what you did about it so far."></textarea>
+
+        <label for="propertySearch">Property <span class="optional">(optional, if this is about one)</span></label>
+        <div class="autocomplete">
+          <input type="text" id="propertySearch" autocomplete="off" placeholder="Start typing a property name or address&hellip;">
+          <div class="autocomplete-list" id="propertyResults" hidden></div>
+        </div>
+        <div id="propertyChipWrap"></div>
+
+        <div class="row-2">
+          <div>
+            <label for="category">Category <span class="optional">(optional)</span></label>
+            <select id="category" name="category">
+              <option value="">Not sure / let the DO decide</option>
+              <option value="legal_compliance">Legal / compliance exposure</option>
+              <option value="blocked_resolution">Blocked resolution (refusal or no response)</option>
+              <option value="churn_risk">Owner or tenant relationship / churn risk</option>
+              <option value="escalation_recurrence">Same issue happening again</option>
+              <option value="major_money_property_risk">Major money / property risk</option>
+              <option value="owner_instruction_one_off">One-off owner instruction</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="blockedFields" hidden>
+          <div class="row-2">
+            <div>
+              <label for="blocked_party">Who&rsquo;s not responding / refusing?</label>
+              <select id="blocked_party" name="blocked_party">
+                <option value="">Select&hellip;</option>
+                <option value="owner">Owner</option>
+                <option value="tenant">Tenant</option>
+              </select>
+            </div>
+            <div>
+              <label for="blocked_reason">Why is this blocked?</label>
+              <select id="blocked_reason" name="blocked_reason">
+                <option value="">Select&hellip;</option>
+                <option value="explicit_refusal">They said no outright</option>
+                <option value="inferred_from_silence">2+ days of silence, no response</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <button type="submit" id="submitBtn">Submit Report</button>
+        <div id="formMessage"></div>
+      </form>
+    </div>
+
+    <div class="success-screen" id="successScreen" hidden>
+      <div class="success-icon">&#10003;</div>
+      <h2>Report submitted</h2>
+      <p>Thanks &mdash; this is now recorded and visible to the Director of Operations.</p>
+      <p>There&rsquo;s nothing more for you to do here.</p>
+      <div class="success-ref" id="successRef"></div>
+      <a class="btn-again" href="#" id="reportAnotherBtn">Report another issue</a>
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ── Property typeahead — GET /api/hub/search-properties, the same
+    // hub-wide search every dashboard's own header widget uses (lib/
+    // property-search.js). Login-gated only, no complaint-tracking role
+    // required, so this works for any team member reaching this page. ──
+    var selectedProperty = null;
+    var searchInput = document.getElementById('propertySearch');
+    var resultsBox = document.getElementById('propertyResults');
+    var chipWrap = document.getElementById('propertyChipWrap');
+    var searchDebounce = null;
+
+    function renderChip() {
+      if (!selectedProperty) { chipWrap.innerHTML = ''; return; }
+      chipWrap.innerHTML = '<div class="selected-chip">' +
+        escapeHtml(selectedProperty.name || selectedProperty.address || 'Selected property') +
+        '<button type="button" id="clearPropertyBtn" aria-label="Clear property">&times;</button></div>';
+      document.getElementById('clearPropertyBtn').addEventListener('click', function () {
+        selectedProperty = null;
+        searchInput.value = '';
+        renderChip();
+        searchInput.hidden = false;
+      });
+      searchInput.hidden = true;
+    }
+
+    searchInput.addEventListener('input', function () {
+      var q = searchInput.value.trim();
+      clearTimeout(searchDebounce);
+      if (q.length < 2) { resultsBox.hidden = true; resultsBox.innerHTML = ''; return; }
+      searchDebounce = setTimeout(function () {
+        fetch('/api/hub/search-properties?q=' + encodeURIComponent(q), { credentials: 'include' })
+          .then(function (r) { return r.ok ? r.json() : []; })
+          .then(function (results) {
+            if (!results || !results.length) { resultsBox.hidden = true; resultsBox.innerHTML = ''; return; }
+            resultsBox.innerHTML = results.map(function (p) {
+              return '<div class="autocomplete-item" data-id="' + escapeHtml(p.id) + '" data-name="' + escapeHtml(p.name || '') + '">' +
+                escapeHtml(p.name || p.address || 'Unnamed property') +
+                (p.address ? '<span class="ac-sub">' + escapeHtml(p.address) + (p.city ? ', ' + escapeHtml(p.city) : '') + '</span>' : '') +
+                '</div>';
+            }).join('');
+            resultsBox.hidden = false;
+            resultsBox.querySelectorAll('.autocomplete-item').forEach(function (el) {
+              el.addEventListener('click', function () {
+                selectedProperty = { id: el.getAttribute('data-id'), name: el.getAttribute('data-name') };
+                resultsBox.hidden = true;
+                renderChip();
+              });
+            });
+          })
+          .catch(function () { resultsBox.hidden = true; });
+      }, 200);
+    });
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('.autocomplete')) resultsBox.hidden = true;
+    });
+
+    // ── Category -> conditional blocked_resolution fields ──────────────
+    var categorySelect = document.getElementById('category');
+    var blockedFields = document.getElementById('blockedFields');
+    categorySelect.addEventListener('change', function () {
+      blockedFields.hidden = categorySelect.value !== 'blocked_resolution';
+    });
+
+    // ── Submit ───────────────────────────────────────────────────────
+    document.getElementById('reportForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var msgEl = document.getElementById('formMessage');
+      msgEl.innerHTML = '';
+
+      var description = document.getElementById('description').value.trim();
+      if (!description) {
+        msgEl.innerHTML = '<div class="message error">Describe what happened before submitting.</div>';
+        return;
+      }
+      var category = categorySelect.value || null;
+      var payload = {
+        description: description,
+        property_id: selectedProperty ? selectedProperty.id : null,
+        category: category,
+      };
+      if (category === 'blocked_resolution') {
+        payload.blocked_party = document.getElementById('blocked_party').value || null;
+        payload.blocked_reason = document.getElementById('blocked_reason').value || null;
+        if (!payload.blocked_party || !payload.blocked_reason) {
+          msgEl.innerHTML = '<div class="message error">For a blocked-resolution report, say who isn&rsquo;t responding and why.</div>';
+          return;
+        }
+      }
+
+      var btn = document.getElementById('submitBtn');
+      btn.disabled = true;
+      btn.textContent = 'Submitting&hellip;';
+
+      fetch('/api/complaint-tracking/report', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+        .then(function (res) {
+          return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            var errMsg = (result.body && result.body.error) || 'Something went wrong. Please try again.';
+            if (result.status === 403) {
+              errMsg = 'Your Rincon Hub account isn&rsquo;t linked to an active team member record yet. Ask an admin to help.';
+            }
+            msgEl.innerHTML = '<div class="message error">' + errMsg + '</div>';
+            btn.disabled = false;
+            btn.textContent = 'Submit Report';
+            return;
+          }
+          document.getElementById('formCard').hidden = true;
+          document.getElementById('successRef').textContent = 'Reference: ' + result.body.id;
+          document.getElementById('successScreen').hidden = false;
+        })
+        .catch(function () {
+          msgEl.innerHTML = '<div class="message error">Network error &mdash; nothing was submitted. Please try again.</div>';
+          btn.disabled = false;
+          btn.textContent = 'Submit Report';
+        });
+    });
+
+    document.getElementById('reportAnotherBtn').addEventListener('click', function (e) {
+      e.preventDefault();
+      document.getElementById('reportForm').reset();
+      selectedProperty = null;
+      renderChip();
+      searchInput.hidden = false;
+      blockedFields.hidden = true;
+      document.getElementById('formMessage').innerHTML = '';
+      document.getElementById('successScreen').hidden = true;
+      document.getElementById('formCard').hidden = false;
+    });
+  </script>
+</body>
+</html>

@@ -1117,6 +1117,15 @@ const significancePass = require('../lib/significance-pass');
 // this very object) actually take effect.
 const significanceBatch = require('../lib/significance-batch');
 const { computeSilenceContext } = require('../../complaint-tracking/lib/process-pending-messages');
+// lib/notify.js — required here, the same whole-module way significance-
+// batch.js itself now requires it (see that file's own comment on its
+// `const notify = require(...)` line for why), so spyOn(notify, 'sendMail',
+// ...) below mutates the SAME already-loaded module object significance-
+// batch.js's own notify.sendMail(...) call site reads from at call time.
+// Node's require cache is keyed by resolved absolute path, so this
+// resolves to the identical module instance regardless of the different
+// relative path each file uses to get there.
+const notify = require('../../lib/notify');
 
 // ─── Driver query correctness (dedupeNewPairs — the pure core of
 // fetchNextEligibleConversations; the DB round-trips around it cannot be
@@ -3423,7 +3432,7 @@ function makeBatchTrackingFakeClient({ batchRow = null, itemRows = [], significa
 // conversation_significance select (for reportNeedsCall2, reused unchanged
 // by run-scoped call sites in the CLI).
 // ============================================================
-function makeRunTrackingFakeClient({ runRow = null, runItemRows = [], batchRows = [], batchItemRows = [], significanceRows = [] } = {}) {
+function makeRunTrackingFakeClient({ runRow = null, runItemRows = [], batchRows = [], batchItemRows = [], significanceRows = [], historicalReviewRows = [] } = {}) {
   const state = {
     run: runRow ? { ...runRow } : null,
     runItems: runItemRows.map((r) => ({ ...r })),
@@ -3649,6 +3658,22 @@ function makeRunTrackingFakeClient({ runRow = null, runItemRows = [], batchRows 
     return chain;
   }
 
+  // Added for computeCall2RunNotificationCounts() (2026-09-29, Asimov's
+  // Call 2 batch-completion-notification requirement) — a real, count-only
+  // read against the view Asimov found has zero application code touching
+  // it anywhere today. Only the one shape that function actually calls,
+  // .select('id', { count: 'exact', head: true }) with no filter, is
+  // supported — matching how narrowly the other chains here are scoped.
+  function historicalReviewRequiredChain() {
+    const chain = {
+      select() { return chain; },
+      then(resolve, reject) {
+        return Promise.resolve({ data: null, error: null, count: historicalReviewRows.length }).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
   return {
     client: {
       from(table) {
@@ -3657,11 +3682,141 @@ function makeRunTrackingFakeClient({ runRow = null, runItemRows = [], batchRows 
         if (table === 'archive_search_significance_batches') return batchesChain();
         if (table === 'archive_search_significance_batch_items') return batchItemsChain();
         if (table === 'missive_conversation_significance') return significanceChain();
+        if (table === 'complaints_historical_review_required') return historicalReviewRequiredChain();
         throw new Error(`makeRunTrackingFakeClient: unexpected table "${table}" — this fake covers the submission-run tables plus the Batches tracking tables; everything else should go through a monkey-patched significance-pass.js export.`);
       },
     },
     state,
     calls,
+  };
+}
+
+// ============================================================
+// makeCall2EndToEndFakeClient — added 2026-09-29 for the Call 2 Batches API
+// build's own end-to-end write-back tests, same purpose and same "strategy
+// (b)" as PART 18h's own dedicated fake (see that test's own comment,
+// above, for why a real end-to-end test needs its own fake rather than
+// makeBatchTrackingFakeClient/makeRunTrackingFakeClient): it lets the REAL,
+// un-spied parseCall2Response/applyCall2Fields/findExistingComplaintFor
+// Conversation/createComplaintRow run against a fake Supabase client,
+// proving "do not reimplement Call 2's own write path" the same way PART
+// 18h already proved it for Call 1's applyCall1Result.
+//
+// Covers exactly the tables that path touches for a HISTORICAL (never
+// live_pipeline) row with no address match — the real, expected shape of
+// the ~27,000-conversation backlog this build exists to process — same
+// deliberately narrow scope PART 18h's own fake already takes for Call 1:
+// archive_search_significance_batch_items (write-back bookkeeping),
+// missive_conversation_significance (both the fetchSignificanceRowsForPairs
+// select+in lookup AND the final applyCall2Fields update-by-id),
+// missive_message_intake_search_safe (buildConversationContext's own
+// message fetch), complaints (findExistingComplaintForConversation's
+// lookup + createComplaintRow's insert), and audit_log
+// (writeAuditLog — createComplaintRow's own 'complaint_tracking.created'
+// event). tenants/owners/vendors are deliberately NOT covered: the fixture
+// conversationRow's own address fields are all null, so matchParticipant
+// sToRecords(supabase, []) short-circuits before ever calling supabase at
+// all (subject-match.js: `if (!clean.length) return none;`) — confirmed by
+// reading that function, not assumed, before relying on it here.
+// ============================================================
+function makeCall2EndToEndFakeClient({ itemRows, significanceRows, conversationRow }) {
+  const state = {
+    items: itemRows.map((r) => ({ ...r })),
+    significanceRows: significanceRows.map((r) => ({ ...r })),
+    complaintsInserted: [],
+  };
+
+  function matchesEq(row, filters) {
+    return filters.every((f) => (f.gt ? row[f.col] > f.val : f.isNull ? (row[f.col] === null || row[f.col] === undefined) : row[f.col] === f.val));
+  }
+
+  function itemsChain() {
+    const filters = [];
+    let op = null, updateFields = null, orderCol = null, limitN = null;
+    const chain = {
+      select() { op = op || 'select'; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, val }); return chain; },
+      is(col, val) { filters.push({ col, val, isNull: val === null }); return chain; },
+      gt(col, val) { filters.push({ col, val, gt: true }); return chain; },
+      order(col) { orderCol = col; return chain; },
+      limit(n) { limitN = n; return chain; },
+      then(resolve, reject) {
+        let result;
+        if (op === 'update') {
+          state.items.filter((it) => matchesEq(it, filters)).forEach((it) => Object.assign(it, updateFields));
+          result = { data: null, error: null };
+        } else {
+          let matching = state.items.filter((it) => matchesEq(it, filters));
+          if (orderCol) matching = [...matching].sort((a, b) => (a[orderCol] > b[orderCol] ? 1 : a[orderCol] < b[orderCol] ? -1 : 0));
+          if (limitN != null) matching = matching.slice(0, limitN);
+          result = { data: matching, error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  function significanceChain() {
+    let mode = null, inVals = null, updateFields = null;
+    const filters = [];
+    const chain = {
+      select() { mode = mode || 'select'; return chain; },
+      in(col, vals) { inVals = vals; return chain; },
+      update(fields) { mode = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ col, val }); return chain; },
+      then(resolve, reject) {
+        let result;
+        if (mode === 'update') {
+          state.significanceRows.filter((r) => matchesEq(r, filters)).forEach((r) => Object.assign(r, updateFields));
+          result = { data: null, error: null };
+        } else {
+          result = { data: state.significanceRows.filter((r) => inVals.includes(r.missive_conversation_id)), error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  function complaintsChain() {
+    let op = null, insertRow = null;
+    const chain = {
+      select() { op = op || 'select'; return chain; },
+      insert(row) { op = 'insert'; insertRow = row; return chain; },
+      eq() { return chain; },
+      order() { return chain; },
+      limit() { return chain; },
+      // findExistingComplaintForConversation's own lookup — this fake never
+      // seeds a pre-existing complaint, so there is always nothing to find.
+      maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+      single() {
+        if (op === 'insert') {
+          const row = { id: `complaint-${state.complaintsInserted.length + 1}`, created_at: new Date().toISOString(), ...insertRow };
+          state.complaintsInserted.push(row);
+          return Promise.resolve({ data: row, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+    };
+    return chain;
+  }
+
+  return {
+    client: {
+      from(table) {
+        if (table === 'archive_search_significance_batch_items') return itemsChain();
+        if (table === 'missive_conversation_significance') return significanceChain();
+        if (table === 'missive_message_intake_search_safe') {
+          return { select() { return this; }, eq() { return this; }, order() { return this; }, then(resolve) { return Promise.resolve({ data: [conversationRow], error: null }).then(resolve); } };
+        }
+        if (table === 'complaints') return complaintsChain();
+        if (table === 'audit_log') return { insert: () => Promise.resolve({ data: null, error: null }) };
+        throw new Error(`makeCall2EndToEndFakeClient: unexpected table "${table}" — this fake only covers a historical, no-address-match Call 2 write-back (see its own header comment for exactly why that scope is enough).`);
+      },
+    },
+    state,
   };
 }
 
@@ -3730,6 +3885,46 @@ test('run-significance-batch — parseForceArg: false when omitted, true when --
   assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--stage=call_1']), { force: false });
   assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--force']), { force: true });
   assert.deepStrictEqual(runSignificanceBatchCli.parseForceArg(['--since-date=2025-09-17', '--force']), { force: true });
+});
+
+// ADDED 2026-09-29 — parseWatchArgs, the --watch/--poll-interval= CLI
+// parsing for the "check-once-per-invocation, no internal poll loop" fix
+// (Hermes's ~55-minute detection-lag finding — see run-significance-batch.js's
+// own "ADDED 2026-09-29 — --watch" header for the full root-cause story).
+// Pure, no I/O — same directly-testable shape as parseStageArg/parseLimitArg/
+// parseForceArg above.
+test('run-significance-batch — parseWatchArgs: omitted entirely defaults to watch:false with the default poll interval (unused, but present) and no error', () => {
+  assert.deepStrictEqual(
+    runSignificanceBatchCli.parseWatchArgs([]),
+    { watch: false, pollIntervalMinutes: runSignificanceBatchCli.DEFAULT_POLL_INTERVAL_MINUTES, error: null }
+  );
+});
+
+test('run-significance-batch — parseWatchArgs: --watch alone is accepted and uses the default poll interval', () => {
+  assert.deepStrictEqual(
+    runSignificanceBatchCli.parseWatchArgs(['--stage=call_1', '--watch']),
+    { watch: true, pollIntervalMinutes: runSignificanceBatchCli.DEFAULT_POLL_INTERVAL_MINUTES, error: null }
+  );
+});
+
+test('run-significance-batch — parseWatchArgs: --watch with --poll-interval=N uses N', () => {
+  assert.deepStrictEqual(
+    runSignificanceBatchCli.parseWatchArgs(['--watch', '--poll-interval=10']),
+    { watch: true, pollIntervalMinutes: 10, error: null }
+  );
+});
+
+test('run-significance-batch — parseWatchArgs: --poll-interval given WITHOUT --watch is rejected, not silently ignored', () => {
+  const result = runSignificanceBatchCli.parseWatchArgs(['--poll-interval=10']);
+  assert.strictEqual(result.watch, false);
+  assert.strictEqual(result.pollIntervalMinutes, null);
+  assert.ok(result.error, 'expected an error when --poll-interval is given without --watch');
+});
+
+test('run-significance-batch — parseWatchArgs: --poll-interval must be a positive integer', () => {
+  assert.ok(runSignificanceBatchCli.parseWatchArgs(['--watch', '--poll-interval=0']).error, 'expected 0 to be rejected');
+  assert.ok(runSignificanceBatchCli.parseWatchArgs(['--watch', '--poll-interval=-5']).error, 'expected a negative value to be rejected');
+  assert.ok(runSignificanceBatchCli.parseWatchArgs(['--watch', '--poll-interval=abc']).error, 'expected a non-numeric value to be rejected');
 });
 
 // ============================================================
@@ -4970,7 +5165,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   const promptSpy = spyOn(significancePass, 'buildCall1Prompt', ({ threadText }) => threadText);
 
   try {
-    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, significanceBatch.MAX_BATCH_BYTES, 3);
+    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, 'call_1', significanceBatch.MAX_BATCH_BYTES, 3);
     assert.strictEqual(entries.length, 9);
     assert.deepStrictEqual(entries.map((e) => e.item.missive_conversation_id), items.map((it) => it.missive_conversation_id), 'expected entries in the exact same order as the input items, not completion order');
     assert.strictEqual(skippedEmpty, 0);
@@ -5013,7 +5208,7 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   });
 
   try {
-    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, smallRequestBytes + 50, 3);
+    const { entries, skippedEmpty, skippedOversized } = await significanceBatch.buildDispatchEntries(items, 'call_1', smallRequestBytes + 50, 3);
     assert.strictEqual(skippedEmpty, 1, 'expected exactly one skipped_empty (conv-1-missing)');
     assert.strictEqual(skippedOversized, 1, 'expected exactly one skipped_oversized (conv-3-big)');
     assert.strictEqual(entries.length, 3, 'expected the 3 surviving normal items');
@@ -5148,7 +5343,603 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   assert.strictEqual(anthropicCalls.create.length, 1, 'expected the healthy-ratio run to actually dispatch');
 });
 
-  return { name: 'significance-batch — PART 18-19 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
+// ============================================================================
+// PART 20 — lib/significance-batch.js's CALL 2 SUBMISSION/DISPATCH/WRITE-BACK
+// (2026-09-29). The exact same sequential runSerialCheck() convention as
+// PART 18-19 above, for the identical reason (every scenario here spies on
+// the SAME shared significancePass object).
+// ============================================================================
+
+// ─── 20a — startSubmissionRun: call_2 draws from fetchIncompleteSignificanceRows,
+// never fetchNextEligibleConversations, and sinceDate (meaningless for call_2)
+// is ignored/forced null rather than silently recorded as if it were applied ──
+  await runSerialCheck('significance-batch — startSubmissionRun: stage call_2 calls fetchIncompleteSignificanceRows (never the call_1-only fetchNextEligibleConversations), and forces since_date to null on the run row even when a sinceDate was passed in', async () => {
+  const rows = [
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-1', category: 'dispute', resolution_status: 'open', why: 'w1', discovery_context: 'historical_backfill' },
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-2', category: 'owner_instruction', resolution_status: 'open', why: 'w2', discovery_context: 'historical_backfill' },
+  ];
+  const incompleteSpy = spyOn(significancePass, 'fetchIncompleteSignificanceRows', async (n) => { assert.strictEqual(n, 50); return rows; });
+  const eligibleSpy = spyOn(significancePass, 'fetchNextEligibleConversations', async () => { throw new Error('fetchNextEligibleConversations should NEVER be called for a call_2 run'); });
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({});
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({});
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const result = await freshBatchModule.startSubmissionRun({ stage: 'call_2', sinceDate: '2025-01-01', limit: 50 });
+      assert.strictEqual(result.started, true);
+      assert.strictEqual(result.eligibleCount, 2);
+      assert.strictEqual(result.run.since_date, null, 'expected sinceDate to be ignored/forced null for a call_2 run');
+    });
+  } finally {
+    incompleteSpy.restore(); eligibleSpy.restore();
+  }
+  assert.strictEqual(incompleteSpy.calls.length, 1);
+  assert.strictEqual(eligibleSpy.calls.length, 0);
+  assert.strictEqual(state.runItems.length, 2);
+  assert.deepStrictEqual(new Set(state.runItems.map((it) => it.missive_conversation_id)), new Set(['conv-c2-1', 'conv-c2-2']));
+});
+
+// ─── 20b — the stage guard still rejects anything beyond call_1/call_2 ─────
+  await runSerialCheck('significance-batch — startSubmissionRun: an unsupported stage is refused with a clear, explicit error before any DB or Anthropic call', async () => {
+  await assert.rejects(() => significanceBatch.startSubmissionRun({ stage: 'call_3' }), /not implemented — only 'call_1' and 'call_2'/);
+});
+
+  await runSerialCheck('significance-batch — dispatchRunChunks: a run row somehow stamped with an unsupported stage is refused with a clear, explicit error rather than silently treating it as call_1', async () => {
+  const runRow = { id: 'run-bad-stage', stage: 'call_3', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 1, fully_processed_at: null, failed_at: null };
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ runRow });
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({});
+  await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+    await assert.rejects(() => freshBatchModule.dispatchRunChunks({ runId: 'run-bad-stage' }), /not implemented — only 'call_1' and 'call_2'/);
+  });
+});
+
+// ─── 20c — dispatchRunChunks: call_2 skips the Call-1-only expected-pool
+// sanity check entirely, and builds real Call 2 requests fed by a lookup of
+// each item's own missive_conversation_significance row ───────────────────
+  await runSerialCheck('significance-batch — dispatchRunChunks: stage call_2 NEVER calls estimateExpectedEligiblePool (that check estimates Call 1\'s own pool, which has no Call 2 equivalent — Q\'s own documented scope decision), fetches complaint_tracking_config exactly ONCE for the whole call, and builds real Call 2 requests via buildCall2Prompt fed by each item\'s own looked-up category/resolution_status/why/discovery_context, with max_tokens: 768', async () => {
+  const runId = 'run-c2-dispatch';
+  const runRow = { id: runId, stage: 'call_2', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 2, fully_processed_at: null, failed_at: null };
+  const runItemRows = [
+    { id: 'ri-c2-1', run_id: runId, sequence_in_run: 0, mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-1', chunk_number: null, batch_id: null, dispatched_at: null },
+    { id: 'ri-c2-2', run_id: runId, sequence_in_run: 1, mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-2', chunk_number: null, batch_id: null, dispatched_at: null },
+  ];
+  const significanceRows = [
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-1', category: 'dispute', resolution_status: 'open', why: 'why one', discovery_context: 'historical_backfill' },
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-2', category: 'owner_instruction', resolution_status: 'unresolved', why: 'why two', discovery_context: 'historical_backfill' },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, runItemRows, significanceRows });
+
+  const poolSpy = spyOn(significancePass, 'estimateExpectedEligiblePool', async () => { throw new Error('estimateExpectedEligiblePool should NEVER be called for a call_2 run'); });
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}`, thread: { fake: convId } }));
+  const configSpy = spyOn(significancePass, 'getActiveComplaintTrackingConfig', async () => null);
+  const silenceSpy = spyOn(significancePass, 'computeSilenceContext', () => { throw new Error('computeSilenceContext should never be called for a historical_backfill row'); });
+  const promptSpy = spyOn(significancePass, 'buildCall2Prompt', (args) => `PROMPT[${args.category}|${args.resolution_status}|${args.why}|${args.discoveryContext}|${args.threadText}]`);
+
+  let createCount = 0;
+  const { client: anthropicClientFake, calls: anthropicCalls } = makeFakeAnthropicBatchesClient({
+    create: async () => { createCount++; return { id: `msgbatch_c2_${createCount}`, processing_status: 'in_progress' }; },
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.dispatchRunChunks({ runId });
+      assert.strictEqual(summary.blockedBySanityCheck, false);
+      assert.strictEqual(summary.chunksSubmitted, 1);
+      assert.strictEqual(summary.itemsDispatched, 2);
+    });
+  } finally {
+    poolSpy.restore(); contextSpy.restore(); configSpy.restore(); silenceSpy.restore(); promptSpy.restore();
+  }
+
+  assert.strictEqual(poolSpy.calls.length, 0, 'expected the sanity check to never run for a call_2 stage run');
+  assert.strictEqual(configSpy.calls.length, 1, 'expected complaint_tracking_config to be fetched exactly once per dispatch call, not once per item');
+  assert.strictEqual(anthropicCalls.create.length, 1);
+  const requests = anthropicCalls.create[0][0].requests;
+  assert.strictEqual(requests.length, 2);
+  for (const req of requests) {
+    assert.strictEqual(req.params.model, 'claude-sonnet-5');
+    assert.strictEqual(req.params.max_tokens, 768, 'expected Call 2 batch requests to use max_tokens: 768, matching runCall2()\'s own live call');
+  }
+  const texts = requests.map((r) => r.params.messages[0].content[0].text);
+  assert.ok(texts.some((t) => t === 'PROMPT[dispute|open|why one|historical_backfill|text conv-c2-1]'));
+  assert.ok(texts.some((t) => t === 'PROMPT[owner_instruction|unresolved|why two|historical_backfill|text conv-c2-2]'));
+  assert.ok(state.runItems.every((it) => it.batch_id != null));
+});
+
+// ─── 20d — buildDispatchEntries' own call_2 branch: a live_pipeline row gets
+// a REAL computeSilenceContext call (fed the active config's own threshold,
+// or the same default of 2 runCall2Phase itself falls back to), while a
+// historical_backfill row in the very same call never triggers it at all ──
+  await runSerialCheck('significance-batch — buildDispatchEntries: stage call_2 computes a live_pipeline row\'s own real silence context via computeSilenceContext (fed the active complaint_tracking_config\'s blocked_resolution_silence_days), while a historical_backfill row in the SAME call gets silenceContext: null and never triggers computeSilenceContext for itself', async () => {
+  const items = [
+    { id: 'ri-live', mailbox_key: 'mb1', missive_conversation_id: 'conv-live' },
+    { id: 'ri-hist', mailbox_key: 'mb1', missive_conversation_id: 'conv-hist' },
+  ];
+  const significanceRows = [
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-live', category: 'dispute', resolution_status: 'open', why: 'live why', discovery_context: 'live_pipeline' },
+    { mailbox_key: 'mb1', missive_conversation_id: 'conv-hist', category: 'dispute', resolution_status: 'open', why: 'hist why', discovery_context: 'historical_backfill' },
+  ];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ significanceRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ addressMatched: false, threadText: `text ${convId}`, thread: { convId } }));
+  const configSpy = spyOn(significancePass, 'getActiveComplaintTrackingConfig', async () => ({ blocked_resolution_silence_days: 5 }));
+  const silenceCalls = [];
+  const silenceSpy = spyOn(significancePass, 'computeSilenceContext', (thread, days) => { silenceCalls.push({ thread, days }); return { fake: 'silence' }; });
+  const promptSpy = spyOn(significancePass, 'buildCall2Prompt', (args) => `PROMPT[${args.discoveryContext}|${JSON.stringify(args.silenceContext)}]`);
+
+  let result;
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: {} }, async (freshBatchModule) => {
+      result = await freshBatchModule.buildDispatchEntries(items, 'call_2', freshBatchModule.MAX_BATCH_BYTES, 2);
+    });
+  } finally {
+    contextSpy.restore(); configSpy.restore(); silenceSpy.restore(); promptSpy.restore();
+  }
+
+  assert.strictEqual(result.entries.length, 2);
+  assert.strictEqual(configSpy.calls.length, 1, 'expected getActiveComplaintTrackingConfig to be fetched exactly once for the whole call');
+  assert.strictEqual(silenceCalls.length, 1, 'expected computeSilenceContext to be called exactly once — only for the live_pipeline row');
+  assert.strictEqual(silenceCalls[0].days, 5, 'expected the active config\'s own blocked_resolution_silence_days to be threaded through, not a hardcoded default');
+  const liveEntry = result.entries.find((e) => e.item.missive_conversation_id === 'conv-live');
+  const histEntry = result.entries.find((e) => e.item.missive_conversation_id === 'conv-hist');
+  assert.strictEqual(liveEntry.request.params.messages[0].content[0].text, 'PROMPT[live_pipeline|{"fake":"silence"}]');
+  assert.strictEqual(histEntry.request.params.messages[0].content[0].text, 'PROMPT[historical_backfill|null]');
+});
+
+// ─── 20e — writeBackCall2Batch END-TO-END (happy path): a real escalation
+// result is parsed with the REAL parseCall2Response and applied through the
+// REAL applyCall2Fields, genuinely creating a complaints row ───────────────
+  await runSerialCheck('significance-batch — writeBackCall2Batch END-TO-END: a real \'succeeded\' escalation result is parsed with the REAL parseCall2Response and applied through the REAL applyCall2Fields, genuinely creating a complaints row and updating the existing missive_conversation_significance row (never reimplementing Call 2\'s own write path)', async () => {
+  const conversationRow = {
+    id: 1, mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-real-1', missive_message_id: 'msg-c2-1',
+    from_address: null, to_addresses: null, cc_addresses: null, bcc_addresses: null,
+    subject: 'Owner refusing repair', body_text: 'The owner has refused to authorize this repair and has gone silent.',
+    delivered_at: '2026-02-01T00:00:00.000Z', screening_completed_at: '2026-02-02T00:00:00.000Z',
+  };
+  const itemRows = [
+    { id: 'item-c2-real-1', batch_id: 'batch-c2-real', token: 'tok-c2-real', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-real-1', result_status: 'succeeded', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-c2-real-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-real-1', category: 'dispute', why: 'Owner has refused to authorize a repair.', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+  ];
+  const { client: fakeClient, state } = makeCall2EndToEndFakeClient({ itemRows, significanceRows, conversationRow });
+
+  const rawResponseText = JSON.stringify({ escalation_signal: 'blocked_resolution', blocked_reason: 'explicit_refusal', blocked_party: 'owner', needs_human_call: false, owner_instruction_rejected: null, owner_instruction_summary: null });
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    results: async () => asyncIterableFromArray([{ custom_id: 'tok-c2-real', result: { type: 'succeeded', message: { content: [{ type: 'text', text: rawResponseText }] } } }]),
+  });
+
+  significancePass._setSupabaseClientForTesting(fakeClient);
+  try {
+    await withFakeSignificanceBatch({ supabaseClient: fakeClient, anthropicClient: anthropicClientFake }, async (batchLib) => {
+      const summary = await batchLib.writeBackCall2Batch({ batchId: 'batch-c2-real', anthropicBatchId: 'msgbatch_c2_real' });
+      assert.strictEqual(summary.processed, 1);
+      assert.strictEqual(summary.written_significance, 1);
+      assert.strictEqual(summary.errors, 0);
+    });
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+
+  assert.strictEqual(state.complaintsInserted.length, 1, 'expected exactly one REAL complaints insert — proving createComplaintRow (not a reimplementation) actually ran');
+  const complaint = state.complaintsInserted[0];
+  assert.strictEqual(complaint.category, 'dispute');
+  assert.strictEqual(complaint.escalation_signal, 'blocked_resolution');
+  assert.strictEqual(complaint.blocked_reason, 'explicit_refusal');
+  assert.strictEqual(complaint.blocked_party, 'owner');
+  assert.strictEqual(complaint.description, 'Owner has refused to authorize a repair.');
+  assert.strictEqual(complaint.source_missive_conversation_id, 'conv-c2-real-1');
+  assert.strictEqual(complaint.discovery_context, 'historical_backfill');
+  assert.strictEqual(complaint.extracted_by, significancePass.CONTENT_PASS_VERSION, 'expected the SAME version constant the synchronous pipeline stamps — proof this went through the shared write path, not a parallel one');
+
+  const sigRow = state.significanceRows.find((r) => r.id === 'sig-c2-real-1');
+  assert.ok(sigRow.call2_completed_at, 'expected call2_completed_at to be stamped on the REAL significance-row update');
+  assert.strictEqual(sigRow.complaint_id, complaint.id, 'expected the significance row to be updated with the newly created complaint\'s id');
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  assert.ok(byToken['tok-c2-real'].written_back_at, 'expected the batch item to be marked written back');
+});
+
+// ─── 20f — writeBackCall2Batch END-TO-END (no-escalation path): the real
+// write path still stamps call2_completed_at but correctly creates NO
+// complaint when shouldCreateComplaint's real conditions aren't met ────────
+  await runSerialCheck('significance-batch — writeBackCall2Batch END-TO-END: a real \'succeeded\' result with escalation_signal: \'none\' and needs_human_call: false updates call2_completed_at via the REAL applyCall2Fields but creates NO complaint', async () => {
+  const conversationRow = {
+    id: 2, mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-none-1', missive_message_id: 'msg-c2-none-1',
+    from_address: null, to_addresses: null, cc_addresses: null, bcc_addresses: null,
+    subject: 'Routine question', body_text: 'Just a routine, already-resolved logistics question, nothing more.',
+    delivered_at: '2026-02-05T00:00:00.000Z', screening_completed_at: '2026-02-06T00:00:00.000Z',
+  };
+  const itemRows = [
+    { id: 'item-c2-none-1', batch_id: 'batch-c2-none', token: 'tok-c2-none', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-none-1', result_status: 'succeeded', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-c2-none-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-none-1', category: 'dispute', why: 'A minor dispute that turned out to be nothing.', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+  ];
+  const { client: fakeClient, state } = makeCall2EndToEndFakeClient({ itemRows, significanceRows, conversationRow });
+
+  const rawResponseText = JSON.stringify({ escalation_signal: 'none', blocked_reason: null, blocked_party: null, needs_human_call: false, owner_instruction_rejected: null, owner_instruction_summary: null });
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    results: async () => asyncIterableFromArray([{ custom_id: 'tok-c2-none', result: { type: 'succeeded', message: { content: [{ type: 'text', text: rawResponseText }] } } }]),
+  });
+
+  significancePass._setSupabaseClientForTesting(fakeClient);
+  try {
+    await withFakeSignificanceBatch({ supabaseClient: fakeClient, anthropicClient: anthropicClientFake }, async (batchLib) => {
+      const summary = await batchLib.writeBackCall2Batch({ batchId: 'batch-c2-none', anthropicBatchId: 'msgbatch_c2_none' });
+      assert.strictEqual(summary.written_significance, 1);
+    });
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+
+  assert.strictEqual(state.complaintsInserted.length, 0, 'expected NO complaint to be created when escalation_signal is none and needs_human_call is false');
+  const sigRow = state.significanceRows.find((r) => r.id === 'sig-c2-none-1');
+  assert.ok(sigRow.call2_completed_at, 'expected call2_completed_at to still be stamped even though no complaint was created');
+  assert.strictEqual(sigRow.complaint_id, undefined, 'expected complaint_id to never even be included in the update when no complaint was created');
+});
+
+// ─── 20g — Call 2's OWN fail-closed contract (unlike Call 1's "no row,
+// stays eligible"): a non-succeeded result AND a succeeded-but-unparseable
+// result both still reach the REAL write path with call2Result: {ok:false},
+// never silently skipped the way an equivalent Call 1 result would be ──────
+  await runSerialCheck('significance-batch — applyOneCall2BatchItem (via writeBackCall2Batch): a non-succeeded (errored) result AND a succeeded-but-unparseable result both still reach applyCall2Fields with call2Result: {ok:false} — Call 2\'s own fail-closed contract, never silently skipped the way Call 1\'s equivalent failure is', async () => {
+  const itemRows = [
+    { id: 'item-c2-err', batch_id: 'batch-c2-fail', token: 'tok-err', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-err', result_status: 'errored', written_back_at: null },
+    { id: 'item-c2-unparseable', batch_id: 'batch-c2-fail', token: 'tok-unparseable', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-unparseable', result_status: 'succeeded', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-err', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-err', category: 'dispute', why: 'why err', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+    { id: 'sig-unparseable', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-unparseable', category: 'dispute', why: 'why unparseable', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+  ];
+  const { client: supabaseClient, state } = makeBatchTrackingFakeClient({ itemRows, significanceRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => ({ rows: [{ delivered_at: '2026-01-01T00:00:00.000Z' }], addressMatch: { subject_type: null, subject_id: null, vendor_id: null, property_id: null }, addressMatched: false, threadText: `text ${convId}` }));
+  const applyCall2FieldsCalls = [];
+  const applySpy = spyOn(significancePass, 'applyCall2Fields', async (args) => { applyCall2FieldsCalls.push(args); return { outcome: args.call2Result.ok ? 'call2_completed' : 'call2_failed_placeholder', significance_id: args.significanceId, complaint_id: null }; });
+
+  const results = [
+    { custom_id: 'tok-err', result: { type: 'errored', error: { type: 'invalid_request', message: 'bad' } } },
+    { custom_id: 'tok-unparseable', result: { type: 'succeeded', message: { content: [{ type: 'text', text: 'not json at all' }] } } },
+  ];
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({ results: async () => asyncIterableFromArray(results) });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.writeBackCall2Batch({ batchId: 'batch-c2-fail', anthropicBatchId: 'msgbatch_c2_fail' });
+      assert.strictEqual(summary.processed, 2);
+      assert.strictEqual(summary.errors, 0);
+    });
+  } finally {
+    contextSpy.restore(); applySpy.restore();
+  }
+
+  assert.strictEqual(applyCall2FieldsCalls.length, 2, 'expected BOTH the errored item and the unparseable item to still reach applyCall2Fields — never silently skipped');
+  for (const call of applyCall2FieldsCalls) assert.strictEqual(call.call2Result.ok, false, `expected call2Result.ok === false for ${call.missive_conversation_id}`);
+  assert.ok(state.items.every((it) => it.written_back_at), 'expected both items to be marked written back');
+});
+
+// ─── 20h — the two pre-AI-call gaps: no significance row at all (checked
+// FIRST, before ever calling buildConversationContext), and a conversation
+// whose messages have disappeared since dispatch — both write NO
+// significance row yet are still marked written back, never a hard crash ──
+  await runSerialCheck('significance-batch — writeBackCall2Batch: an item with no matching missive_conversation_significance row at write-back time is caught BEFORE ever calling buildConversationContext, and one whose conversation messages have disappeared is caught after — both write no significance row (no_row_written) yet are still marked written back', async () => {
+  const itemRows = [
+    { id: 'item-no-sig', batch_id: 'batch-c2-gaps', token: 'tok-no-sig', mailbox_key: 'mb1', missive_conversation_id: 'conv-no-sig', result_status: 'succeeded', written_back_at: null },
+    { id: 'item-no-msgs', batch_id: 'batch-c2-gaps', token: 'tok-no-msgs', mailbox_key: 'mb1', missive_conversation_id: 'conv-no-msgs', result_status: 'succeeded', written_back_at: null },
+  ];
+  const significanceRows = [
+    // Only conv-no-msgs has a significance row; conv-no-sig has none at all.
+    { id: 'sig-no-msgs', mailbox_key: 'mb1', missive_conversation_id: 'conv-no-msgs', category: 'dispute', why: 'why', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+  ];
+  const { client: supabaseClient, state } = makeBatchTrackingFakeClient({ itemRows, significanceRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async (mb, convId) => {
+    if (convId === 'conv-no-sig') throw new Error('buildConversationContext should never be called when there is no significance row at all — that check happens first');
+    if (convId === 'conv-no-msgs') return null;
+    return { addressMatched: false, threadText: 'x' };
+  });
+  const applySpy = spyOn(significancePass, 'applyCall2Fields', async () => { throw new Error('applyCall2Fields should never be reached for either of these two items'); });
+
+  const results = [
+    { custom_id: 'tok-no-sig', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } },
+    { custom_id: 'tok-no-msgs', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } },
+  ];
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({ results: async () => asyncIterableFromArray(results) });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const summary = await freshBatchModule.writeBackCall2Batch({ batchId: 'batch-c2-gaps', anthropicBatchId: 'msgbatch_c2_gaps' });
+      assert.strictEqual(summary.processed, 2);
+      assert.strictEqual(summary.no_row_written, 2);
+      assert.strictEqual(summary.written_significance, 0);
+      assert.strictEqual(summary.errors, 0);
+    });
+  } finally {
+    contextSpy.restore(); applySpy.restore();
+  }
+
+  const byToken = Object.fromEntries(state.items.map((it) => [it.token, it]));
+  assert.ok(byToken['tok-no-sig'].written_back_at, 'expected the item with no significance row to still be marked written back');
+  assert.ok(byToken['tok-no-msgs'].written_back_at, 'expected the item whose conversation messages disappeared to still be marked written back');
+});
+
+// ─── 20i — checkAndResumeRun: a batch row stamped stage: 'call_2' is routed
+// through writeBackCall2Batch (parseCall2Response/applyCall2Fields), never
+// through the call_1 write-back path (parseCall1Response/applyCall1Result) ─
+  await runSerialCheck('significance-batch — checkAndResumeRun: a batch row stamped stage: \'call_2\' is written back through writeBackCall2Batch (parseCall2Response/applyCall2Fields) — the call_1-only parseCall1Response/applyCall1Result are never called', async () => {
+  const runId = 'run-c2-resume';
+  const runRow = { id: runId, stage: 'call_2', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 1, fully_processed_at: null, failed_at: null };
+  const batchRows = [
+    { id: 'batch-c2-x', stage: 'call_2', anthropic_batch_id: 'msgbatch_c2_x', anthropic_status: 'in_progress', run_id: runId, chunk_number: 0, completed_at: null, failed_at: null, results_retrieved_at: null },
+  ];
+  const batchItemRows = [
+    { id: 'bi-c2-x1', batch_id: 'batch-c2-x', token: 'tok-c2-x1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-x1', result_status: 'pending', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-c2-x1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2-x1', category: 'dispute', why: 'w', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, batchRows, batchItemRows, significanceRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => ({ rows: [{ delivered_at: '2026-01-01T00:00:00.000Z' }], addressMatch: {}, addressMatched: false, threadText: 'x' }));
+  const call1ParseSpy = spyOn(significancePass, 'parseCall1Response', () => { throw new Error('parseCall1Response should NEVER be called for a call_2 batch row'); });
+  const call1ApplySpy = spyOn(significancePass, 'applyCall1Result', async () => { throw new Error('applyCall1Result should NEVER be called for a call_2 batch row'); });
+  const call2ParseCalls = [];
+  const call2ParseSpy = spyOn(significancePass, 'parseCall2Response', (text, opts) => { call2ParseCalls.push({ text, opts }); return { escalation_signal: 'none', blocked_reason: null, blocked_party: null, needs_human_call: false, owner_instruction_rejected: null, owner_instruction_summary: null }; });
+  const call2ApplyCalls = [];
+  const call2ApplySpy = spyOn(significancePass, 'applyCall2Fields', async (args) => { call2ApplyCalls.push(args); return { outcome: 'call2_completed', significance_id: args.significanceId, complaint_id: null }; });
+
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    retrieve: async () => ({ processing_status: 'ended' }),
+    results: async () => asyncIterableFromArray([{ custom_id: 'tok-c2-x1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }]),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const outcome = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome.fullyProcessed, true);
+    });
+  } finally {
+    contextSpy.restore(); call1ParseSpy.restore(); call1ApplySpy.restore(); call2ParseSpy.restore(); call2ApplySpy.restore();
+  }
+
+  assert.strictEqual(call2ParseCalls.length, 1, 'expected parseCall2Response to be consulted for the call_2 batch item');
+  assert.strictEqual(call2ApplyCalls.length, 1, 'expected applyCall2Fields to be called for the call_2 batch item');
+  assert.strictEqual(call2ApplyCalls[0].call2Result.ok, true);
+  assert.ok(state.batches.find((b) => b.id === 'batch-c2-x').completed_at, 'expected the call_2 batch to be marked completed via the SAME maybeMarkBatchCompleted used by call_1');
+});
+
+// ============================================================================
+// PART 21 — Call 2 batch-completion notification (Asimov's governance
+// review, 2026-09-29): computeCall2RunNotificationCounts, sendCall2Batch
+// CompletionNotification, and the checkAndResumeRun hook that fires it. See
+// each function's own header comment in lib/significance-batch.js for the
+// full reasoning. All still run through runSerialCheck() inside this same
+// IIFE — these tests share the identical _setSupabaseClientForTesting/
+// spyOn(significancePass, ...) hazards PART 18-20's own header comment
+// documents, plus a new one: notify.sendMail is now ALSO a shared,
+// property-mutated spy target (spyOn(notify, 'sendMail', ...)), so it needs
+// the same strict-sequence discipline as everything else here.
+// ============================================================================
+
+// ─── 21a — computeCall2RunNotificationCounts: correct counts against
+// constructed fake data, scoped to the given run's own batches only (never
+// "every recent significance row"), with a same-conversation-id-different-
+// mailbox row correctly excluded — the same composite-key collision guard
+// reportNeedsCall2() already relies on ──────────────────────────────────
+  await runSerialCheck('significance-batch — computeCall2RunNotificationCounts: real counts against constructed fake data, scoped to this run\'s own batches, with a cross-mailbox same-conversation-id collision correctly excluded', async () => {
+  const historicalReviewRows = [{ id: 'hr-1' }, { id: 'hr-2' }, { id: 'hr-3' }]; // portfolio-wide total — deliberately unrelated to any batch/run id below.
+  const batchItemRows = [
+    { id: 'bi-1', batch_id: 'batch-n1', token: 't1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', result_status: 'pending', written_back_at: null },
+    { id: 'bi-2', batch_id: 'batch-n1', token: 't2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', result_status: 'pending', written_back_at: null },
+    { id: 'bi-3', batch_id: 'batch-n2', token: 't3', mailbox_key: 'mb1', missive_conversation_id: 'conv-3', result_status: 'pending', written_back_at: null },
+    // A batch item belonging to a DIFFERENT run's batch — proves scoping is
+    // by the passed batchIds, not "every batch item in the table."
+    { id: 'bi-x', batch_id: 'batch-other-run', token: 'tx', mailbox_key: 'mb1', missive_conversation_id: 'conv-x', result_status: 'pending', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', needs_human_call: true, owner_instruction_rejected: 'true' },
+    { id: 'sig-2', mailbox_key: 'mb1', missive_conversation_id: 'conv-2', needs_human_call: false, owner_instruction_rejected: null },
+    { id: 'sig-3', mailbox_key: 'mb1', missive_conversation_id: 'conv-3', needs_human_call: true, owner_instruction_rejected: 'uncertain' },
+    // Same missive_conversation_id as conv-1 but a DIFFERENT mailbox — a
+    // real, documented collision risk elsewhere in this codebase
+    // (reportNeedsCall2's own comment). needs_human_call: true here must
+    // NOT be counted — this run's own batch item for conv-1 is mb1, not mb2.
+    { id: 'sig-1-other-mailbox', mailbox_key: 'mb2', missive_conversation_id: 'conv-1', needs_human_call: true, owner_instruction_rejected: 'true' },
+    // conv-x belongs to a batch outside this run's own batchIds — must
+    // never be counted either.
+    { id: 'sig-x', mailbox_key: 'mb1', missive_conversation_id: 'conv-x', needs_human_call: true, owner_instruction_rejected: 'true' },
+  ];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ batchItemRows, significanceRows, historicalReviewRows });
+
+  significanceBatch._setSupabaseClientForTesting(supabaseClient);
+  try {
+    const counts = await significanceBatch.computeCall2RunNotificationCounts({ batchIds: ['batch-n1', 'batch-n2'] });
+    assert.strictEqual(counts.historicalReviewBacklogCount, 3, 'expected the portfolio-wide historical-review count, unaffected by run scoping');
+    assert.strictEqual(counts.runConversationCount, 3, 'expected exactly conv-1/conv-2/conv-3 — conv-x is scoped out by batchIds');
+    assert.strictEqual(counts.needsHumanCallCount, 2, 'expected conv-1 and conv-3 only — the mb2 collision row and conv-x must not be counted');
+    assert.strictEqual(counts.ownerInstructionRejectedCount, 1, 'expected only conv-1\'s owner_instruction_rejected === \'true\' — conv-3\'s \'uncertain\' does not count');
+  } finally {
+    significanceBatch._setSupabaseClientForTesting(null);
+  }
+  });
+
+// ─── 21b — sendCall2BatchCompletionNotification: sends exactly one real
+// email via the SAME lib/notify.js sendMail() sendEscalationEmail() already
+// uses, to DO_EMAIL + PETER_EMAIL, carrying the real computed counts ─────
+  await runSerialCheck('significance-batch — sendCall2BatchCompletionNotification: sends exactly one email via notify.sendMail(), to DO_EMAIL + PETER_EMAIL, carrying the real computed counts', async () => {
+  const historicalReviewRows = [{ id: 'hr-1' }];
+  const batchItemRows = [
+    { id: 'bi-1', batch_id: 'batch-n', token: 't1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', result_status: 'pending', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', needs_human_call: true, owner_instruction_rejected: 'true' },
+  ];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ batchItemRows, significanceRows, historicalReviewRows });
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  significanceBatch._setSupabaseClientForTesting(supabaseClient);
+  const sendMailCalls = [];
+  const sendMailSpy = spyOn(notify, 'sendMail', async (args) => { sendMailCalls.push(args); return { ok: true, sent: 2, failed: 0, accepted: args.to, rejected: [], error: null }; });
+
+  try {
+    const result = await significanceBatch.sendCall2BatchCompletionNotification({ runId: 'run-notify-1', batchIds: ['batch-n'] });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(sendMailCalls.length, 1, 'expected sendMail to be called exactly once');
+    assert.deepStrictEqual(sendMailCalls[0].to, ['do@example.test', 'peter@example.test'], 'expected the SAME DO_EMAIL/PETER_EMAIL recipient pattern sendEscalationEmail() already uses');
+    assert.ok(sendMailCalls[0].subject.includes('1 need a human call'), 'expected the real needsHumanCallCount in the subject line');
+    assert.ok(sendMailCalls[0].text.includes('run-notify-1'), 'expected the run id in the email body');
+    assert.ok(sendMailCalls[0].text.includes('Flagged needs_human_call (this run):    1'), 'expected the real computed needsHumanCallCount in the body');
+    assert.ok(sendMailCalls[0].text.includes('historical review checklist (complaints_historical_review_required), portfolio-wide: 1'), 'expected the real computed historicalReviewBacklogCount in the body');
+    assert.strictEqual(result.counts.needsHumanCallCount, 1);
+    assert.strictEqual(result.counts.historicalReviewBacklogCount, 1);
+  } finally {
+    sendMailSpy.restore();
+    significanceBatch._setSupabaseClientForTesting(null);
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21c — sendCall2BatchCompletionNotification: a realistic notify.sendMail
+// failure (its own real contract — resolves { ok: false, ... }, never
+// throws) is reported back honestly as ok:false, never thrown ────────────
+  await runSerialCheck('significance-batch — sendCall2BatchCompletionNotification: a realistic notify.sendMail() failure (resolves ok:false, per its own real contract) is reported back as ok:false, never thrown', async () => {
+  const batchItemRows = [
+    { id: 'bi-1', batch_id: 'batch-n', token: 't1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', result_status: 'pending', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-1', mailbox_key: 'mb1', missive_conversation_id: 'conv-1', needs_human_call: false, owner_instruction_rejected: null },
+  ];
+  const { client: supabaseClient } = makeRunTrackingFakeClient({ batchItemRows, significanceRows, historicalReviewRows: [] });
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  significanceBatch._setSupabaseClientForTesting(supabaseClient);
+  const sendMailSpy = spyOn(notify, 'sendMail', async () => ({ ok: false, sent: 0, failed: 2, accepted: [], rejected: [], error: 'mailer_not_configured' }));
+
+  try {
+    const result = await significanceBatch.sendCall2BatchCompletionNotification({ runId: 'run-notify-2', batchIds: ['batch-n'] });
+    assert.strictEqual(result.ok, false, 'expected ok:false to be reported honestly, matching notify.sendMail\'s own resolved outcome');
+    assert.ok(result.error, 'expected a real error message reported back');
+  } finally {
+    sendMailSpy.restore();
+    significanceBatch._setSupabaseClientForTesting(null);
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21d — checkAndResumeRun: the notification fires exactly ONCE, only on
+// the transition into fully processed (never again on a later, redundant
+// re-check of an already-completed run), and a simulated failure — here the
+// most defensive case, notify.sendMail itself THROWING, contrary to its own
+// real contract — still never affects the run's own fully_processed_at,
+// which is written BEFORE the notification is even attempted ─────────────
+  await runSerialCheck('significance-batch — checkAndResumeRun: fires the call_2 completion notification exactly once on the transition to fully processed (never again on a redundant re-check), and a simulated notify failure never affects the run\'s own fully_processed_at', async () => {
+  const runId = 'run-c2-notify';
+  const runRow = { id: runId, stage: 'call_2', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 1, fully_processed_at: null, failed_at: null };
+  const batchRows = [
+    { id: 'batch-c2n', stage: 'call_2', anthropic_batch_id: 'msgbatch_c2n', anthropic_status: 'in_progress', run_id: runId, chunk_number: 0, completed_at: null, failed_at: null, results_retrieved_at: null },
+  ];
+  const batchItemRows = [
+    { id: 'bi-c2n1', batch_id: 'batch-c2n', token: 'tok-c2n1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2n1', result_status: 'pending', written_back_at: null },
+  ];
+  const significanceRows = [
+    { id: 'sig-c2n1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c2n1', category: 'dispute', why: 'w', discovery_context: 'historical_backfill', keyword_check_flagged_protected_class: false, keyword_check_flagged_category: null, needs_human_call: true, owner_instruction_rejected: null },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, batchRows, batchItemRows, significanceRows, historicalReviewRows: [{ id: 'hr-1' }] });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => ({ rows: [{ delivered_at: '2026-01-01T00:00:00.000Z' }], addressMatch: {}, addressMatched: false, threadText: 'x' }));
+  const call2ParseSpy = spyOn(significancePass, 'parseCall2Response', () => ({ escalation_signal: 'none', blocked_reason: null, blocked_party: null, needs_human_call: false, owner_instruction_rejected: null, owner_instruction_summary: null }));
+  const call2ApplySpy = spyOn(significancePass, 'applyCall2Fields', async (args) => ({ outcome: 'call2_completed', significance_id: args.significanceId, complaint_id: null }));
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  const sendMailCalls = [];
+  const sendMailSpy = spyOn(notify, 'sendMail', async (args) => {
+    sendMailCalls.push(args);
+    throw new Error('simulated notify outage — must never affect the run\'s own fully_processed_at');
+  });
+
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    retrieve: async () => ({ processing_status: 'ended' }),
+    results: async () => asyncIterableFromArray([{ custom_id: 'tok-c2n1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }]),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const outcome = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome.fullyProcessed, true);
+    });
+    assert.ok(state.run.fully_processed_at, 'expected fully_processed_at to be set despite the notify failure — the run\'s own completion must never depend on the email succeeding');
+    assert.strictEqual(sendMailCalls.length, 1, 'expected the notification to be attempted exactly once, on the transition to fully processed');
+
+    // A redundant re-check (e.g. a later cron tick) must never re-send —
+    // the run is already fully_processed_at from the call above.
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const outcome2 = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome2.fullyProcessed, true);
+    });
+    assert.strictEqual(sendMailCalls.length, 1, 'expected NO second notification on a redundant re-check of an already-fully-processed run');
+  } finally {
+    contextSpy.restore(); call2ParseSpy.restore(); call2ApplySpy.restore(); sendMailSpy.restore();
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21e — checkAndResumeRun: a stage: 'call_1' run completing never calls
+// the Call 2 completion notification at all — call_1 already has its own
+// separate, already-reviewed live trigger (Asimov's own finding) ─────────
+  await runSerialCheck('significance-batch — checkAndResumeRun: a stage: \'call_1\' run completing never calls the Call 2 completion notification — call_1 already has its own separate, already-reviewed live trigger', async () => {
+  const runId = 'run-c1-no-notify';
+  const runRow = { id: runId, stage: 'call_1', since_date: null, assembled_at: new Date().toISOString(), eligible_count: 1, fully_processed_at: null, failed_at: null };
+  const batchRows = [
+    { id: 'batch-c1n', stage: 'call_1', anthropic_batch_id: 'msgbatch_c1n', anthropic_status: 'in_progress', run_id: runId, chunk_number: 0, completed_at: null, failed_at: null, results_retrieved_at: null },
+  ];
+  const batchItemRows = [
+    { id: 'bi-c1n1', batch_id: 'batch-c1n', token: 'tok-c1n1', mailbox_key: 'mb1', missive_conversation_id: 'conv-c1n1', result_status: 'pending', written_back_at: null },
+  ];
+  const { client: supabaseClient, state } = makeRunTrackingFakeClient({ runRow, batchRows, batchItemRows });
+
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => ({ rows: [{ missive_message_id: 'm1' }], thread: {}, addressMatch: {}, addressMatched: false, threadText: 'x' }));
+  const parseSpy = spyOn(significancePass, 'parseCall1Response', () => ({ resolution_status: 'open', category: 'dispute', why: 'test', tone_trend: null, identification: { property_text: null, vendor_text: null } }));
+  const applySpy = spyOn(significancePass, 'applyCall1Result', async () => ({}));
+  const propDirSpy = spyOn(significancePass, 'fetchPropertyDirectory', async () => []);
+  const vendorDirSpy = spyOn(significancePass, 'fetchVendorDirectory', async () => []);
+
+  const sendMailCalls = [];
+  const sendMailSpy = spyOn(notify, 'sendMail', async (args) => { sendMailCalls.push(args); return { ok: true, sent: 1, failed: 0, accepted: [], rejected: [], error: null }; });
+
+  const { client: anthropicClientFake } = makeFakeAnthropicBatchesClient({
+    retrieve: async () => ({ processing_status: 'ended' }),
+    results: async () => asyncIterableFromArray([{ custom_id: 'tok-c1n1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: '{}' }] } } }]),
+  });
+
+  try {
+    await withFakeSignificanceBatch({ supabaseClient, anthropicClient: anthropicClientFake }, async (freshBatchModule) => {
+      const outcome = await freshBatchModule.checkAndResumeRun({ runId });
+      assert.strictEqual(outcome.fullyProcessed, true);
+    });
+  } finally {
+    contextSpy.restore(); parseSpy.restore(); applySpy.restore(); propDirSpy.restore(); vendorDirSpy.restore(); sendMailSpy.restore();
+  }
+  assert.ok(state.run.fully_processed_at, 'expected the call_1 run to still be marked fully processed normally');
+  assert.strictEqual(sendMailCalls.length, 0, 'expected the Call 2 completion notification to never fire for a call_1 run');
+  });
+
+  return { name: 'significance-batch — PART 18-20 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
 })());
 
 // ─── Report ──────────────────────────────────────────────────────────────

@@ -132,6 +132,42 @@ function loadDotEnv() {
 
 const VALID_STAGES = ['call_1', 'call_2'];
 
+// ============================================================================
+// ADDED 2026-09-29 — --watch (the ~55-minute detection-lag fix)
+// ============================================================================
+// Root cause, confirmed by reading this file and lib/significance-batch.js
+// in full: there is NO poll-interval/backoff/sleep constant anywhere in
+// either file to be "set too high." runBatchWork() (below) checks Anthropic
+// ONCE and returns — it has no internal loop at all. The ~55-minute real gap
+// between a batch actually finishing on Anthropic's side and this pipeline's
+// database reflecting that was never a code bug inside the polling logic; it
+// was an OPERATIONAL gap — nothing was invoking this script often enough.
+// Today that's covered by an ad hoc external bash loop (a human-run `while
+// true; do node run-significance-batch.js ...; sleep 180; done`) as a
+// stopgap. --watch below builds that same "check, sleep, repeat until done"
+// cycle into the tool itself, so the next person doesn't need to hand-roll
+// a shell loop to get a real few-minutes cadence.
+//
+// Deliberately NOT a change to runBatchWork()'s own one-shot behavior, and
+// deliberately NOT held under one long-lived lock for the whole watch
+// duration: each cycle acquires lib/significance-lock.js's cross-process
+// lock, does exactly the same one-shot work runBatchWork() always did, then
+// RELEASES it before sleeping (see main()'s own watch loop, below). Holding
+// the lock across the sleep too would block the Hub's own live-pipeline
+// routes (router.js's process-significance-pending / -scheduled) for the
+// entire watch session — exactly the cross-process conflict lib/
+// significance-lock.js exists to prevent, not something this fix should
+// reintroduce. This also matches how the existing ad hoc external bash loop
+// already behaves (one process, one lock acquisition, per cycle) — --watch
+// is that same shape, just internal to this script instead of external to
+// it.
+// ============================================================================
+const DEFAULT_POLL_INTERVAL_MINUTES = 3; // matches today's ad hoc external stopgap loop's own cadence — a reasonable default, not a measured optimum.
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function printHelp() {
   console.log(`
 run-significance-batch.js — Phase 2, the Message Batches API run
@@ -178,6 +214,18 @@ Flags:
                           and confirming the low count is real. Applies to
                           this one command invocation only — never silently
                           remembered for next time.
+  --watch                 Stay running and repeat this same check-and-dispatch
+                          cycle every --poll-interval minutes (default: ${DEFAULT_POLL_INTERVAL_MINUTES})
+                          until the run is fully processed, then exit
+                          cleanly. Without this flag (the default, unchanged
+                          behavior), the command checks ONCE and exits —
+                          something else (a human, a cron entry, or an
+                          external shell loop) has to re-invoke it to make
+                          further progress. See this file's own "ADDED
+                          2026-09-29 — --watch" header below for why this
+                          exists.
+  --poll-interval=N       Minutes between checks in --watch mode (default:
+                          ${DEFAULT_POLL_INTERVAL_MINUTES}). Only meaningful together with --watch.
 `);
 }
 
@@ -206,6 +254,23 @@ function parseForceArg(args) {
   return { force: args.includes('--force') };
 }
 
+// parseWatchArgs — --watch and --poll-interval=N together, since the second
+// only ever means anything in terms of the first. --poll-interval given
+// WITHOUT --watch is rejected rather than silently ignored — a caller who
+// typed it clearly expects it to do something, and silently no-op'ing it
+// would be more confusing than telling them so up front. Same pure,
+// directly-testable shape as parseStageArg/parseLimitArg/parseForceArg
+// above.
+function parseWatchArgs(args) {
+  const watch = args.includes('--watch');
+  const match = args.find((a) => a.startsWith('--poll-interval='));
+  if (!match) return { watch, pollIntervalMinutes: DEFAULT_POLL_INTERVAL_MINUTES, error: null };
+  if (!watch) return { watch, pollIntervalMinutes: null, error: '--poll-interval only has an effect together with --watch (a one-shot check has nothing to poll between).' };
+  const n = Number.parseInt(match.split('=')[1], 10);
+  if (!Number.isFinite(n) || n <= 0) return { watch, pollIntervalMinutes: null, error: `--poll-interval must be a positive integer (minutes), got "${match.split('=')[1]}".` };
+  return { watch, pollIntervalMinutes: n, error: null };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) {
@@ -226,6 +291,12 @@ async function main() {
     return;
   }
   const { force } = parseForceArg(args);
+  const { watch, pollIntervalMinutes, error: watchError } = parseWatchArgs(args);
+  if (watchError) {
+    console.error(`${watchError} Run with --help for usage.`);
+    process.exitCode = 1;
+    return;
+  }
   // Reused verbatim from run-significance-pilot.js — identical --since-date
   // semantics and validation, not re-derived here. (--since-years is
   // intentionally not offered on this script; Peter's staged plan already
@@ -258,6 +329,7 @@ async function main() {
   console.log(`Stage: ${stage}`);
   console.log('This makes REAL, BILLED AI calls (a single Anthropic batch) and REAL database writes.');
   console.log('If this is not running on sally right now, stop and re-launch there instead — see this file\'s own header.\n');
+  if (watch) console.log(`--watch given: this process will stay alive, re-checking every ${pollIntervalMinutes} minute(s) until this run is fully processed, then exit cleanly. Ctrl+C stops it early — safe, since the run's own state is durably saved in the database either way; a later invocation of this command, watched or not, picks up exactly where this one leaves off.\n`);
 
   // Cross-process lock (lib/significance-lock.js — Asimov's flagged gap,
   // 2026-09-18, automatic-scheduling review): this script and the Hub's
@@ -269,8 +341,28 @@ async function main() {
   // main() (submit, or check/resume + write-back), not just one call
   // inside it, since every branch below does real, billed work or real
   // database writes.
+  //
+  // ADDED 2026-09-29 — --watch loops this SAME lock-wrapped one-shot cycle
+  // (ownerLabel unchanged in shape) rather than wrapping the whole watch
+  // session in one lock acquisition — see this file's own "ADDED 2026-09-29
+  // — --watch" header, above, for why: the lock must be released between
+  // cycles so a live-pipeline route on the Hub can still run during a long
+  // watch session, exactly as it already could between two separate
+  // external-bash-loop invocations of this same command.
   const { withSignificanceLock } = require('./lib/significance-lock');
-  await withSignificanceLock(`standalone-batch --stage=${stage}${sinceDate ? ` --since-date=${sinceDate}` : ''}${force ? ' --force' : ''}`, () => runBatchWork({ stage, sinceDate, limit, force }));
+  const ownerLabel = `standalone-batch --stage=${stage}${sinceDate ? ` --since-date=${sinceDate}` : ''}${force ? ' --force' : ''}${watch ? ` --watch --poll-interval=${pollIntervalMinutes}` : ''}`;
+
+  if (!watch) {
+    await withSignificanceLock(ownerLabel, () => runBatchWork({ stage, sinceDate, limit, force }));
+    return;
+  }
+
+  for (;;) {
+    const { done } = await withSignificanceLock(ownerLabel, () => runBatchWork({ stage, sinceDate, limit, force }));
+    if (done) return;
+    console.log(`\n[watch] sleeping ${pollIntervalMinutes} minute(s) before the next check...`);
+    await sleep(pollIntervalMinutes * 60 * 1000);
+  }
 }
 
 // ============================================================================
@@ -281,6 +373,18 @@ async function main() {
 // re-run; a crash, a rate limit, or a still-processing Anthropic batch (up
 // to 24 hours) just means re-running this same command later picks up
 // exactly where it left off.
+//
+// ADDED 2026-09-29 — now returns { done } (previously nothing/undefined,
+// which no caller ever read). `done: true` means there is nothing this
+// process could usefully do by immediately re-checking again right now
+// (the run finished, there was nothing eligible, or something needs a
+// human's manual review/--force before more progress is possible); `done:
+// false` means a run is genuinely still in flight at Anthropic and a later
+// check might find more done. This is ONLY consumed by main()'s new
+// --watch loop, above, to decide whether to keep polling or exit — every
+// existing call site (main()'s own non-watch path) already discarded this
+// function's return value and continues to do so, so this is a pure
+// addition, not a behavior change, for anyone not passing --watch.
 // ============================================================================
 async function runBatchWork({ stage, sinceDate, limit, force = false }) {
   const batchLib = require('./lib/significance-batch');
@@ -296,7 +400,7 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
     if (!result.started) {
       console.log(`\nNothing started (${result.reason}).`);
       if (result.run) console.log(`Existing/unfinished run: ${result.run.id} (assembled: ${!!result.run.assembled_at})`);
-      return;
+      return { done: true }; // nothing_eligible (nothing left to do), or unfinished_run_exists (a same-stage race) — either way, retrying immediately would not change anything.
     }
     console.log(`\nRun ${result.run.id} started with ${result.eligibleCount} eligible conversation(s), durably recorded — the expensive eligibility scan's results can never be lost now, regardless of what happens to submission from here.`);
     run = result.run;
@@ -307,7 +411,7 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
   if (!run.assembled_at) {
     console.error(`\nRun ${run.id} has not finished being durably recorded (assembled_at is not set). This should only happen if a previous run crashed between inserting the run row and finishing its item inserts — a narrow, documented window (see lib/significance-batch.js's own header). This needs manual review: re-running this command will NOT re-attempt the eligibility scan for an already-started run (by design — that discipline is the whole point of this fix), so it also cannot fix this on its own.`);
     process.exitCode = 1;
-    return;
+    return { done: true }; // needs a human to manually review — retrying immediately would hit the exact same error.
   }
 
   console.log('\nDispatching any undispatched chunks for this run to Anthropic (safe to re-run — already-dispatched chunks are always skipped)...');
@@ -331,7 +435,7 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
     console.error('  2. If the low count is real and expected (e.g. a genuinely small or already-mostly-processed date window), re-run this exact same command with --force to dispatch anyway.');
     console.error('  3. If the low count looks wrong, do NOT force it — flag this run for Neo/Q to investigate before anything is sent to Anthropic.');
     process.exitCode = 1;
-    return;
+    return { done: true }; // needs a human decision (--force, or investigate) — retrying immediately without either would just fail the same check again.
   }
 
   console.log(`Dispatch: ${dispatch.chunksSubmitted} chunk(s) submitted, ${dispatch.itemsDispatched} conversation(s) dispatched` +
@@ -355,7 +459,7 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
 
   if (!resumed.fullyProcessed) {
     console.log(`\nRun ${run.id} is not fully processed yet — some chunk(s) are still processing at Anthropic (up to 24 hours each), still rate-limited, or still need write-back. Re-run this same command later to continue.`);
-    return;
+    return { done: false }; // a real run is still genuinely in flight — this is the one case --watch's loop (above) should keep polling for.
   }
 
   console.log(`\nRun ${run.id} is now fully processed — every chunk's results have been written back.`);
@@ -371,6 +475,8 @@ async function runBatchWork({ stage, sinceDate, limit, force = false }) {
     console.log(`\n${totalNeedsCall2} of ${totalWithSignificanceRow} conversation(s) with a written significance row (across this run's ${resumed.results.length} chunk(s)) need a Call 2 pass.`);
     console.log('Call 2 is NOT submitted automatically. Review these Call 1 results first (same review step the pilot always required), then run this tool again with --stage=call_2 once that submission path is built.');
   }
+
+  return { done: true }; // fully processed — nothing left for --watch to keep polling for.
 }
 
 // require.main guard — lets test/run-tests.js require this file to unit-test
@@ -383,4 +489,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseStageArg, parseLimitArg, parseForceArg };
+module.exports = { parseStageArg, parseLimitArg, parseForceArg, parseWatchArgs, DEFAULT_POLL_INTERVAL_MINUTES };

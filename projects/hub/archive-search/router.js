@@ -81,7 +81,7 @@ const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 
 const { runScreeningPassChunk, getScreeningStatus, fetchFlaggedEarliestBodyTextByConversation, fetchEarliestBodyTextForConversations } = require('./lib/screening-pass');
-const { runSignificancePassBatch } = require('./lib/significance-pass');
+const { runSignificancePassBatch, significancePassAlertShouldFire, sendSignificancePassAlertEmail } = require('./lib/significance-pass');
 const { withSignificanceLock, SignificancePassLockedError } = require('./lib/significance-lock');
 const { toCsv } = require('./lib/csv');
 const { sendMail } = require('../lib/notify');
@@ -2069,6 +2069,16 @@ internalRouter.post('/api/archive-search/process-significance-pending', async (r
       runSignificancePassBatch({ limit, discoveryContext: 'live_pipeline', sinceDate: sinceDateParam })
     );
     console.log(`[${ts}] archive-search process-significance-pending complete:`, summary);
+    // Failure alert (lib/significance-pass.js's significancePassAlertShouldFire/
+    // sendSignificancePassAlertEmail — Asimov's condition on the SCHEDULED route
+    // below going live on a cron, see that route's own comment). Fires on EVERY
+    // caller of this route, not just the scheduled one — same "a human running
+    // this by hand deserves the same safety net" reasoning process-pending's own
+    // circuit-breaker alert above already uses, and it changes nothing for a
+    // normal, healthy run.
+    if (significancePassAlertShouldFire(summary)) {
+      await sendSignificancePassAlertEmail({ route: 'process-significance-pending', summary, ts });
+    }
     res.json({ ok: true, ...summary });
   } catch (err) {
     if (err instanceof SignificancePassLockedError) {
@@ -2143,8 +2153,11 @@ function significanceCronEnabled() {
  * POST /api/archive-search/process-significance-pending-scheduled
  * Identical body to process-significance-pending above (same
  * runSignificancePassBatch() call, same live_pipeline discoveryContext,
- * same ?limit=/?since_date= params, same cross-process lock) — this is a
- * SEPARATE route, not a modification of the existing manually-triggered
+ * same ?limit=/?since_date= params, same cross-process lock, and — added
+ * 2026-10-01, Asimov's condition on this route ever going live on a cron,
+ * see lib/significance-pass.js's significancePassAlertShouldFire/
+ * sendSignificancePassAlertEmail — the same post-run failure alert) — this
+ * is a SEPARATE route, not a modification of the existing manually-triggered
  * one, specifically so the existing route's behavior for Peter's own
  * by-hand calls never changes, and so the "is this automatic yet" answer
  * lives in one obvious place (this route + the flag below) rather than as
@@ -2181,6 +2194,19 @@ internalRouter.post('/api/archive-search/process-significance-pending-scheduled'
       runSignificancePassBatch({ limit, discoveryContext: 'live_pipeline', sinceDate: sinceDateParam })
     );
     console.log(`[${ts}] archive-search process-significance-pending-scheduled complete:`, summary);
+    // Failure alert — the condition Asimov attached to clearing THIS route for
+    // automatic scheduling (see the big comment above this route and process-
+    // pending's own identical-shape circuit-breaker alert, Section 7 above):
+    // nothing previously told anyone if an unattended cron run degraded (an API
+    // outage, a new mail pattern confusing the parser, fail-closed placeholders
+    // piling up) — it only wrote a log line and an audit_log row. See lib/
+    // significance-pass.js's significancePassAlertShouldFire/
+    // sendSignificancePassAlertEmail for the threshold and send logic (shared
+    // with process-significance-pending above, so a human running this by hand
+    // gets the same safety net).
+    if (significancePassAlertShouldFire(summary)) {
+      await sendSignificancePassAlertEmail({ route: 'process-significance-pending-scheduled', summary, ts });
+    }
     res.json({ ok: true, ...summary });
   } catch (err) {
     if (err instanceof SignificancePassLockedError) {

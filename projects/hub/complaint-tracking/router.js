@@ -521,6 +521,17 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
     flagged_category: contentCheck.flagged_category,
     status: 'open',
     source: 'manual_staff',
+    // Real bug, found live 2026-09-29 (Peter's first real test of this
+    // form): discovery_context is NOT NULL with only 'live_pipeline' and
+    // 'historical_backfill' legal (added later, by the significance-pass
+    // engine-swap migration, for the two AI-scan sources) — this manual
+    // path was never updated when that column was added, so every
+    // submission failed. 'manual_staff' reuses the exact name `source`
+    // above already uses for this same case — see
+    // supabase/migrations/20260929010000_add_manual_staff_to_complaints_
+    // discovery_context_check.sql for the constraint widening this
+    // requires (additive only, cannot affect any existing row).
+    discovery_context: 'manual_staff',
     reported_by_team_member_id: req.teamMemberId,
     extracted_by: null,
     complaint_tracking_config_id: activeConfig.id,

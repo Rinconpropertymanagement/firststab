@@ -60,19 +60,33 @@
  * ============================================================================
  * WHAT THIS FILE DOES NOT DO (Q's own scope decisions — flagged, not silent)
  * ============================================================================
- *   1. 'call_2' batches are not actually submittable yet. submitBatch()
- *      throws a clear, explicit error for any stage other than 'call_1'.
- *      Call 1 submission draws its conversations from significance-pass.js's
- *      fetchNextEligibleConversations() and its prompt from buildCall1Prompt()
- *      — a 'call_2' batch would need a COMPLETELY different conversation
- *      source (existing missive_conversation_significance rows that
- *      needsCall2() flags — reportNeedsCall2() below already computes that
- *      exact list) and buildCall2Prompt()'s richer inputs (category,
- *      resolution_status, why, silence context). That is real, separate,
- *      deliberate follow-on work — this build only had to get Call 1's real
- *      results in front of Peter before Call 2 was ever authorized to run
- *      at this scale (see reportNeedsCall2()'s own header), so it stops
- *      exactly there rather than guessing at 'call_2' submission's shape.
+ *   1. UPDATED 2026-09-29: 'call_2' batches ARE now submittable/dispatchable/
+ *      write-back-able — via the RUN-based flow only (startSubmissionRun/
+ *      dispatchRunChunks/checkAndResumeRun, below), which is what run-
+ *      significance-batch.js's own CLI actually drives. The original,
+ *      LEGACY single-batch flow (submitBatch()/checkAndResume(), just below
+ *      this header) was deliberately left call_1-only — it is dead code as
+ *      far as the real CLI is concerned (confirmed by reading run-
+ *      significance-batch.js: it calls startSubmissionRun/dispatchRunChunks/
+ *      checkAndResumeRun exclusively), so extending it to call_2 would have
+ *      been unused surface area, not a real capability gap. Q's own call,
+ *      flagged rather than silent: submitBatch()'s own stage guard (below)
+ *      is UNCHANGED and still throws for anything but 'call_1'.
+ *      Call 2's run-based dispatch draws its conversations from
+ *      significance-pass.js's fetchIncompleteSignificanceRows() (the
+ *      existing Call-1-done-but-Call-2-never-run backlog) and its prompt
+ *      from buildCall2Prompt()'s richer inputs (category, resolution_status,
+ *      why, discovery_context, silence context) — looked up from
+ *      missive_conversation_significance at dispatch time, since the
+ *      submission-run-items table itself only ever stores mailbox_key/
+ *      missive_conversation_id (see fetchSignificanceRowsForPairs() and
+ *      buildDispatchEntries()'s own call_2 branch, below). Write-back has
+ *      its own dedicated path (applyOneCall2BatchItem()/writeBackCall2Batch(),
+ *      below) built on significance-pass.js's applyCall2Fields() — extracted
+ *      from runCall2Phase() there for the exact same "do not reimplement
+ *      the database write" reason applyCall1Result() was extracted from
+ *      processConversation() back on 2026-09-17 (see that file's own header
+ *      comment on applyCall2Fields for the full story).
  *   2. Splitting one submission across MULTIPLE Anthropic batches is not
  *      implemented as true parallel submission — it can't be, structurally:
  *      the schema's own one-unfinished-batch-per-stage UNIQUE index (Neo's
@@ -141,6 +155,14 @@ const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 const significancePass = require('./significance-pass');
+// Whole-module reference, not destructured — same reason significancePass
+// above is required this way: test/run-tests.js's own spyOn() (PART 18's
+// header comment explains why) mutates a METHOD PROPERTY on an already-
+// loaded module object, which only affects call sites that look the
+// property up at call time (notify.sendMail(...)), never a destructured
+// `const { sendMail } = require(...)` local that would keep pointing at
+// the ORIGINAL function object forever.
+const notify = require('../../lib/notify');
 
 // `let`, not `const` — see _setSupabaseClientForTesting()'s own comment
 // just below for why this needs to be reassignable in place, rather than
@@ -679,11 +701,293 @@ async function maybeMarkBatchCompleted(batchId) {
 }
 
 // ============================================================
+// applyOneCall2BatchItem — Call 2's write-back counterpart to
+// applyOneBatchItem() above. Unlike Call 1's own write-back contract
+// (result.type !== 'succeeded' -> write NOTHING, "stays eligible for the
+// next run" — Call 1 requests are idempotent to simply retry), Call 2's
+// fail-closed contract is different and is mirrored here exactly:
+// runCall2Phase()'s own synchronous path (significance-pass.js) still
+// writes a needs_human_call=true PLACEHOLDER (and can still create a
+// complaint off of it) whenever the AI call itself fails or its response
+// doesn't parse — "never no trace at all" (spec Section 5). So here, EVERY
+// result — succeeded-and-parsed, succeeded-but-unparseable, errored,
+// canceled, or expired — is turned into a call2Result ({ok:true,...} or
+// {ok:false}) and run through the real, shared applyCall2Fields(); only the
+// two failure modes that happen BEFORE there's even a call2Result to build
+// (the significance row itself is gone, or the conversation's own messages
+// are gone) skip straight to a bare written_back_at stamp with no
+// significance-row write at all, same as applyOneBatchItem()'s own
+// "conversation messages no longer found" branch.
+//
+// Looks up the item's existing missive_conversation_significance row
+// (populated by Call 1, already stored, fetched via the shared
+// fetchSignificanceRowsForPairs() batch lookup, once per writeBackCall2Batch
+// call — see that function, below) for category/why/discovery_context/
+// keyword-check flags — the submission-run-item/batch-item itself only
+// ever stored mailbox_key/missive_conversation_id (see buildDispatchEntries'
+// own call_2 branch, above, for the identical lookup need at dispatch
+// time). Property/vendor resolution mirrors retryCall2ForExistingRow()'s
+// own already-accepted, narrower, address-match-only scope (see that
+// function's own header comment in significance-pass.js for why) — never
+// Call 1's own content-extracted citation, which isn't available here
+// either (only Call 1's OWN write path, at Call 1 write-back time, ever
+// sees that citation).
+// @returns {Promise<'written'|'no_row_written'>}
+// ============================================================
+async function applyOneCall2BatchItem({ item, result, significanceRowsByKey }) {
+  const { id: itemId, mailbox_key, missive_conversation_id } = item;
+  const nowIso = new Date().toISOString();
+
+  const sigRow = significanceRowsByKey.get(`${mailbox_key}::${missive_conversation_id}`);
+  if (!sigRow) {
+    const { error } = await supabase
+      .from('archive_search_significance_batch_items')
+      .update({ written_back_at: nowIso, error_detail: 'No missive_conversation_significance row found for this conversation at write-back time (its Call 1 result may have been deleted).' })
+      .eq('id', itemId);
+    if (error) throw error;
+    return 'no_row_written';
+  }
+
+  const context = await significancePass.buildConversationContext(mailbox_key, missive_conversation_id);
+  if (!context) {
+    const { error } = await supabase
+      .from('archive_search_significance_batch_items')
+      .update({ written_back_at: nowIso, error_detail: 'Conversation messages no longer found at write-back time.' })
+      .eq('id', itemId);
+    if (error) throw error;
+    return 'no_row_written';
+  }
+
+  const { rows, addressMatch } = context;
+
+  let call2Result;
+  if (result.type === 'succeeded') {
+    const content = (result.message && result.message.content) || [];
+    const textBlock = content.find((b) => b.type === 'text');
+    const parsed = textBlock ? significancePass.parseCall2Response(textBlock.text, { category: sigRow.category }) : null;
+    call2Result = parsed ? { ok: true, value: parsed } : { ok: false }; // succeeded per Anthropic but unparseable — no in-batch retry is possible, same posture as applyOneBatchItem()'s own unparseable-Call-1 case, except Call 2's own contract (unlike Call 1's) still writes a fail-closed placeholder for this, via applyCall2Fields below.
+  } else {
+    call2Result = { ok: false }; // errored/canceled/expired — mirrors runCall2Phase()'s own AI-call-failure branch exactly.
+  }
+
+  await significancePass.applyCall2Fields({
+    significanceId: sigRow.id,
+    mailbox_key,
+    missive_conversation_id,
+    discoveryContext: sigRow.discovery_context,
+    category: sigRow.category,
+    why: sigRow.why,
+    call2Result,
+    rows,
+    addressMatch,
+    flaggedProtectedClass: sigRow.keyword_check_flagged_protected_class,
+    flaggedCategory: sigRow.keyword_check_flagged_category,
+    property_id: addressMatch.property_id || null,
+    vendor_id: addressMatch.vendor_id || null,
+  });
+
+  const { error } = await supabase
+    .from('archive_search_significance_batch_items')
+    .update({ written_back_at: nowIso })
+    .eq('id', itemId);
+  if (error) throw error;
+  return 'written';
+}
+
+// ============================================================
+// writeBackCall2Batch — Call 2's write-back counterpart to writeBackBatch()
+// above. Same shape and same resumability contract (load the small pending
+// set once, stream Anthropic's results exactly once, drainInGroups/
+// mapWithConcurrency at WRITEBACK_CONCURRENCY, per-item try/catch, an
+// already-written-back or unrecognized token is silently skipped) — only
+// the per-item write path differs (applyOneCall2BatchItem, above, instead
+// of applyOneBatchItem), plus ONE Call-2-specific prefetch:
+// missive_conversation_significance rows for every pending item, fetched
+// ONCE via fetchSignificanceRowsForPairs() before the concurrent loop
+// starts, mirroring writeBackBatch()'s own once-per-call sharedDirectories
+// prefetch.
+// ============================================================
+async function writeBackCall2Batch({ batchId, anthropicBatchId }) {
+  const summary = { processed: 0, written_significance: 0, no_row_written: 0, errors: 0, unmatched: 0 };
+
+  const pendingItems = await fetchAllPendingWriteBackItems(batchId);
+  if (pendingItems.length === 0) return summary; // nothing pending — batch may already be fully written back (caller checks maybeMarkBatchCompleted()).
+
+  const pendingMap = new Map(pendingItems.map((item) => [item.token, item]));
+  const significanceRowsByKey = await fetchSignificanceRowsForPairs(
+    pendingItems,
+    'id, mailbox_key, missive_conversation_id, category, why, discovery_context, keyword_check_flagged_protected_class, keyword_check_flagged_category'
+  );
+
+  const anthropic = anthropicClient();
+  const stream = await anthropic.beta.messages.batches.results(anthropicBatchId);
+
+  for await (const group of drainInGroups(stream, WRITEBACK_CONCURRENCY)) {
+    await mapWithConcurrency(group, WRITEBACK_CONCURRENCY, async (r) => {
+      const item = pendingMap.get(r.custom_id);
+      if (!item) return; // already written back by an earlier run, or an unrecognized token — never reprocess.
+      try {
+        const outcome = await applyOneCall2BatchItem({ item, result: r.result, significanceRowsByKey });
+        summary.processed++;
+        if (outcome === 'written') summary.written_significance++;
+        else summary.no_row_written++;
+      } catch (err) {
+        console.error(`[significance-batch] Call 2 write-back failed for token ${r.custom_id} (${item.mailbox_key}/${item.missive_conversation_id}):`, err.message);
+        summary.errors++;
+      }
+      pendingMap.delete(r.custom_id);
+    });
+  }
+
+  summary.unmatched = pendingMap.size;
+  return summary;
+}
+
+// ============================================================
+// computeCall2RunNotificationCounts — the three real, at-the-moment-it-
+// fires counts sendCall2BatchCompletionNotification() (below) reports.
+// Asimov's governance review, 2026-09-29: a live, one-at-a-time Call 2
+// run today always has a human present watching it; a silent bulk
+// backlog run has no equivalent, so this is the one new place a human
+// actually finds out — and it must report real counts, never estimates.
+//
+//   - historicalReviewBacklogCount: total rows in
+//     complaints_historical_review_required RIGHT NOW — Asimov's own
+//     finding was that this view (spec Section 6's bounded, must-be-
+//     affirmatively-cleared checklist) has zero application code
+//     touching it anywhere today. Portfolio-wide, not scoped to this
+//     run — the view's own definition (supabase/migrations/20260913020000_
+//     archive_search_significance_complaint_merge_schema.sql) is not
+//     run-specific, and Asimov's ask was "how many are sitting there,"
+//     not "how many this run added."
+//   - needsHumanCallCount / ownerInstructionRejectedCount: scoped to
+//     THIS run's own conversations only — same reportNeedsCall2()
+//     reasoning just above (never "every recent significance row," which
+//     a concurrent live-pipeline trickle could leak into). Gathered via
+//     every batch this run ever dispatched (batchIds, passed in by the
+//     caller — see checkAndResumeRun below), not just the batch that
+//     happened to complete last.
+//   - needs_human_call/owner_instruction_rejected are read directly off
+//     missive_conversation_significance (applyCall2Fields' own write
+//     target) rather than off complaints: shouldCreateComplaint() in
+//     significance-pass.js treats needs_human_call=true as an
+//     unconditional trigger, so every such significance row always has
+//     a companion complaints row with the same needs_human_call — this
+//     is the same count either way, without the extra hop through
+//     complaint_id.
+// ============================================================
+async function computeCall2RunNotificationCounts({ batchIds }) {
+  const { count: historicalReviewBacklogCount, error: reviewErr } = await supabase
+    .from('complaints_historical_review_required')
+    .select('id', { count: 'exact', head: true });
+  if (reviewErr) throw reviewErr;
+
+  // Same "IN() on one column, filter the composite key in app code" pattern
+  // reportNeedsCall2() above already uses — missive_conversation_id is only
+  // unique WITHIN a mailbox.
+  let items = [];
+  for (const batchId of (batchIds || [])) {
+    const { data, error } = await supabase
+      .from('archive_search_significance_batch_items')
+      .select('mailbox_key, missive_conversation_id')
+      .eq('batch_id', batchId);
+    if (error) throw error;
+    items.push(...(data || []));
+  }
+
+  const ids = Array.from(new Set(items.map((i) => i.missive_conversation_id)));
+  const itemKeys = new Set(items.map((i) => `${i.mailbox_key}::${i.missive_conversation_id}`));
+
+  const rows = [];
+  const LOOKUP_CHUNK = 200; // same chunk size reportNeedsCall2() already uses for this identical lookup shape.
+  for (let i = 0; i < ids.length; i += LOOKUP_CHUNK) {
+    const { data, error } = await supabase
+      .from('missive_conversation_significance')
+      .select('mailbox_key, missive_conversation_id, needs_human_call, owner_instruction_rejected')
+      .in('missive_conversation_id', ids.slice(i, i + LOOKUP_CHUNK));
+    if (error) throw error;
+    rows.push(...(data || []));
+  }
+
+  const matched = rows.filter((r) => itemKeys.has(`${r.mailbox_key}::${r.missive_conversation_id}`));
+
+  return {
+    historicalReviewBacklogCount: historicalReviewBacklogCount || 0,
+    runConversationCount: ids.length,
+    needsHumanCallCount: matched.filter((r) => r.needs_human_call === true).length,
+    ownerInstructionRejectedCount: matched.filter((r) => r.owner_instruction_rejected === 'true').length,
+  };
+}
+
+// ============================================================
+// sendCall2BatchCompletionNotification — Asimov's one remaining condition
+// before a call_2 backlog run can go live against real data (governance
+// review, 2026-09-29): fired exactly once, at the moment a call_2 run
+// transitions to fully processed (see checkAndResumeRun's own hook,
+// below — this is NOT a new completion-detection mechanism, it reuses
+// that existing transition point). Recipients and send mechanism
+// deliberately match sendEscalationEmail() in router.js exactly (DO_EMAIL
+// + PETER_EMAIL, both independently, via lib/notify.js's shared
+// sendMail() over the Gmail API) — this codebase's own established
+// pattern for "something happened that a human needs to know about,"
+// not a new one invented for this build.
+//
+// Same defensive posture as every other non-critical side effect in this
+// codebase: wrapped in try/catch, logged loudly with the shared
+// [HUB-ALERT] prefix on any failure, and NEVER throws past this function
+// — a broken mailer must never leave the run's own completion status
+// (already durably written by the caller before this is invoked) in a
+// bad state.
+// ============================================================
+async function sendCall2BatchCompletionNotification({ runId, batchIds }) {
+  try {
+    const counts = await computeCall2RunNotificationCounts({ batchIds });
+
+    const recipients = [process.env.DO_EMAIL, process.env.PETER_EMAIL].filter(Boolean);
+    if (!recipients.length) {
+      console.error(`[HUB-ALERT] Call 2 batch completion notification not sent — DO_EMAIL and PETER_EMAIL are both unset. Run ${runId} finished: ${counts.needsHumanCallCount} of ${counts.runConversationCount} conversation(s) need a human call; ${counts.historicalReviewBacklogCount} complaint(s) currently sit in complaints_historical_review_required.`);
+      return { ok: false, counts, error: 'no_recipient' };
+    }
+
+    const result = await notify.sendMail({
+      to: recipients,
+      subject: `Archive Search: historical complaint backlog run finished — ${counts.needsHumanCallCount} need a human call`,
+      text: [
+        'A Call 2 historical complaint backlog run has finished processing on the Rincon Hub.',
+        '',
+        `Run:                                    ${runId}`,
+        `Conversations processed in this run:    ${counts.runConversationCount}`,
+        `Flagged needs_human_call (this run):    ${counts.needsHumanCallCount}`,
+        `Flagged owner_instruction_rejected (this run, informational): ${counts.ownerInstructionRejectedCount}`,
+        '',
+        `Complaints currently sitting in the historical review checklist (complaints_historical_review_required), portfolio-wide: ${counts.historicalReviewBacklogCount}`,
+        'This checklist is not yet surfaced in any Hub dashboard — ask Q/Neo if you want a way to review and clear it from the UI.',
+        '',
+        'No AI system has made a final decision here — this email is so a human finds out a batch of historical complaints landed, the same way someone already would for today\'s live, one-at-a-time Call 2 flow. Log in to the Rincon Hub and open Complaint Tracking to review the flagged conversations.',
+      ].join('\n'),
+    });
+
+    if (!result.ok) {
+      const detail = result.error || `${result.rejected.length} of ${recipients.length} recipient(s) rejected: ${result.rejected.join(', ')}`;
+      console.error(`[HUB-ALERT] Call 2 batch completion notification failed to send for run ${runId}: ${detail}`);
+      return { ok: false, counts, error: detail };
+    }
+
+    console.log(`[significance-batch] Call 2 batch completion notification sent for run ${runId} to ${recipients.length} recipient(s).`);
+    return { ok: true, counts };
+  } catch (err) {
+    // MUST NEVER throw past this function — see the header comment above.
+    console.error(`[HUB-ALERT] Call 2 batch completion notification threw and was swallowed for run ${runId}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ============================================================
 // reportNeedsCall2 — step 4. Only ever called after a 'call_1' stage batch
 // reaches completed_at. Deliberately reports only — never submits a
-// 'call_2' batch itself (that is a separate, later, DELIBERATE invocation
-// of submitBatch({stage: 'call_2', ...}), once that path is actually built
-// — see this file's own header). Scoped to THIS batch's own conversations
+// 'call_2' run itself (that is a separate, later, DELIBERATE invocation of
+// startSubmissionRun({stage: 'call_2', ...}) — see this file's own header,
+// "UPDATED 2026-09-29", for that path). Scoped to THIS batch's own conversations
 // (via archive_search_significance_batch_items), not "every recent
 // significance row" — a concurrent live-pipeline trickle elsewhere in this
 // codebase could otherwise leak unrelated rows into the count.
@@ -789,8 +1093,8 @@ async function fetchRunById(runId) {
 // this whole redesign protects is fully durable the instant it returns.
 // ============================================================
 async function startSubmissionRun({ stage, sinceDate = null, limit } = {}) {
-  if (stage !== 'call_1') {
-    throw new Error(`startSubmissionRun: stage '${stage}' is not implemented yet — only 'call_1' submission is built (see this file's own header for why 'call_2' submission is real, separate, deliberate follow-on work).`);
+  if (stage !== 'call_1' && stage !== 'call_2') {
+    throw new Error(`startSubmissionRun: stage '${stage}' is not implemented — only 'call_1' and 'call_2' submission are built.`);
   }
 
   const existing = await findUnfinishedRun(stage);
@@ -798,12 +1102,30 @@ async function startSubmissionRun({ stage, sinceDate = null, limit } = {}) {
 
   const requestedCount = Math.min(limit || MAX_BATCH_REQUESTS, MAX_BATCH_REQUESTS);
 
+  // sinceDate is meaningless for call_2 (fetchIncompleteSignificanceRows
+  // below takes no date parameter — it works off already-processed rows'
+  // own call2_completed_at, not a message date window) — forced to null
+  // both for the fetch below and for what gets durably recorded on the run
+  // row, so a run's own record never implies a date filter that was never
+  // actually applied, even if a caller passed one by mistake (e.g. a stale
+  // --since-date left over from a call_1 run of the same CLI command).
+  const effectiveSinceDate = stage === 'call_2' ? null : sinceDate;
+
   // THE expensive, hours-long call — exactly ONCE per run, ever. This
   // discipline (never call this a second time for the same run, and the
   // one-active-run-per-stage guard above ensuring no second run can start
   // while this one is still unresolved) is the ENTIRE no-double-submission
-  // guarantee — see the migration's own "THE RUN MODEL" section.
-  const pairs = await significancePass.fetchNextEligibleConversations(requestedCount, sinceDate);
+  // guarantee — see the migration's own "THE RUN MODEL" section. Call 2's
+  // own eligible set (the ~27,000-conversation Call 1-done-but-Call-2-never-
+  // run backlog) is comparatively cheap — a single indexed query against
+  // missive_conversation_significance, not Call 1's own hours-long
+  // screening-pipeline scan — but is still fetched exactly once here, for
+  // the identical reason: the one-active-run-per-stage guard above is what
+  // makes "exactly once" true, and that guarantee must not depend on which
+  // stage's own fetch happens to be cheap or expensive.
+  const pairs = stage === 'call_1'
+    ? await significancePass.fetchNextEligibleConversations(requestedCount, effectiveSinceDate)
+    : await significancePass.fetchIncompleteSignificanceRows(requestedCount);
   if (pairs.length === 0) return { started: false, reason: 'nothing_eligible', run: null };
 
   let runRow;
@@ -812,10 +1134,10 @@ async function startSubmissionRun({ stage, sinceDate = null, limit } = {}) {
       .from('archive_search_significance_submission_runs')
       .insert({
         stage,
-        since_date: sinceDate,
+        since_date: effectiveSinceDate,
         requested_count: requestedCount,
         submitted_by: BATCH_TOOL_VERSION,
-        notes: sinceDate ? `sinceDate=${sinceDate}` : null,
+        notes: effectiveSinceDate ? `sinceDate=${effectiveSinceDate}` : null,
       })
       .select()
       .single();
@@ -1074,6 +1396,46 @@ function partitionIntoChunks(entries, maxRequests, maxBytes) {
 }
 
 // ============================================================
+// fetchSignificanceRowsForPairs — batch-fetches missive_conversation_
+// significance rows for a set of (mailbox_key, missive_conversation_id)
+// pairs, keyed by "mailbox_key::missive_conversation_id" for O(1) per-item
+// lookup. Needed because the submission-run-items/batch-items tables only
+// ever store mailbox_key/missive_conversation_id (see startSubmissionRun's
+// own item rows and insertBatchItems above) — Call 2's own dispatch
+// (buildDispatchEntries, below) and write-back (writeBackCall2Batch, below)
+// both need category/resolution_status/why/discovery_context (dispatch) or
+// category/why/discovery_context/keyword-check flags (write-back), which
+// live only on that OTHER table, never on the run/batch item rows
+// themselves. Same "IN() on one column, filter the composite key in app
+// code" pattern reportNeedsCall2() above already uses, for the identical
+// reason (missive_conversation_id is only unique within a mailbox) — a
+// separate constant/function rather than reusing reportNeedsCall2()'s own
+// inline LOOKUP_CHUNK, since that one is scoped to a single batch's own
+// items and a fixed column list, not a general-purpose fetch. Called ONCE
+// per dispatch/write-back call (never per item) — see buildDispatchEntries'
+// and writeBackCall2Batch's own callers for why.
+// ============================================================
+const SIGNIFICANCE_ROWS_LOOKUP_CHUNK = 200;
+
+async function fetchSignificanceRowsForPairs(pairs, selectColumns) {
+  const ids = Array.from(new Set(pairs.map((p) => p.missive_conversation_id)));
+  const wantedKeys = new Set(pairs.map((p) => `${p.mailbox_key}::${p.missive_conversation_id}`));
+  const byKey = new Map();
+  for (let i = 0; i < ids.length; i += SIGNIFICANCE_ROWS_LOOKUP_CHUNK) {
+    const { data, error } = await supabase
+      .from('missive_conversation_significance')
+      .select(selectColumns)
+      .in('missive_conversation_id', ids.slice(i, i + SIGNIFICANCE_ROWS_LOOKUP_CHUNK));
+    if (error) throw error;
+    for (const row of (data || [])) {
+      const key = `${row.mailbox_key}::${row.missive_conversation_id}`;
+      if (wantedKeys.has(key)) byKey.set(key, row);
+    }
+  }
+  return byKey;
+}
+
+// ============================================================
 // buildDispatchEntries — builds one real Call 1 request per undispatched
 // item, reusing buildConversationContext()/buildCall1Prompt() exactly like
 // buildCall1BatchRequests() above already does (never reimplemented), plus
@@ -1122,15 +1484,65 @@ function partitionIntoChunks(entries, maxRequests, maxBytes) {
 // concurrency is a parameter (defaulting to DISPATCH_CONCURRENCY), not the
 // module constant read directly, for the same testability reason maxBytes
 // already is one call up in this same header comment.
+//
+// ADDED 2026-09-29 — stage-aware, for the Call 2 batch build. `stage` picks
+// which prompt gets built (buildCall1Prompt vs buildCall2Prompt) and which
+// max_tokens the request carries (1024 for Call 1, unchanged; 768 for Call
+// 2, matching runCall2()'s own live call — significance-pass.js ~line
+// 563-570). Call 2's own prompt needs category/resolution_status/why/
+// discovery_context, which — unlike Call 1's own eligible pairs, which
+// carry nothing beyond mailbox_key/missive_conversation_id either, but
+// need nothing more than that — must be looked up from missive_
+// conversation_significance (fetchSignificanceRowsForPairs, above); done
+// ONCE for the whole `items` array before the per-item concurrent loop
+// starts, not once per item, same "one round trip for the whole call"
+// discipline getActiveComplaintTrackingConfig() below is also given.
+// silenceContext (needed by buildCall2Prompt() for a 'live_pipeline' row —
+// most of the historical backlog is 'historical_backfill', where it's
+// simply null, per buildCall2Prompt()'s own historicalFraming branch)
+// reuses significancePass.computeSilenceContext() directly — the exact
+// same call runCall2Phase() itself makes — rather than re-deriving that
+// silence-window logic here.
 // ============================================================
-async function buildDispatchEntries(items, maxBytes = MAX_BATCH_BYTES, concurrency = DISPATCH_CONCURRENCY) {
+async function buildDispatchEntries(items, stage, maxBytes = MAX_BATCH_BYTES, concurrency = DISPATCH_CONCURRENCY) {
   const seenTokens = new Set();
+
+  let call2SignificanceByKey = null;
+  let complaintTrackingConfig = null;
+  if (stage === 'call_2') {
+    call2SignificanceByKey = await fetchSignificanceRowsForPairs(
+      items,
+      'mailbox_key, missive_conversation_id, category, resolution_status, why, discovery_context'
+    );
+    complaintTrackingConfig = await significancePass.getActiveComplaintTrackingConfig();
+  }
 
   const perItemResults = await mapWithConcurrency(items, concurrency, async (item) => {
     const context = await significancePass.buildConversationContext(item.mailbox_key, item.missive_conversation_id);
     if (!context) return { outcome: 'skipped_empty' };
-    const { addressMatched, threadText } = context;
-    const prompt = significancePass.buildCall1Prompt({ threadText, addressMatched });
+    const { addressMatched, threadText, thread } = context;
+
+    let prompt;
+    if (stage === 'call_1') {
+      prompt = significancePass.buildCall1Prompt({ threadText, addressMatched });
+    } else {
+      const sigFields = call2SignificanceByKey.get(`${item.mailbox_key}::${item.missive_conversation_id}`);
+      if (!sigFields) {
+        console.error(`[significance-batch] item ${item.id} (${item.mailbox_key}/${item.missive_conversation_id}) has no missive_conversation_significance row at dispatch time (Call 1's own result may have been deleted since this run was assembled) — skipping, same as a disappeared conversation; left undispatched, needs manual review.`);
+        return { outcome: 'skipped_empty' };
+      }
+      const silenceContext = sigFields.discovery_context === 'live_pipeline'
+        ? significancePass.computeSilenceContext(thread, complaintTrackingConfig ? complaintTrackingConfig.blocked_resolution_silence_days : 2)
+        : null;
+      prompt = significancePass.buildCall2Prompt({
+        category: sigFields.category,
+        resolution_status: sigFields.resolution_status,
+        why: sigFields.why,
+        threadText,
+        discoveryContext: sigFields.discovery_context,
+        silenceContext,
+      });
+    }
 
     let token;
     do { token = generateToken(); } while (seenTokens.has(token)); // re-roll on collision — see generateToken()'s own header for how unlikely this branch is to ever run.
@@ -1140,7 +1552,7 @@ async function buildDispatchEntries(items, maxBytes = MAX_BATCH_BYTES, concurren
       custom_id: token,
       params: {
         model: 'claude-sonnet-5',
-        max_tokens: 1024,
+        max_tokens: stage === 'call_1' ? 1024 : 768,
         output_config: { effort: 'medium' },
         messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
       },
@@ -1276,12 +1688,27 @@ async function checkEligiblePoolSanity({ eligibleCount, sinceDate }) {
 // deliberately proceed; every OTHER call to this function, for this or any
 // other run, still checks fresh, exactly per this file's own "never trust a
 // one-time decision baked into the row" design choice (see that header).
+//
+// ADDED 2026-09-29 — stage-aware (Call 2 build). The EXPECTED POOL SANITY
+// CHECK above is deliberately run for run.stage === 'call_1' ONLY (Q's own
+// scope decision, flagged here rather than silently assumed): checkEligible
+// PoolSanity()/estimateExpectedEligiblePool() estimate Call 1's OWN eligible
+// pool — the same screening-cleared-conversations-minus-already-processed
+// scan Call 1's real eligibility fetch itself runs — which has no Call 2
+// equivalent. Call 2's eligible_count is a small, already-known, fixed
+// subset of conversations Call 1 has ALREADY fully processed (the ~27,000-
+// conversation backlog), not an independently-estimable "pool" with its own
+// undercount failure mode — comparing it against Call 1's own pool estimate
+// would compare two unrelated denominators and, in the ~27k-of-~250k real
+// case, would ALWAYS fail (roughly 11%, nowhere near the 70% threshold),
+// making --force mandatory on every single call2 dispatch rather than the
+// deliberate, occasional human override this check is designed to be.
 // ============================================================
 async function dispatchRunChunks({ runId, maxRequests = MAX_BATCH_REQUESTS, maxBytes = MAX_BATCH_BYTES, force = false }) {
   const run = await fetchRunById(runId);
   if (!run) throw new Error(`dispatchRunChunks: no submission run found with id "${runId}".`);
-  if (run.stage !== 'call_1') {
-    throw new Error(`dispatchRunChunks: stage '${run.stage}' is not implemented yet — only 'call_1' dispatch is built (this function only knows how to build Call 1 requests).`);
+  if (run.stage !== 'call_1' && run.stage !== 'call_2') {
+    throw new Error(`dispatchRunChunks: stage '${run.stage}' is not implemented — only 'call_1' and 'call_2' dispatch are built.`);
   }
   if (!run.assembled_at) {
     throw new Error(`dispatchRunChunks: run ${runId} has not finished being durably assembled (assembled_at is not set) — its eligible list may be incomplete. This should only happen if startSubmissionRun crashed between inserting the run row and finishing its submission_run_items inserts (a narrow, documented window — see this file's own header). Needs manual review before dispatching; re-running will not fix this on its own.`);
@@ -1292,7 +1719,7 @@ async function dispatchRunChunks({ runId, maxRequests = MAX_BATCH_REQUESTS, maxB
   const undispatchedItems = await fetchUndispatchedRunItems(runId);
   if (undispatchedItems.length === 0) return summary;
 
-  if (!force) {
+  if (!force && run.stage === 'call_1') {
     const sanityCheck = await checkEligiblePoolSanity({ eligibleCount: run.eligible_count, sinceDate: run.since_date });
     if (!sanityCheck.passed) {
       console.error(`[significance-batch] SANITY CHECK FAILED for run ${runId}: eligible_count=${sanityCheck.eligibleCount} is only ${(sanityCheck.ratio * 100).toFixed(1)}% of the estimated expected pool (~${sanityCheck.expectedPool}, from ${sanityCheck.totalMatchingConversations} matching conversation(s) minus ${sanityCheck.totalAlreadyProcessed} already-processed conversation(s)) — below the ${(EXPECTED_POOL_MIN_RATIO * 100).toFixed(0)}% threshold. Refusing to dispatch anything to Anthropic for this run — this looks like the same class of silent undercount seen on 2026-09-18 (33,755 found vs. ~84,192 expected). Pass force: true (CLI: --force) once a human has reviewed this run and confirmed the low count is real.`);
@@ -1300,7 +1727,7 @@ async function dispatchRunChunks({ runId, maxRequests = MAX_BATCH_REQUESTS, maxB
     }
   }
 
-  const { entries, skippedEmpty, skippedOversized } = await buildDispatchEntries(undispatchedItems, maxBytes);
+  const { entries, skippedEmpty, skippedOversized } = await buildDispatchEntries(undispatchedItems, run.stage, maxBytes);
   summary.itemsSkippedEmpty = skippedEmpty;
   summary.itemsSkippedOversized = skippedOversized;
   if (entries.length === 0) return summary;
@@ -1390,6 +1817,17 @@ async function dispatchRunChunks({ runId, maxRequests = MAX_BATCH_REQUESTS, maxB
 // A run with zero batches yet (dispatch hasn't happened, or every chunk so
 // far has been rate-limited) can never be marked fully processed here —
 // correctly: there is nothing yet to have finished.
+//
+// ADDED 2026-09-29 — stage-aware write-back (Call 2 build). Each batches
+// row already carries its OWN stage column (stamped from run.stage at
+// dispatch time — see dispatchRunChunks' own insert, above), so this reads
+// batchRow.stage directly rather than re-fetching the parent run — correct
+// even in the (currently impossible, since a run's own stage never
+// changes) hypothetical of a run whose batches somehow disagreed with its
+// own stage. checkAndResumeOneBatch()/maybeMarkBatchCompleted() themselves
+// are genuinely stage-agnostic (neither reads or writes anything Call-1-
+// or Call-2-specific) and stay completely unchanged, exactly as this
+// function's own header already promises.
 // ============================================================
 async function checkAndResumeRun({ runId }) {
   const { data: batchRows, error } = await supabase
@@ -1414,7 +1852,9 @@ async function checkAndResumeRun({ runId }) {
     let nowCompleted = false;
 
     if (checked.remote.processing_status === 'ended' && checked.batch.results_retrieved_at) {
-      writeBackSummary = await writeBackBatch({ batchId: batchRow.id, anthropicBatchId: batchRow.anthropic_batch_id });
+      writeBackSummary = batchRow.stage === 'call_2'
+        ? await writeBackCall2Batch({ batchId: batchRow.id, anthropicBatchId: batchRow.anthropic_batch_id })
+        : await writeBackBatch({ batchId: batchRow.id, anthropicBatchId: batchRow.anthropic_batch_id });
       nowCompleted = await maybeMarkBatchCompleted(batchRow.id);
     }
 
@@ -1430,17 +1870,44 @@ async function checkAndResumeRun({ runId }) {
 
   const { data: allBatchRows, error: allErr } = await supabase
     .from('archive_search_significance_batches')
-    .select('completed_at')
+    .select('id, completed_at')
     .eq('run_id', runId);
   if (allErr) throw allErr;
 
   const fullyProcessed = (allBatchRows || []).length > 0 && (allBatchRows || []).every((b) => !!b.completed_at);
   if (fullyProcessed) {
+    // Read the run row BEFORE stamping fully_processed_at, so this can tell
+    // "this call is the one that just finished the run" apart from "this
+    // run was already fully processed and checkAndResumeRun got called
+    // again anyway" (a redundant cron re-check, for example) — the ONLY
+    // guard standing between sendCall2BatchCompletionNotification() (below)
+    // firing exactly once per run, per Asimov's own requirement, and firing
+    // again on every subsequent call. stage is read from the same row, so a
+    // call_1 run (which already has a live, human-present trigger — today's
+    // one-at-a-time flow — per Asimov's own finding) never gets this email.
+    const runBeforeUpdate = await fetchRunById(runId);
+    const alreadyFullyProcessed = !!(runBeforeUpdate && runBeforeUpdate.fully_processed_at);
+
     const { error: updateErr } = await supabase
       .from('archive_search_significance_submission_runs')
       .update({ fully_processed_at: new Date().toISOString() })
       .eq('id', runId);
     if (updateErr) throw updateErr;
+
+    // Asimov's governance review, 2026-09-29 — cleared to build, not
+    // cleared to run against real data until this existed: a real
+    // notification firing once a call_2 backlog run finishes, so a human
+    // actually finds out. Hooked into the SAME transition point the run
+    // itself already uses to mark itself done (immediately above), not a
+    // new completion-detection mechanism. Never awaited in a way that
+    // could affect the return value or throw past this function — see
+    // sendCall2BatchCompletionNotification's own try/catch.
+    if (!alreadyFullyProcessed && runBeforeUpdate && runBeforeUpdate.stage === 'call_2') {
+      await sendCall2BatchCompletionNotification({
+        runId,
+        batchIds: (allBatchRows || []).map((b) => b.id),
+      });
+    }
   }
 
   return { results, fullyProcessed };
@@ -1494,6 +1961,22 @@ module.exports = {
   // DISPATCH_CONCURRENCY/mapWithConcurrency already are.
   WRITEBACK_CONCURRENCY,
   drainInGroups,
+  // Added 2026-09-29 — Call 2 batch submission/dispatch/write-back (this
+  // file's own header note on submitBatch()'s untouched legacy guard, plus
+  // the stage-aware startSubmissionRun/dispatchRunChunks/checkAndResumeRun
+  // above, and buildDispatchEntries' own new call_2 branch). Exported for
+  // the same direct-unit-test reasons as their Call 1 counterparts above.
+  fetchSignificanceRowsForPairs,
+  applyOneCall2BatchItem,
+  writeBackCall2Batch,
+  // Added 2026-09-29 — Call 2 batch-completion notification (Asimov's
+  // governance review; see computeCall2RunNotificationCounts' and
+  // sendCall2BatchCompletionNotification's own header comments, above).
+  // Exported directly for the same "exercise it on its own, not just
+  // indirectly through checkAndResumeRun" reason every other unit in this
+  // file's own "Added" export groups already is.
+  computeCall2RunNotificationCounts,
+  sendCall2BatchCompletionNotification,
   _setSupabaseClientForTesting,
   _setAnthropicClientForTesting,
 };

@@ -5710,6 +5710,83 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
 });
 
 // ============================================================================
+// PART 21z — significance-pass per-run failure alert (Asimov's governance
+// review, 2026-10-01 — the condition attached to process-significance-pending-
+// scheduled ever running on a cron). See lib/significance-pass.js's own header
+// comment, directly above runSignificancePassBatch's module.exports entry, for
+// the full reasoning. Pure/synchronous — significancePassFailureCount and
+// significancePassAlertShouldFire touch no DB/network, so these run as plain
+// test() calls, same as PART 6's circuitBreakerShouldTrip tests above.
+// ============================================================================
+test('significancePassFailureCount — sums errors + call1_failed + call2_failed_placeholder, treating missing fields as 0', () => {
+  assert.strictEqual(significancePass.significancePassFailureCount({ errors: 1, call1_failed: 1, call2_failed_placeholder: 1 }), 3);
+  assert.strictEqual(significancePass.significancePassFailureCount({ errors: 0, call1_failed: 0, call2_failed_placeholder: 0 }), 0);
+  assert.strictEqual(significancePass.significancePassFailureCount({}), 0, 'expected missing fields to count as 0, not throw or produce NaN');
+});
+
+test('significancePassAlertShouldFire — a clean run (zero failures) never fires', () => {
+  assert.strictEqual(
+    significancePass.significancePassAlertShouldFire({ conversations_processed: 20, call2_completed: 20, call2_failed_placeholder: 0, call1_failed: 0, errors: 0 }),
+    false
+  );
+});
+
+test('significancePassAlertShouldFire — below SIGNIFICANCE_PASS_ALERT_THRESHOLD (a couple of isolated failures spread across different counters) does not fire', () => {
+  assert.strictEqual(
+    significancePass.significancePassAlertShouldFire({ conversations_processed: 18, call2_completed: 17, call2_failed_placeholder: 1, call1_failed: 1, errors: 0 }),
+    false
+  );
+});
+
+test('significancePassAlertShouldFire — exactly at SIGNIFICANCE_PASS_ALERT_THRESHOLD fires (>= not >)', () => {
+  assert.strictEqual(significancePass.SIGNIFICANCE_PASS_ALERT_THRESHOLD, 3, 'this test assumes the documented threshold value — update it deliberately if that constant intentionally changes');
+  assert.strictEqual(
+    significancePass.significancePassAlertShouldFire({ conversations_processed: 17, call2_completed: 17, call2_failed_placeholder: 0, call1_failed: 0, errors: 3 }),
+    true
+  );
+});
+
+test('significancePassAlertShouldFire — one short of the threshold does not fire (regression guard on the off-by-one)', () => {
+  assert.strictEqual(
+    significancePass.significancePassAlertShouldFire({ conversations_processed: 18, call2_completed: 18, call2_failed_placeholder: 0, call1_failed: 0, errors: 2 }),
+    false
+  );
+});
+
+test('significancePassAlertShouldFire — failures spread across errors/call1_failed/call2_failed_placeholder still sum to trip it, matching Asimov\'s own "errors/call1_failed/...placeholders" combined wording', () => {
+  assert.strictEqual(
+    significancePass.significancePassAlertShouldFire({ conversations_processed: 17, call2_completed: 16, call2_failed_placeholder: 1, call1_failed: 1, errors: 1 }),
+    true
+  );
+});
+
+test('router.js — BOTH process-significance-pending and process-significance-pending-scheduled check significancePassAlertShouldFire(summary) and call sendSignificancePassAlertEmail() with their own real route name after runSignificancePassBatch() completes — source-scanned, the same way PART 6 already proves process-pending\'s own screening-pass circuit-breaker alert call site, since neither route is invoked live in this suite', () => {
+  const routerSource = fs.readFileSync(path.join(__dirname, '..', 'router.js'), 'utf8');
+
+  const manualStart = routerSource.indexOf("internalRouter.post('/api/archive-search/process-significance-pending',");
+  const manualEnd = routerSource.indexOf("internalRouter.post('/api/archive-search/process-significance-pending-scheduled',");
+  const scheduledStart = manualEnd;
+  const scheduledEnd = routerSource.indexOf("router.get('/api/archive-search/significance-pilot-export',");
+  assert.ok(manualStart > -1 && manualEnd > manualStart && scheduledEnd > scheduledStart, 'expected to find all three route boundaries — route names may have changed');
+
+  const manualBody = routerSource.slice(manualStart, manualEnd);
+  const scheduledBody = routerSource.slice(scheduledStart, scheduledEnd);
+
+  for (const [name, body] of [['process-significance-pending', manualBody], ['process-significance-pending-scheduled', scheduledBody]]) {
+    assert.ok(body.includes('significancePassAlertShouldFire(summary)'), `expected ${name} to check significancePassAlertShouldFire(summary) after its own run`);
+    assert.ok(body.includes(`route: '${name}'`), `expected ${name} to pass its own real route name to sendSignificancePassAlertEmail()`);
+    assert.ok(body.includes('sendSignificancePassAlertEmail({'), `expected ${name} to actually call sendSignificancePassAlertEmail()`);
+    // The alert call must be gated behind the threshold check, not unconditional —
+    // confirmed by checking the alert call site textually falls inside an `if`
+    // block whose condition is the threshold check, not merely that both
+    // substrings exist somewhere in the route.
+    const ifIdx = body.indexOf('if (significancePassAlertShouldFire(summary))');
+    const alertIdx = body.indexOf('sendSignificancePassAlertEmail({');
+    assert.ok(ifIdx > -1 && alertIdx > ifIdx && alertIdx - ifIdx < 200, `expected ${name}'s sendSignificancePassAlertEmail() call to sit directly inside the significancePassAlertShouldFire(summary) if-guard, not fire unconditionally`);
+  }
+});
+
+// ============================================================================
 // PART 21 — Call 2 batch-completion notification (Asimov's governance
 // review, 2026-09-29): computeCall2RunNotificationCounts, sendCall2Batch
 // CompletionNotification, and the checkAndResumeRun hook that fires it. See
@@ -5937,6 +6014,130 @@ function makeTimingAwareItemsBatchFakeClient({ batchRow, itemRows, delayForToken
   }
   assert.ok(state.run.fully_processed_at, 'expected the call_1 run to still be marked fully processed normally');
   assert.strictEqual(sendMailCalls.length, 0, 'expected the Call 2 completion notification to never fire for a call_1 run');
+  });
+
+// ─── 21f-21i — significance-pass per-run failure alert (Asimov's condition,
+// 2026-10-01 — see lib/significance-pass.js's own header comment). Run inside
+// THIS SAME sequential IIFE, not a separate asyncTest()/IIFE of their own,
+// because they also spyOn(notify, 'sendMail', ...) — the identical shared,
+// property-mutated spy target 21b-21e above already use, so they need the
+// same strict-sequence discipline this whole PART's header comment documents
+// (asyncTest()-registered IIFEs run CONCURRENTLY with each other; only
+// runSerialCheck() calls INSIDE one IIFE are guaranteed ordered) ───────────
+
+// ─── 21f — sendSignificancePassAlertEmail: a run that crosses the alert
+// threshold sends exactly one real email via notify.sendMail(), to DO_EMAIL +
+// PETER_EMAIL, carrying the real run counts, route name, and run time ─────
+  await runSerialCheck('significance-pass — sendSignificancePassAlertEmail: a run that crosses the alert threshold sends exactly one email via notify.sendMail(), to DO_EMAIL + PETER_EMAIL, carrying the real run counts and route name', async () => {
+  const summary = { conversations_processed: 17, call2_completed: 16, call2_failed_placeholder: 1, call2_retried: 0, complaints_created: 2, call1_failed: 1, errors: 1 };
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  const sendMailCalls = [];
+  const sendMailSpy = spyOn(notify, 'sendMail', async (args) => { sendMailCalls.push(args); return { ok: true, sent: 2, failed: 0, accepted: args.to, rejected: [], error: null }; });
+
+  try {
+    const result = await significancePass.sendSignificancePassAlertEmail({ route: 'process-significance-pending-scheduled', summary, ts: '2026-10-01T12:00:00.000Z' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(sendMailCalls.length, 1, 'expected sendMail to be called exactly once');
+    assert.deepStrictEqual(sendMailCalls[0].to, ['do@example.test', 'peter@example.test'], 'expected the same DO_EMAIL/PETER_EMAIL recipient pattern this codebase\'s other alert emails already use');
+    assert.ok(sendMailCalls[0].subject.includes('process-significance-pending-scheduled'), 'expected the real route name in the subject line');
+    assert.ok(sendMailCalls[0].subject.includes('3 failure'), 'expected the real combined failure count (1 error + 1 call1_failed + 1 call2_failed_placeholder = 3) in the subject line');
+    assert.ok(sendMailCalls[0].text.includes('process-significance-pending-scheduled'), 'expected the route name in the email body');
+    assert.ok(sendMailCalls[0].text.includes('2026-10-01T12:00:00.000Z'), 'expected the real run timestamp in the email body');
+    assert.ok(sendMailCalls[0].text.includes('Conversations processed:                17'), 'expected the real conversations_processed count in the body');
+    assert.ok(sendMailCalls[0].text.includes('Errors:                                 1'), 'expected the real errors count in the body');
+    assert.ok(sendMailCalls[0].text.includes('Call 1 failed:                          1'), 'expected the real call1_failed count in the body');
+    assert.ok(sendMailCalls[0].text.includes('Call 2 fail-closed placeholders:        1'), 'expected the real call2_failed_placeholder count in the body');
+    assert.ok(sendMailCalls[0].text.includes('Complaints created:                     2'), 'expected the real complaints_created count in the body');
+    assert.strictEqual(result.ok, true);
+  } finally {
+    sendMailSpy.restore();
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21g — sendSignificancePassAlertEmail: no recipient configured (DO_EMAIL
+// and PETER_EMAIL both unset) is reported back honestly as ok:false/
+// no_recipient, never throws, and never even attempts notify.sendMail() —
+// same contract sendCall2BatchCompletionNotification's own 'no_recipient'
+// path already establishes ──────────────────────────────────────────────
+  await runSerialCheck('significance-pass — sendSignificancePassAlertEmail: no recipient configured (DO_EMAIL and PETER_EMAIL both unset) is reported back as ok:false/no_recipient, never throws, and never even attempts to call notify.sendMail()', async () => {
+  const summary = { conversations_processed: 17, call2_completed: 16, call2_failed_placeholder: 1, call1_failed: 1, errors: 1 };
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  delete process.env.DO_EMAIL;
+  delete process.env.PETER_EMAIL;
+
+  const sendMailCalls = [];
+  const sendMailSpy = spyOn(notify, 'sendMail', async (args) => { sendMailCalls.push(args); return { ok: true, sent: 0, failed: 0, accepted: [], rejected: [], error: null }; });
+
+  try {
+    const result = await significancePass.sendSignificancePassAlertEmail({ route: 'process-significance-pending', summary, ts: '2026-10-01T12:00:00.000Z' });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error, 'no_recipient');
+    assert.strictEqual(sendMailCalls.length, 0, 'expected notify.sendMail to never be called when no recipients are configured');
+  } finally {
+    sendMailSpy.restore();
+    if (prevDoEmail === undefined) delete process.env.DO_EMAIL; else process.env.DO_EMAIL = prevDoEmail;
+    if (prevPeterEmail === undefined) delete process.env.PETER_EMAIL; else process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21h — sendSignificancePassAlertEmail: a realistic notify.sendMail()
+// failure (its own real contract — resolves { ok: false, ... }, never
+// throws) is reported back honestly as ok:false, never thrown ────────────
+  await runSerialCheck('significance-pass — sendSignificancePassAlertEmail: a realistic notify.sendMail() failure (resolves ok:false, per its own real contract) is reported back as ok:false, never thrown', async () => {
+  const summary = { conversations_processed: 17, call2_completed: 16, call2_failed_placeholder: 1, call1_failed: 1, errors: 1 };
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  const sendMailSpy = spyOn(notify, 'sendMail', async () => ({ ok: false, sent: 0, failed: 2, accepted: [], rejected: [], error: 'mailer_not_configured' }));
+
+  try {
+    const result = await significancePass.sendSignificancePassAlertEmail({ route: 'process-significance-pending', summary, ts: '2026-10-01T12:00:00.000Z' });
+    assert.strictEqual(result.ok, false, 'expected ok:false to be reported honestly, matching notify.sendMail\'s own resolved outcome');
+    assert.ok(result.error, 'expected a real error message reported back');
+  } finally {
+    sendMailSpy.restore();
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
+  });
+
+// ─── 21i — sendSignificancePassAlertEmail: notify.sendMail() itself THROWING
+// (contrary to its own real contract — the most defensive case, same choice
+// 21d above makes for the Call 2 completion notification) is still caught and
+// reported back as ok:false — NEVER propagates past this function, so a
+// broken mailer can never crash or block the route that just finished a real
+// pipeline run ──────────────────────────────────────────────────────────
+  await runSerialCheck('significance-pass — sendSignificancePassAlertEmail: notify.sendMail() itself THROWING (contrary to its own real contract) is still caught and reported back as ok:false — never propagates past this function, so a broken mailer can never crash or block the route that just finished a real pipeline run', async () => {
+  const summary = { conversations_processed: 17, call2_completed: 16, call2_failed_placeholder: 1, call1_failed: 1, errors: 1 };
+
+  const prevDoEmail = process.env.DO_EMAIL;
+  const prevPeterEmail = process.env.PETER_EMAIL;
+  process.env.DO_EMAIL = 'do@example.test';
+  process.env.PETER_EMAIL = 'peter@example.test';
+
+  const sendMailSpy = spyOn(notify, 'sendMail', async () => { throw new Error('simulated mail-server outage'); });
+
+  try {
+    const result = await significancePass.sendSignificancePassAlertEmail({ route: 'process-significance-pending-scheduled', summary, ts: '2026-10-01T12:00:00.000Z' });
+    assert.strictEqual(result.ok, false);
+    assert.ok(result.error.includes('simulated mail-server outage'), 'expected the real thrown error message reported back, not swallowed silently');
+  } finally {
+    sendMailSpy.restore();
+    process.env.DO_EMAIL = prevDoEmail;
+    process.env.PETER_EMAIL = prevPeterEmail;
+  }
   });
 
   return { name: 'significance-batch — PART 18-20 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };

@@ -87,6 +87,13 @@ const { toThreadShape, collectAllAddresses, threadFullText } = require('../../co
 const { matchParticipantsToRecords } = require('../../complaint-tracking/lib/subject-match');
 const { findPossibleDuplicate } = require('../../complaint-tracking/lib/duplicate-check');
 const { computeSilenceContext, lookupSingleDirectorOfOperations } = require('../../complaint-tracking/lib/process-pending-messages');
+// Added 2026-10-01 for the per-run failure alert below (sendSignificancePassAlertEmail)
+// — the SAME shared mailer significance-batch.js's sendCall2BatchCompletionNotification
+// already uses, required the identical way (as the module object, not destructured)
+// so a test can spyOn(notify, 'sendMail', ...) and have this file's own call site see
+// it — a plain destructured `const { sendMail } = require(...)` would bind its own
+// copy of the function at require time and never observe a later spy.
+const notify = require('../../lib/notify');
 
 // `let`, not `const` — see _setSupabaseClientForTesting() just below.
 let supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -533,7 +540,19 @@ function parseCall2Response(rawText, { category }) {
   if (category === 'owner_instruction') {
     if (parsed.owner_instruction_rejected === true || parsed.owner_instruction_rejected === false) {
       owner_instruction_rejected = parsed.owner_instruction_rejected;
-    } else if (parsed.owner_instruction_rejected === 'uncertain') {
+    } else if (parsed.owner_instruction_rejected === 'uncertain' || parsed.owner_instruction_rejected === null) {
+      // Real bug found live 2026-10-01: a genuinely ambiguous owner_instruction
+      // conversation (e.g. "staff chasing an unresponsive owner" — there's no
+      // actual accept/reject decision to report) makes the model return a
+      // bare `null` here rather than the string 'uncertain', even though
+      // that's exactly what 'uncertain' already means. Treating `null` as a
+      // parse FAILURE (the old behavior) sent it down the fail-closed retry
+      // path forever — Call 2 never marks call2_completed_at for a
+      // fail-closed row by design, so this exact conversation kept getting
+      // resubmitted and re-billed on every single run with no way to ever
+      // finish. `null` and the literal string 'uncertain' both mean the same
+      // thing here, so both map to the schema's own existing 'uncertain'
+      // bucket instead of a doomed-to-repeat parse failure.
       owner_instruction_rejected = 'uncertain';
     } else {
       return null; // category is owner_instruction but this required field didn't come through — retry.
@@ -861,6 +880,55 @@ function resolveUniqueMatch(citedText, directory, fieldNames) {
 // ============================================================
 const DRIVER_PAGE_SIZE = 500;
 
+// SLOW_DB_CALL_WARNING_MS — added 2026-09-22, live-incident diagnostics. A
+// real production run froze mid-scan (150 pages in, 0.4% CPU, established
+// TCP connection, no forward progress for 100+ seconds, never crashed —
+// killed manually) and the existing 25-page progress summary (below, in
+// fetchNextEligibleConversations()) wasn't fine-grained enough to say WHICH
+// individual DB call froze. fetchDriverPage() and filterAlreadyProcessed()
+// below each time their own call(s) against this threshold and console.error
+// immediately (not batched into the next summary) when one is slow, so a
+// repeat freeze pinpoints the exact cursor / batch instead of just the page
+// range. 3000ms is generous slack above this driver's normal ~200-330ms
+// live timing (see fetchDriverPage()'s own header comment) without being so
+// tight that ordinary jitter trips it. Logging only — does not change
+// control flow, retries, or error handling either side of the threshold.
+const SLOW_DB_CALL_WARNING_MS = 3000;
+
+// DB_CALL_ABORT_TIMEOUT_MS — added 2026-09-22, Peter approved same day. The
+// same live incident above left the process at 0.4% CPU with an ESTABLISHED
+// TCP connection and no forward progress for 100+ seconds — a plain DB
+// round-trip should never legitimately take that long, and nothing was
+// hanging server-side (independently re-running the identical two DB calls
+// at the moment of the real freeze came back in 545ms and 177ms). Chaining
+// .abortSignal(AbortSignal.timeout(DB_CALL_ABORT_TIMEOUT_MS)) onto both
+// fetchDriverPage()'s RPC call and each filterAlreadyProcessed() batch below
+// makes a genuinely stuck request fail loudly (and get caught by the
+// existing `if (error) throw error` in each) instead of hanging the whole
+// process forever. 45000ms is comfortably above service_role's 30s
+// statement_timeout ceiling for this driver (raised specifically for it —
+// migration 20260918030000) so it never fires on a call Postgres itself
+// would still have finished, but short enough to fail during an active
+// debugging session rather than never.
+const DB_CALL_ABORT_TIMEOUT_MS = 45000;
+
+// isAbortTimeoutError — added alongside DB_CALL_ABORT_TIMEOUT_MS. Detects
+// the client-side abort produced by AbortSignal.timeout(), so the two call
+// sites below can log an unambiguous "this was a timeout, not an ordinary
+// DB error" line instead of just falling through to the generic slow-call
+// warning. Verified empirically against the installed @supabase/postgrest-js
+// (2.112.3): AbortSignal.timeout() surfaces as error.message starting with
+// "TimeoutError:" with error.hint left blank — NOT the "AbortError:" +
+// populated hint shape postgrest-js's own doc comment shows for a manually-
+// triggered AbortController.abort(). Matches both message shapes so this
+// keeps working if either call site's abort mechanism ever changes. Only
+// picks which console.error line to print — `if (error) throw error` below
+// still fires exactly the same either way, so this never changes control
+// flow.
+function isAbortTimeoutError(error) {
+  return !!error && typeof error.message === 'string' && /TimeoutError|AbortError/.test(error.message);
+}
+
 // ============================================================
 // Real fix, 2026-09-17 (Neo's diagnosis, independently reproduced live
 // twice tonight). Two earlier approaches both failed against the real
@@ -936,10 +1004,19 @@ const DRIVER_PAGE_SIZE = 500;
 // only — screening_result = 'clear', nothing else).
 // ============================================================
 async function fetchDriverPage(cursor) {
-  const { data, error } = await supabase.rpc('archive_search_significance_driver_next_clear_page', {
-    p_cursor_id: cursor, // null is fine — the RPC's own default (and its `p_cursor_id IS NULL OR id > p_cursor_id` WHERE clause) handles "start from the beginning," same as the old `if (cursor !== null) query = query.gt(...)` branch did.
-    p_limit: DRIVER_PAGE_SIZE,
-  });
+  const callStartedAt = Date.now();
+  const { data, error } = await supabase
+    .rpc('archive_search_significance_driver_next_clear_page', {
+      p_cursor_id: cursor, // null is fine — the RPC's own default (and its `p_cursor_id IS NULL OR id > p_cursor_id` WHERE clause) handles "start from the beginning," same as the old `if (cursor !== null) query = query.gt(...)` branch did.
+      p_limit: DRIVER_PAGE_SIZE,
+    })
+    .abortSignal(AbortSignal.timeout(DB_CALL_ABORT_TIMEOUT_MS));
+  const callElapsedMs = Date.now() - callStartedAt;
+  if (isAbortTimeoutError(error)) {
+    console.error(`[significance-pass] fetchDriverPage RPC call ABORTED after ${callElapsedMs}ms (timeout ${DB_CALL_ABORT_TIMEOUT_MS}ms) — cursor=${cursor === null ? 'null (start)' : cursor}: likely hung, not a normal DB error.`);
+  } else if (callElapsedMs > SLOW_DB_CALL_WARNING_MS) {
+    console.error(`[significance-pass] SLOW fetchDriverPage RPC call: cursor=${cursor === null ? 'null (start)' : cursor}, took ${callElapsedMs}ms (warn threshold ${SLOW_DB_CALL_WARNING_MS}ms)`);
+  }
   if (error) throw error;
   return data || [];
 }
@@ -998,10 +1075,19 @@ async function filterAlreadyProcessed(pairs) {
   const existingKeys = new Set();
   const BATCH = 200;
   for (let i = 0; i < ids.length; i += BATCH) {
+    const batchIds = ids.slice(i, i + BATCH);
+    const batchStartedAt = Date.now();
     const { data, error } = await supabase
       .from('missive_conversation_significance')
       .select('mailbox_key, missive_conversation_id')
-      .in('missive_conversation_id', ids.slice(i, i + BATCH));
+      .in('missive_conversation_id', batchIds)
+      .abortSignal(AbortSignal.timeout(DB_CALL_ABORT_TIMEOUT_MS));
+    const batchElapsedMs = Date.now() - batchStartedAt;
+    if (isAbortTimeoutError(error)) {
+      console.error(`[significance-pass] filterAlreadyProcessed existence-check batch ABORTED after ${batchElapsedMs}ms (timeout ${DB_CALL_ABORT_TIMEOUT_MS}ms) — ${batchIds.length} ids: likely hung, not a normal DB error.`);
+    } else if (batchElapsedMs > SLOW_DB_CALL_WARNING_MS) {
+      console.error(`[significance-pass] SLOW filterAlreadyProcessed existence-check batch: ${batchIds.length} ids, took ${batchElapsedMs}ms (warn threshold ${SLOW_DB_CALL_WARNING_MS}ms)`);
+    }
     if (error) throw error;
     for (const row of data || []) existingKeys.add(`${row.mailbox_key}::${row.missive_conversation_id}`);
   }
@@ -1371,6 +1457,16 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
   const persistThisRunsCursor = (cursorId, { exhausted }) =>
     persistDriverCursor(cursorId, cursorScopeKey, { exhausted, floorId: startingCursorFloor, runStartedAt, escalationDigest });
 
+  // Progress logging only (observability, not behavior) — added so a long
+  // live run is visible while it's happening instead of silent until it
+  // succeeds or throws. Counters reuse values the loop below already
+  // computes; no extra DB calls. Logged every PROGRESS_LOG_EVERY_PAGES
+  // pages, plus once more as a summary at every return/exit point.
+  const PROGRESS_LOG_EVERY_PAGES = 25;
+  const fnStartedAt = Date.now();
+  let pagesWalked = 0;
+  let rowsExamined = 0;
+
   for (;;) {
     const page = await fetchDriverPage(lastId);
     if (page.length === 0) {
@@ -1378,6 +1474,13 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
       break;
     }
     lastId = page[page.length - 1].id; // advance from the RAW page, before the date/escalation filters below — pagination must progress through every message row regardless of whether it passes either filter, or a long run of filtered-out messages would re-fetch the same page forever. NOTE: this is only a safe cursor value once the WHOLE page has actually been walked (the two persistThisRunsCursor() calls below this line, both reached only after the per-pair loop runs to completion) — see firstRowIdForPair below for the mid-page early-exit case, where it is NOT safe.
+
+    pagesWalked++;
+    rowsExamined += page.length;
+    if (pagesWalked % PROGRESS_LOG_EVERY_PAGES === 0) {
+      const elapsedSec = ((Date.now() - fnStartedAt) / 1000).toFixed(1);
+      console.log(`[significance-pass] fetchNextEligibleConversations progress: ${pagesWalked} pages walked, ${rowsExamined} rows examined, ${found.length} eligible found so far, ${elapsedSec}s elapsed`);
+    }
 
     const datePassingRows = page.filter((row) => passesSinceDate(row, sinceDate));
     const eligibleRows = datePassingRows.filter((row) => passesEscalationExclusion(row, escalationKeys));
@@ -1417,6 +1520,7 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
         // are re-examined, not skipped, next run.
         const examinedThroughId = firstRowIdForPair.get(key);
         await persistThisRunsCursor(examinedThroughId, { exhausted: false });
+        console.log(`[significance-pass] fetchNextEligibleConversations done (target reached): ${pagesWalked} pages walked, ${rowsExamined} rows examined, ${found.length} eligible found, ${((Date.now() - fnStartedAt) / 1000).toFixed(1)}s elapsed`);
         return found;
       }
     }
@@ -1426,6 +1530,7 @@ async function fetchNextEligibleConversations(targetCount, sinceDate = null) {
       break;
     }
   }
+  console.log(`[significance-pass] fetchNextEligibleConversations done (walk exhausted): ${pagesWalked} pages walked, ${rowsExamined} rows examined, ${found.length} eligible found, ${((Date.now() - fnStartedAt) / 1000).toFixed(1)}s elapsed`);
   return found;
 }
 
@@ -1934,6 +2039,43 @@ async function runCall2Phase({
     mailbox_key, missive_conversation_id, // temporary — only consumed by logHermesUsage() inside runCall2(); buildCall2Prompt() does not read these keys.
   });
 
+  return applyCall2Fields({
+    significanceId, mailbox_key, missive_conversation_id, discoveryContext,
+    category, why, call2Result, rows, addressMatch,
+    flaggedProtectedClass, flaggedCategory, property_id, vendor_id,
+  });
+}
+
+// ============================================================
+// The database-write half of Call 2 — pulled out of runCall2Phase()
+// (2026-09-29, the Call 2 Batches API build) for the EXACT same reason
+// applyCall1Result() was pulled out of processConversation() on 2026-09-17
+// (see that function's own header comment, above): lib/significance-
+// batch.js's new Call 2 write-back tool obtains a call2Result from a
+// downloaded Anthropic batch result (parseCall2Response on text that came
+// back from client.beta.messages.batches.results(), not from runCall2())
+// and needs to apply it through the exact same call2Fields-build ->
+// shouldCreateComplaint -> findExistingComplaintForConversation/
+// createComplaintRow -> significance-row-update sequence runCall2Phase
+// always used — "do not reimplement the database write" is the same
+// instruction that governed applyCall1Result()'s own extraction.
+//
+// Zero behavior change from the code this replaced (previously inlined at
+// the tail of runCall2Phase, lines 2023-2108 before this change): same
+// order, same fields, same conditionals — only relocated and given a name.
+// runCall2Phase (above) is live, in production, actively running Complaint
+// Tracking's real trial right now — this split changes nothing about what
+// it does, only where the code lives; see this build's own report for how
+// that was verified (a diff of the extracted block against the original
+// tail, plus the full existing test suite passing at the same count before
+// and after).
+// @returns {Promise<{outcome:string, significance_id:string, complaint_id:string|null}>}
+// ============================================================
+async function applyCall2Fields({
+  significanceId, mailbox_key, missive_conversation_id, discoveryContext,
+  category, why, call2Result, rows, addressMatch,
+  flaggedProtectedClass, flaggedCategory, property_id, vendor_id,
+}) {
   let call2Fields;
   if (call2Result.ok) {
     const v = call2Result.value;
@@ -2260,6 +2402,110 @@ async function runSignificancePassBatch({ limit, discoveryContext, sinceDate = n
   return summary;
 }
 
+// ============================================================
+// Per-run failure alert — Asimov's one remaining condition (governance
+// review, 2026-10-01) before process-significance-pending-scheduled (router.js)
+// can run unattended on a cron: "mirror the screening pass's existing circuit-
+// breaker pattern, or at minimum fire a per-run summary email when errors/
+// call1_failed/fail-closed placeholders exceed a small threshold." This builds
+// the "at minimum" bar, deliberately, not a full mirror of screening-pass.js's
+// CIRCUIT_BREAKER_* — that mechanism stops a chunk EARLY, mid-run, by checking
+// circuitBreakerShouldTrip() inside runScreeningPassChunk()'s own per-item loop
+// (see that file). Reaching into THIS file's loop above to do the same would
+// touch the one pipeline with the longest, most heavily-reviewed governance
+// trail in this codebase (compliance/archive-search-significance-*, Asimov AND
+// Mason both CLEARED WITH CONDITIONS already met) for a run that is small and
+// already bounded (LIVE_SIGNIFICANCE_PASS_DEFAULT_LIMIT = 20, or an explicit
+// router.js ?limit=) — unlike the screening pass's 500-row chunk, there's no
+// large unattended blast radius a mid-run abort is protecting against here.
+// The simpler, Asimov-sanctioned "alert after the run finishes" shape is the
+// smaller change that still satisfies the actual ask: someone finds out.
+//
+// Threshold: a flat count, not screening-pass's floor+rate+ceiling combo —
+// that extra machinery exists there to tell "mostly failing" apart from "a
+// few isolated failures" across a 500-row chunk; a batch this size doesn't
+// need a rate calculation to make that same call. Reuses the exact value of
+// screening-pass.js's own CIRCUIT_BREAKER_MIN_ERRORS floor (3) for the same
+// reason that file picked it: 1-2 isolated failures in one run is ordinary
+// noise a retry absorbs fine; 3 or more, on a run this size, is already
+// upwards of ~15% of a full default-sized (20-conversation) batch and worth
+// a human's attention. Deliberately hardcoded, not env-configurable — same
+// "safety-net default, not a .env knob" precedent screening-pass.js's own
+// constants and SCREENING_PASS_CHUNK_SIZE already set.
+const SIGNIFICANCE_PASS_ALERT_THRESHOLD = 3;
+
+// The three counts summary already carries that each independently represent
+// something going wrong (never a normal, healthy outcome): errors (an
+// unexpected throw this run's own try/catch caught), call1_failed (Call 1
+// itself failed closed), call2_failed_placeholder (Call 2 failed closed and
+// wrote a placeholder). Summed, not reported separately against three
+// different thresholds — simpler, and Asimov's own wording ("errors/
+// call1_failed/... placeholders exceed a small threshold") reads as one
+// combined bar, not three independent ones.
+function significancePassFailureCount(summary) {
+  return (summary.errors || 0) + (summary.call1_failed || 0) + (summary.call2_failed_placeholder || 0);
+}
+
+function significancePassAlertShouldFire(summary) {
+  return significancePassFailureCount(summary) >= SIGNIFICANCE_PASS_ALERT_THRESHOLD;
+}
+
+// Sends the alert itself — recipients and send mechanism deliberately match
+// sendEscalationEmail() (router.js) and sendCall2BatchCompletionNotification()
+// (lib/significance-batch.js) exactly: [DO_EMAIL, PETER_EMAIL].filter(Boolean),
+// both independently, via lib/notify.js's shared sendMail() over the Gmail API
+// — this codebase's established "something happened that a human needs to
+// know about" pattern, not a new one invented for this build.
+//
+// Same defensive posture as every other non-critical side effect in this
+// codebase (sendCall2BatchCompletionNotification's own header comment states
+// this identically): wrapped in try/catch, logged loudly with the shared
+// [HUB-ALERT] prefix on any failure, and NEVER throws past this function — a
+// broken mailer must never crash or block the actual pipeline run, which has
+// already completed (and, for conversations_processed > 0, already written
+// its own results) before this is ever called.
+async function sendSignificancePassAlertEmail({ route, summary, ts }) {
+  try {
+    const failureCount = significancePassFailureCount(summary);
+    const recipients = [process.env.DO_EMAIL, process.env.PETER_EMAIL].filter(Boolean);
+    if (!recipients.length) {
+      console.error(`[HUB-ALERT] Significance pass failure alert not sent — DO_EMAIL and PETER_EMAIL are both unset. Route: ${route}, run at ${ts}. ${failureCount} failure(s) this run (errors: ${summary.errors || 0}, call1_failed: ${summary.call1_failed || 0}, call2_failed_placeholder: ${summary.call2_failed_placeholder || 0}).`);
+      return { ok: false, error: 'no_recipient' };
+    }
+
+    const result = await notify.sendMail({
+      to: recipients,
+      subject: `Archive Search: significance pass — ${failureCount} failure(s) this run (${route})`,
+      text: [
+        'A significance + complaint-triage pass run on the Rincon Hub crossed its failure-alert threshold.',
+        '',
+        `Route:                                  ${route}`,
+        `Run time:                               ${ts}`,
+        `Conversations processed:                ${summary.conversations_processed || 0}`,
+        `Errors:                                 ${summary.errors || 0}`,
+        `Call 1 failed:                          ${summary.call1_failed || 0}`,
+        `Call 2 fail-closed placeholders:        ${summary.call2_failed_placeholder || 0}`,
+        `Complaints created:                     ${summary.complaints_created || 0}`,
+        '',
+        'This does not stop the pipeline — pending conversations are unaffected and get picked up normally on the next run, same as the screening pass\'s own circuit breaker. Check server logs (pm2 logs hub) for the individual conversation failures, then re-run this route (by hand, or on its next scheduled run) once the underlying issue is understood.',
+      ].join('\n'),
+    });
+
+    if (!result.ok) {
+      const detail = result.error || `${result.rejected.length} of ${recipients.length} recipient(s) rejected: ${result.rejected.join(', ')}`;
+      console.error(`[HUB-ALERT] Significance pass failure alert failed to send for route ${route}: ${detail}`);
+      return { ok: false, error: detail };
+    }
+
+    console.log(`[archive-search email] Significance pass failure alert sent for route ${route} to ${recipients.length} recipient(s).`);
+    return { ok: true };
+  } catch (err) {
+    // MUST NEVER throw past this function — see the header comment above.
+    console.error(`[HUB-ALERT] Significance pass failure alert threw and was swallowed for route ${route}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   CONTENT_PASS_VERSION,
   TOPIC_CATEGORIES,
@@ -2304,5 +2550,27 @@ module.exports = {
   fetchVendorDirectory,
   findExistingComplaintForConversation,
   createComplaintRow,
+  // Added 2026-09-29 for the Call 2 Batches API build (lib/significance-
+  // batch.js) — same reasoning as the 2026-09-17 block just above: pure
+  // additions, nothing above this line changed behavior beyond the
+  // applyCall2Fields() extraction (a verified no-op refactor of
+  // runCall2Phase, which still calls it directly). Exported so that build
+  // can reuse this file's own Call 2 write-path/config/silence-context
+  // logic instead of reimplementing any of it against a downloaded batch
+  // result.
+  applyCall2Fields,
+  getActiveComplaintTrackingConfig,
+  computeSilenceContext,
+  // Added 2026-10-01 for the per-run failure alert (Asimov's condition on
+  // process-significance-pending-scheduled going live on a cron — see this
+  // block's own header comment, above runSignificancePassBatch's module.exports
+  // entry) — exported so router.js can call them from both significance-pass
+  // routes, and so this file's own test suite can exercise the threshold logic
+  // and the send path directly (spyOn(notify, 'sendMail', ...), same pattern
+  // lib/significance-batch.js's PART 21 tests already use).
+  SIGNIFICANCE_PASS_ALERT_THRESHOLD,
+  significancePassFailureCount,
+  significancePassAlertShouldFire,
+  sendSignificancePassAlertEmail,
   _setSupabaseClientForTesting,
 };

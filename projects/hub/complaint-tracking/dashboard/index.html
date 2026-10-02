@@ -82,10 +82,35 @@
     .property-chip { display: inline-flex; align-items: center; gap: 6px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; font-size: 12px; font-weight: 600; padding: 5px 8px 5px 10px; border-radius: 999px; }
     .property-chip button { background: none; border: none; color: #1d4ed8; font-size: 14px; cursor: pointer; line-height: 1; padding: 0; }
 
+    /* ── View tabs (triage redesign, 2026-10) — "Needs a Call + Flagged
+       for Review" is the default landing view; "Log" and "Resolved" are
+       one click away, not shown by default (build task Phase 2 item 6).
+       Same pill/dark-active language as .filter-btn.active, scaled up
+       slightly since these are page-level views, not a narrowing filter. */
+    .view-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+    .view-tab { background: #fff; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; color: #374151; cursor: pointer; font-family: inherit; }
+    .view-tab:hover { background: #f3f4f6; }
+    .view-tab.active { background: #1f2937; border-color: #1f2937; color: #fff; }
+    .view-tab .count-pill { background: rgba(0,0,0,0.08); margin-left: 6px; }
+    .view-tab.active .count-pill { background: rgba(255,255,255,0.22); color: #fff; }
+
+    /* ── Bulk selection (Phase 1 item 2) ── */
+    .select-all-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #6b7280; margin-bottom: 8px; padding-left: 2px; }
+    .bulk-bar { position: sticky; top: 8px; z-index: 20; background: #1f2937; color: #fff; border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+    .bulk-bar[hidden] { display: none; }
+    .bulk-bar .bulk-count { font-weight: 700; }
+    .bulk-bar button { font-size: 12.5px; padding: 6px 12px; border-radius: 6px; border: none; cursor: pointer; font-family: inherit; font-weight: 600; }
+    .bulk-bar .bulk-go { background: #fff; color: #1f2937; }
+    .bulk-bar .bulk-go:hover { background: #e5e7eb; }
+    .bulk-bar .bulk-go:disabled { opacity: 0.6; cursor: not-allowed; }
+    .bulk-bar .bulk-clear { background: transparent; color: #d1d5db; text-decoration: underline; font-weight: 500; }
+    .bulk-bar .bulk-progress { color: #d1d5db; }
+
     /* ── Section groups ── */
     .section-block { margin-bottom: 22px; }
     .section-heading { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #111827; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
     .section-heading .count-pill { background: #f3f4f6; color: #6b7280; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
+    .quiet-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #9ca3af; margin: 18px 0 8px; }
 
     /* Subject-type visual separation (product doc Section 4: "owner-tied
        and tenant-tied items must be visually separated wherever they're
@@ -113,6 +138,20 @@
     .c-card.subj-unmatched    { border-left-color: #d97706; }
     .c-card.is-held { border-left-color: #111827; background: #fafafa; }
 
+    /* Quick actions (Phase 1 item 1/2) — always visible at the top of the
+       card, not inside the collapsed Manage panel. Checkbox + "Not an
+       Issue" + "Resolved" (which expands an inline note field, not the
+       whole Manage panel). Visual language borrows directly from the
+       duplicate-suggestion callout's own confirm/dismiss buttons just
+       below (same .btn / .btn-confirm classes), per the build task's own
+       instruction to match that established one-click pattern rather than
+       invent a new one. */
+    .c-quick-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 9px; flex-wrap: wrap; }
+    .c-select { flex: none; display: flex; align-items: center; }
+    .c-select input { width: 15px; height: 15px; cursor: pointer; }
+    .quick-note-box { flex: 1 1 100%; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .quick-note-box textarea { flex: 1 1 220px; min-height: 42px; font-size: 12.5px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; font-family: inherit; resize: vertical; }
+
     .c-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
     .c-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .c-date { font-size: 11.5px; color: #9ca3af; white-space: nowrap; }
@@ -131,15 +170,45 @@
     .badge-soft-gray     { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
     .badge-subject { font-weight: 700; }
 
+    /* Single colored triage indicator (Phase 2 item 7) — replaces the old
+       5-badge pile on the card face. Full badge detail (categoryBadge,
+       needsHumanCallBadge, blockedSubBadge, toneBadge, fairHousingBadge)
+       still renders, unchanged, inside the Manage panel's new "All Flags"
+       section — nothing is deleted, just no longer the default view. */
+    .indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; }
+    .indicator .idot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .indicator-call .idot    { background: #dc2626; }
+    .indicator-call          { color: #991b1b; }
+    .indicator-flagged .idot { background: #d97706; }
+    .indicator-flagged       { color: #92400e; }
+    .indicator-log .idot     { background: #9ca3af; }
+    .indicator-log           { color: #6b7280; }
+    /* Only ever shown via the admin "Show No Issue rows (audit)" toggle —
+       a lighter dot than Log so it never reads as a real Log-lane row. */
+    .indicator-no_issue .idot { background: #d1d5db; }
+    .indicator-no_issue       { color: #9ca3af; }
+    .stalled-flag { color: #b45309; font-weight: 700; margin-left: 4px; }
+
     /* Category badges — one soft color per category, distinct from
        status/subject vocabulary so the three never get confused reading
-       a card left-to-right. */
-    .cat-legal_compliance             { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
-    .cat-blocked_resolution           { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
-    .cat-churn_risk                   { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
-    .cat-escalation_recurrence        { background: #fdf2f8; color: #9d174d; border: 1px solid #fbcfe8; }
-    .cat-major_money_property_risk    { background: #fef2f2; color: #7f1d1d; border: 1px solid #fca5a5; font-weight: 700; }
-    .cat-owner_instruction_one_off    { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+       a card left-to-right. REBUILT 2026-10 to the real, current 8-value
+       category taxonomy (complaints.category / archive-search's
+       TOPIC_CATEGORIES) — the previous 6-value set here
+       (legal_compliance, blocked_resolution, churn_risk,
+       escalation_recurrence, major_money_property_risk,
+       owner_instruction_one_off) was retired when that taxonomy changed;
+       because CATEGORY_META's keys never matched a real row's category
+       value, categoryBadge() silently rendered nothing for every
+       complaint — see CATEGORY_META's own comment below for the full
+       explanation. */
+    .cat-owner_instruction      { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .cat-legal_exposure         { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; font-weight: 700; }
+    .cat-safety_issue           { background: #fef2f2; color: #7f1d1d; border: 1px solid #fca5a5; font-weight: 700; }
+    .cat-maintenance_standard   { background: #f0fdfa; color: #0f766e; border: 1px solid #99f6e4; }
+    .cat-dispute                { background: #fdf2f8; color: #9d174d; border: 1px solid #fbcfe8; }
+    .cat-routine_logistics      { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+    .cat-other                  { background: #f8fafc; color: #475569; border: 1px solid #e2e8f0; }
+    .cat-accommodation_related  { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
     .cat-badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 
     .c-desc { font-size: 13.5px; color: #111827; line-height: 1.45; margin-bottom: 8px; }
@@ -148,6 +217,7 @@
     .c-meta-line .fl { color: #9ca3af; margin-right: 3px; }
     .c-meta-line a { color: #1d4ed8; text-decoration: none; }
     .c-meta-line a:hover { text-decoration: underline; }
+    .c-last-touched { font-size: 11.5px; color: #9ca3af; margin: 2px 0 6px; }
 
     /* Held placeholder — deliberately its own visual language, never the
        category badges above (product doc: "labeled distinctly... never
@@ -160,6 +230,13 @@
     .dup-callout-text { margin-bottom: 6px; line-height: 1.4; }
     .dup-callout-actions { display: flex; gap: 8px; }
 
+    /* Name-match suggestion callout (migration 20261002060000) — reuses
+       .dup-callout's same amber warning styling (both are "AI noticed
+       something, a human must decide"); only the per-candidate row below
+       is new. */
+    .nm-candidate-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: #fff; border: 1px solid #fde68a; border-radius: 5px; padding: 5px 8px; margin: 4px 0; }
+    .nm-candidate-name { font-weight: 600; color: #92400e; }
+
     .btn { font-size: 12px; padding: 5px 11px; border-radius: 5px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; color: #374151; font-family: inherit; font-weight: 500; }
     .btn:hover { background: #f3f4f6; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -168,6 +245,23 @@
     .btn-primary { background: #1d4ed8; border: none; border-radius: 6px; padding: 7px 16px; font-size: 12.5px; color: #fff; cursor: pointer; font-weight: 600; font-family: inherit; }
     .btn-primary:hover { background: #1e40af; }
     .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    /* Owner-instruction rows within the Log tab (Phase 2 item 5) —
+       deliberately NOT a .c-card: lighter visual weight, no checkbox, no
+       quick actions, no Manage panel. Most of these are just the AI
+       logging an owner answering a question staff already asked (Peter's
+       own characterization) — a quiet, scannable record, not a to-do
+       queue. The amber dot is the one real signal worth a glance:
+       owner_instruction_rejected = true/'uncertain' ("worth a second
+       look"); false/null stays plain gray. */
+    .owner-update-list { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 18px; }
+    .owner-update-row { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border-bottom: 1px solid #f3f4f6; font-size: 12.5px; }
+    .owner-update-row:last-child { border-bottom: none; }
+    .owner-update-row .oi-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: #d1d5db; align-self: center; }
+    .owner-update-row.oi-flag .oi-dot { background: #d97706; }
+    .owner-update-row .oi-label { font-weight: 700; color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; flex: none; }
+    .owner-update-row .oi-text { color: #374151; flex: 1; min-width: 160px; }
+    .owner-update-row .oi-date { color: #9ca3af; font-size: 11px; flex: none; }
 
     /* Manage panel — reuses details.subsection pattern already
        established across this Hub's dashboards. */
@@ -190,13 +284,13 @@
     .manage-msg.err { color: #991b1b; }
     .manage-msg.ok { color: #166534; }
 
-    details.subsection.routine-toggle { border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; padding: 12px 14px; }
-    details.subsection.routine-toggle summary { cursor: pointer; font-size: 13px; font-weight: 700; list-style: none; display: flex; align-items: center; gap: 6px; color: #111827; }
-    details.subsection.routine-toggle summary::-webkit-details-marker { display: none; }
-    details.subsection.routine-toggle summary::before { content: '▸'; font-size: 11px; color: #9ca3af; display: inline-block; transition: transform 0.15s; }
-    details.subsection.routine-toggle[open] summary::before { transform: rotate(90deg); }
-    .routine-toggle .subsection-body { margin-top: 14px; }
-    .routine-sub { font-size: 12px; color: #9ca3af; font-weight: 400; margin-left: 2px; }
+    /* Activity history timeline (Phase 3 item 9) — read-only, lazy-loaded
+       the first time a card's Manage panel is opened. */
+    .history-list { display: flex; flex-direction: column; gap: 8px; }
+    .history-item { font-size: 12px; color: #374151; border-left: 2px solid #e5e7eb; padding-left: 8px; }
+    .history-item .h-top { color: #6b7280; font-size: 11px; margin-bottom: 1px; }
+    .history-item .h-note { color: #111827; }
+    .history-empty, .history-loading { font-size: 12px; color: #9ca3af; }
 
     .empty { color: #9ca3af; padding: 26px; text-align: center; font-size: 13px; }
     .error-page { text-align: center; padding: 60px 16px; color: #6b7280; }
@@ -208,7 +302,8 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px); background: #111827; color: #fff; font-size: 13px; font-weight: 500; padding: 10px 18px; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease; z-index: 1000; }
-    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+    .toast-action { background: none; border: none; color: #93c5fd; font-weight: 700; margin-left: 10px; cursor: pointer; font-family: inherit; font-size: 13px; text-decoration: underline; padding: 0; }
 
     @media (max-width: 640px) {
       .page { padding: 0 12px 48px; }
@@ -220,6 +315,8 @@
       .filter-search { flex-basis: 100%; }
       .manage-row { flex-direction: column; }
       .manage-row > * { min-width: 0; }
+      .view-tabs { flex-direction: column; align-items: stretch; }
+      .bulk-bar { flex-direction: column; align-items: flex-start; }
     }
   </style>
 </head>
@@ -228,7 +325,7 @@
     <div class="header">
       <div class="header-left">
         <h1>Complaint Tracking</h1>
-        <p>Every complaint gets a real record. Big-deal items are surfaced here first; routine items are still tracked, just tucked out of the way below.</p>
+        <p>Every complaint gets a real record. Needs a Call and Flagged for Review are surfaced here first; the Log and Resolved tabs are one click away.</p>
       </div>
       <div class="header-right" id="headerRight">
         <a class="btn-report" href="/complaint-tracking/report">+ Report an issue</a>
@@ -260,25 +357,74 @@
       if (isNaN(dt.getTime())) return escapeHtml(d);
       return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' at ' + dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     }
+    // "3 days ago" — used by the collapsed card face's "Last touched"
+    // line (build task Phase 3 item 11). Deliberately coarse (days/
+    // months/years, no hours/minutes) — this is a skim-the-list signal,
+    // not a precise timestamp (formatDateTime above already covers that
+    // for anyone who opens the history timeline).
+    function timeAgo(iso) {
+      if (!iso) return null;
+      var ms = Date.now() - new Date(iso).getTime();
+      if (isNaN(ms)) return null;
+      var days = Math.floor(ms / 86400000);
+      if (days <= 0) return 'today';
+      if (days === 1) return '1 day ago';
+      if (days < 30) return days + ' days ago';
+      var months = Math.floor(days / 30);
+      if (months < 12) return months + (months === 1 ? ' month ago' : ' months ago');
+      var years = Math.floor(months / 12);
+      return years + (years === 1 ? ' year ago' : ' years ago');
+    }
     var toastHideTimer = null;
-    function showToast(message) {
+    // EXTENDED 2026-10 (triage redesign) for the Undo affordance on "Not
+    // an Issue" / quick-Resolved toasts — still the exact same component
+    // every other call site in this file already uses (the plain
+    // showToast('message') shape is untouched and still the common case).
+    // opts: { actionLabel, onAction, duration } — all optional.
+    function showToast(message, opts) {
+      opts = opts || {};
       var toast = document.getElementById('toast');
-      toast.textContent = message;
+      if (opts.actionLabel && opts.onAction) {
+        toast.innerHTML = escapeHtml(message) + '<button type="button" class="toast-action" id="toastActionBtn">' + escapeHtml(opts.actionLabel) + '</button>';
+        var actionBtn = document.getElementById('toastActionBtn');
+        actionBtn.addEventListener('click', function () {
+          clearTimeout(toastHideTimer);
+          toast.classList.remove('visible');
+          opts.onAction();
+        });
+      } else {
+        toast.textContent = message;
+      }
       toast.classList.add('visible');
       clearTimeout(toastHideTimer);
-      toastHideTimer = setTimeout(function () { toast.classList.remove('visible'); }, 2600);
+      toastHideTimer = setTimeout(function () { toast.classList.remove('visible'); }, opts.duration || 2600);
     }
 
     // ────────────────────────────────────────────────────────────────
     // Category / status / subject-type vocabulary
     // ────────────────────────────────────────────────────────────────
+    // REBUILT 2026-10 — real pre-existing bug, found while reading this
+    // file for the triage redesign build: this dictionary still held a
+    // RETIRED 6-value category vocabulary (legal_compliance,
+    // blocked_resolution, churn_risk, escalation_recurrence,
+    // major_money_property_risk, owner_instruction_one_off). The real,
+    // current category values (complaints.category's own CHECK
+    // constraint, and archive-search/lib/significance-pass.js's
+    // TOPIC_CATEGORIES, which router.js's manual-report route validates
+    // against) are the 8-value set below. Because the old keys never
+    // matched a real row's category, categoryBadge() silently returned ''
+    // for every complaint — no complaint card has ever shown a category
+    // badge. Fixed by matching the real values; see the matching cat-*
+    // CSS rules above for the same fix on the styling side.
     var CATEGORY_META = {
-      legal_compliance:          { label: 'Legal / Compliance' },
-      blocked_resolution:        { label: 'Blocked Resolution' },
-      churn_risk:                { label: 'Relationship / Churn Risk' },
-      escalation_recurrence:     { label: 'Escalation / Recurrence' },
-      major_money_property_risk: { label: 'Major Money / Property Risk' },
-      owner_instruction_one_off: { label: 'Owner Instruction' },
+      owner_instruction:     { label: 'Owner Instruction' },
+      legal_exposure:        { label: 'Legal Exposure' },
+      safety_issue:          { label: 'Safety Issue' },
+      maintenance_standard:  { label: 'Maintenance Standard' },
+      dispute:               { label: 'Dispute' },
+      routine_logistics:     { label: 'Routine Logistics' },
+      other:                 { label: 'Other' },
+      accommodation_related: { label: 'Accommodation Related' },
     };
     var STATUS_META = {
       open:        { label: 'Open', cls: 'badge-solid-blue' },
@@ -288,6 +434,19 @@
       held:        { label: 'Held', cls: 'badge-solid-gray' },
     };
     var SUBJECT_LABELS = { owner: 'Owner', tenant: 'Tenant', team_member: 'Team Member', property: 'Property' };
+    var ACTION_LABELS = {
+      'complaint_tracking.created': 'Created',
+      'complaint_tracking.stage_changed': 'Stage changed',
+      'complaint_tracking.delegated': 'Delegated',
+      'complaint_tracking.matched': 'Attached to property/person',
+      'complaint_tracking.duplicate_suggested': 'Duplicate suggested',
+      'complaint_tracking.duplicate_disposition': 'Duplicate reviewed',
+      'complaint_tracking.protected_class_flagged': 'Fair Housing flag',
+      'complaint_tracking.aging_nudge': 'Aging reminder',
+      'complaint_tracking.ccpa_deletion_blocked_held': 'CCPA deletion blocked (held)',
+      'complaint_tracking.ccpa_deletion_disposition': 'CCPA deletion reviewed',
+    };
+    function humanizeAction(action) { return ACTION_LABELS[action] || action; }
 
     function categoryBadge(category) {
       if (!category) return '';
@@ -307,6 +466,16 @@
     // not exposed to this dashboard via any route, so the "2+ days"
     // wording below is the documented v1 value, not a live read of the
     // config table; update this string if that value is ever revised.
+    //
+    // NOT touched by this build's CATEGORY_META fix above, even though
+    // it has the same root cause (checks c.category === 'blocked_resolution',
+    // which — like the old CATEGORY_META keys — is a value from the
+    // RETIRED 6-value vocabulary; under the real 8-value taxonomy,
+    // 'blocked_resolution' is an escalation_signal value, never a
+    // category, so this check can also never match a real row today).
+    // Only the dictionary bug was in scope for this pass — flagged here,
+    // not fixed, per "tell me, don't fix without asking" for anything
+    // beyond what was explicitly called out.
     function blockedSubBadge(c) {
       if (c.category !== 'blocked_resolution' || !c.blocked_reason) return '';
       var partyLabel = c.blocked_party ? (SUBJECT_LABELS[c.blocked_party] || c.blocked_party) : 'Someone';
@@ -337,13 +506,113 @@
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Triage classification (Phase 2 item 5/7, Phase 3 item 12) — the
+    // real-signal replacement for the old is_big_deal split. is_big_deal
+    // is true on effectively every row (confirmed against real data:
+    // 2,732/2,733) because its own generated-column definition is
+    // `category IS NOT NULL OR needs_human_call OR held_legal_fair_housing`
+    // and every complaint has a category by construction — it carries no
+    // signal. needs_human_call and escalation_signal do.
+    // ────────────────────────────────────────────────────────────────
+    // severity_tier (migration 20261002010000/20261002020000, Neo) is now
+    // the PRIMARY triage signal once a row has actually been assessed —
+    // urgent -> call, worth_a_look -> flagged, just_a_record -> log,
+    // no_issue -> its own hidden-by-default lane (see laneOf below).
+    // severity_tier IS NULL means "not yet assessed" (true for every row
+    // until the retroactive batch tool runs, and for any row created while
+    // the live-pipeline hook stays feature-flagged off) — for exactly those
+    // rows, this falls through to the EXACT same needs_human_call/
+    // escalation_signal logic this function has always used, byte-for-byte
+    // unchanged, per the build task's explicit "an unassessed row must
+    // never disappear or misbehave" requirement.
+    function triagePriority(c) {
+      if (c.severity_tier != null) {
+        if (c.severity_tier === 'urgent') return 'call';
+        if (c.severity_tier === 'worth_a_look') return 'flagged';
+        if (c.severity_tier === 'just_a_record') return 'log';
+        if (c.severity_tier === 'no_issue') return 'no_issue';
+      }
+      if (c.needs_human_call) return 'call';
+      if (c.escalation_signal) return 'flagged';
+      return 'log';
+    }
+    // Which bucket a row belongs to for grouping/tab purposes. held and
+    // merged are their own permanent, isolated buckets — excluded from
+    // every lane below exactly as the build task requires, never folded
+    // into Needs a Call / Flagged for Review / Log / Resolved. 'no_issue'
+    // (severity_tier = 'no_issue') is a fifth such isolated bucket, added
+    // 2026-10-02 — excluded from every default view/count/tile entirely
+    // (render()'s own noIssueItems, below, only ever populates it behind
+    // the explicit admin audit toggle), never folded into Log the way
+    // 'just_a_record' is.
+    function laneOf(c) {
+      if (c.held_legal_fair_housing) return 'held';
+      if (c.merged_into_id) return 'merged';
+      if (c.status === 'resolved') return 'resolved';
+      return triagePriority(c);
+    }
+    // "Stalled" (Phase 3 item 12) — reuses the existing check-aging cron's
+    // own signal (last_aging_nudge_at, already stamped server-side) but
+    // gates eligibility off the SAME real-signal fields as the lanes
+    // above, never off is_big_deal (which would light up almost every
+    // row). The "already moved off 'open' at least once" condition in the
+    // build task is approximated here as "currently in_progress or
+    // blocked" — the complaints table has no separate "has this row ever
+    // left open" flag, and status != 'open' is the honest, cheap proxy
+    // available without a per-row audit_log join on every list render
+    // (every complaint starts life at status='open' by construction, so
+    // being in in_progress/blocked now means it left open at some point;
+    // the one case this doesn't catch is a row reopened back to 'open'
+    // after being worked and stalling again — a real but rare edge this
+    // proxy accepts rather than paying for an expensive join to close).
+    function isStalled(c) {
+      if (c.held_legal_fair_housing || c.merged_into_id) return false;
+      if (c.status !== 'in_progress' && c.status !== 'blocked') return false;
+      var p = triagePriority(c);
+      if (p !== 'call' && p !== 'flagged') return false;
+      return !!c.last_aging_nudge_at;
+    }
+    function indicatorHtml(c) {
+      var p = triagePriority(c);
+      // 'no_issue' only ever reaches this function via the admin audit
+      // toggle (noIssueItems, in render()) — labeled explicitly rather than
+      // falling through to the 'else' branch's 'Log', which would wrongly
+      // suggest it's part of the normal Log lane.
+      var label = p === 'call' ? 'Needs a Call' : p === 'flagged' ? 'Flagged for Review' : p === 'no_issue' ? 'No Issue' : 'Log';
+      var stalled = isStalled(c) ? ' <span class="stalled-flag">&middot; Stalled</span>' : '';
+      return '<span class="indicator indicator-' + p + '"><span class="idot"></span>' + label + '</span>' + stalled;
+    }
+    function emailLinkLine(c) {
+      var link = c.display && c.display.missive_link;
+      if (!link) return '';
+      return '<div class="c-meta-line"><a href="' + escapeHtml(link) + '" target="_blank" rel="noopener noreferrer">View original email &rarr;</a></div>';
+    }
+    function lastTouchedLine(c) {
+      var lt = c.display && c.display.last_touched;
+      var at = (lt && lt.at) || c.updated_at;
+      var ago = timeAgo(at);
+      if (!ago) return '';
+      var by = (lt && lt.by) ? (' by ' + escapeHtml(lt.by)) : '';
+      return '<div class="c-last-touched">Last touched ' + ago + by + '</div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // State
     // ────────────────────────────────────────────────────────────────
     var me = null;
     var allComplaints = [];
     var teamMembers = [];
     var vendors = [];
-    var filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false };
+    var filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false, includeNoIssue: false, view: 'active' };
+    // Bulk-selection state (Phase 1 item 2) — a plain id->true map, reset
+    // on every full render() (i.e. whenever a filter, tab, or tile
+    // changes — a clean slate each time the visible set changes).
+    // Checkbox clicks update this directly and patch just the bulk bar
+    // (updateBulkBar()), not a full re-render, so checking several boxes
+    // in a row stays snappy even with a long list on screen.
+    var selectedIds = {};
+    var CANNED_NOT_ISSUE_NOTE = 'Reviewed — not actionable';
+    var UNDO_REOPEN_NOTE = 'Reverted via Undo (reopened after being marked Not an Issue).';
 
     // ────────────────────────────────────────────────────────────────
     // Card rendering
@@ -380,8 +649,97 @@
         '</div></div>';
     }
 
+    // Name-match suggestion callout (migration 20261002060000) — Mason's
+    // point 1, the review surface this entire feature exists for: the
+    // human must see every real candidate (not just agree with a single
+    // guess) before confirming one. Every candidate here shares the SAME
+    // property (name-match suggestions are only ever generated after a
+    // property is already resolved — see router.js's own attachDisplayInfo
+    // comment), so it's shown once, above the candidate list, not repeated
+    // per candidate.
+    function nameMatchCallout(c) {
+      if (!c.suggested_subject_type || c.human_confirmed_subject_outcome) return '';
+      var candidates = (c.display && c.display.name_match_candidates) || [];
+      var d = c.display || {};
+      var propertyLabel = d.property ? (d.property.name || d.property.address || 'this property') : 'this property';
+      var typeLabel = c.suggested_subject_type === 'owner' ? 'owner' : 'tenant';
+      var quote = c.suggested_subject_name_text ? ('&ldquo;' + escapeHtml(c.suggested_subject_name_text) + '&rdquo;') : 'a name in this conversation';
+
+      var headline = candidates.length > 1
+        ? ('&#9888; ' + candidates.length + ' ' + typeLabel + 's named like ' + quote + ' are on file at ' + escapeHtml(propertyLabel) + ' &mdash; pick the right one, or reject if none are correct.')
+        : ('&#9888; Possible ' + typeLabel + ' match from ' + quote + ' at ' + escapeHtml(propertyLabel) + ' &mdash; a human must confirm before this is used as the record&rsquo;s subject.');
+
+      var rows = candidates.map(function (cand) {
+        return '<div class="nm-candidate-row">' +
+          '<span class="nm-candidate-name">' + escapeHtml(cand.name) + '</span>' +
+          '<button class="btn btn-confirm" data-action="name-match-confirm" data-id="' + c.id + '" data-candidate="' + escapeHtml(cand.id) + '">Confirm this one</button>' +
+          '</div>';
+      }).join('');
+
+      return '<div class="dup-callout">' +
+        '<div class="dup-callout-text">' + headline + '</div>' +
+        rows +
+        '<div class="dup-callout-actions" style="margin-top:4px;"><button class="btn btn-reject" data-action="name-match-reject" data-id="' + c.id + '">None of these are right</button></div>' +
+        '</div>';
+    }
+
+    // Quick actions (Phase 1 item 1/2) — always visible at the top of the
+    // card, never inside the collapsed Manage panel. Not shown for held
+    // placeholders (their own closure flow is the only path, by design)
+    // or already-resolved cards (nothing to quickly resolve/dismiss).
+    function renderQuickActions(c) {
+      if (c.held_legal_fair_housing || c.status === 'resolved') return '';
+      return '<div class="c-quick-actions">' +
+        '<label class="c-select"><input type="checkbox" class="card-select" data-id="' + c.id + '" aria-label="Select this complaint"></label>' +
+        '<button type="button" class="btn" data-action="quick-not-issue" data-id="' + c.id + '">Not an Issue</button>' +
+        '<button type="button" class="btn btn-confirm" data-action="quick-resolve-toggle" data-id="' + c.id + '">Resolved</button>' +
+        '<div class="quick-note-box" data-role="quick-resolve-box" hidden>' +
+        '<textarea data-role="quick-resolve-text" placeholder="What was done?"></textarea>' +
+        '<button type="button" class="btn-primary" data-action="quick-resolve-save" data-id="' + c.id + '">Save</button>' +
+        '<button type="button" class="btn" data-action="quick-resolve-cancel" data-id="' + c.id + '">Cancel</button>' +
+        '</div>' +
+        '</div>';
+    }
+
+    // Full badge detail (Phase 2 item 7) — the old 5-badge pile, moved
+    // (not deleted) into the Manage panel for anyone who wants the full
+    // picture.
+    function badgeDetailHtml(c) {
+      var all = [categoryBadge(c.category), needsHumanCallBadge(c), blockedSubBadge(c), toneBadge(c), fairHousingBadge(c)].filter(Boolean).join(' ');
+      if (!all) return '';
+      return '<div class="manage-section"><div class="manage-section-title">All Flags</div><div class="c-badges">' + all + '</div></div>';
+    }
+    // Activity history (Phase 3 item 9) — lazy-loaded the first time this
+    // card's Manage panel is opened (wireManagePanel's own toggle
+    // listener), not fetched up front for every card on the page.
+    function historySectionHtml(c) {
+      return '<div class="manage-section" data-role="history-section">' +
+        '<div class="manage-section-title">Activity</div>' +
+        '<div data-role="history-body" class="history-loading">Not loaded yet &mdash; expand to load.</div>' +
+        '</div>';
+    }
+    // "Add an update" (Phase 3 item 10) — a plain progress note, separate
+    // from the stage-change form, reusing the same /:id/stage route with
+    // the CURRENT status so nothing about this claims a status change.
+    // Hidden for a held placeholder (which has its own closure-only flow
+    // and would 409 against /:id/stage) and for an already-resolved
+    // complaint (posting to_status='resolved' again would silently
+    // overwrite the stored resolution_note with this note's text instead
+    // — a real footgun, not something this build introduces a way to
+    // trigger).
+    function addUpdateSectionHtml(c) {
+      if (c.status === 'held' || c.status === 'resolved') return '';
+      return '<div class="manage-section">' +
+        '<div class="manage-section-title">Add an Update</div>' +
+        '<div class="manage-hint" style="margin:0 0 8px;">A progress note only &mdash; this does not change the stage.</div>' +
+        '<textarea data-role="progress-note" placeholder="What happened since the last update&hellip;"></textarea>' +
+        '<div style="margin-top:8px;"><button type="button" class="btn" data-action="progress-save" data-id="' + c.id + '">Save Note</button></div>' +
+        '<div class="manage-msg" data-role="progress-msg"></div>' +
+        '</div>';
+    }
+
     function manageBodyHtml(c) {
-      var sections = '';
+      var sections = badgeDetailHtml(c) + historySectionHtml(c) + addUpdateSectionHtml(c);
 
       if (c.status === 'held') {
         sections += '<div class="manage-section">' +
@@ -451,7 +809,6 @@
       // handled"), not disappear the moment it's closed and blend back
       // into an ordinary resolved complaint.
       var isHeld = c.held_legal_fair_housing;
-      var badges = [categoryBadge(c.category), needsHumanCallBadge(c), blockedSubBadge(c), toneBadge(c), fairHousingBadge(c)].filter(Boolean).join(' ');
 
       var body;
       if (isHeld) {
@@ -468,9 +825,13 @@
       }
 
       var html = '<div class="c-card ' + subjCls + (isHeld ? ' is-held' : '') + '" data-card-id="' + c.id + '">';
-      html += '<div class="c-top"><div class="c-badges">' + statusBadge(c.status) + subjectChip(c) + badges + '</div><div class="c-date">' + formatDate(c.created_at) + '</div></div>';
+      html += renderQuickActions(c);
+      html += '<div class="c-top"><div class="c-badges">' + (isHeld ? '' : indicatorHtml(c)) + statusBadge(c.status) + subjectChip(c) + '</div><div class="c-date">' + formatDate(c.created_at) + '</div></div>';
       html += body;
+      html += emailLinkLine(c);
+      html += lastTouchedLine(c);
       html += duplicateCallout(c);
+      html += nameMatchCallout(c);
       html += propertyLine(c) + vendorLine(c) + ownershipLine(c);
       if (c.source === 'manual_staff' && c.display && c.display.reported_by_name) {
         html += '<div class="c-meta-line"><span class="fl">Reported by:</span> ' + escapeHtml(c.display.reported_by_name) + '</div>';
@@ -478,6 +839,22 @@
       html += '<details class="manage"><summary>Manage</summary><div class="manage-body">' + manageBodyHtml(c) + '</div></details>';
       html += '</div>';
       return html;
+    }
+
+    // Owner-update row (Phase 2 item 5) — a compact, lower-weight row for
+    // the Log tab's owner_instruction subset, per-design NOT a .c-card:
+    // no checkbox, no quick actions, no Manage panel. See this file's own
+    // .owner-update-row CSS comment for why.
+    function renderOwnerUpdateRow(c) {
+      var flagged = c.owner_instruction_rejected === 'true' || c.owner_instruction_rejected === 'uncertain' || c.owner_instruction_rejected === true;
+      var text = c.description ? (c.description.length > 160 ? c.description.slice(0, 160) + '&hellip;' : c.description) : '(no description on file)';
+      var who = (c.display && c.display.subject_name) ? c.display.subject_name : (SUBJECT_LABELS[c.subject_type] || 'Owner');
+      return '<div class="owner-update-row' + (flagged ? ' oi-flag' : '') + '">' +
+        '<span class="oi-dot"></span>' +
+        '<span class="oi-label">Owner update</span>' +
+        '<span class="oi-text">' + escapeHtml(who) + ': ' + escapeHtml(text) + (flagged ? ' &mdash; <strong>worth a second look</strong>' : '') + '</span>' +
+        '<span class="oi-date">' + formatDate(c.created_at) + '</span>' +
+        '</div>';
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -514,11 +891,31 @@
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Filtering + tiles
+    // Filtering + tiles — mostly UNCHANGED by the triage-redesign build
+    // (existing filter bar and stat tiles kept working exactly as they did
+    // before; the triage redesign operated on applyFilters()'s own output,
+    // same as the old Big Deal/Routine split did). EXCEPTION, fixed
+    // 2026-10-02 (bug fix, separate from the redesign): the "Needs
+    // Attention" tile and its filter used to count c.is_big_deal, which is
+    // true on almost every row (see the comment above triagePriority) and
+    // never actually got switched over when the lanes below it did. It now
+    // reuses needsAttentionSignal() (== triagePriority() 'call'/'flagged',
+    // the exact same real signal the Needs a Call / Flagged for Review
+    // lanes already use) so the number at the top of the page can never
+    // drift from the lanes directly below it again.
     // ────────────────────────────────────────────────────────────────
+    // Shared by applyFilters()'s 'needs_attention' tile filter and
+    // renderTiles()'s tile count below — one definition, reused in both
+    // places, rather than the two re-deriving the same check independently
+    // and risking them drifting apart from each other too.
+    function needsAttentionSignal(c) {
+      var p = triagePriority(c);
+      return p === 'call' || p === 'flagged';
+    }
     function applyFilters(items) {
       return items.filter(function (c) {
         if (!filters.includeMerged && c.merged_into_id) return false;
+        if (!filters.includeNoIssue && laneOf(c) === 'no_issue') return false;
         if (filters.category && c.category !== filters.category) return false;
         if (filters.status && c.status !== filters.status) return false;
         if (filters.subjectType === 'unmatched' && !(c.needs_matching && !c.subject_type)) return false;
@@ -528,7 +925,7 @@
           var hay = ((c.description || '') + ' ' + (c.resolution_note || '')).toLowerCase();
           if (hay.indexOf(filters.q.toLowerCase()) === -1) return false;
         }
-        if (filters.tile === 'needs_attention' && !(c.is_big_deal && c.status !== 'resolved' && !c.merged_into_id)) return false;
+        if (filters.tile === 'needs_attention' && !(needsAttentionSignal(c) && c.status !== 'resolved' && !c.merged_into_id)) return false;
         if (filters.tile === 'blocked' && c.status !== 'blocked') return false;
         if (filters.tile === 'held' && c.status !== 'held') return false;
         if (filters.tile === 'duplicates' && c.duplicate_status !== 'suggested') return false;
@@ -539,7 +936,7 @@
 
     function renderTiles(items) {
       var active = items.filter(function (c) { return !c.merged_into_id; });
-      var needsAttention = active.filter(function (c) { return c.is_big_deal && c.status !== 'resolved'; }).length;
+      var needsAttention = active.filter(function (c) { return needsAttentionSignal(c) && c.status !== 'resolved'; }).length;
       var blocked = active.filter(function (c) { return c.status === 'blocked'; }).length;
       var held = active.filter(function (c) { return c.status === 'held'; }).length;
       var duplicates = active.filter(function (c) { return c.duplicate_status === 'suggested'; }).length;
@@ -575,7 +972,7 @@
         ? '<div class="property-chip">' + escapeHtml(filters.propertyLabel) + '<button type="button" id="clearPropertyFilter" aria-label="Clear">&times;</button></div>'
         : '<div class="autocomplete"><input type="text" id="propertyFilterSearch" placeholder="Filter by property&hellip;" autocomplete="off"><div class="autocomplete-list" id="propertyFilterResults" hidden></div></div>';
 
-      var anyActive = filters.category || filters.status || filters.subjectType || filters.q || filters.propertyId || filters.tile || filters.includeMerged;
+      var anyActive = filters.category || filters.status || filters.subjectType || filters.q || filters.propertyId || filters.tile || filters.includeMerged || filters.includeNoIssue;
 
       return '<div class="filters-bar"><div class="filters">' +
         '<div class="filter-group"><span class="filter-label">Category</span>' + catButtons + '</div>' +
@@ -584,8 +981,40 @@
         '<div class="filter-group">' + propertyChip + '</div>' +
         '<div class="filter-search"><input type="text" id="searchInput" placeholder="Search description&hellip;" value="' + escapeHtml(filters.q) + '"></div>' +
         '<label class="filter-check"><input type="checkbox" id="includeMergedCheck"' + (filters.includeMerged ? ' checked' : '') + '> Include merged/duplicate records</label>' +
+        '<label class="filter-check"><input type="checkbox" id="includeNoIssueCheck"' + (filters.includeNoIssue ? ' checked' : '') + '> Show No Issue rows (audit)</label>' +
         (anyActive ? '<button class="filter-clear" id="clearFiltersBtn">Clear all filters</button>' : '') +
         '</div></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // View tabs (Phase 2 item 6) — "Needs a Call + Flagged for Review"
+    // combined is the default landing view; Log and Resolved are one
+    // click away.
+    // ────────────────────────────────────────────────────────────────
+    function renderViewTabs(activeCount, logCount, resolvedCount) {
+      function tab(key, label, count) {
+        return '<button type="button" class="view-tab' + (filters.view === key ? ' active' : '') + '" data-view="' + key + '">' + label + ' <span class="count-pill">' + count + '</span></button>';
+      }
+      return '<div class="view-tabs">' +
+        tab('active', 'Needs a Call + Flagged for Review', activeCount) +
+        tab('log', 'Log', logCount) +
+        tab('resolved', 'Resolved', resolvedCount) +
+        '</div>';
+    }
+
+    // Select-all + bulk bar (Phase 1 item 2) — rendered above whichever
+    // card list currently has checkboxes. Starts with the bulk bar
+    // hidden; it's revealed by updateBulkBar() the moment 1+ is checked,
+    // not re-rendered from here (see the selectedIds comment above).
+    function renderBulkControls(items) {
+      if (!items.length) return '';
+      return '<div class="select-all-row"><label><input type="checkbox" id="selectAllVisible"> Select all visible (' + items.length + ')</label></div>' +
+        '<div class="bulk-bar" id="bulkBar" hidden>' +
+        '<span class="bulk-count" id="bulkCount">0 selected</span>' +
+        '<button type="button" class="bulk-go" id="bulkMarkNotIssue">Mark as Not an Issue</button>' +
+        '<span class="bulk-progress" id="bulkProgress"></span>' +
+        '<button type="button" class="bulk-clear" id="bulkClear">Clear selection</button>' +
+        '</div>';
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -593,34 +1022,85 @@
     // ────────────────────────────────────────────────────────────────
     function render() {
       var filtered = applyFilters(allComplaints);
+
       // held_legal_fair_housing (permanent), not status — a closed held
       // item's status becomes 'resolved', but it must stay in its own
-      // distinct group forever, never blended into an ordinary resolved
-      // complaint's subject-type group (see renderCard's isHeld comment).
+      // distinct group forever, excluded from every lane/view/bulk-action
+      // below, exactly as today (see renderCard's isHeld comment and
+      // laneOf() above).
       var heldItems = filtered.filter(function (c) { return c.held_legal_fair_housing; });
-      var bigDeal = filtered.filter(function (c) { return c.is_big_deal && !c.held_legal_fair_housing; });
-      var routine = filtered.filter(function (c) { return !c.is_big_deal; });
+      var callItems = filtered.filter(function (c) { return laneOf(c) === 'call'; });
+      var flaggedItems = filtered.filter(function (c) { return laneOf(c) === 'flagged'; });
+      var logAll = filtered.filter(function (c) { return laneOf(c) === 'log'; });
+      var ownerUpdateItems = logAll.filter(function (c) { return c.category === 'owner_instruction'; });
+      var logItems = logAll.filter(function (c) { return c.category !== 'owner_instruction'; });
+      var resolvedItems = filtered.filter(function (c) { return laneOf(c) === 'resolved'; });
+      // Merged/duplicate rows are excluded from every lane above by
+      // design (per the build task's explicit "Log — everything else not
+      // held/merged"). The pre-existing "Include merged/duplicate
+      // records" filter checkbox still needs to do something visible
+      // when checked (it did before this build), so those rows get their
+      // own small, clearly-separate list inside the Log tab instead of
+      // silently going nowhere — a judgment call, not literally spelled
+      // out in the task.
+      var mergedItems = filters.includeMerged ? filtered.filter(function (c) { return laneOf(c) === 'merged'; }) : [];
+      // 'no_issue' rows (severity_tier = 'no_issue') are already excluded
+      // from `filtered` itself by applyFilters() unless filters.includeNoIssue
+      // is checked (the admin audit toggle, renderFilters above) — so this
+      // only ever has rows in it when that toggle is on, exactly mirroring
+      // mergedItems' own "excluded unless explicitly asked for" shape just
+      // above. Per the build task, No Issue never appears in any default
+      // count/tile/lane — it gets its own small, clearly-separate section
+      // inside the Log tab, never folded into Log itself.
+      var noIssueItems = filters.includeNoIssue ? filtered.filter(function (c) { return laneOf(c) === 'no_issue'; }) : [];
 
       var html = renderTiles(allComplaints) + renderFilters();
+      html += renderViewTabs(callItems.length + flaggedItems.length, logAll.length, resolvedItems.length);
 
-      html += '<div class="section-block">';
-      html += '<div class="section-heading">Big Deal <span class="count-pill">' + (heldItems.length + bigDeal.length) + '</span></div>';
-      if (!heldItems.length && !bigDeal.length) {
-        html += '<div class="empty">Nothing big-deal matches these filters right now.</div>';
-      } else {
-        if (heldItems.length) {
-          html += '<div class="subject-group"><div class="subject-group-heading"><span class="dot" style="background:#111827;"></span>Held &mdash; Legal / Fair Housing (' + heldItems.length + ')</div>' +
-            heldItems.map(renderCard).join('') + '</div>';
+      html += '<div id="tabContent">';
+      if (filters.view === 'log') {
+        html += renderBulkControls(logItems);
+        html += '<div class="section-block">';
+        if (ownerUpdateItems.length) {
+          html += '<div class="quiet-section-title">Owner Updates (' + ownerUpdateItems.length + ')</div>';
+          html += '<div class="owner-update-list">' + ownerUpdateItems.map(renderOwnerUpdateRow).join('') + '</div>';
         }
-        html += renderSubjectGroups(bigDeal);
+        html += '<div class="quiet-section-title">Log (' + logItems.length + ')</div>';
+        html += logItems.length ? renderSubjectGroups(logItems) : '<div class="empty">Nothing in the log matches these filters.</div>';
+        if (mergedItems.length) {
+          html += '<div class="quiet-section-title">Merged / Duplicate Records (' + mergedItems.length + ')</div>';
+          html += renderSubjectGroups(mergedItems);
+        }
+        if (noIssueItems.length) {
+          html += '<div class="quiet-section-title">No Issue (' + noIssueItems.length + ') &mdash; audit view, hidden by default</div>';
+          html += renderSubjectGroups(noIssueItems);
+        }
+        html += '</div>';
+      } else if (filters.view === 'resolved') {
+        html += '<div class="section-block">';
+        html += resolvedItems.length ? renderSubjectGroups(resolvedItems) : '<div class="empty">Nothing resolved matches these filters.</div>';
+        html += '</div>';
+      } else {
+        html += renderBulkControls(callItems.concat(flaggedItems));
+        html += '<div class="section-block">';
+        html += '<div class="section-heading">Needs a Call <span class="count-pill">' + callItems.length + '</span></div>';
+        html += callItems.length ? renderSubjectGroups(callItems) : '<div class="empty">Nothing needs a call right now.</div>';
+        html += '</div>';
+        html += '<div class="section-block">';
+        html += '<div class="section-heading">Flagged for Review <span class="count-pill">' + flaggedItems.length + '</span></div>';
+        html += flaggedItems.length ? renderSubjectGroups(flaggedItems) : '<div class="empty">Nothing flagged for review right now.</div>';
+        html += '</div>';
       }
       html += '</div>';
 
-      html += '<details class="subsection routine-toggle" id="routineDetails">' +
-        '<summary>Routine Items <span class="routine-sub">still tracked, not urgent (' + routine.length + ')</span></summary>' +
-        '<div class="subsection-body">' + (routine.length ? renderSubjectGroups(routine) : '<div class="empty">No routine items match these filters.</div>') + '</div>' +
-        '</details>';
+      if (heldItems.length) {
+        html += '<div class="section-block">';
+        html += '<div class="section-heading">Held &mdash; Legal / Fair Housing <span class="count-pill">' + heldItems.length + '</span></div>';
+        html += heldItems.map(renderCard).join('');
+        html += '</div>';
+      }
 
+      selectedIds = {};
       document.getElementById('app').innerHTML = html;
       wireInteractions();
     }
@@ -630,7 +1110,10 @@
     // ────────────────────────────────────────────────────────────────
     function findCard(id) { return allComplaints.find(function (c) { return c.id === id; }); }
 
-    function replaceComplaintInPlace(updated) {
+    // "Quiet" variant — patches local state without a full re-render, for
+    // use inside a bulk loop (replaceComplaintInPlace below still does
+    // the normal single-action thing: patch + render()).
+    function replaceComplaintInPlaceQuiet(updated) {
       var idx = allComplaints.findIndex(function (c) { return c.id === updated.id; });
       if (idx !== -1) {
         // Preserve the display{} block a plain action-route response
@@ -638,6 +1121,9 @@
         // merge onto the existing row rather than overwrite it outright.
         allComplaints[idx] = Object.assign({}, allComplaints[idx], updated);
       }
+    }
+    function replaceComplaintInPlace(updated) {
+      replaceComplaintInPlaceQuiet(updated);
       render();
     }
 
@@ -651,12 +1137,69 @@
       });
     }
 
+    // Sequential stage-change loop (Phase 1 item 2) — judgment call: a
+    // dedicated bulk backend route wasn't built for this. The action
+    // itself (a fixed canned note, looped per id against the existing
+    // /:id/stage route) is simple enough that N sequential calls with a
+    // visible progress indicator cover the stated "few hundred/thousand
+    // items" case without a second server-side code path to keep in sync
+    // with /:id/stage's own note/validation rules.
+    function sequentialStageChange(ids, to_status, note, onProgress) {
+      var remaining = ids.slice();
+      var total = ids.length;
+      var done = 0, failed = 0;
+      function step() {
+        if (!remaining.length) return Promise.resolve({ done: done, failed: failed });
+        var id = remaining.shift();
+        if (onProgress) onProgress(done + failed, total);
+        return post('/api/complaint-tracking/' + encodeURIComponent(id) + '/stage', { to_status: to_status, note: note })
+          .then(function (r) {
+            if (r.ok) { done++; replaceComplaintInPlaceQuiet(r.body.complaint); } else { failed++; }
+            return step();
+          })
+          .catch(function () { failed++; return step(); });
+      }
+      return step();
+    }
+    function markNotIssue(ids, onProgress) {
+      return sequentialStageChange(ids, 'resolved', CANNED_NOT_ISSUE_NOTE, onProgress);
+    }
+    // Undo (Phase 1 item 3) — per the build task's own wording, reverts
+    // to 'open' specifically (not whatever status the row happened to be
+    // in before), same mechanism, same required-note route.
+    function undoToOpen(ids) {
+      return sequentialStageChange(ids, 'open', UNDO_REOPEN_NOTE).then(function () {
+        render();
+        showToast('Reopened.');
+      });
+    }
+
+    function updateBulkBar() {
+      var bar = document.getElementById('bulkBar');
+      if (!bar) return;
+      var count = Object.keys(selectedIds).length;
+      bar.hidden = count === 0;
+      var countEl = document.getElementById('bulkCount');
+      if (countEl) countEl.textContent = count + ' selected';
+      var goBtn = document.getElementById('bulkMarkNotIssue');
+      if (goBtn) { goBtn.textContent = 'Mark ' + count + ' as Not an Issue'; goBtn.disabled = false; }
+      var progressEl = document.getElementById('bulkProgress');
+      if (progressEl) progressEl.textContent = '';
+    }
+
     function wireInteractions() {
       // Tiles
       document.querySelectorAll('.tile').forEach(function (el) {
         el.addEventListener('click', function () {
           var key = el.getAttribute('data-tile');
           filters.tile = filters.tile === key ? '' : key;
+          render();
+        });
+      });
+      // View tabs
+      document.querySelectorAll('.view-tab').forEach(function (el) {
+        el.addEventListener('click', function () {
+          filters.view = el.getAttribute('data-view');
           render();
         });
       });
@@ -670,12 +1213,17 @@
       });
       var clearBtn = document.getElementById('clearFiltersBtn');
       if (clearBtn) clearBtn.addEventListener('click', function () {
-        filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false };
+        filters = { category: '', status: '', subjectType: '', tile: '', q: '', propertyId: null, propertyLabel: '', includeMerged: false, includeNoIssue: false, view: 'active' };
         render();
       });
       var includeMergedCheck = document.getElementById('includeMergedCheck');
       if (includeMergedCheck) includeMergedCheck.addEventListener('change', function () {
         filters.includeMerged = includeMergedCheck.checked;
+        render();
+      });
+      var includeNoIssueCheck = document.getElementById('includeNoIssueCheck');
+      if (includeNoIssueCheck) includeNoIssueCheck.addEventListener('change', function () {
+        filters.includeNoIssue = includeNoIssueCheck.checked;
         render();
       });
       var searchInput = document.getElementById('searchInput');
@@ -691,6 +1239,101 @@
       var clearPropertyFilterBtn = document.getElementById('clearPropertyFilter');
       if (clearPropertyFilterBtn) clearPropertyFilterBtn.addEventListener('click', function () {
         filters.propertyId = null; filters.propertyLabel = ''; render();
+      });
+
+      // Bulk selection (Phase 1 item 2)
+      var selectAllVisible = document.getElementById('selectAllVisible');
+      if (selectAllVisible) {
+        selectAllVisible.addEventListener('change', function () {
+          var checked = selectAllVisible.checked;
+          document.querySelectorAll('#tabContent .card-select').forEach(function (cb) {
+            cb.checked = checked;
+            if (checked) selectedIds[cb.getAttribute('data-id')] = true; else delete selectedIds[cb.getAttribute('data-id')];
+          });
+          updateBulkBar();
+        });
+      }
+      document.querySelectorAll('#tabContent .card-select').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+          var id = cb.getAttribute('data-id');
+          if (cb.checked) selectedIds[id] = true; else delete selectedIds[id];
+          updateBulkBar();
+        });
+      });
+      var bulkClear = document.getElementById('bulkClear');
+      if (bulkClear) bulkClear.addEventListener('click', function () {
+        selectedIds = {};
+        document.querySelectorAll('#tabContent .card-select').forEach(function (cb) { cb.checked = false; });
+        if (selectAllVisible) selectAllVisible.checked = false;
+        updateBulkBar();
+      });
+      var bulkMarkNotIssue = document.getElementById('bulkMarkNotIssue');
+      if (bulkMarkNotIssue) bulkMarkNotIssue.addEventListener('click', function () {
+        var ids = Object.keys(selectedIds);
+        if (!ids.length) return;
+        bulkMarkNotIssue.disabled = true;
+        var progressEl = document.getElementById('bulkProgress');
+        markNotIssue(ids, function (doneCount, total) {
+          if (progressEl) progressEl.textContent = 'Marking ' + Math.min(doneCount + 1, total) + ' of ' + total + '…';
+        }).then(function (result) {
+          render();
+          if (result.done) {
+            showToast('Marked ' + result.done + ' as not an issue' + (result.failed ? ' (' + result.failed + ' failed)' : '') + '.', {
+              actionLabel: 'Undo', duration: 8000, onAction: function () { undoToOpen(ids); }
+            });
+          } else {
+            showToast('Could not mark these. Try again.');
+          }
+        });
+      });
+
+      // Quick actions (Phase 1 item 1)
+      document.querySelectorAll('[data-action="quick-not-issue"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id');
+          btn.disabled = true;
+          markNotIssue([id]).then(function (result) {
+            render();
+            if (result.done) {
+              showToast('Marked not an issue.', { actionLabel: 'Undo', duration: 8000, onAction: function () { undoToOpen([id]); } });
+            } else {
+              showToast('Could not mark this. Try again.');
+            }
+          });
+        });
+      });
+      document.querySelectorAll('[data-action="quick-resolve-toggle"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var cardEl = btn.closest('.c-card');
+          var box = cardEl.querySelector('[data-role="quick-resolve-box"]');
+          box.hidden = !box.hidden;
+          if (!box.hidden) cardEl.querySelector('[data-role="quick-resolve-text"]').focus();
+        });
+      });
+      document.querySelectorAll('[data-action="quick-resolve-cancel"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var cardEl = btn.closest('.c-card');
+          cardEl.querySelector('[data-role="quick-resolve-box"]').hidden = true;
+        });
+      });
+      document.querySelectorAll('[data-action="quick-resolve-save"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var cardEl = btn.closest('.c-card');
+          var id = btn.getAttribute('data-id');
+          var textEl = cardEl.querySelector('[data-role="quick-resolve-text"]');
+          var note = textEl.value.trim();
+          if (!note) { textEl.focus(); return; }
+          btn.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(id) + '/stage', { to_status: 'resolved', note: note })
+            .then(function (r) {
+              btn.disabled = false;
+              if (!r.ok) { showToast(r.body.error || 'Could not save.'); return; }
+              replaceComplaintInPlaceQuiet(r.body.complaint);
+              render();
+              showToast('Marked resolved.', { actionLabel: 'Undo', duration: 8000, onAction: function () { undoToOpen([id]); } });
+            })
+            .catch(function () { btn.disabled = false; showToast('Network error.'); });
+        });
       });
 
       // Duplicate confirm/dismiss
@@ -709,6 +1352,53 @@
         });
       });
 
+      // Name-match suggestion confirm/reject (migration 20261002060000) —
+      // its own dedicated route, deliberately never /match (see router.js's
+      // own comment on these two routes for why).
+      document.querySelectorAll('[data-action="name-match-confirm"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id');
+          var candidateId = btn.getAttribute('data-candidate');
+          var cardEl = btn.closest('.c-card');
+          cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = true; });
+          post('/api/complaint-tracking/' + encodeURIComponent(id) + '/name-match/confirm', { candidate_id: candidateId })
+            .then(function (r) {
+              if (!r.ok) {
+                showToast(r.body.error || 'Could not save this.');
+                cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = false; });
+                return;
+              }
+              showToast('Match confirmed.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () {
+              showToast('Network error.');
+              cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = false; });
+            });
+        });
+      });
+      document.querySelectorAll('[data-action="name-match-reject"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id');
+          var cardEl = btn.closest('.c-card');
+          cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = true; });
+          post('/api/complaint-tracking/' + encodeURIComponent(id) + '/name-match/reject', {})
+            .then(function (r) {
+              if (!r.ok) {
+                showToast(r.body.error || 'Could not save this.');
+                cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = false; });
+                return;
+              }
+              showToast('Rejected &mdash; still needs matching.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () {
+              showToast('Network error.');
+              cardEl.querySelectorAll('[data-action="name-match-confirm"], [data-action="name-match-reject"]').forEach(function (b) { b.disabled = false; });
+            });
+        });
+      });
+
       // Manage panels — wired per card via delegated lookups on open
       document.querySelectorAll('.c-card').forEach(function (cardEl) {
         var id = cardEl.getAttribute('data-card-id');
@@ -719,6 +1409,53 @@
     }
 
     function wireManagePanel(cardEl, c) {
+      // Activity history (Phase 3 item 9) — lazy-loaded the first time
+      // this card's Manage panel is opened.
+      var manageDetails = cardEl.querySelector('details.manage');
+      if (manageDetails) {
+        var historyLoaded = false;
+        manageDetails.addEventListener('toggle', function () {
+          if (!manageDetails.open || historyLoaded) return;
+          historyLoaded = true;
+          var body = cardEl.querySelector('[data-role="history-body"]');
+          if (!body) return;
+          body.textContent = 'Loading…';
+          fetch('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/history', { credentials: 'include' })
+            .then(function (res) { return res.json().then(function (json) { return { ok: res.ok, body: json }; }); })
+            .then(function (r) {
+              if (!r.ok) { body.className = 'history-loading'; body.textContent = r.body.error || 'Could not load history.'; return; }
+              var events = r.body.events || [];
+              if (!events.length) { body.className = 'history-empty'; body.textContent = 'No activity logged yet.'; return; }
+              body.className = 'history-list';
+              body.innerHTML = events.map(function (e) {
+                return '<div class="history-item"><div class="h-top">' + escapeHtml(humanizeAction(e.action)) + ' &mdash; ' + escapeHtml(e.actor) + ' &middot; ' + formatDateTime(e.created_at) + '</div>' +
+                  (e.note ? '<div class="h-note">' + escapeHtml(e.note) + '</div>' : '') + '</div>';
+              }).join('');
+            })
+            .catch(function () { body.className = 'history-loading'; body.textContent = 'Network error loading history.'; });
+        });
+      }
+
+      // Add an update (Phase 3 item 10)
+      var progressSave = cardEl.querySelector('[data-action="progress-save"]');
+      if (progressSave) {
+        progressSave.addEventListener('click', function () {
+          var note = cardEl.querySelector('[data-role="progress-note"]');
+          var msgEl = cardEl.querySelector('[data-role="progress-msg"]');
+          if (!note.value.trim()) { msgEl.textContent = 'Add a note first.'; msgEl.className = 'manage-msg err'; return; }
+          msgEl.textContent = ''; msgEl.className = 'manage-msg';
+          progressSave.disabled = true;
+          post('/api/complaint-tracking/' + encodeURIComponent(c.id) + '/stage', { to_status: c.status, note: note.value.trim() })
+            .then(function (r) {
+              progressSave.disabled = false;
+              if (!r.ok) { msgEl.textContent = r.body.error || 'Could not save.'; msgEl.className = 'manage-msg err'; return; }
+              showToast('Update added.');
+              replaceComplaintInPlace(r.body.complaint);
+            })
+            .catch(function () { progressSave.disabled = false; msgEl.textContent = 'Network error.'; msgEl.className = 'manage-msg err'; });
+        });
+      }
+
       // Stage change
       var stageSave = cardEl.querySelector('[data-action="stage-save"]');
       if (stageSave) {

@@ -19,9 +19,23 @@
  * lives elsewhere and this file does not attempt to duplicate it.
  */
 
+// Fake env values, same reasoning archive-search/test/run-tests.js's own
+// header gives for its identical setup: router.js (required below, for
+// PART A) creates a Supabase client at module load time, same as every
+// other Hub tool's router.js — these let it load without its own startup
+// env-var check exiting the process. Set before ANY require below, since
+// router.js's own require chain (archive-search/router.js, which in turn
+// requires archive-search/lib/significance-pass.js) reads these at their
+// own module-load time too.
+process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://fake-test-project.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'fake-test-service-role-key';
+process.env.CRON_SECRET = process.env.CRON_SECRET || 'fake-test-cron-secret';
+
 const assert = require('assert');
+const path = require('path');
 
 const results = [];
+const asyncResults = [];
 
 function test(name, fn) {
   try {
@@ -30,6 +44,14 @@ function test(name, fn) {
   } catch (err) {
     results.push({ name, pass: false, error: err.message });
   }
+}
+
+function asyncTest(name, fn) {
+  asyncResults.push(
+    fn()
+      .then(() => ({ name, pass: true }))
+      .catch((err) => ({ name, pass: false, error: err.message }))
+  );
 }
 
 const { toThreadShape, threadFullText, threadFullTextBounded } = require('../lib/thread-adapter');
@@ -213,19 +235,298 @@ test('threadFullTextBounded — throws a clear error for a non-integer maxMessag
   assert.throws(() => threadFullTextBounded(thread, 5.5), /positive integer/);
 });
 
-// ─── Report ──────────────────────────────────────────────────────────────
-console.log('\nComplaint Tracking — thread-adapter.js Test Suite\n' + '='.repeat(60));
-let failCount = 0;
-for (const r of results) {
-  if (r.pass) {
-    console.log(`PASS  ${r.name}`);
-  } else {
-    failCount += 1;
-    console.log(`FAIL  ${r.name}`);
-    console.log(`      ${r.error}`);
+// ============================================================
+// PART A — router.js: name-match suggestion review routes (migration
+// 20261002060000; archive-search/lib/significance-pass.js's own
+// findNameMatchCandidates()/applyCall1Result() carry the suggestion-
+// generation tests, in that file's own test suite — this PART covers
+// only the human-review side: POST .../name-match/confirm and POST
+// .../name-match/reject).
+//
+// No supertest-style HTTP harness exists anywhere in this codebase (grep
+// confirms it) — the established, lighter-weight convention this suite
+// already uses for a DB-touching function (archive-search/test/run-tests.js
+// PART 15's withFakeSupabaseClient) is to swap @supabase/supabase-js's own
+// require.cache entry for a fake createClient() BEFORE requiring the real
+// module, so the module's own `const supabase = createClient(...)` picks
+// up the fake. Applied here to complaint-tracking/router.js (which itself
+// requires archive-search/router.js, which requires archive-search/lib/
+// significance-pass.js — both resolve the SAME @supabase/supabase-js file
+// from this monorepo's one node_modules, so the single swapped cache entry
+// covers all three). The route HANDLER is then called directly (pulled off
+// router.stack by path/method), bypassing requireComplaintTrackingAccess —
+// that gate is a plain allow-list already readable from router.js's own
+// source; these tests exercise the handler's actual read/write logic, not
+// the access-control middleware in front of it.
+// ============================================================
+
+function makeNameMatchFakeClient({ complaintRow, significanceRow = null, anchorMessageRow = null }) {
+  const state = {
+    complaints: [{ ...complaintRow }],
+    significance: significanceRow,
+    anchorMessage: anchorMessageRow,
+    auditLogInserts: [],
+    messageLinkInserts: [],
+  };
+
+  function makeChain(table) {
+    const filters = [];
+    let op = null, payload = null;
+    const chain = {
+      select() { if (!op) op = 'select'; return chain; },
+      eq(col, val) { filters.push({ col, val }); return chain; },
+      or() { return chain; }, // 'users' lookup (writeAuditLog's lookupUserId) — always misses below, irrelevant to what these tests assert.
+      order() { return chain; },
+      limit() { return chain; },
+      update(fields) { op = 'update'; payload = fields; return chain; },
+      insert(row) { op = 'insert'; payload = row; return chain; },
+      maybeSingle() {
+        if (table === 'complaints' && op === 'select') {
+          const match = state.complaints.find((r) => filters.every((f) => r[f.col] === f.val));
+          return Promise.resolve({ data: match ? { ...match } : null, error: null });
+        }
+        if (table === 'complaints' && op === 'update') {
+          const idx = state.complaints.findIndex((r) => filters.every((f) => r[f.col] === f.val));
+          if (idx === -1) return Promise.resolve({ data: null, error: null });
+          state.complaints[idx] = { ...state.complaints[idx], ...payload };
+          return Promise.resolve({ data: { ...state.complaints[idx] }, error: null });
+        }
+        if (table === 'missive_conversation_significance') return Promise.resolve({ data: state.significance, error: null });
+        if (table === 'missive_message_intake_search_safe') return Promise.resolve({ data: state.anchorMessage, error: null });
+        return Promise.resolve({ data: null, error: null }); // 'users', or anything else not modeled here.
+      },
+      single() {
+        if (table === 'complaints' && op === 'update') {
+          const idx = state.complaints.findIndex((r) => filters.every((f) => r[f.col] === f.val));
+          if (idx === -1) return Promise.resolve({ data: null, error: { message: 'not found' } });
+          state.complaints[idx] = { ...state.complaints[idx], ...payload };
+          return Promise.resolve({ data: { ...state.complaints[idx] }, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      then(resolve, reject) {
+        let result = { data: null, error: null };
+        if (table === 'audit_log' && op === 'insert') {
+          state.auditLogInserts.push(payload);
+        } else if (table === 'missive_message_links' && op === 'insert') {
+          state.messageLinkInserts.push(payload);
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+
+  return { client: { from: (t) => makeChain(t) }, state };
+}
+
+// Swaps @supabase/supabase-js's require.cache entry for the fake client,
+// force-refreshes complaint-tracking/router.js so its own `const supabase
+// = createClient(...)` picks it up, pulls the named route's handler
+// (the LAST layer in that route's own stack — requireComplaintTrackingAccess
+// is the only other one) off router.stack, and calls it with a minimal
+// fake req/res. Restores everything in `finally`, so this can never leak a
+// fake module into any other test in this suite — same discipline
+// archive-search/test/run-tests.js's withFakeSupabaseClient already
+// documents for its own identical swap.
+async function callRouterHandler({ fakeClient, method, routePath, req }) {
+  const targetPath = require.resolve('../router.js');
+  const supabasePath = require.resolve('@supabase/supabase-js', { paths: [path.dirname(targetPath)] });
+
+  const hadSupabaseCache = Object.prototype.hasOwnProperty.call(require.cache, supabasePath);
+  const originalSupabaseModule = require.cache[supabasePath];
+  const hadTargetCache = Object.prototype.hasOwnProperty.call(require.cache, targetPath);
+  const originalTargetModule = require.cache[targetPath];
+
+  // archive-search/router.js and archive-search/lib/significance-pass.js
+  // (both required transitively by complaint-tracking/router.js) each
+  // build their OWN Supabase client too — force a fresh require of those
+  // as well so none of them hold onto a stale, previously-cached client
+  // from an earlier test run in this same process.
+  const archiveSearchRouterPath = require.resolve('../../archive-search/router.js');
+  const significancePassPath = require.resolve('../../archive-search/lib/significance-pass.js');
+  const hadArchiveSearchRouterCache = Object.prototype.hasOwnProperty.call(require.cache, archiveSearchRouterPath);
+  const originalArchiveSearchRouterModule = require.cache[archiveSearchRouterPath];
+  const hadSignificancePassCache = Object.prototype.hasOwnProperty.call(require.cache, significancePassPath);
+  const originalSignificancePassModule = require.cache[significancePassPath];
+
+  require.cache[supabasePath] = {
+    id: supabasePath, filename: supabasePath, loaded: true, exports: { createClient: () => fakeClient },
+  };
+  delete require.cache[targetPath];
+  delete require.cache[archiveSearchRouterPath];
+  delete require.cache[significancePassPath];
+
+  try {
+    const { router } = require(targetPath);
+    const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
+    if (!layer) throw new Error(`No route found for ${method.toUpperCase()} ${routePath}`);
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+
+    let statusCode = 200;
+    let jsonBody = null;
+    const res = {
+      status(code) { statusCode = code; return res; },
+      json(body) { jsonBody = body; return res; },
+    };
+    await handler(req, res);
+    return { statusCode, body: jsonBody };
+  } finally {
+    if (hadSupabaseCache) require.cache[supabasePath] = originalSupabaseModule; else delete require.cache[supabasePath];
+    if (hadTargetCache) require.cache[targetPath] = originalTargetModule; else delete require.cache[targetPath];
+    if (hadArchiveSearchRouterCache) require.cache[archiveSearchRouterPath] = originalArchiveSearchRouterModule; else delete require.cache[archiveSearchRouterPath];
+    if (hadSignificancePassCache) require.cache[significancePassPath] = originalSignificancePassModule; else delete require.cache[significancePassPath];
   }
 }
-console.log('='.repeat(60));
-console.log(`${results.length - failCount}/${results.length} passed`);
 
-if (failCount > 0) process.exitCode = 1;
+// isValidUuid() (router.js) requires real UUID shape — these fixture ids
+// are deliberately real-looking UUIDs, not readable slugs, so every route
+// under test gets past that check and actually exercises the logic below
+// it (an earlier draft of these tests used slugs like "complaint-1" and
+// every one of them tripped the 400 "not valid" guard instead of the
+// behavior being tested — caught by actually running this suite, not
+// assumed correct).
+const COMPLAINT_ID = '11111111-1111-1111-1111-111111111111';
+const TENANT_A_ID = '22222222-2222-2222-2222-222222222222';
+const TENANT_B_ID = '33333333-3333-3333-3333-333333333333';
+const NOT_OFFERED_ID = '44444444-4444-4444-4444-444444444444';
+const PROPERTY_ID = '55555555-5555-5555-5555-555555555555';
+
+const BASE_COMPLAINT_ROW = {
+  id: COMPLAINT_ID,
+  property_id: PROPERTY_ID,
+  source_missive_conversation_id: 'conv-1',
+  suggested_subject_type: 'tenant',
+  suggested_subject_name_text: '"Jane Doe called about the leak"',
+  suggested_subject_candidate_ids: [TENANT_A_ID, TENANT_B_ID],
+  suggested_subject_extracted_by: 'archive-search-content-pass-v2',
+  human_confirmed_subject_outcome: null,
+  human_confirmed_subject_id: null,
+  human_confirmed_subject_by: null,
+  human_confirmed_subject_at: null,
+  subject_type: null,
+  subject_id: null,
+  needs_matching: true,
+};
+
+asyncTest('router — POST .../name-match/confirm: happy path writes subject_type/subject_id, needs_matching=false, the human_confirmed_subject_* trail, one audit_log entry, and a missive_message_links row with match_method=content_extracted_human_confirmed', async () => {
+  const { client, state } = makeNameMatchFakeClient({
+    complaintRow: BASE_COMPLAINT_ROW,
+    significanceRow: { mailbox_key: 'team:test-mailbox' },
+    anchorMessageRow: { missive_message_id: 'msg-anchor-1' },
+  });
+  const req = { params: { id: COMPLAINT_ID }, body: { candidate_id: TENANT_A_ID }, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/confirm', req });
+
+  assert.strictEqual(result.statusCode, 200);
+  assert.strictEqual(result.body.success, true);
+  assert.strictEqual(result.body.complaint.subject_type, 'tenant');
+  assert.strictEqual(result.body.complaint.subject_id, TENANT_A_ID);
+  assert.strictEqual(result.body.complaint.needs_matching, false);
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_outcome, 'confirmed');
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_id, TENANT_A_ID);
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_by, 'do@rinconmanagement.com');
+  assert.ok(result.body.complaint.human_confirmed_subject_at);
+
+  assert.strictEqual(state.auditLogInserts.length, 1);
+  assert.strictEqual(state.auditLogInserts[0].action, 'complaint_tracking.name_match_confirmed');
+  assert.strictEqual(state.auditLogInserts[0].entity_type, 'complaint');
+  assert.strictEqual(state.auditLogInserts[0].details.subject_id, TENANT_A_ID);
+
+  assert.strictEqual(state.messageLinkInserts.length, 1);
+  const link = state.messageLinkInserts[0];
+  assert.strictEqual(link.match_method, 'content_extracted_human_confirmed');
+  assert.strictEqual(link.subject_type, 'tenant');
+  assert.strictEqual(link.subject_id, TENANT_A_ID);
+  assert.strictEqual(link.mailbox_key, 'team:test-mailbox');
+  assert.strictEqual(link.missive_message_id, 'msg-anchor-1');
+  assert.strictEqual(link.human_confirmed_by, 'do@rinconmanagement.com');
+  assert.ok(link.human_confirmed_at);
+  assert.strictEqual(link.source_reference, BASE_COMPLAINT_ROW.suggested_subject_name_text);
+  assert.strictEqual(link.extracted_by, BASE_COMPLAINT_ROW.suggested_subject_extracted_by);
+});
+
+asyncTest('router — POST .../name-match/confirm: rejects a candidate_id that was never actually suggested (400, nothing written) — Mason\'s point 1, enforced at the route too, not just the DB CHECK', async () => {
+  const { client, state } = makeNameMatchFakeClient({ complaintRow: BASE_COMPLAINT_ROW });
+  const req = { params: { id: COMPLAINT_ID }, body: { candidate_id: NOT_OFFERED_ID }, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/confirm', req });
+
+  assert.strictEqual(result.statusCode, 400);
+  assert.strictEqual(state.complaints[0].subject_type, null, 'expected subject_type to stay untouched');
+  assert.strictEqual(state.auditLogInserts.length, 0);
+});
+
+asyncTest('router — POST .../name-match/confirm: 409 when the complaint has no pending suggestion at all', async () => {
+  const { client } = makeNameMatchFakeClient({ complaintRow: { ...BASE_COMPLAINT_ROW, suggested_subject_type: null, suggested_subject_candidate_ids: null } });
+  const req = { params: { id: COMPLAINT_ID }, body: { candidate_id: TENANT_A_ID }, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/confirm', req });
+  assert.strictEqual(result.statusCode, 409);
+});
+
+asyncTest('router — POST .../name-match/confirm: 409 when this suggestion was already reviewed (no double-confirm)', async () => {
+  const { client } = makeNameMatchFakeClient({ complaintRow: { ...BASE_COMPLAINT_ROW, human_confirmed_subject_outcome: 'rejected', human_confirmed_subject_by: 'someone@rinconmanagement.com', human_confirmed_subject_at: '2026-10-01T00:00:00.000Z' } });
+  const req = { params: { id: COMPLAINT_ID }, body: { candidate_id: TENANT_A_ID }, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/confirm', req });
+  assert.strictEqual(result.statusCode, 409);
+});
+
+asyncTest('router — POST .../name-match/confirm: never blocked by a failed missive_message_links write (best-effort) — the real subject_type/subject_id write and audit trail still succeed even when the mailbox/anchor lookup comes back empty', async () => {
+  const { client, state } = makeNameMatchFakeClient({ complaintRow: BASE_COMPLAINT_ROW, significanceRow: null, anchorMessageRow: null });
+  const req = { params: { id: COMPLAINT_ID }, body: { candidate_id: TENANT_B_ID }, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/confirm', req });
+
+  assert.strictEqual(result.statusCode, 200);
+  assert.strictEqual(result.body.complaint.subject_id, TENANT_B_ID);
+  assert.strictEqual(state.auditLogInserts.length, 1, 'expected the real audit trail to still be written');
+  assert.strictEqual(state.messageLinkInserts.length, 0, 'expected no missive_message_links row when the anchor could not be resolved');
+});
+
+asyncTest('router — POST .../name-match/reject: sets outcome=rejected, leaves needs_matching=TRUE and subject_type/subject_id untouched (null), writes one audit_log entry', async () => {
+  const { client, state } = makeNameMatchFakeClient({ complaintRow: BASE_COMPLAINT_ROW });
+  const req = { params: { id: COMPLAINT_ID }, body: {}, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/reject', req });
+
+  assert.strictEqual(result.statusCode, 200);
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_outcome, 'rejected');
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_id, null);
+  assert.strictEqual(result.body.complaint.human_confirmed_subject_by, 'do@rinconmanagement.com');
+  assert.ok(result.body.complaint.human_confirmed_subject_at);
+  assert.strictEqual(result.body.complaint.needs_matching, true, 'expected needs_matching to stay TRUE on rejection');
+  assert.strictEqual(result.body.complaint.subject_type, null, 'expected subject_type to never be written on a rejection');
+  assert.strictEqual(result.body.complaint.subject_id, null, 'expected subject_id to never be written on a rejection');
+
+  assert.strictEqual(state.auditLogInserts.length, 1);
+  assert.strictEqual(state.auditLogInserts[0].action, 'complaint_tracking.name_match_rejected');
+  assert.strictEqual(state.messageLinkInserts.length, 0, 'expected no missive_message_links row on a rejection — nothing was confirmed');
+});
+
+asyncTest('router — POST .../name-match/reject: 409 when there is no pending suggestion', async () => {
+  const { client } = makeNameMatchFakeClient({ complaintRow: { ...BASE_COMPLAINT_ROW, suggested_subject_type: null, suggested_subject_candidate_ids: null } });
+  const req = { params: { id: COMPLAINT_ID }, body: {}, user: { email: 'do@rinconmanagement.com' }, complaintTrackingRole: 'director_of_operations' };
+  const result = await callRouterHandler({ fakeClient: client, method: 'post', routePath: '/api/complaint-tracking/:id/name-match/reject', req });
+  assert.strictEqual(result.statusCode, 409);
+});
+
+// ─── Report ──────────────────────────────────────────────────────────────
+async function main() {
+  const resolvedAsync = await Promise.all(asyncResults);
+  const all = [...results, ...resolvedAsync];
+
+  console.log('\nComplaint Tracking — Test Suite\n' + '='.repeat(60));
+  let failCount = 0;
+  for (const r of all) {
+    if (r.pass) {
+      console.log(`PASS  ${r.name}`);
+    } else {
+      failCount += 1;
+      console.log(`FAIL  ${r.name}`);
+      console.log(`      ${r.error}`);
+    }
+  }
+  console.log('='.repeat(60));
+  console.log(`${all.length - failCount}/${all.length} passed`);
+
+  if (failCount > 0) process.exitCode = 1;
+}
+
+main();

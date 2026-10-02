@@ -888,6 +888,7 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
   // properties_owned_i_ds is a comma-separated list of AppFolio property IDs.
   const ownerRows         = [];
   const propertyOwnerRows = [];
+  const ownerEmailRows    = [];
 
   for (const row of rows) {
     const ownerId = String(row.owner_id || '').trim();
@@ -905,11 +906,30 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
       ? String(row.properties_owned_i_ds).split(',').map(s => s.trim()).filter(Boolean)
       : [];
 
+    // email can carry multiple comma-joined addresses for some owners
+    // (confirmed live, 2026-10-02: 132 of 394 owners with any email —
+    // see supabase/migrations/20261002000000_tenant_owner_emails_schema.sql
+    // for the full writeup). Split here so owners.email stops being a
+    // broken joined string going forward; every address (including the
+    // first) also goes to ownerEmailRows below for owner_emails, the
+    // complete set Complaint Tracking's matcher checks against.
+    const ownerEmailAddresses = row.email
+      ? String(row.email).split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+
     ownerRows.push({
       appfolio_id: ownerId,
       name:        row.name       || null,
       phone,
-      email:       row.email      || null,
+      email:       ownerEmailAddresses[0] || null,
+    });
+
+    ownerEmailAddresses.forEach((email, i) => {
+      ownerEmailRows.push({
+        appfolio_owner_id: ownerId,
+        email,
+        is_primary: i === 0,
+      });
     });
 
     for (const propId of propIds) {
@@ -923,12 +943,13 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
 
   console.log(`[${reportName}] Mapped ${ownerRows.length} unique owners → owners.`);
   console.log(`[${reportName}] Mapped ${propertyOwnerRows.length} links → property_owners.`);
+  console.log(`[${reportName}] Mapped ${ownerEmailRows.length} addresses → owner_emails.`);
 
   if (isDryRun) {
-    console.log(`[${reportName}] DRY RUN — would upsert ${ownerRows.length} to owners, ${propertyOwnerRows.length} to property_owners.\n`);
+    console.log(`[${reportName}] DRY RUN — would upsert ${ownerRows.length} to owners, ${propertyOwnerRows.length} to property_owners, ${ownerEmailRows.length} to owner_emails.\n`);
     summary.push({
-      reportName, table: 'owners + property_owners', status: 'DRY_RUN',
-      rowsMapped: ownerRows.length + propertyOwnerRows.length,
+      reportName, table: 'owners + property_owners + owner_emails', status: 'DRY_RUN',
+      rowsMapped: ownerRows.length + propertyOwnerRows.length + ownerEmailRows.length,
     });
     return;
   }
@@ -971,14 +992,37 @@ async function syncOwnerDirectory(isDryRun, isDiscover, summary) {
     return;
   }
 
-  const rowsUpserted = ownersUpserted + propertyOwnersUpserted;
+  // owner_emails — the complete per-address set (supabase/migrations/
+  // 20261002000000_tenant_owner_emails_schema.sql). appfolio_owner_id is
+  // the upsert conflict key (owner_id UUID FK resolved later, same
+  // two-phase shape as lease_tenants — see resolve_owner_email_foreign_
+  // keys(), called from main() alongside the other FK-resolution calls).
+  let ownerEmailsUpserted = 0;
+  try {
+    const result = await upsertGroupWithRowFallback(
+      'owner_emails',
+      ownerEmailRows,
+      ['appfolio_owner_id', 'email'],
+    );
+    ownerEmailsUpserted = result.succeeded;
+    if (result.failed.length) {
+      failures.push(...result.failed.map(f => ({ idField: 'appfolio_owner_id', idValue: f.row.appfolio_owner_id, error: f.error })));
+    }
+    console.log(`[${reportName}] Upserted ${ownerEmailsUpserted} rows to owner_emails${result.failed.length ? ` (${result.failed.length} FAILED)` : ''}.\n`);
+  } catch (err) {
+    console.error(`[${reportName}] UPSERT ERROR (owner_emails): ${err.message}\n`);
+    summary.push({ reportName, table: 'owner_emails', status: 'UPSERT_ERROR', error: err.message });
+    return;
+  }
+
+  const rowsUpserted = ownersUpserted + propertyOwnersUpserted + ownerEmailsUpserted;
   if (failures.length === 0) {
-    summary.push({ reportName, table: 'owners + property_owners', status: 'OK', rowsUpserted });
+    summary.push({ reportName, table: 'owners + property_owners + owner_emails', status: 'OK', rowsUpserted });
   } else {
     console.error(`[${reportName}] PARTIAL FAILURE: ${rowsUpserted} row(s) upserted, ${failures.length} row(s) FAILED and were NOT saved:`);
     failures.forEach(f => console.error(`[${reportName}]   ${f.idField} ${f.idValue}: ${f.error}`));
     console.error('');
-    summary.push({ reportName, table: 'owners + property_owners', status: 'PARTIAL_ERROR', rowsUpserted, failures });
+    summary.push({ reportName, table: 'owners + property_owners + owner_emails', status: 'PARTIAL_ERROR', rowsUpserted, failures });
   }
 }
 
@@ -1164,6 +1208,106 @@ async function syncLeaseTenants(isDryRun, isDiscover, summary) {
   } catch (err) {
     console.error(`[${label}] UPSERT ERROR: ${err.message}\n`);
     summary.push({ reportName: label, table: 'lease_tenants', status: 'UPSERT_ERROR', error: err.message });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANT EMAILS — tenant_directory also populates this table
+// (supabase/migrations/20261002000000_tenant_owner_emails_schema.sql — fixes
+// the bug where tenant_directory's comma-separated `emails` field only ever
+// kept its first address; see the migration's own header for the full
+// writeup).
+//
+// tenant_directory ALREADY runs through REPORT_CONFIG above for the
+// `tenants` table (entry 3) — that entry's buildRow() is left completely
+// untouched here. This is a second, independent fetch of the same report,
+// the exact same "one report, two tables, two fetches" pattern
+// syncLeaseTenants() above already uses for tenant_directory, and
+// syncOwnerDirectory() uses for owner_directory — not a restructuring of
+// tenant_directory's existing REPORT_CONFIG entry. The extra fetch costs one
+// more "initial request" against AppFolio's rate limit (pagination requests
+// are exempt — see the rate-limit note at the top of this file).
+//
+// afId must match tenant_directory's own REPORT_CONFIG entry's
+// `const afId = row.selected_tenant_id || row.occupancy_import_uid` exactly
+// — same requirement syncLeaseTenants() already documents — or
+// resolve_tenant_email_foreign_keys()'s join against tenants.appfolio_id
+// below would silently fail to resolve.
+async function syncTenantEmails(isDryRun, isDiscover, summary) {
+  const label = 'tenant_directory (tenant_emails)';
+
+  if (isDiscover) {
+    // Already discovered by tenant_directory's own REPORT_CONFIG entry above.
+    return;
+  }
+
+  console.log(`[${label}] Fetching tenant_directory...`);
+  let rows;
+  try {
+    rows = await fetchAllPages('tenant_directory');
+  } catch (err) {
+    console.error(`[${label}] FETCH ERROR: ${err.message}`);
+    summary.push({ reportName: label, status: 'FETCH_ERROR', error: err.message });
+    return;
+  }
+  console.log(`[${label}] Fetched ${rows.length} tenant_directory rows.`);
+
+  const tenantEmailRows = [];
+  let skipped = 0;
+  let rowErrors = 0;
+  for (const row of rows) {
+    // Per-row isolation — same pattern as syncLeaseTenants()'s own loop
+    // above: one malformed row must not abort the whole sync run.
+    try {
+      const afId = row.selected_tenant_id || row.occupancy_import_uid;
+      if (!afId) { skipped++; continue; }
+      const addresses = row.emails
+        ? String(row.emails).split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      if (!addresses.length) { skipped++; continue; }
+
+      addresses.forEach((email, i) => {
+        tenantEmailRows.push({
+          appfolio_tenant_id: String(afId),
+          email,
+          is_primary: i === 0,
+        });
+      });
+    } catch (err) {
+      rowErrors++;
+    }
+  }
+  const skipNote = skipped > 0 ? ` (${skipped} skipped — missing tenant id or emails)` : '';
+  const errorNote = rowErrors > 0 ? ` (${rowErrors} row error(s) skipped)` : '';
+  console.log(`[${label}] Mapped ${tenantEmailRows.length} addresses from ${rows.length} tenant_directory rows${skipNote}${errorNote}.`);
+
+  if (isDryRun) {
+    console.log(`[${label}] DRY RUN — would upsert ${tenantEmailRows.length} rows total.\n`);
+    summary.push({ reportName: label, table: 'tenant_emails', status: 'DRY_RUN', rowsMapped: tenantEmailRows.length });
+    return;
+  }
+
+  try {
+    // Same per-row isolation as syncLeaseTenants()'s own upsert — one bad
+    // tenant-email row can no longer take its batch-mates down with it.
+    const result = await upsertGroupWithRowFallback(
+      'tenant_emails',
+      tenantEmailRows,
+      ['appfolio_tenant_id', 'email'],
+    );
+    if (result.failed.length === 0) {
+      console.log(`[${label}] Upserted ${result.succeeded} rows to tenant_emails.\n`);
+      summary.push({ reportName: label, table: 'tenant_emails', status: 'OK', rowsUpserted: result.succeeded });
+    } else {
+      const failures = result.failed.map(f => ({ idField: 'appfolio_tenant_id', idValue: f.row.appfolio_tenant_id, error: f.error }));
+      console.error(`[${label}] PARTIAL FAILURE: ${result.succeeded} row(s) upserted to tenant_emails, ${failures.length} row(s) FAILED and were NOT saved:`);
+      failures.forEach(f => console.error(`[${label}]   ${f.idField} ${f.idValue}: ${f.error}`));
+      console.error('');
+      summary.push({ reportName: label, table: 'tenant_emails', status: 'PARTIAL_ERROR', rowsUpserted: result.succeeded, failures });
+    }
+  } catch (err) {
+    console.error(`[${label}] UPSERT ERROR: ${err.message}\n`);
+    summary.push({ reportName: label, table: 'tenant_emails', status: 'UPSERT_ERROR', error: err.message });
   }
 }
 
@@ -1356,6 +1500,7 @@ async function main() {
 
   await syncOwnerDirectory(isDryRun, isDiscover, summary);
   await syncLeaseTenants(isDryRun, isDiscover, summary);
+  await syncTenantEmails(isDryRun, isDiscover, summary);
 
   // ── Portfolio-wide FK resolution — run after all tables are populated ───
   // resolve_appfolio_foreign_keys() (20260803000001_resolve_fk_function.sql)
@@ -1392,6 +1537,34 @@ async function main() {
     } catch (err) {
       console.error(`[lease-tenant-fk-resolution] ERROR: ${err.message}\n`);
       summary.push({ reportName: 'lease-tenant-fk-resolution', status: 'ERROR', error: err.message });
+    }
+  }
+
+  // ── tenant_emails / owner_emails FK resolution ──────────────────────────
+  // tenant_emails.tenant_id / owner_emails.owner_id — new functions from
+  // supabase/migrations/20261002000000_tenant_owner_emails_schema.sql, same
+  // two-phase (raw AppFolio ID now, UUID resolved later) shape as
+  // lease_tenants above, called here alongside the existing FK-resolution
+  // calls per that migration's own header.
+  if (!isDryRun && !isDiscover) {
+    try {
+      const teFkResult = await supabaseRpc('resolve_tenant_email_foreign_keys');
+      console.log(`[tenant-email-fk-resolution] tenant_emails→tenants: ${teFkResult.tenant_emails_resolved}\n`);
+      summary.push({ reportName: 'tenant-email-fk-resolution', status: 'OK', ...teFkResult });
+    } catch (err) {
+      console.error(`[tenant-email-fk-resolution] ERROR: ${err.message}\n`);
+      summary.push({ reportName: 'tenant-email-fk-resolution', status: 'ERROR', error: err.message });
+    }
+  }
+
+  if (!isDryRun && !isDiscover) {
+    try {
+      const oeFkResult = await supabaseRpc('resolve_owner_email_foreign_keys');
+      console.log(`[owner-email-fk-resolution] owner_emails→owners: ${oeFkResult.owner_emails_resolved}\n`);
+      summary.push({ reportName: 'owner-email-fk-resolution', status: 'OK', ...oeFkResult });
+    } catch (err) {
+      console.error(`[owner-email-fk-resolution] ERROR: ${err.message}\n`);
+      summary.push({ reportName: 'owner-email-fk-resolution', status: 'ERROR', error: err.message });
     }
   }
 

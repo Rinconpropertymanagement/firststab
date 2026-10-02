@@ -1,0 +1,243 @@
+-- ============================================================
+-- Migration: 20261002050000_remove_is_big_deal_gate_from_complaints_needing_attention_view
+-- Created:   2026-10-02
+-- Author:    Neo (database specialist)
+--
+-- PLAIN ENGLISH: the "needing attention" list (Property 360 and the Hub
+-- home-page red-count tile both read this) has been gating on is_big_deal
+-- since this view was first created. is_big_deal is almost meaningless
+-- now — it's a generated column that comes out TRUE on nearly every
+-- AI-sourced complaint, so it wasn't actually screening anything. This
+-- migration takes it out and replaces it with the real signal this table
+-- now has: a row shows up here if the calibrated severity rating says
+-- it's genuinely urgent or worth a look, OR if it's a held Legal/Fair
+-- Housing placeholder (those never get an automated rating at all, and
+-- must never depend on one to stay visible). Nothing is deleted — this
+-- changes which rows this one list shows, exactly like every prior change
+-- to this view has.
+--
+-- THIS IS A FOLLOW-UP TO 20261002040000's OWN "FLAGGED, NOT FIXED" NOTE.
+-- That migration named this exact open item (is_big_deal left in place,
+-- a held row's guaranteed visibility depending on it) and called it
+-- "Peter's call, not mine to make silently." Peter's call has now been
+-- made and relayed via Jarvis: remove is_big_deal from this view's WHERE
+-- clause; keep held_legal_fair_housing rows guaranteed-visible via an
+-- explicit carve-out rather than via is_big_deal's umbrella.
+--
+-- WHY A NEW FILE, NOT AN EDIT: standing rule, never modify an existing
+-- migration. Read directly from 20261002040000 before writing this file
+-- (not assumed from memory) — that is the view's real current definition,
+-- confirmed by opening the file:
+--
+--   CREATE OR REPLACE VIEW complaints_needing_attention AS
+--   SELECT c.* FROM complaints c
+--   WHERE c.is_big_deal
+--     AND c.status != 'resolved'
+--     AND c.merged_into_id IS NULL
+--     AND c.severity_tier IS DISTINCT FROM 'no_issue'
+--     AND (
+--       c.subject_type IS DISTINCT FROM 'tenant'
+--       OR c.subject_id IS NULL
+--       OR EXISTS (
+--         SELECT 1 FROM leases l WHERE l.tenant_id = c.subject_id AND l.status = 'active'
+--       )
+--     );
+--
+-- This migration is NOT applied here — Peter applies it himself via
+-- Supabase's SQL Editor, same as every migration in this project.
+--
+-- ============================================================
+-- THE CHANGE: is_big_deal OUT, AN EXPLICIT SEVERITY/HELD CARVE-OUT IN
+-- ============================================================
+-- Old first condition:   c.is_big_deal
+-- New first condition:   (c.severity_tier IN ('urgent', 'worth_a_look') OR c.held_legal_fair_housing)
+--
+-- This is the exact expression Peter decided on (relayed via Jarvis), and
+-- it correctly carries both properties the old is_big_deal umbrella was
+-- actually providing:
+--
+--   1. Severity-based inclusion for a normal (non-held) row: visible only
+--      when severity_tier is 'urgent' or 'worth_a_look' — i.e. the two
+--      tiers the calibrated rubric defines as actually needing eyes on
+--      them (COMMENT ON COLUMN complaints.severity_tier, 20261002010000).
+--      'just_a_record', 'no_issue', and NULL (not yet assessed) are all
+--      excluded for a normal row, same as 'no_issue' already was.
+--   2. Guaranteed inclusion for a held_legal_fair_housing row, regardless
+--      of severity_tier — which for a held row is always NULL. Held rows
+--      are structurally barred from ever getting an automated
+--      severity_tier (complaints_held_excludes_ai_fields, widened at
+--      20261002010000 to also force severity_tier IS NULL whenever
+--      held_legal_fair_housing = TRUE — confirmed by reading that
+--      constraint directly, not assumed): "held_legal_fair_housing = FALSE
+--      OR (category IS NULL AND ... AND severity_tier IS NULL)". Without
+--      this explicit OR branch, every held row — the single most severe
+--      thing this table represents — would silently vanish from this view
+--      the moment is_big_deal stopped being the first condition. This OR
+--      branch is what 20261002040000 flagged as the load-bearing piece and
+--      is exactly what this migration preserves.
+--
+-- A CONSEQUENCE OF THE REMAINING is_big_deal LINES IN THE COLUMN DEFINITION,
+-- NOT OF THIS VIEW: is_big_deal itself (the generated column on
+-- `complaints`) is untouched by this migration — this only changes what
+-- this one VIEW filters on. complaints.is_big_deal still exists, still
+-- computes the same way, and is still used wherever else it's used today.
+--
+-- ============================================================
+-- THE NOW-REDUNDANT severity_tier IS DISTINCT FROM 'no_issue' LINE —
+-- REMOVED, NOT LEFT IN, BECAUSE IT IS FULLY SUBSUMED BY THE CHANGE ABOVE
+-- ============================================================
+-- 20261002040000 added `AND c.severity_tier IS DISTINCT FROM 'no_issue'`
+-- as a condition standing ALONGSIDE is_big_deal, because at the time
+-- is_big_deal was still the first gate and could not by itself exclude a
+-- 'no_issue' row (it's TRUE for almost every AI row regardless of rating).
+-- Once is_big_deal is replaced by `severity_tier IN ('urgent',
+-- 'worth_a_look') OR held_legal_fair_housing`, that line becomes logically
+-- impossible to violate whenever the new first condition is true:
+--   - If severity_tier IN ('urgent', 'worth_a_look') is what made the row
+--     pass, severity_tier is provably not 'no_issue' — 'no_issue' isn't in
+--     that list.
+--   - If held_legal_fair_housing is what made the row pass, severity_tier
+--     is provably NULL (complaints_held_excludes_ai_fields, above), and
+--     NULL IS DISTINCT FROM 'no_issue' is TRUE by definition — it can never
+--     be the reason a row is excluded.
+-- So keeping that line would not change which rows this view returns; it
+-- would only sit there implying a filter that's no longer doing any work,
+-- which is the opposite of this project's "keep it as simple as possible"
+-- standard. Removed here rather than left as dead weight. If this
+-- reasoning is ever invalidated — e.g. a future migration lets a held row
+-- carry severity_tier = 'no_issue' — that future migration is the one that
+-- would need to re-add an explicit no_issue exclusion; nothing about THIS
+-- migration's own correctness depends on that not happening.
+--
+-- ============================================================
+-- REAL BEHAVIOR CHANGE TO FLAG, NOT JUST A CLEANUP — WARNING BEFORE THIS
+-- SHIPS, PER "IF SOMETHING COULD BREAK, WARN ME FIRST"
+-- ============================================================
+-- A non-held row with severity_tier IS NULL (not yet run through severity
+-- assessment) is now EXCLUDED from this view. Under the old WHERE clause
+-- it was INCLUDED (is_big_deal TRUE + NULL IS DISTINCT FROM 'no_issue' is
+-- also TRUE). This is not a side effect — it is exactly what "severity-
+-- based inclusion for normal rows" means, and it is the explicit, intended
+-- effect of the decision this migration implements. But it has a real
+-- timing consequence worth knowing before applying:
+--
+--   - A LIVE complaint (discovery_context = 'live_pipeline') gets its
+--     severity_tier assigned synchronously at creation time, with 3
+--     retries (archive-search/lib/significance-pass.js, ~line 2359-2389).
+--     It only stays NULL if that classification call fails all 3 retries
+--     — the live-pipeline window where a new, non-held complaint would be
+--     briefly invisible here is the retry-exhaustion failure path, not the
+--     normal case. The home-count tile already filters to
+--     discovery_context = 'live_pipeline' only, so this is the population
+--     that tile actually counts.
+--   - A HISTORICAL complaint (discovery_context = 'historical_backfill')
+--     gets its severity_tier assigned by a separate batch tool
+--     (archive-search/run-severity-batch.js / lib/severity-batch.js), not
+--     at creation time — so any historical row that batch hasn't reached
+--     yet sits at severity_tier IS NULL for as long as that backfill takes.
+--     Property 360 (GET /api/complaint-tracking/property/:property_id)
+--     reads this view with NO discovery_context filter, so it does include
+--     historical_backfill rows. Any such row still sitting at severity_tier
+--     IS NULL when this migration goes live will disappear from Property
+--     360 until the severity batch reaches it (or forever, if it's not
+--     held and the batch never rates it 'urgent'/'worth_a_look').
+--     Confirm the severity backfill's real completion status against the
+--     actual 2,733-row population before applying, so this isn't a
+--     surprise drop in what Property 360 shows.
+--
+-- ============================================================
+-- GOVERNANCE CONTEXT (status check, not a fresh flag)
+-- ============================================================
+-- The one piece of this change with real Fair Housing weight — held rows
+-- staying guaranteed-visible regardless of severity_tier — is exactly what
+-- this migration preserves, not what it changes. The piece that IS
+-- changing (is_big_deal's removal as the general-population gate) is a
+-- signal-accuracy/product call, the same framing 20261002040000 already
+-- used when it first flagged this as "Peter's call, not mine to make
+-- silently." That call has now been made and relayed via Jarvis. Per this
+-- project's rule, only Asimov/Mason independently re-litigate governance;
+-- I have not and am not re-opening that question here. Flagging the same
+-- standing caveat 20261002040000 flagged: this view still feeds Property
+-- 360 and the home-page tile, both tenant-facing-adjacent surfaces, so if
+-- Jarvis has not already had Asimov/Mason (or Peter directly) confirm this
+-- specific visibility change is covered, that confirmation should happen
+-- before this file is pasted into Supabase's SQL Editor — same gate as
+-- last time, not a new one.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. View definition change
+--       only — no table, column, or row is altered. CREATE OR REPLACE
+--       VIEW has no validation step and cannot fail against existing data.
+--   [x] Does this touch a table other code depends on? Yes, indirectly —
+--       complaints_needing_attention, read by GET /api/complaint-tracking/
+--       home-count and GET /api/complaint-tracking/property/:property_id
+--       (complaint-tracking/router.js), and through the second route,
+--       Property 360's dashboard. Both already do `.select('*')` or
+--       `.select('id', ...)` with no column list naming is_big_deal, so
+--       neither breaks on columns — the only observable change is which
+--       ROWS come back, which is the explicitly requested behavior change.
+--   [x] Additive or destructive? Visibility-narrowing, not data-destructive
+--       — same category as 20261002040000's own change. See "REAL BEHAVIOR
+--       CHANGE TO FLAG" above for the specific population affected.
+--   [x] Tested on a copy of the data first? No staging copy exists in this
+--       project, same standing caveat every migration here carries.
+--       Mitigated by this being a pure, reversible query-definition change
+--       — no DDL that can fail partway, no data mutated.
+--   [~] Governance go-ahead for this specific view change — see Governance
+--       Context above; not independently re-confirmed by me, per this
+--       project's rule that this judgment belongs to Asimov/Mason/Peter via
+--       Jarvis, not to me. Should be confirmed before this file is applied.
+-- ============================================================
+
+CREATE OR REPLACE VIEW complaints_needing_attention AS
+SELECT c.* FROM complaints c
+WHERE (
+    c.severity_tier IN ('urgent', 'worth_a_look')
+    OR c.held_legal_fair_housing
+  )
+  AND c.status != 'resolved'
+  AND c.merged_into_id IS NULL
+  AND (
+    c.subject_type IS DISTINCT FROM 'tenant'
+    OR c.subject_id IS NULL
+    OR EXISTS (
+      SELECT 1 FROM leases l WHERE l.tenant_id = c.subject_id AND l.status = 'active'
+    )
+  );
+
+COMMENT ON VIEW complaints_needing_attention IS
+  'Live-computed "what still needs eyes on it" view (Design Decision 14) — every open, non-merged complaint rated severity_tier IN (''urgent'',''worth_a_look''), OR any held_legal_fair_housing placeholder regardless of severity_tier (which is always NULL for a held row — complaints_held_excludes_ai_fields), except a tenant-subject complaint whose tenant no longer has an active lease. is_big_deal REMOVED as the general gate (2026-10-02, this migration) — it had become near-tautological for AI-sourced rows (see complaints.is_big_deal''s own column comment); severity_tier now does that job directly, with an explicit carve-out so a held row''s visibility never depends on a rating it structurally never receives. A non-held row with severity_tier IS NULL (not yet assessed) is now excluded from this view until assessed — see this migration''s own "REAL BEHAVIOR CHANGE TO FLAG" note for the live-pipeline vs. historical-backfill timing difference this creates. The underlying complaints row is never deleted or hidden elsewhere; it just drops out of this one view, same as the pre-existing lease-end condition already did.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- CREATE OR REPLACE VIEW complaints_needing_attention AS
+-- SELECT c.* FROM complaints c
+-- WHERE c.is_big_deal
+--   AND c.status != 'resolved'
+--   AND c.merged_into_id IS NULL
+--   AND c.severity_tier IS DISTINCT FROM 'no_issue'
+--   AND (
+--     c.subject_type IS DISTINCT FROM 'tenant'
+--     OR c.subject_id IS NULL
+--     OR EXISTS (
+--       SELECT 1 FROM leases l WHERE l.tenant_id = c.subject_id AND l.status = 'active'
+--     )
+--   );
+--
+-- COMMENT ON VIEW complaints_needing_attention IS
+--   'Live-computed "what still needs eyes on it" view (Design Decision 14) — every open, non-merged, big-deal complaint not rated severity_tier = ''no_issue'', except a tenant-subject complaint whose tenant no longer has an active lease. Widened to carry severity_tier/severity_rationale/severity_assessed_at/severity_rubric_version (via its own SELECT c.* re-expanding at CREATE OR REPLACE time) and narrowed to exclude a ''no_issue'' row by default, same severity_tier IS DISTINCT FROM ''no_issue'' idiom as idx_complaints_severity_visible — a NULL (not-yet-assessed) row is never excluded by this condition, matching GET /api/complaint-tracking''s own default filter (2026-10-02). The underlying complaints row is never deleted or hidden elsewhere; it just drops out of this one view, same as the pre-existing lease-end condition already did. STILL GATED ON is_big_deal, unchanged and unresolved — see 20260913020000''s own column comment on complaints.is_big_deal for why that condition is now close to tautological for AI-sourced rows; flagged, not fixed, in the migration that added this comment (20261002040000).';
+--
+-- -- Note: this rollback restores the is_big_deal-gated WHERE clause this
+-- -- migration removed (i.e. reverts to exactly 20261002040000's version).
+-- -- It does not touch the complaints.is_big_deal or .severity_tier columns
+-- -- themselves — both still exist either way. It also does not restore a
+-- -- row to visibility retroactively; a row excluded by this migration and
+-- -- then re-included by this rollback behaves as a normal visibility
+-- -- change, same as every other condition on this view.
+-- ============================================================

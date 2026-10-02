@@ -105,6 +105,57 @@ async function findUniqueMatch(supabase, table, addr) {
   return data && data.length === 1 ? data[0] : null;
 }
 
+// ============================================================
+// MULTI-EMAIL MATCHING (tenant_owner_emails_schema, 20261002000000) — a
+// tenant/owner's address may now live in the old single column
+// (tenants.email / owners.email, still just the first/primary address) OR
+// in the new child table (tenant_emails / owner_emails, the complete set),
+// OR BOTH once a person has been re-synced. These two helpers check both
+// sources for the same address and union the resulting ids into a Set,
+// same "unique match or nothing, never guess" discipline findUniqueMatch()
+// above already enforces — exactly one distinct id across BOTH sources is a
+// match; zero or 2+ is treated as no match, never thrown on.
+//
+// Strictly additive, by construction: a tenant/owner not yet re-synced into
+// the new child table has zero rows there, so the Set is built from the old
+// column alone — identical to calling findUniqueMatch() directly. Nothing
+// about today's matching behavior changes until a row actually exists in
+// the new table.
+//
+// findUniqueMatch() itself is untouched above — it's directly unit-tested
+// and still used alone for the vendor loop below (vendors are out of scope
+// for this fix; vendors.email has no child-table equivalent).
+// ============================================================
+
+async function findUniqueIdAcrossOldAndNew(supabase, oldTable, newTable, newTableIdCol, addr) {
+  const escaped = escapeIlike(addr);
+  const [oldResult, newResult] = await Promise.all([
+    supabase.from(oldTable).select('id').ilike('email', escaped),
+    supabase.from(newTable).select(newTableIdCol).ilike('email', escaped),
+  ]);
+  if (oldResult.error) throw oldResult.error;
+  if (newResult.error) throw newResult.error;
+
+  const ids = new Set();
+  for (const row of oldResult.data || []) ids.add(row.id);
+  for (const row of newResult.data || []) {
+    const id = row[newTableIdCol];
+    if (id != null) ids.add(id);
+  }
+
+  if (ids.size !== 1) return null;
+  const [onlyId] = ids;
+  return { id: onlyId };
+}
+
+async function findUniqueTenantIdForAddress(supabase, addr) {
+  return findUniqueIdAcrossOldAndNew(supabase, 'tenants', 'tenant_emails', 'tenant_id', addr);
+}
+
+async function findUniqueOwnerIdForAddress(supabase, addr) {
+  return findUniqueIdAcrossOldAndNew(supabase, 'owners', 'owner_emails', 'owner_id', addr);
+}
+
 /**
  * @param {object} supabase
  * @param {string[]} addresses - every participant address in the thread (any case/order)
@@ -116,7 +167,7 @@ async function matchParticipantsToRecords(supabase, addresses) {
   if (!clean.length) return none;
 
   for (const addr of clean) {
-    const tenant = await findUniqueMatch(supabase, 'tenants', addr);
+    const tenant = await findUniqueTenantIdForAddress(supabase, addr);
     if (tenant) {
       const property_id = await resolveActivePropertyForTenant(supabase, tenant.id);
       return { subject_type: 'tenant', subject_id: tenant.id, vendor_id: null, property_id };
@@ -124,7 +175,7 @@ async function matchParticipantsToRecords(supabase, addresses) {
   }
 
   for (const addr of clean) {
-    const owner = await findUniqueMatch(supabase, 'owners', addr);
+    const owner = await findUniqueOwnerIdForAddress(supabase, addr);
     // No property_id resolution for an owner match — owners.properties is
     // many-to-many (property_owners junction), so a single owner can hold
     // several properties; picking one would be a guess. Same "never a
@@ -141,4 +192,10 @@ async function matchParticipantsToRecords(supabase, addresses) {
   return none;
 }
 
-module.exports = { matchParticipantsToRecords, escapeIlike, findUniqueMatch };
+module.exports = {
+  matchParticipantsToRecords,
+  escapeIlike,
+  findUniqueMatch,
+  findUniqueTenantIdForAddress,
+  findUniqueOwnerIdForAddress,
+};

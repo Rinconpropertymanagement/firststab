@@ -77,6 +77,17 @@ const { TOPIC_CATEGORIES: CATEGORIES } = require('../archive-search/lib/signific
 const { findPossibleDuplicate } = require('./lib/duplicate-check');
 const { lookupSingleDirectorOfOperations } = require('./lib/process-pending-messages');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
+// Triage redesign build (2026-10): "View original email" link. Reusing
+// archive-search/router.js's own missiveConversationLink() by direct
+// import, same cross-tool-import precedent as the CATEGORIES line above,
+// rather than a second copy of that URL template that could silently
+// drift from it (e.g. if the Missive URL shape ever changes again — see
+// that function's own comment history). Importing from the router module
+// itself (not a lib/ file) is heavier than the CATEGORIES import, but it's
+// where the real, only copy of this function lives; module caching means
+// this doesn't double-run archive-search/router.js's own setup — it's
+// already required once by server.js regardless of load order.
+const { missiveConversationLink } = require('../archive-search/router');
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const missing = [];
@@ -276,6 +287,84 @@ async function fetchByIds(table, columns, idList) {
   return data || [];
 }
 
+// Triage redesign build (2026-10), Phase 3 item 11 — "Last touched X ago
+// by [name]" on the collapsed card face. The complaints row itself already
+// has a trigger-maintained updated_at (free — no query needed, see
+// row.display.last_touched_at below), but WHO touched it only lives in
+// audit_log, and there's no per-row "last_updated_by" column (a real
+// schema change, which this additive-reads-only phase was told not to
+// make). Getting that cheaply for ~1,000+ visible rows in one list load
+// means a single batched, paginated query — same "page through in bounded
+// 1000-row chunks" pattern this file's own GET /api/complaint-tracking
+// route already uses for the same PostgREST row-cap reason (see that
+// route's own comment) — rather than one query per card (an N+1 that
+// would mean a thousand+ requests on every dashboard load).
+// Capped at MAX_PAGES purely as a safety valve against paging through
+// this tool's entire audit history for one list load if some id is
+// somehow never covered; in practice every complaint gets a
+// 'complaint_tracking.created' row at insert (both the manual-report path
+// above and significance-pass.js's own complaint-creation path write one),
+// so ordering newest-first and stopping once every id has at least one
+// hit converges fast. Any id left uncovered when the cap is hit just gets
+// no last_touched info — same "log, don't throw, show the row anyway"
+// discipline as attachDisplayInfo's own enrichment lookups.
+async function attachLastTouchedInfo(rows) {
+  if (!rows || !rows.length) return rows;
+  const ids = rows.map((r) => r.id);
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 10;
+  const latestByEntity = new Map();
+
+  try {
+    for (let page = 0; page < MAX_PAGES && latestByEntity.size < ids.length; page += 1) {
+      const from = page * PAGE_SIZE;
+      const { data, error } = await supabase
+        .from('audit_log')
+        .select('entity_id, actor_type, actor_id, created_at')
+        .eq('entity_type', 'complaint')
+        .in('entity_id', ids)
+        .order('created_at', { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) throw error;
+      for (const row of data || []) {
+        if (!latestByEntity.has(row.entity_id)) latestByEntity.set(row.entity_id, row);
+      }
+      if (!data || data.length < PAGE_SIZE) break;
+    }
+  } catch (err) {
+    console.error('[complaint-tracking] last-touched lookup failed (showing rows without it):', err.message);
+    return rows;
+  }
+
+  // actor_id holds the acting human's email for a 'human' action (see
+  // writeAuditLog's own actor_id fallback: actor_id || actor_email) — look
+  // those up against team_members for a real name instead of a raw email.
+  // team_members.email is stored lowercased (shared_team_members schema's
+  // own CHECK); lowercase the comparison so case differences from whatever
+  // auth handed us as req.user.email don't silently miss a match.
+  const emails = [...new Set(
+    [...latestByEntity.values()]
+      .filter((r) => r.actor_type === 'human' && r.actor_id && r.actor_id.includes('@'))
+      .map((r) => r.actor_id.toLowerCase())
+  )];
+  let nameByEmail = new Map();
+  if (emails.length) {
+    const { data: matched, error } = await supabase.from('team_members').select('full_name, email').in('email', emails);
+    if (!error) nameByEmail = new Map((matched || []).map((m) => [m.email, m.full_name || m.email]));
+  }
+
+  for (const row of rows) {
+    const latest = latestByEntity.get(row.id);
+    if (!latest) continue;
+    const by = latest.actor_type === 'system'
+      ? 'System'
+      : (nameByEmail.get((latest.actor_id || '').toLowerCase()) || latest.actor_id || 'Unknown');
+    row.display = row.display || {};
+    row.display.last_touched = { at: latest.created_at, by };
+  }
+  return rows;
+}
+
 async function attachDisplayInfo(rows) {
   if (!rows || !rows.length) return rows;
 
@@ -288,8 +377,20 @@ async function attachDisplayInfo(rows) {
     ...rows.map((r) => r.delegated_to_team_member_id),
     ...rows.map((r) => r.reported_by_team_member_id),
   ]);
-  const ownerIds = uniq(rows.filter((r) => r.subject_type === 'owner').map((r) => r.subject_id));
-  const tenantIds = uniq(rows.filter((r) => r.subject_type === 'tenant').map((r) => r.subject_id));
+  // Name-match suggestion candidates (migration 20261002060000) — merged
+  // into the SAME owner/tenant id lists already fetched below (fetchByIds
+  // dedupes via .in(), so adding these costs nothing extra) rather than a
+  // third round-trip. A pending suggestion's own candidate_ids are UUIDs
+  // into tenants.id | owners.id, per suggested_subject_type — same table,
+  // same shape as a real subject_id, just not yet confirmed as one.
+  const suggestedTenantCandidateIds = rows
+    .filter((r) => r.suggested_subject_type === 'tenant' && r.suggested_subject_candidate_ids)
+    .flatMap((r) => r.suggested_subject_candidate_ids);
+  const suggestedOwnerCandidateIds = rows
+    .filter((r) => r.suggested_subject_type === 'owner' && r.suggested_subject_candidate_ids)
+    .flatMap((r) => r.suggested_subject_candidate_ids);
+  const ownerIds = uniq([...rows.filter((r) => r.subject_type === 'owner').map((r) => r.subject_id), ...suggestedOwnerCandidateIds]);
+  const tenantIds = uniq([...rows.filter((r) => r.subject_type === 'tenant').map((r) => r.subject_id), ...suggestedTenantCandidateIds]);
   const teamMemberSubjectIds = uniq(rows.filter((r) => r.subject_type === 'team_member').map((r) => r.subject_id));
   const dupIds = uniq(rows.map((r) => r.possible_duplicate_of_id));
 
@@ -335,17 +436,54 @@ async function attachDisplayInfo(rows) {
     } else if (row.subject_type === 'team_member') {
       subjectName = teamMemberLabel(teamMemberSubjectMap, row.subject_id);
     }
+
+    // Name-match suggestion candidates, resolved to real display names —
+    // Mason's point 1, the whole reason this build exists: "the human step
+    // only earns its risk-reduction if the review surface actively exposes
+    // the collision... so the reviewer is disambiguating with real
+    // information, not just agreeing with a guess." Every candidate here
+    // was ALREADY scoped by findNameMatchCandidates() (significance-
+    // pass.js) to tenants/owners AT this row's own property_id — so by
+    // construction every candidate in this list shares the SAME property
+    // already shown above as `property`; there is no separate per-
+    // candidate property to resolve or show.
+    let nameMatchCandidates = null;
+    if (row.suggested_subject_type && row.suggested_subject_candidate_ids) {
+      const candidateMap = row.suggested_subject_type === 'owner' ? ownerMap : tenantMap;
+      nameMatchCandidates = row.suggested_subject_candidate_ids.map((id) => {
+        const person = candidateMap.get(id);
+        let name = null;
+        if (person) {
+          name = row.suggested_subject_type === 'owner' ? person.name : [person.first_name, person.last_name].filter(Boolean).join(' ');
+        }
+        return { id, name: name || 'Unknown' };
+      });
+    }
+
     row.display = {
       property: property ? { name: property.name, address: property.address, city: property.city } : null,
       unit_number: row.unit_id ? (unitMap.get(row.unit_id)?.unit_number || null) : null,
       vendor_name: row.vendor_id ? (vendorMap.get(row.vendor_id)?.company_name || null) : null,
       subject_name: subjectName,
+      name_match_candidates: nameMatchCandidates,
       owner_team_member_name: teamMemberLabel(teamMemberMap, row.owner_team_member_id),
       delegated_team_member_name: teamMemberLabel(teamMemberMap, row.delegated_to_team_member_id),
       reported_by_name: teamMemberLabel(teamMemberMap, row.reported_by_team_member_id),
       possible_duplicate: dup ? { description: dup.description, category: dup.category, status: dup.status, created_at: dup.created_at } : null,
+      // Triage redesign build (2026-10) — "View original email" (Phase 2
+      // item 8). Every row with a source_missive_conversation_id gets a
+      // real, working link; rows with none (e.g. a manual_staff report)
+      // get null, same "null means not applicable" convention every other
+      // display{} field above already uses.
+      missive_link: row.source_missive_conversation_id ? missiveConversationLink(row.source_missive_conversation_id) : null,
     };
   }
+  // Phase 3 item 11 ("Last touched X ago by [name]") — a second, separate
+  // batched pass (its own audit_log query, not foldable into the
+  // Promise.all above since it depends on knowing every row's id, not a
+  // fixed set of foreign-key ids) — see attachLastTouchedInfo's own header
+  // for why this is one batched query rather than one per row.
+  await attachLastTouchedInfo(rows);
   return rows;
 }
 
@@ -592,11 +730,43 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
 // Section 5: "filterable by property, team member, category, status").
 // Returns is_big_deal per row (a real, generated column) so the dashboard
 // splits big-deal-up-top vs. routine-behind-a-dropdown without re-deriving
-// that logic client-side. Single query, no pagination — same accepted,
-// documented limitation owner-tenant-notes/router.js's own property-listing
-// route carries for a comparably-scoped, low-volume-at-launch tool.
+// that logic client-side.
+//
+// Real bug, found live 2026-10-02 (Peter noticed the dashboard stop at
+// exactly 1,000 rows once the historical backlog clear pushed the real
+// count to 2,733): a single unpaginated .select() silently caps at
+// Supabase/PostgREST's own default max-rows (1000), same gotcha this
+// project has already hit twice elsewhere (fetchIncompleteSignificanceRows,
+// significance-batch.js). The "single query, no pagination" design this
+// comment used to describe was an accepted limitation ONLY while real
+// volume stayed under 1000 — it silently started dropping rows the moment
+// it didn't, with no error, no truncation notice, nothing. Fixed by paging
+// through every 1000-row chunk server-side and concatenating — the
+// response shape to the dashboard is unchanged (still every matching row,
+// in one response), so no client-side change is needed.
+// `include_no_issue=true` — the "admin-only way to see No-Issue rows for
+// audit purposes" the severity-tier build task asks for. Deliberately NOT
+// a new access tier: Design Decision 15 ("binary, two roles, no tiers",
+// SECTION 1 above) already settled that question for this tool, and both
+// roles requireComplaintTrackingAccess allows (admin, director_of_operations)
+// are the only humans who can reach this route at all — so gating the
+// toggle on "already has Complaint Tracking access" satisfies "admin-only"
+// without reopening that design decision for one filter flag. Default
+// (flag omitted/false) excludes severity_tier = 'no_issue' rows — per the
+// build task, a No Issue row is correctly classified as not belonging in
+// this tool's default view at all, not merely a low-priority lane.
+// severity_tier IS NULL (not yet assessed — true for every row until the
+// retroactive batch tool runs) is NEVER excluded either way: unassessed
+// rows must keep behaving exactly as they do today, per the build task's
+// own explicit instruction. Written as `.or('severity_tier.is.null,
+// severity_tier.neq.no_issue')`, not a bare `.neq()`, because Postgres's
+// own NULL semantics make `severity_tier <> 'no_issue'` evaluate to UNKNOWN
+// (excluded) for a NULL row — the explicit `.is.null` branch is what keeps
+// unassessed rows visible, mirroring the DB's own partial index
+// (idx_complaints_severity_visible, migration 20261002010000) which uses
+// the identical "IS DISTINCT FROM" idiom for the same reason.
 router.get('/api/complaint-tracking', requireComplaintTrackingAccess, async (req, res) => {
-  const { property_id, subject_type, subject_id, category, status, owner_team_member_id, q } = req.query;
+  const { property_id, subject_type, subject_id, category, status, owner_team_member_id, q, include_no_issue } = req.query;
 
   if (property_id && !isValidUuid(property_id)) return res.status(400).json({ error: 'property_id is not valid.' });
   if (subject_id && !isValidUuid(subject_id)) return res.status(400).json({ error: 'subject_id is not valid.' });
@@ -610,10 +780,17 @@ router.get('/api/complaint-tracking', requireComplaintTrackingAccess, async (req
   if (status) query = query.eq('status', status);
   if (owner_team_member_id) query = query.eq('owner_team_member_id', owner_team_member_id);
   if (q && typeof q === 'string' && q.trim()) query = query.ilike('description', `%${q.trim()}%`);
+  if (include_no_issue !== 'true') query = query.or('severity_tier.is.null,severity_tier.neq.no_issue');
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ complaints: await attachDisplayInfo(data || []) });
+  const PAGE_SIZE = 1000;
+  let allRows = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await query.range(from, from + PAGE_SIZE - 1);
+    if (error) return res.status(500).json({ error: error.message });
+    allRows = allRows.concat(data || []);
+    if (!data || data.length < PAGE_SIZE) break;
+  }
+  res.json({ complaints: await attachDisplayInfo(allRows) });
 });
 
 // ─── GET /api/complaint-tracking/home-count — the Hub home-page tile
@@ -632,6 +809,28 @@ router.get('/api/complaint-tracking', requireComplaintTrackingAccess, async (req
 // live-operational tile with thousands of old findings the moment it ran
 // — exactly the failure mode Section 6 exists to prevent. Found and fixed
 // while building that pass, not a pre-existing bug report.
+//
+// FLAGGED, NOT FIXED, 2026-10-02: the severity-tier build task asks for a
+// `severity_tier IS DISTINCT FROM 'no_issue'` filter here AND on Property
+// 360 (GET /api/complaint-tracking/property/:property_id, just below) —
+// both read complaints_needing_attention, not `complaints` directly. This
+// view was created with `SELECT c.*` (supabase/migrations/20260910000000,
+// re-issued unchanged by 20260913020000) — in Postgres, `*` is expanded
+// into an explicit column list AT THE MOMENT the view is created/replaced,
+// not live-resolved on every read. A plain `ALTER TABLE complaints ADD
+// COLUMN severity_tier ...` (20261002010000) does NOT make severity_tier
+// selectable through this view — confirmed against Postgres's own
+// documented view-expansion behavior, not assumed. Adding `.or(...)` on
+// severity_tier here today would make BOTH routes throw (column does not
+// exist on complaints_needing_attention), not silently no-op. Fixing this
+// needs a new Neo migration that re-issues `CREATE OR REPLACE VIEW
+// complaints_needing_attention AS SELECT c.* FROM complaints c WHERE ...`
+// (every existing WHERE clause, plus the new severity_tier exclusion) —
+// a schema change, not a router.js change, so it's flagged here for Jarvis
+// to route to Neo rather than worked around in application code. Until
+// that migration exists and is applied, these two routes are correctly
+// left unchanged — they already behave exactly as they do today, with no
+// regression either way.
 router.get('/api/complaint-tracking/home-count', requireComplaintTrackingAccess, async (req, res) => {
   const { count, error } = await supabase
     .from('complaints_needing_attention').select('id', { count: 'exact', head: true }).eq('discovery_context', 'live_pipeline');
@@ -694,6 +893,57 @@ router.post('/api/complaint-tracking/:id/stage', requireComplaintTrackingAccess,
   });
 
   res.json({ success: true, complaint: updated });
+});
+
+// ─── GET /api/complaint-tracking/:id/history — triage redesign build
+// (2026-10), Phase 3 item 9. Purely additive read of audit_log, which
+// already gets a row on every stage change, delegation, duplicate
+// decision, and held-item closure (writeAuditLog() calls throughout this
+// file) — there was simply no route reading any of it back until now.
+// Newest-first, capped at the last 20 events per the task's own spec (this
+// is a human-facing timeline, not an export/compliance tool — Rule 10's
+// full-history CCPA/export paths are unrelated and untouched).
+router.get('/api/complaint-tracking/:id/history', requireComplaintTrackingAccess, async (req, res) => {
+  if (!isValidUuid(req.params.id)) return res.status(400).json({ error: 'That id is not valid.' });
+
+  const { data, error } = await supabase
+    .from('audit_log')
+    .select('id, action, actor_type, actor_id, details, created_at')
+    .eq('entity_type', 'complaint').eq('entity_id', req.params.id)
+    .order('created_at', { ascending: false })
+    .limit(20);
+  if (error) return res.status(500).json({ error: error.message });
+
+  // actor_id is the acting human's email for a 'human' action (writeAuditLog's
+  // own actor_id fallback) — resolved to a real name the same way
+  // attachLastTouchedInfo does, for the same reason (a raw email in a
+  // staff-facing timeline is a worse read than a name when one's available).
+  const emails = [...new Set(
+    (data || [])
+      .filter((r) => r.actor_type === 'human' && r.actor_id && r.actor_id.includes('@'))
+      .map((r) => r.actor_id.toLowerCase())
+  )];
+  let nameByEmail = new Map();
+  if (emails.length) {
+    const { data: members, error: memberErr } = await supabase.from('team_members').select('full_name, email').in('email', emails);
+    if (!memberErr) nameByEmail = new Map((members || []).map((m) => [m.email, m.full_name || m.email]));
+  }
+
+  const events = (data || []).map((r) => ({
+    id: r.id,
+    action: r.action,
+    actor_type: r.actor_type,
+    actor: r.actor_type === 'system' ? 'System' : (nameByEmail.get((r.actor_id || '').toLowerCase()) || r.actor_id || 'Unknown'),
+    // "Note where present" (task spec) — every writeAuditLog() call site in
+    // this file that carries a human-written note puts it in
+    // details.reason (stage changes, held closures) or details.disposition_notes
+    // (CCPA held disposition); neither key is ever set on the same row, so
+    // this is a safe single fallback, not a guess between two live values.
+    note: (r.details && (r.details.reason || r.details.disposition_notes)) || null,
+    created_at: r.created_at,
+  }));
+
+  res.json({ events });
 });
 
 // ─── POST /api/complaint-tracking/:id/delegate — DO stays accountable
@@ -767,6 +1017,182 @@ router.post('/api/complaint-tracking/:id/match', requireComplaintTrackingAccess,
     action: 'complaint_tracking.matched', entity_type: 'complaint', entity_id: req.params.id,
     actor_email: req.user.email, property_id: updated.property_id, risk_level: 'low', privacy_category: 'processing',
     details: { property_id: property_id || null, subject_type: subject_type || null, subject_id: subject_id || null, vendor_id: vendor_id || null, actor_role: req.complaintTrackingRole },
+  });
+
+  res.json({ success: true, complaint: updated });
+});
+
+// ============================================================
+// Name-match suggestion review — migration 20261002060000, the narrower,
+// Mason-cleared, human-confirmed name-based-matching design (Peter's
+// explicit approval for THIS version only, relayed via Jarvis — full
+// automatic resolution is OUT OF SCOPE). Deliberately its OWN pair of
+// routes, never folded into /match above: Mason's point 1 requires the
+// reviewer to be shown and disambiguate a REAL collision (every real
+// candidate this complaint's own property corroborates, per archive-
+// search/lib/significance-pass.js's findNameMatchCandidates()), which is a
+// fundamentally different review action from the free-form manual
+// property/subject search /match already offers — confusing the two in
+// one endpoint would risk a human picking a candidate without ever seeing
+// the collision context that's this whole feature's safety property.
+//
+// resolveMailboxAnchorForConversation() below carries the same narrow,
+// already-accepted multi-mailbox ambiguity significance-pass.js's own
+// findExistingComplaintForConversation() documents (missive_conversation_id
+// is only unique WITHIN a mailbox, and complaints carries no mailbox_key
+// column) — accepted here for the identical reason, not re-litigated.
+// ============================================================
+
+async function resolveMailboxAnchorForConversation(missive_conversation_id) {
+  const { data: sig, error: sigErr } = await supabase
+    .from('missive_conversation_significance')
+    .select('mailbox_key')
+    .eq('missive_conversation_id', missive_conversation_id)
+    .limit(1).maybeSingle();
+  if (sigErr || !sig) return null;
+
+  const { data: msg, error: msgErr } = await supabase
+    .from('missive_message_intake_search_safe')
+    .select('missive_message_id')
+    .eq('mailbox_key', sig.mailbox_key)
+    .eq('missive_conversation_id', missive_conversation_id)
+    .order('delivered_at', { ascending: true })
+    .limit(1).maybeSingle();
+  if (msgErr || !msg) return null;
+
+  return { mailbox_key: sig.mailbox_key, missive_message_id: msg.missive_message_id };
+}
+
+// Mason's point 3 (audit-trail parity) applied to the PERMANENT link
+// record, not just the complaints-row review columns: a confirmed name
+// match gets a real missive_message_links row with the new, distinct
+// match_method, carrying who confirmed it and when. Best-effort, non-
+// fatal — same posture significance-pass.js's own writeMessageLinks()
+// already uses for every content-extracted row: a failure here never
+// blocks the real write (complaints.subject_type/subject_id and the
+// human_confirmed_subject_* audit trail on complaints itself, already
+// committed by the caller before this runs) — it only means the permanent
+// link record didn't also get written. The caller logs any failure
+// loudly so it's never silently lost.
+async function writeNameMatchConfirmedLink(complaint, actorEmail, nowIso) {
+  if (!complaint.source_missive_conversation_id) return; // defensive only — every AI-created complaint that can ever carry a suggestion always has one (createComplaintRow always sets it); a manually-reported complaint can never have suggested_subject_type set in the first place.
+  const anchor = await resolveMailboxAnchorForConversation(complaint.source_missive_conversation_id);
+  if (!anchor) return; // logged by the caller — nothing real to anchor the link to.
+
+  const { error } = await supabase.from('missive_message_links').insert({
+    mailbox_key: anchor.mailbox_key,
+    missive_message_id: anchor.missive_message_id,
+    missive_conversation_id: complaint.source_missive_conversation_id,
+    property_id: complaint.property_id,
+    subject_type: complaint.subject_type,
+    subject_id: complaint.subject_id,
+    match_method: 'content_extracted_human_confirmed',
+    source_reference: complaint.suggested_subject_name_text,
+    confidence: 0.7, // same fixed value significance-pass.js's own vendor content_extracted path already uses (writeMessageLinks()) — this was never a model-reported confidence score to begin with.
+    extracted_by: complaint.suggested_subject_extracted_by,
+    human_confirmed_by: actorEmail,
+    human_confirmed_at: nowIso,
+  });
+  if (error) throw error;
+}
+
+// ─── POST /api/complaint-tracking/:id/name-match/confirm — a human picks
+// one specific candidate. This is the ONLY place in this codebase that
+// writes complaints.subject_type/subject_id from a name-based (as opposed
+// to address-based) match — and only ever after this explicit human
+// action, never automatically.
+router.post('/api/complaint-tracking/:id/name-match/confirm', requireComplaintTrackingAccess, async (req, res) => {
+  if (!isValidUuid(req.params.id)) return res.status(400).json({ error: 'That id is not valid.' });
+  const { candidate_id } = req.body;
+  if (!isValidUuid(candidate_id)) return res.status(400).json({ error: 'candidate_id is required and must be a valid id.' });
+
+  const { data: before, error: beforeErr } = await supabase
+    .from('complaints')
+    .select('id, property_id, suggested_subject_type, suggested_subject_candidate_ids, human_confirmed_subject_outcome, source_missive_conversation_id')
+    .eq('id', req.params.id).maybeSingle();
+  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
+  if (!before) return res.status(404).json({ error: 'Complaint not found.' });
+  if (!before.suggested_subject_type) {
+    return res.status(409).json({ error: 'This complaint has no pending name-match suggestion to review.' });
+  }
+  if (before.human_confirmed_subject_outcome) {
+    return res.status(409).json({ error: 'This suggestion has already been reviewed.' });
+  }
+  if (!before.suggested_subject_candidate_ids.includes(candidate_id)) {
+    return res.status(400).json({ error: 'candidate_id must be one of the candidates this complaint actually suggested.' });
+  }
+
+  const nowIso = new Date().toISOString();
+  const { data: updated, error: updateErr } = await supabase
+    .from('complaints')
+    .update({
+      subject_type: before.suggested_subject_type,
+      subject_id: candidate_id,
+      needs_matching: false,
+      human_confirmed_subject_outcome: 'confirmed',
+      human_confirmed_subject_id: candidate_id,
+      human_confirmed_subject_by: req.user.email,
+      human_confirmed_subject_at: nowIso,
+    })
+    .eq('id', req.params.id).select().single();
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+  // Part D — audit log, same conventions as every other write in this
+  // router (writeAuditLog's own actor_email -> performed_by lookup).
+  await writeAuditLog({
+    action: 'complaint_tracking.name_match_confirmed', entity_type: 'complaint', entity_id: req.params.id,
+    actor_email: req.user.email, property_id: updated.property_id, risk_level: 'medium', privacy_category: 'processing',
+    details: {
+      subject_type: before.suggested_subject_type, subject_id: candidate_id,
+      candidate_count: before.suggested_subject_candidate_ids.length, actor_role: req.complaintTrackingRole,
+    },
+  });
+
+  try {
+    await writeNameMatchConfirmedLink(updated, req.user.email, nowIso);
+  } catch (err) {
+    console.error(`[complaint-tracking] missive_message_links insert failed for name-match confirm on complaint ${req.params.id}:`, err.message);
+  }
+
+  res.json({ success: true, complaint: updated });
+});
+
+// ─── POST /api/complaint-tracking/:id/name-match/reject — "none of these
+// are right." Leaves needs_matching = TRUE (the migration's own schema
+// comment, "A DELIBERATE OMISSION" section) — the record goes back to
+// looking exactly like any other unmatched orphan; this build makes no UI
+// distinction between "never reviewed" and "reviewed and rejected" beyond
+// the audit_log entry below.
+router.post('/api/complaint-tracking/:id/name-match/reject', requireComplaintTrackingAccess, async (req, res) => {
+  if (!isValidUuid(req.params.id)) return res.status(400).json({ error: 'That id is not valid.' });
+
+  const { data: before, error: beforeErr } = await supabase
+    .from('complaints')
+    .select('id, property_id, suggested_subject_type, human_confirmed_subject_outcome')
+    .eq('id', req.params.id).maybeSingle();
+  if (beforeErr) return res.status(500).json({ error: beforeErr.message });
+  if (!before) return res.status(404).json({ error: 'Complaint not found.' });
+  if (!before.suggested_subject_type) {
+    return res.status(409).json({ error: 'This complaint has no pending name-match suggestion to review.' });
+  }
+  if (before.human_confirmed_subject_outcome) {
+    return res.status(409).json({ error: 'This suggestion has already been reviewed.' });
+  }
+
+  const { data: updated, error: updateErr } = await supabase
+    .from('complaints')
+    .update({
+      human_confirmed_subject_outcome: 'rejected',
+      human_confirmed_subject_by: req.user.email,
+      human_confirmed_subject_at: new Date().toISOString(),
+    })
+    .eq('id', req.params.id).select().single();
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+  await writeAuditLog({
+    action: 'complaint_tracking.name_match_rejected', entity_type: 'complaint', entity_id: req.params.id,
+    actor_email: req.user.email, property_id: updated.property_id, risk_level: 'low', privacy_category: 'processing',
+    details: { suggested_subject_type: before.suggested_subject_type, actor_role: req.complaintTrackingRole },
   });
 
   res.json({ success: true, complaint: updated });

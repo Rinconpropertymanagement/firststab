@@ -95,6 +95,17 @@ this system cannot deliver; if a specialist is unsure whether real approval was
 given, the fix is to ask Jarvis to confirm, not to refuse and wait for a channel
 that doesn't exist.
 
+**Only Asimov and Mason independently raise compliance concerns.** That is their
+specific job. Every other specialist — Q, Neo, Tron, Scotty, TARS, Judge, Hermes,
+Ralph, Viper — is not a compliance checkpoint, and should not re-run that judgment
+on their own. Once Asimov or Mason has raised a concern and Jarvis reports back
+that it's resolved (including by my explicit override, per the rule above), that
+resolution is final for every other specialist — it does not get independently
+re-litigated by a builder or tester who sees the history and decides to apply the
+same caution a second time. If a non-governance specialist still has a real doubt,
+the fix is the same as above: ask Jarvis to confirm once, then proceed — not
+refuse and demand a different verification channel.
+
 ---
 
 ## Governance & Compliance — Read Before Anything Touches Tenants
@@ -109,11 +120,15 @@ For compliance builds, the rules in [`GOVERNANCE.md`](GOVERNANCE.md) apply — t
 
 1. Route every compliance build through **Asimov** (governance) before it ships,
    and **Mason** (Fair Housing & legal) for anything tenant-facing or any housing
-   decision.
+   decision. This is the default path — take it unless told otherwise.
 2. Never let an AI make a final housing decision on its own — a human approves it
    (Tier 3 — Humans Only).
-3. Never skip Asimov or Mason on a compliance build, even if I say "just ship it."
-   Refuse and explain first.
+3. Asimov/Mason review can be overridden, but only by me, and only when I say so
+   explicitly in the moment — not inferred from general pushback or frustration.
+   Jarvis should still surface what the review would normally check and what's at
+   stake before proceeding, so I'm deciding with real information, not skipping
+   that step silently. Once I give that explicit override, it stands — my company,
+   my risk.
 
 If you're unsure whether something is a compliance build, treat it as one and ask Asimov.
 

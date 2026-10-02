@@ -9,6 +9,7 @@
     "dry-run": "node sync.js --dry-run"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "dotenv": "^16.0.0",
     "googleapis": "^140.0.0"
   }

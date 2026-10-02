@@ -1,0 +1,228 @@
+-- ============================================================
+-- Migration: 20261002020000_add_no_issue_protected_signal_guard_to_complaints
+-- Created:   2026-10-02
+-- Author:    Neo (database specialist)
+--
+-- Direct, same-day follow-up to 20261002010000_add_severity_tier_to_
+-- complaints.sql (REQUIRES that migration already applied — this one
+-- ALTERs columns it created). Not folded into that file in place, per
+-- Neo's own standing rule to never modify an existing migration, even one
+-- not yet applied — same convention this schema already used once before
+-- for a comparable "the design changed before it shipped" situation
+-- (20260910000000 was marked superseded rather than rewritten). The point
+-- of writing this as its own file: a real, timestamped record that a
+-- parallel Asimov governance review caught a gap in the first migration's
+-- design BEFORE it reached Peter, not a silent patch with no trace.
+--
+-- THE GAP: 20261002010000 let the application layer decide, by policy
+-- alone, never to assign severity_tier = 'no_issue' to a row where
+-- needs_human_call = TRUE, category = 'accommodation_related', or
+-- flagged_protected_class = TRUE. Asimov's finding, relayed via Jarvis:
+-- that is not good enough for this specific case. Mason's prior review of
+-- this same pipeline already forced accommodation_related items into
+-- mandatory review for a real Fair Housing reason, not a style
+-- preference — an unreasonably delayed accommodation request can itself
+-- BE the violation, and it never looks like an active "dispute" until it
+-- is already too late to fix. A severity rubric calibrated on "does this
+-- look disputed" is, by Mason's own prior finding, the wrong lens for
+-- this one category — so this cannot be left to "the prompt should
+-- produce the right answer." It needs to be true no matter what the
+-- rubric, the prompt, or a future recalibration ever outputs.
+--
+-- This migration is NOT applied here — Peter applies it himself via
+-- Supabase's SQL Editor, same as every migration in this project.
+--
+-- ============================================================
+-- THE GUARANTEE, AND WHY A PLAIN CHECK CONSTRAINT IS THE RIGHT TOOL (NOT
+-- AWKWARD, NOT A WORKAROUND, NOT WHAT A TRIGGER IS FOR)
+-- ============================================================
+-- Asimov's own ask left room for "a trigger, or a generated/constrained
+-- relationship" if a multi-column CHECK turned out to be awkward here.
+-- It isn't, and a trigger would be the wrong tool, not a stronger one: all
+-- four columns this guarantee reads — severity_tier, needs_human_call,
+-- category, flagged_protected_class — live on the SAME ROW of the SAME
+-- TABLE. That is exactly the case a Postgres CHECK constraint exists for,
+-- and this table already enforces several same-row, multi-column
+-- invariants of the identical shape (complaints_held_excludes_ai_fields;
+-- complaints_flag_requires_category, which already reads flagged_
+-- protected_class alongside flagged_category for a near-identical "this
+-- flag can't be true without that field also being set" rule). A trigger
+-- would only earn its keep if this needed to reach across ROWS (e.g. "no
+-- two open complaints for the same tenant") or across TABLES — it doesn't.
+-- Reaching for one here would add a function, a trigger registration, and
+-- a second thing to keep in sync with the CHECK's own logic, for no
+-- enforcement benefit: a CHECK constraint already runs on every INSERT and
+-- every UPDATE, for every writer — Q's application code, the backfill
+-- batch job, any future migration, or a manual edit typed directly into
+-- Supabase's SQL Editor. There is no code path that can set severity_tier
+-- = 'no_issue' on a qualifying row and have it silently succeed; the
+-- database itself refuses the write with a constraint-violation error.
+-- That is the "guaranteed in code/schema, not just empirically likely
+-- from calibration" outcome Asimov asked for.
+--
+-- Added as its own constraint, not folded into complaints_severity_fields
+-- _together (20261002010000) or complaints_held_excludes_ai_fields,
+-- because it is a different kind of rule: those two govern WHETHER
+-- severity_tier may be set at all (together with its siblings; never on a
+-- held row); this one governs what severity_tier may NOT be, given the
+-- row's OTHER signals, once it is set. Keeping them separate means a
+-- future reviewer reading this file's name sees exactly what changed and
+-- why, rather than a diff buried inside an already-shipped constraint's
+-- body.
+--
+-- Interaction with held rows: none. A held_legal_fair_housing row already
+-- has severity_tier forced to NULL by 20261002010000's extension of
+-- complaints_held_excludes_ai_fields — NULL IS DISTINCT FROM 'no_issue' is
+-- TRUE, so this new constraint's first clause is already satisfied and it
+-- never even reaches the second. The two constraints compose correctly
+-- without needing to reference each other.
+--
+-- Interaction with existing data: none to worry about. As of this
+-- migration, no row anywhere has severity_tier set to anything (20261002
+-- 010000 shipped the column same-day, before any backfill ran) — every
+-- existing row satisfies this constraint's first clause (severity_tier IS
+-- DISTINCT FROM 'no_issue') trivially, regardless of its needs_human_call/
+-- category/flagged_protected_class values. Safe to add against the live
+-- 2,733-row table with no pre-cleanup needed.
+--
+-- ============================================================
+-- CONFIRMED UNTOUCHED, AS ASKED — NEITHER THIS MIGRATION NOR 20261002
+-- 010000 MODIFIES EITHER OF THE TWO VIEWS/QUERIES ASIMOV NAMED
+-- ============================================================
+-- Re-read directly against 20260913020000_archive_search_significance_
+-- complaint_merge_schema.sql (the live schema definition) before writing
+-- this file, not assumed from memory:
+--
+--   - complaints_historical_review_required (that migration's Section E)
+--     filters on c.discovery_context, c.historical_review_cleared_at,
+--     s.resolution_status, c.category, and c.escalation_signal. No
+--     reference to severity_tier anywhere in its WHERE clause, and this
+--     migration adds none. Stays exactly as permissive as it is today.
+--
+--   - The "Needs a Human Call" queue has no dedicated VIEW (that
+--     migration's own Section D comment: "a plain list of pending items,"
+--     Q's own query) — it is served by idx_missive_conversation_
+--     significance_needs_human_call_queue, a partial index on
+--     missive_conversation_significance (a DIFFERENT table from
+--     complaints) filtered on needs_human_call, human_confirmed_big_issue,
+--     category, and escalation_signal. severity_tier does not exist on
+--     that table at all — only on complaints — so there is no column for
+--     a filter to even reference. Stays exactly as permissive as it is
+--     today.
+--
+-- Neither object is altered by this file. Nothing here required stopping
+-- to flag this to Jarvis, per the ask — confirming in writing instead, so
+-- the confirmation has the same paper trail as everything else in this
+-- file.
+--
+-- ============================================================
+-- VERSIONING — CONFIRMED, NO CHANGE NEEDED
+-- ============================================================
+-- severity_rubric_version (added by 20261002010000) already follows the
+-- exact pattern Asimov asked for — the same bump-on-material-change
+-- convention significance-pass.js's CONTENT_PASS_VERSION and screening-
+-- pass.js's SCREENING_VERSION already use — and is already forced into
+-- lockstep with severity_tier by complaints_severity_fields_together (set
+-- together or not at all; never a tier with no version on record). Every
+-- row carrying a severity_tier is therefore already traceable to exactly
+-- the rubric version that produced it, including this constraint's own
+-- effect: a future rubric version cannot retroactively change what an
+-- OLD row's recorded severity_tier/severity_rubric_version pair says,
+-- only what a NEW assessment writes.
+--
+-- ============================================================
+-- AUDIT LOG (GOVERNANCE.md Rule 1) — CONFIRMED NOT AWKWARD, NO SCHEMA
+-- CHANGE NEEDED
+-- ============================================================
+-- Writing the audit_log row itself is Q's application code (same as every
+-- other audit_log write already in complaint-tracking/router.js, e.g. the
+-- existing complaint_tracking.duplicate_suggested write) — not this
+-- migration's job, and nothing here needs to change for it to happen
+-- cleanly: complaints.id is, and has always been, a stable UUID primary
+-- key, exactly the shape audit_log.* writes already key their entity_id
+-- off of elsewhere in this router. The moment Q's backfill job or live
+-- pipeline sets severity_tier (and, in lockstep, severity_rationale/
+-- severity_assessed_at/severity_rubric_version), it has everything it
+-- needs in-hand, on the same row, to write a single audit_log entry (e.g.
+-- complaint_tracking.severity_assessed) with entity_id = complaints.id
+-- and event_data carrying the new tier/rationale/version — no join, no
+-- lookup, no awkward shape. Flagged here only because it was asked for by
+-- name; no DDL below does anything new to support it, because nothing new
+-- was needed.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No — see "Interaction with
+--       existing data" above: no row has severity_tier set yet, so this
+--       constraint is trivially satisfied by every row that exists today.
+--   [x] Does this touch a table other code depends on? Yes, complaints —
+--       but this adds one CHECK constraint only; nothing that currently
+--       writes to this table sets severity_tier at all yet (no backfill,
+--       no pipeline change, both still unbuilt), so nothing existing can
+--       newly violate it.
+--   [x] Additive or destructive? Additive/restrictive-on-a-brand-new-
+--       column only — one new CHECK constraint, one re-issued column
+--       comment (COMMENT ON COLUMN always fully replaces the prior text;
+--       not an edit to 20261002010000's file, a fresh statement from this
+--       one). No column, table, or existing constraint removed or
+--       loosened.
+--   [x] Tested on a copy of the data first? No staging copy exists in
+--       this project, same standing caveat as always. Mitigated
+--       identically to 20261002010000: nothing today has a value in the
+--       column this constraint governs.
+--   [x] Governance go-ahead for THIS SPECIFIC constraint — yes: this
+--       migration exists because Asimov's review required it, relayed via
+--       Jarvis, before 20261002010000's design could be considered final.
+--       Does not by itself clear the backfill batch job or any dashboard
+--       change to go live against real data — per Jarvis's own note,
+--       Mason still owes a scoped review of the accommodation/protected-
+--       class interaction specifically before that happens. This
+--       migration file existing and being handed to Peter is not that
+--       clearance; it is the schema being ready for whenever that
+--       clearance lands.
+-- ============================================================
+
+
+-- The guarantee itself: a row can never read severity_tier = 'no_issue'
+-- while any of the three protected-signal fields say otherwise. Written
+-- as "IS DISTINCT FROM 'no_issue' OR (safe conditions)" rather than
+-- "severity_tier = 'no_issue' AND (unsafe conditions) -> reject" so that
+-- every non-'no_issue' value (including NULL — not yet assessed) trivially
+-- satisfies the constraint without needing its own separate branch, same
+-- idiom this table's other CHECK constraints already use throughout
+-- (complaints_blocked_requires_reason, complaints_resolved_requires_note).
+ALTER TABLE complaints
+  ADD CONSTRAINT complaints_no_issue_excludes_protected_signals CHECK (
+    severity_tier IS DISTINCT FROM 'no_issue' OR (
+      needs_human_call = FALSE
+      AND category IS DISTINCT FROM 'accommodation_related'
+      AND flagged_protected_class = FALSE
+    )
+  );
+
+-- Re-issued in full (COMMENT ON COLUMN always replaces the previous text
+-- outright) so anyone reading this column's comment directly in Supabase
+-- sees the complete, current invariant — including this migration's
+-- guarantee — rather than only what 20261002010000 knew at the time.
+COMMENT ON COLUMN complaints.severity_tier IS
+  'Calibrated severity (distinct from the tautological-for-AI-rows is_big_deal — see that column''s own comment): ''urgent'' (active dispute, obstruction, explicit legal/leave threat, or an unresolved actively-disputed Fair Housing/accommodation request), ''worth_a_look'' (real friction or an open disagreement not yet escalated, or a genuinely new unaddressed hazard with near-term timing risk), ''just_a_record'' (a real disagreement being actively negotiated, not yet escalated — never routine uncontested business regardless of money/permanence involved), ''no_issue'' (the default: routine business or a maintenance/habitability issue progressing with no dispute). NULL means not yet assessed — a real fourth state, never coerced into one of the four tiers; see complaints_severity_fields_together. Calibrated across three rounds against Peter''s own real judgment (70% exact agreement on round 3, every miss single-tier and defensible, never urgent-buried-as-routine). held_legal_fair_housing rows are structurally excluded from this field (complaints_held_excludes_ai_fields) — a held row is already the most severe thing this table represents and is never run through automated categorization of any kind. GUARANTEED, not just calibration-likely (complaints_no_issue_excludes_protected_signals, added 2026-10-02 per Asimov''s review): this can never equal ''no_issue'' on any row where needs_human_call = TRUE, category = ''accommodation_related'', or flagged_protected_class = TRUE, regardless of what any prompt, rubric, or recalibration ever outputs — the database refuses the write outright.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- COMMENT ON COLUMN complaints.severity_tier IS
+--   'Calibrated severity (distinct from the tautological-for-AI-rows is_big_deal — see that column''s own comment): ''urgent'' (active dispute, obstruction, explicit legal/leave threat, or an unresolved actively-disputed Fair Housing/accommodation request), ''worth_a_look'' (real friction or an open disagreement not yet escalated, or a genuinely new unaddressed hazard with near-term timing risk), ''just_a_record'' (a real disagreement being actively negotiated, not yet escalated — never routine uncontested business regardless of money/permanence involved), ''no_issue'' (the default: routine business or a maintenance/habitability issue progressing with no dispute). NULL means not yet assessed — a real fourth state, never coerced into one of the four tiers; see complaints_severity_fields_together. Calibrated across three rounds against Peter''s own real judgment (70% exact agreement on round 3, every miss single-tier and defensible, never urgent-buried-as-routine). held_legal_fair_housing rows are structurally excluded from this field (complaints_held_excludes_ai_fields) — a held row is already the most severe thing this table represents and is never run through automated categorization of any kind.';
+-- -- Restores 20261002010000's original comment text (pre-guarantee).
+--
+-- ALTER TABLE complaints
+--   DROP CONSTRAINT IF EXISTS complaints_no_issue_excludes_protected_signals;
+-- -- Safe at any time — removing this constraint cannot itself corrupt
+-- -- data; it only stops blocking a future write it would otherwise have
+-- -- rejected. If this is rolled back after real severity assessments
+-- -- exist, no currently-stored row is affected either way.
+--
+-- ============================================================

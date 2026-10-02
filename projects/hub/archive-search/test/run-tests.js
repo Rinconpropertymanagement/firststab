@@ -26,6 +26,18 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto'); // PART 20 (resumable driver cursor) needs a real md5, matching the digest shape the real Postgres functions in migration 20260920010000 compute.
+const vm = require('vm'); // PART 22h (Needs Attention tile bug fix) runs complaint-tracking/dashboard/index.html's real inline <script> for real, rather than only grepping its source — see that PART's own header for why.
+
+// Severity-tier build (2026-10-02) — lib/severity-batch.js computes its own
+// STATE_PATH from this env var ONCE, at require() time (below), so it has
+// to be set before that require happens. A dedicated, pid-suffixed test
+// path keeps this suite's own in-flight-batch state file from ever
+// colliding with a real one on a host where a real severity batch run
+// might also be in progress (this file's own header: "touches no real
+// Supabase project... makes zero real network calls" — this is part of
+// making that true for this new module too).
+process.env.SEVERITY_BATCH_STATE_PATH = process.env.SEVERITY_BATCH_STATE_PATH
+  || path.join(os.tmpdir(), `test-severity-batch-state-${process.pid}.json`);
 
 const results = [];
 const asyncResults = [];
@@ -1116,6 +1128,14 @@ const significancePass = require('../lib/significance-pass');
 // which is what makes PART 18's spyOn()-based tests (patching methods on
 // this very object) actually take effect.
 const significanceBatch = require('../lib/significance-batch');
+// Severity-tier build (2026-10-02) — severityRubric has no cross-module
+// load-order concern (it requires nothing from this codebase, only the lazy
+// Anthropic SDK inside anthropicClient()); severityBatch requires
+// significanceBatch (above) for its pure utilities only (sizeOfRequestBytes/
+// partitionIntoChunks/mapWithConcurrency/drainInGroups), never
+// significancePass, so none of PART 18's own load-order gotcha applies here.
+const severityRubric = require('../lib/severity-rubric');
+const severityBatch = require('../lib/severity-batch');
 const { computeSilenceContext } = require('../../complaint-tracking/lib/process-pending-messages');
 // lib/notify.js — required here, the same whole-module way significance-
 // batch.js itself now requires it (see that file's own comment on its
@@ -1199,7 +1219,13 @@ test('significance-pass — shouldCreateComplaint: branch 4, category IN (legal_
   }), true);
 });
 
-test('significance-pass — shouldCreateComplaint: the negative case — none of the four conditions true means NO complaint row', () => {
+test('significance-pass — shouldCreateComplaint: branch 5 (added 2026-10-02, Mason governance review gap #1), category=accommodation_related alone is sufficient, with no escalation signal, needs_human_call, or owner_instruction_rejected answer at all — "nothing downstream can protect a row that never gets created"', () => {
+  assert.strictEqual(significancePass.shouldCreateComplaint({
+    escalation_signal: 'none', needs_human_call: false, owner_instruction_rejected: null, category: 'accommodation_related',
+  }), true);
+});
+
+test('significance-pass — shouldCreateComplaint: the negative case — none of the five conditions true means NO complaint row', () => {
   assert.strictEqual(significancePass.shouldCreateComplaint({
     escalation_signal: 'none', needs_human_call: false, owner_instruction_rejected: null, category: 'dispute',
   }), false);
@@ -2006,6 +2032,120 @@ asyncTest('subject-match — matchParticipantsToRecords: regression — a normal
   return subjectMatch.matchParticipantsToRecords(client, ['tenant@rincon-tenant-test.com']).then((result) => {
     assert.deepStrictEqual(result, { subject_type: 'tenant', subject_id: 'tenant-1', vendor_id: null, property_id: 'property-1' });
   });
+});
+
+// ============================================================
+// PART 16b — supabase/migrations/20261002000000_tenant_owner_emails_schema.sql
+// (Neo) + the sync.js / subject-match.js changes that consume it: a
+// tenant/owner's address may now live in the OLD single column
+// (tenants.email / owners.email — still just the first/primary address) OR
+// the NEW child table (tenant_emails / owner_emails — the complete set), OR
+// BOTH once a person is re-synced. findUniqueTenantIdForAddress() /
+// findUniqueOwnerIdForAddress() union both sources into a Set and only
+// match when that Set has exactly one id — same "unique match or nothing"
+// discipline as findUniqueMatch() above, now spanning two tables instead of
+// one. Vendors are untouched (out of scope) — covered by the vendor-loop
+// regression test above, still going through plain findUniqueMatch().
+// ============================================================
+
+asyncTest('subject-match — findUniqueTenantIdForAddress: matches via the NEW tenant_emails table when the OLD tenants.email column has nothing for this address (e.g. a tenant with a second address AppFolio has on file, not yet reflected in tenants.email)', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [{ id: 'tenant-1', email: 'primary@rincon-tenant-test.com' }], // different address — old column has nothing for the one we're looking up
+    tenant_emails: [{ tenant_id: 'tenant-1', email: 'secondary@rincon-tenant-test.com' }],
+  });
+  const result = await subjectMatch.findUniqueTenantIdForAddress(client, 'secondary@rincon-tenant-test.com');
+  assert.deepStrictEqual(result, { id: 'tenant-1' });
+});
+
+asyncTest('subject-match — findUniqueOwnerIdForAddress: matches via the NEW owner_emails table when the OLD owners.email column has nothing for this address (e.g. one of the 132 owners whose comma-joined string gets split across multiple owner_emails rows)', async () => {
+  const client = makeFakeSubjectMatchClient({
+    owners: [{ id: 'owner-1', email: 'first@rincon-owner-test.com' }],
+    owner_emails: [
+      { owner_id: 'owner-1', email: 'first@rincon-owner-test.com' },
+      { owner_id: 'owner-1', email: 'second@rincon-owner-test.com' },
+    ],
+  });
+  const result = await subjectMatch.findUniqueOwnerIdForAddress(client, 'second@rincon-owner-test.com');
+  assert.deepStrictEqual(result, { id: 'owner-1' });
+});
+
+asyncTest('subject-match — findUniqueTenantIdForAddress: regression — still matches via the OLD tenants.email column when tenant_emails has nothing at all for this tenant (not yet re-synced into the new table) — today\'s behavior keeps working unchanged', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [{ id: 'tenant-1', email: 'tenant@rincon-tenant-test.com' }],
+    tenant_emails: [], // no rows yet — this tenant hasn't been re-synced
+  });
+  const result = await subjectMatch.findUniqueTenantIdForAddress(client, 'tenant@rincon-tenant-test.com');
+  assert.deepStrictEqual(result, { id: 'tenant-1' });
+});
+
+asyncTest('subject-match — findUniqueOwnerIdForAddress: regression — still matches via the OLD owners.email column when owner_emails has nothing at all for this owner (not yet re-synced into the new table) — today\'s behavior keeps working unchanged', async () => {
+  const client = makeFakeSubjectMatchClient({
+    owners: [{ id: 'owner-1', email: 'owner@rincon-owner-test.com' }],
+    owner_emails: [],
+  });
+  const result = await subjectMatch.findUniqueOwnerIdForAddress(client, 'owner@rincon-owner-test.com');
+  assert.deepStrictEqual(result, { id: 'owner-1' });
+});
+
+asyncTest('subject-match — findUniqueTenantIdForAddress: an address resolving to 2+ DISTINCT tenants across the combined old-column-plus-new-table lookup is treated as no match, not guessed (same address on tenants.email for one tenant AND on tenant_emails for a different tenant)', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [{ id: 'tenant-A', email: 'shared@rincon-tenant-test.com' }],
+    tenant_emails: [{ tenant_id: 'tenant-B', email: 'shared@rincon-tenant-test.com' }],
+  });
+  const result = await subjectMatch.findUniqueTenantIdForAddress(client, 'shared@rincon-tenant-test.com');
+  assert.strictEqual(result, null, 'expected 2 distinct ids (one from each source) to resolve to null, never guessed');
+});
+
+asyncTest('subject-match — findUniqueOwnerIdForAddress: an address resolving to 2+ DISTINCT owners across the combined old-column-plus-new-table lookup is treated as no match, not guessed (same address on owners.email for one owner AND on owner_emails for a different owner)', async () => {
+  const client = makeFakeSubjectMatchClient({
+    owners: [{ id: 'owner-A', email: 'shared@rincon-owner-test.com' }],
+    owner_emails: [{ owner_id: 'owner-B', email: 'shared@rincon-owner-test.com' }],
+  });
+  const result = await subjectMatch.findUniqueOwnerIdForAddress(client, 'shared@rincon-owner-test.com');
+  assert.strictEqual(result, null, 'expected 2 distinct ids (one from each source) to resolve to null, never guessed');
+});
+
+asyncTest('subject-match — findUniqueTenantIdForAddress: the SAME real tenant appearing in BOTH tenants.email and tenant_emails for this address (re-synced, is_primary copy) is deduped to one id and still matches — not mistaken for an ambiguous 2-row case', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [{ id: 'tenant-1', email: 'tenant@rincon-tenant-test.com' }],
+    tenant_emails: [{ tenant_id: 'tenant-1', email: 'tenant@rincon-tenant-test.com' }], // is_primary copy of the same address, same tenant
+  });
+  const result = await subjectMatch.findUniqueTenantIdForAddress(client, 'tenant@rincon-tenant-test.com');
+  assert.deepStrictEqual(result, { id: 'tenant-1' }, 'expected the Set to dedupe the same id from both sources down to one, still a clean unique match');
+});
+
+asyncTest('subject-match — findUniqueTenantIdForAddress: a tenant_emails row whose tenant_id is still NULL (written by the sync before resolve_tenant_email_foreign_keys() has run) is not counted as a match on its own — never surfaces a null id', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [],
+    tenant_emails: [{ tenant_id: null, email: 'unresolved@rincon-tenant-test.com' }],
+  });
+  const result = await subjectMatch.findUniqueTenantIdForAddress(client, 'unresolved@rincon-tenant-test.com');
+  assert.strictEqual(result, null, 'expected an unresolved (null tenant_id) row to never produce a match');
+});
+
+asyncTest('subject-match — matchParticipantsToRecords: end-to-end — a tenant matches ONLY via tenant_emails (old tenants.email column has a different, unrelated address) and property_id still resolves via the active lease', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [{ id: 'tenant-1', email: 'primary@rincon-tenant-test.com' }],
+    tenant_emails: [{ tenant_id: 'tenant-1', email: 'secondary@rincon-tenant-test.com' }],
+    leases: [{ tenant_id: 'tenant-1', unit_id: 'unit-1', status: 'active' }],
+    units: [{ id: 'unit-1', property_id: 'property-1' }],
+  });
+  const result = await subjectMatch.matchParticipantsToRecords(client, ['secondary@rincon-tenant-test.com']);
+  assert.deepStrictEqual(result, { subject_type: 'tenant', subject_id: 'tenant-1', vendor_id: null, property_id: 'property-1' });
+});
+
+asyncTest('subject-match — matchParticipantsToRecords: end-to-end — an owner whose AppFolio record held a broken comma-joined email (the real 132-owner bug) now matches on the SECOND split address via owner_emails, where it would have matched nothing before this fix', async () => {
+  const client = makeFakeSubjectMatchClient({
+    tenants: [],
+    owners: [{ id: 'owner-1', email: 'ayad321@gmail.com' }], // normalized to first address only, per the backfill/sync fix
+    owner_emails: [
+      { owner_id: 'owner-1', email: 'ayad321@gmail.com' },
+      { owner_id: 'owner-1', email: 'charlottefnp@hotmail.com' },
+    ],
+    vendors: [],
+  });
+  const result = await subjectMatch.matchParticipantsToRecords(client, ['charlottefnp@hotmail.com']);
+  assert.deepStrictEqual(result, { subject_type: 'owner', subject_id: 'owner-1', vendor_id: null, property_id: null });
 });
 
 // ============================================================
@@ -6141,6 +6281,1390 @@ test('router.js — BOTH process-significance-pending and process-significance-p
   });
 
   return { name: 'significance-batch — PART 18-20 sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
+})());
+
+// ============================================================================
+// PART 22 — severity-tier build (2026-10-02, Jarvis-relayed build task).
+// Schema: supabase/migrations/20261002010000_add_severity_tier_to_complaints.sql,
+// .../20261002020000_add_no_issue_protected_signal_guard_to_complaints.sql.
+// Covers: (a) lib/severity-rubric.js's pure parser/floor logic — plain,
+// synchronous test()s, no shared mutable state, safe at any concurrency;
+// (b) lib/severity-batch.js's governance gate / fetch / write-back, and
+// significance-pass.js's createComplaintRow() severity hook — both mutate
+// shared module-level test-override singletons (severityRubric's/
+// severityBatch's own _setAnthropicClientForTesting/_setSupabaseClientForTesting,
+// and significance-pass.js's require.cache swap), so these run inside their
+// OWN sequential runSerialCheck runner, same discipline as PART 18-20's own
+// IIFE just above and for the identical reason — never mixed into that
+// existing runner itself, to avoid touching its already-large, working body;
+// (c) static source-on-disk checks for the router.js/dashboard.html/
+// run-severity-batch.js changes, same routerSourceLine/extractFunctionBody
+// style PART 9-14 already use.
+// ============================================================================
+
+// ─── 22a — buildSeverityPrompt: the exact calibrated text is reproduced
+// word for word, substituting {DESCRIPTION} — proven against a few of the
+// rubric's own most load-bearing sentences (the active-dispute test, the
+// no_issue-even-with-money rule, the four tier definitions), not just that
+// SOME text comes out. A wording drift here would be a silent recalibration,
+// not a refactor. ──────────────────────────────────────────────────────────
+test('severity-rubric — buildSeverityPrompt substitutes the description verbatim into the """ ... """ block', () => {
+  const prompt = severityRubric.buildSeverityPrompt('A tenant is refusing to pay a disputed late fee.');
+  assert.ok(prompt.includes('"""\nA tenant is refusing to pay a disputed late fee.\n"""'), 'expected the description substituted verbatim inside the triple-quoted block');
+});
+
+test('severity-rubric — buildSeverityPrompt carries the exact "ONLY TEST THAT MATTERS" active-dispute sentence, word for word', () => {
+  const prompt = severityRubric.buildSeverityPrompt('x');
+  assert.ok(prompt.includes('THE ONLY TEST THAT MATTERS: is there an ACTIVE DISPUTE — someone obstructing, refusing, or an explicit threat (legal, to leave, to escalate to an agency)?'));
+});
+
+test('severity-rubric — buildSeverityPrompt carries the exact "ROUTINE OWNER/STAFF BUSINESS" no_issue-even-with-money rule, word for word', () => {
+  const prompt = severityRubric.buildSeverityPrompt('x');
+  assert.ok(prompt.includes('ROUTINE OWNER/STAFF BUSINESS WITH NO DISPUTE IS ALWAYS "NO ISSUE," EVEN WHEN IT INVOLVES MONEY OR A PERMANENT CHANGE.'));
+});
+
+test('severity-rubric — buildSeverityPrompt requests exactly the {tier, why} JSON shape, no markdown fence', () => {
+  const prompt = severityRubric.buildSeverityPrompt('x');
+  assert.ok(prompt.includes('Respond with EXACTLY one JSON object, no markdown fence:'));
+  assert.ok(prompt.includes('{"tier": "urgent"|"worth_a_look"|"just_a_record"|"no_issue", "why": "one short plain-English sentence"}'));
+});
+
+test('severity-rubric — SEVERITY_RUBRIC_VERSION is \'v3\' (the calibrated version stamped into complaints.severity_rubric_version)', () => {
+  assert.strictEqual(severityRubric.SEVERITY_RUBRIC_VERSION, 'v3');
+});
+
+test('severity-rubric — SEVERITY_TIERS is exactly the four values the CHECK constraint allows, in the migration\'s own order', () => {
+  assert.deepStrictEqual(severityRubric.SEVERITY_TIERS, ['urgent', 'worth_a_look', 'just_a_record', 'no_issue']);
+});
+
+// ─── 22b — parseSeverityResponse: valid, invalid tier, missing/blank why,
+// malformed JSON, and a stray markdown fence (defensive, even though the
+// prompt asks for none — same posture parseCall1Response already takes). ──
+test('severity-rubric — parseSeverityResponse accepts a clean, valid response', () => {
+  const parsed = severityRubric.parseSeverityResponse('{"tier": "urgent", "why": "Tenant threatened legal action."}');
+  assert.deepStrictEqual(parsed, { tier: 'urgent', why: 'Tenant threatened legal action.' });
+});
+
+test('severity-rubric — parseSeverityResponse tolerates a stray markdown fence (defensive, even though the prompt asks for none)', () => {
+  const parsed = severityRubric.parseSeverityResponse('```json\n{"tier": "no_issue", "why": "Routine, no dispute."}\n```');
+  assert.deepStrictEqual(parsed, { tier: 'no_issue', why: 'Routine, no dispute.' });
+});
+
+test('severity-rubric — parseSeverityResponse rejects an invalid tier value (not one of the four)', () => {
+  assert.strictEqual(severityRubric.parseSeverityResponse('{"tier": "critical", "why": "x"}'), null);
+});
+
+test('severity-rubric — parseSeverityResponse rejects a missing why', () => {
+  assert.strictEqual(severityRubric.parseSeverityResponse('{"tier": "urgent"}'), null);
+});
+
+test('severity-rubric — parseSeverityResponse rejects a blank/whitespace-only why', () => {
+  assert.strictEqual(severityRubric.parseSeverityResponse('{"tier": "urgent", "why": "   "}'), null);
+});
+
+test('severity-rubric — parseSeverityResponse rejects malformed JSON', () => {
+  assert.strictEqual(severityRubric.parseSeverityResponse('{"tier": "urgent", "why": '), null);
+});
+
+test('severity-rubric — parseSeverityResponse rejects a non-string response', () => {
+  assert.strictEqual(severityRubric.parseSeverityResponse(null), null);
+  assert.strictEqual(severityRubric.parseSeverityResponse(undefined), null);
+});
+
+// ─── 22c — applySeverityFloor: THE DATABASE-ENFORCED SAFETY FLOOR, in
+// application code. Originally three trigger conditions; widened 2026-10-02
+// (Mason governance review, gap #2 of 3) with two more: category ===
+// 'legal_exposure', and owner_instruction_rejected === 'true' || === 'uncertain'.
+// Each of the five trigger conditions individually, combined, and the two
+// "never touches" cases (a non-no_issue tier; a no_issue tier with none of
+// the five conditions). ───────────────────────────────────────────────────
+test('severity-rubric — applySeverityFloor leaves a non-no_issue tier completely untouched, even when every trigger condition is also true', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'urgent', why: 'Active dispute.', needs_human_call: true, category: 'accommodation_related', flagged_protected_class: true, owner_instruction_rejected: 'true' });
+  assert.deepStrictEqual(result, { tier: 'urgent', why: 'Active dispute.', floored: false });
+});
+
+test('severity-rubric — applySeverityFloor leaves no_issue untouched when none of the five trigger conditions apply', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine, no dispute.', needs_human_call: false, category: 'routine_logistics', flagged_protected_class: false, owner_instruction_rejected: null });
+  assert.deepStrictEqual(result, { tier: 'no_issue', why: 'Routine, no dispute.', floored: false });
+});
+
+test('severity-rubric — applySeverityFloor leaves no_issue untouched when owner_instruction_rejected is \'false\' (the instruction was not rejected) — only \'true\'/\'uncertain\' trigger, never \'false\'', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'owner_instruction', flagged_protected_class: false, owner_instruction_rejected: 'false' });
+  assert.deepStrictEqual(result, { tier: 'no_issue', why: 'Routine.', floored: false });
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when needs_human_call=true, alone', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: true, category: 'routine_logistics', flagged_protected_class: false, owner_instruction_rejected: null });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes('Routine.'), 'expected the original why text preserved');
+  assert.ok(result.why.includes("Floored from no_issue: flagged by the AI's own uncertainty signal (needs_human_call)"), 'expected the specific needs_human_call floor note');
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when category=accommodation_related, alone', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'accommodation_related', flagged_protected_class: false, owner_instruction_rejected: null });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes('category is accommodation_related'));
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when flagged_protected_class=true, alone', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'routine_logistics', flagged_protected_class: true, owner_instruction_rejected: null });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes('flagged_protected_class is set'));
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when category=legal_exposure, alone (added 2026-10-02, Mason governance review gap #2)', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'legal_exposure', flagged_protected_class: false, owner_instruction_rejected: null });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes('category is legal_exposure'));
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when owner_instruction_rejected=\'true\', alone (added 2026-10-02, Mason governance review gap #2)', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'owner_instruction', flagged_protected_class: false, owner_instruction_rejected: 'true' });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes("owner_instruction_rejected is 'true'"));
+});
+
+test('severity-rubric — applySeverityFloor floors no_issue to worth_a_look when owner_instruction_rejected=\'uncertain\', alone (added 2026-10-02, Mason governance review gap #2)', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: false, category: 'owner_instruction', flagged_protected_class: false, owner_instruction_rejected: 'uncertain' });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes("owner_instruction_rejected is 'uncertain'"));
+});
+
+test('severity-rubric — applySeverityFloor combines all three ORIGINAL trigger conditions into one honest, combined note (never only names the first one checked)', () => {
+  const result = severityRubric.applySeverityFloor({ tier: 'no_issue', why: 'Routine.', needs_human_call: true, category: 'accommodation_related', flagged_protected_class: true, owner_instruction_rejected: null });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes("needs_human_call"), 'expected the needs_human_call reason present');
+  assert.ok(result.why.includes('accommodation_related'), 'expected the category reason present');
+  assert.ok(result.why.includes('flagged_protected_class'), 'expected the flagged_protected_class reason present');
+});
+
+test('severity-rubric — applySeverityFloor combines all FIVE trigger conditions into one honest, combined note, including the two added 2026-10-02 (category can only be one value, so legal_exposure is swapped in for this combined case — a real row can still trip needs_human_call + flagged_protected_class + legal_exposure + owner_instruction_rejected together)', () => {
+  const result = severityRubric.applySeverityFloor({
+    tier: 'no_issue', why: 'Routine.', needs_human_call: true, category: 'legal_exposure', flagged_protected_class: true, owner_instruction_rejected: 'uncertain',
+  });
+  assert.strictEqual(result.tier, 'worth_a_look');
+  assert.strictEqual(result.floored, true);
+  assert.ok(result.why.includes('needs_human_call'), 'expected the needs_human_call reason present');
+  assert.ok(result.why.includes('legal_exposure'), 'expected the category reason present');
+  assert.ok(result.why.includes('flagged_protected_class'), 'expected the flagged_protected_class reason present');
+  assert.ok(result.why.includes("owner_instruction_rejected is 'uncertain'"), 'expected the owner_instruction_rejected reason present');
+});
+
+// ─── 22d — lib/severity-batch.js + significance-pass.js's severity hook —
+// sequential (see this PART's own header for why). ──────────────────────
+asyncResults.push((async () => {
+
+// A minimal, stateful, filtering fake for the `complaints`/`audit_log`
+// tables severity-batch.js actually touches — deliberately NOT the
+// existing makeFilteringFakeClient/makeFakeSupabaseClient helpers above
+// (both are shaped around significance-pass.js's/significance-batch.js's
+// own, different table set and call shapes); small and purpose-built here
+// instead, same "each PART's own fake, sized to what it actually needs"
+// convention this file already follows throughout (e.g. makeFakeSubjectMatchClient
+// vs. makeEscalationAwareFakeClient).
+function severityRowMatchesFilters(row, filters) {
+  return filters.every((f) => {
+    if (f.type === 'eq') return row[f.col] === f.val;
+    if (f.type === 'is') return f.val === null ? (row[f.col] === null || row[f.col] === undefined) : row[f.col] === f.val;
+    if (f.type === 'not-is-null') return !(row[f.col] === null || row[f.col] === undefined); // .not(col, 'is', null)
+    return true;
+  });
+}
+function makeSeverityFakeClient(initialComplaintRows) {
+  const complaintRows = initialComplaintRows.map((r) => ({ ...r }));
+  const auditLogInserts = [];
+  function makeChain(table) {
+    const filters = [];
+    let op = null, insertRow = null, updateFields = null, rangeArgs = null;
+    const chain = {
+      select() { if (!op) op = 'select'; return chain; },
+      insert(row) { op = 'insert'; insertRow = row; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ type: 'eq', col, val }); return chain; },
+      is(col, val) { filters.push({ type: 'is', col, val }); return chain; },
+      not(col, operator, val) { if (operator === 'is' && val === null) filters.push({ type: 'not-is-null', col }); return chain; },
+      order() { return chain; },
+      range(from, to) { rangeArgs = [from, to]; return chain; },
+      maybeSingle() {
+        if (table === 'complaints' && op === 'select') {
+          const match = complaintRows.find((r) => severityRowMatchesFilters(r, filters));
+          return Promise.resolve({ data: match ? { ...match } : null, error: null });
+        }
+        if (table === 'complaints' && op === 'update') {
+          const idx = complaintRows.findIndex((r) => severityRowMatchesFilters(r, filters));
+          if (idx === -1) return Promise.resolve({ data: null, error: null });
+          complaintRows[idx] = { ...complaintRows[idx], ...updateFields };
+          return Promise.resolve({ data: { ...complaintRows[idx] }, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      then(resolve, reject) {
+        let result;
+        if (table === 'complaints' && op === 'select') {
+          let matches = complaintRows.filter((r) => severityRowMatchesFilters(r, filters));
+          if (rangeArgs) matches = matches.slice(rangeArgs[0], rangeArgs[1] + 1);
+          result = { data: matches, error: null };
+        } else if (table === 'audit_log' && op === 'insert') {
+          auditLogInserts.push(insertRow);
+          result = { data: null, error: null };
+        } else {
+          result = { data: [], error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+  return { client: { from: (t) => makeChain(t) }, complaintRows, auditLogInserts };
+}
+
+const succeededResult = (tierWhy) => ({ type: 'succeeded', message: { content: [{ type: 'text', text: JSON.stringify(tierWhy) }] } });
+
+await runSerialCheck('severity-batch — submitSeverityBatch refuses to run when SEVERITY_BATCH_GOVERNANCE_CLEARED is not \'true\' (the governance gate, checked BEFORE any Supabase/Anthropic call)', async () => {
+  const prevFlag = process.env.SEVERITY_BATCH_GOVERNANCE_CLEARED;
+  delete process.env.SEVERITY_BATCH_GOVERNANCE_CLEARED;
+  try {
+    await assert.rejects(
+      severityBatch.submitSeverityBatch({}),
+      (err) => { assert.ok(err.message.includes('SEVERITY_BATCH_GOVERNANCE_CLEARED')); return true; }
+    );
+  } finally {
+    if (prevFlag === undefined) delete process.env.SEVERITY_BATCH_GOVERNANCE_CLEARED; else process.env.SEVERITY_BATCH_GOVERNANCE_CLEARED = prevFlag;
+  }
+});
+
+await runSerialCheck('severity-batch — fetchUnassessedComplaints excludes held rows, already-assessed rows, and null-description rows; returns only the genuinely unassessed ones', async () => {
+  const { client } = makeSeverityFakeClient([
+    { id: 'c-unassessed', description: 'Needs assessment.', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false },
+    { id: 'c-held', description: 'A held legal matter.', needs_human_call: false, category: null, flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: true },
+    { id: 'c-already-assessed', description: 'Already done.', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: 'urgent', held_legal_fair_housing: false },
+    { id: 'c-no-description', description: null, needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false },
+  ]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const rows = await severityBatch.fetchUnassessedComplaints(500);
+    assert.deepStrictEqual(rows.map((r) => r.id), ['c-unassessed'], 'expected only the genuinely unassessed, non-held, described row');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult writes nothing for a non-succeeded batch result (errored/canceled/expired contract)', async () => {
+  const { client, complaintRows, auditLogInserts } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: { type: 'errored', error: { type: 'api_error' } } });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].severity_tier, null, 'expected severity_tier left untouched');
+    assert.strictEqual(auditLogInserts.length, 0, 'expected no audit_log write');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult writes nothing for a succeeded-but-unparseable response (no in-batch retry is possible)', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: 'not json at all' }] } } });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].severity_tier, null);
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult never assigns severity_tier to a row that is held_legal_fair_housing at write-back time (defense in depth, even though the DB constraint would also reject it)', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: null, flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: true }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'urgent', why: 'Active dispute.' }) });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].severity_tier, null, 'expected a held row to never get an automated severity_tier');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult skips a row that is already severity-assessed at write-back time (idempotent against a re-run or a race)', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: 'just_a_record', held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'urgent', why: 'Active dispute.' }) });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].severity_tier, 'just_a_record', 'expected the already-assessed value to never be overwritten');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult happy path (no floor needed): writes all four severity fields and one complaint_tracking.severity_assessed audit_log entry', async () => {
+  const { client, complaintRows, auditLogInserts } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'urgent', why: 'Tenant made an explicit legal threat.' }) });
+    assert.strictEqual(outcome, 'written');
+    assert.strictEqual(complaintRows[0].severity_tier, 'urgent');
+    assert.strictEqual(complaintRows[0].severity_rationale, 'Tenant made an explicit legal threat.');
+    assert.strictEqual(complaintRows[0].severity_rubric_version, 'v3');
+    assert.ok(complaintRows[0].severity_assessed_at, 'expected a timestamp');
+    assert.strictEqual(auditLogInserts.length, 1);
+    assert.strictEqual(auditLogInserts[0].action, 'complaint_tracking.severity_assessed');
+    assert.strictEqual(auditLogInserts[0].entity_type, 'complaint');
+    assert.strictEqual(auditLogInserts[0].entity_id, 'c-1');
+    assert.strictEqual(auditLogInserts[0].actor_type, 'system');
+    assert.strictEqual(auditLogInserts[0].details.floored, false);
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult happy path (floor needed): a fresh needs_human_call=true at write-back time floors a no_issue result to worth_a_look, re-fetched rather than trusting a stale snapshot', async () => {
+  const { client, complaintRows, auditLogInserts } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: true, category: 'routine_logistics', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'no_issue', why: 'Looked routine.' }) });
+    assert.strictEqual(outcome, 'written');
+    assert.strictEqual(complaintRows[0].severity_tier, 'worth_a_look', 'expected the floor to apply using the FRESH needs_human_call=true, never the raw no_issue call');
+    assert.ok(complaintRows[0].severity_rationale.includes('Floored from no_issue'));
+    assert.strictEqual(auditLogInserts[0].details.floored, true);
+    assert.strictEqual(auditLogInserts[0].details.raw_tier_before_floor, 'no_issue');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult happy path (floor needed, added 2026-10-02 Mason governance review gap #2): a fresh owner_instruction_rejected=\'uncertain\' at write-back time floors a no_issue result to worth_a_look, proving the new column is actually read from the fresh fetch, not just added to the function signature and left undefined', async () => {
+  const { client, complaintRows, auditLogInserts } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'owner_instruction', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false, owner_instruction_rejected: 'uncertain' }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'no_issue', why: 'Looked routine.' }) });
+    assert.strictEqual(outcome, 'written');
+    assert.strictEqual(complaintRows[0].severity_tier, 'worth_a_look', 'expected the floor to apply using the FRESH owner_instruction_rejected=\'uncertain\'');
+    assert.ok(complaintRows[0].severity_rationale.includes("owner_instruction_rejected is 'uncertain'"));
+    assert.strictEqual(auditLogInserts[0].details.floored, true);
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult does NOT floor when owner_instruction_rejected=\'false\' at write-back time (only \'true\'/\'uncertain\' trigger)', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([{ id: 'c-1', description: 'x', needs_human_call: false, category: 'owner_instruction', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false, owner_instruction_rejected: 'false' }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: succeededResult({ tier: 'no_issue', why: 'Looked routine.' }) });
+    assert.strictEqual(outcome, 'written');
+    assert.strictEqual(complaintRows[0].severity_tier, 'no_issue', 'expected no floor for owner_instruction_rejected=\'false\'');
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — checkAndWriteBackSeverityBatch reports {found:false} when no in-flight batch is known', async () => {
+  severityBatch.clearState();
+  const result = await severityBatch.checkAndWriteBackSeverityBatch();
+  assert.deepStrictEqual(result, { found: false });
+});
+
+await runSerialCheck('severity-batch — checkAndWriteBackSeverityBatch reports status, not complete, while Anthropic still shows the batch in_progress (and never streams results early)', async () => {
+  severityBatch.writeState({ anthropic_batch_id: 'batch_test_1', anthropic_status: 'in_progress', submitted_at: new Date().toISOString(), complaint_ids: ['c-1'], results_retrieved_at: null, submitted_by: 'test' });
+  const fakeAnthropic = { beta: { messages: { batches: {
+    retrieve: async () => ({ processing_status: 'in_progress' }),
+    results: async () => { throw new Error('must not be called while still in_progress'); },
+  } } } };
+  severityBatch._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityBatch.checkAndWriteBackSeverityBatch();
+    assert.strictEqual(result.alreadyComplete, false);
+    assert.strictEqual(result.status, 'in_progress');
+  } finally {
+    severityBatch._setAnthropicClientForTesting(null);
+    severityBatch.clearState();
+  }
+});
+
+await runSerialCheck('severity-batch — checkAndWriteBackSeverityBatch, once Anthropic reports \'ended\', streams real results, writes them back, and marks the state file fully retrieved', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([
+    { id: 'c-1', description: 'x', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false },
+    { id: 'c-2', description: 'y', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false },
+  ]);
+  severityBatch._setSupabaseClientForTesting(client);
+  severityBatch.writeState({ anthropic_batch_id: 'batch_test_2', anthropic_status: 'in_progress', submitted_at: new Date().toISOString(), complaint_ids: ['c-1', 'c-2'], results_retrieved_at: null, submitted_by: 'test' });
+
+  const fakeAnthropic = { beta: { messages: { batches: {
+    retrieve: async () => ({ processing_status: 'ended' }),
+    results: async () => asyncIterableFromArray([
+      { custom_id: 'c-1', result: succeededResult({ tier: 'urgent', why: 'Threatened to sue.' }) },
+      { custom_id: 'c-2', result: { type: 'errored', error: { type: 'api_error' } } },
+    ]),
+  } } } };
+  severityBatch._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityBatch.checkAndWriteBackSeverityBatch();
+    assert.strictEqual(result.alreadyComplete, true);
+    assert.strictEqual(result.justCompleted, true);
+    assert.strictEqual(result.summary.processed, 2);
+    assert.strictEqual(result.summary.written, 1);
+    assert.strictEqual(result.summary.no_row_written, 1);
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-1').severity_tier, 'urgent');
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-2').severity_tier, null);
+    assert.ok(result.state.results_retrieved_at, 'expected the state file to record completion');
+
+    // Re-running now must be a pure no-op — proves the file-based
+    // resumability contract actually holds, not just the happy path once.
+    const second = await severityBatch.checkAndWriteBackSeverityBatch();
+    assert.strictEqual(second.alreadyComplete, true);
+    assert.strictEqual(second.justCompleted, undefined);
+  } finally {
+    severityBatch._setSupabaseClientForTesting(null);
+    severityBatch._setAnthropicClientForTesting(null);
+    severityBatch.clearState();
+  }
+});
+
+// ─── significance-pass.js's createComplaintRow() severity hook — reuses
+// the existing PART 15 fake-client harness (makeFakeSupabaseClient/
+// withFakeSignificancePass, above), calling createComplaintRow() directly
+// with hand-built Call 1/Call 2-shaped inputs rather than driving the whole
+// pipeline, so each scenario below isolates the hook itself. ────────────
+const SEVERITY_HOOK_BASE_ARGS = {
+  mailbox_key: 'team:test-mailbox', missive_conversation_id: 'conv-severity-hook-test', discoveryContext: 'historical_backfill',
+  property_id: null, vendor_id: null, addressMatch: { subject_type: null, subject_id: null },
+};
+
+await runSerialCheck('significance-pass — createComplaintRow: severity hook stays a true no-op when SEVERITY_LIVE_PIPELINE_ENABLED is unset (default) — severity_tier stays null, no severity_assessed audit entry', async () => {
+  const prevFlag = process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  try {
+    await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+      await freshSignificancePass.createComplaintRow({
+        ...SEVERITY_HOOK_BASE_ARGS, category: 'dispute', why: 'A routine dispute for the flag-off test.',
+        call2Fields: { needs_human_call: false, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: null, owner_instruction_note_text: null },
+        keywordCheck: { flagged_protected_class: false, flagged_category: null },
+      });
+      assert.strictEqual(calls.complaintsInsert[0].severity_tier, null);
+      assert.strictEqual(calls.complaintsInsert[0].severity_rationale, null);
+      assert.strictEqual(calls.auditLogInserts.filter((a) => a.action === 'complaint_tracking.severity_assessed').length, 0, 'expected zero severity_assessed audit entries while the flag is off');
+    });
+  } finally {
+    if (prevFlag === undefined) delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED; else process.env.SEVERITY_LIVE_PIPELINE_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — createComplaintRow: flag ON but the AI call itself fails (no ANTHROPIC_API_KEY, as withFakeSignificancePass already forces) — severity_tier stays null, creation still succeeds, no crash', async () => {
+  const prevFlag = process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  process.env.SEVERITY_LIVE_PIPELINE_ENABLED = 'true';
+  try {
+    await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+      const id = await freshSignificancePass.createComplaintRow({
+        ...SEVERITY_HOOK_BASE_ARGS, category: 'dispute', why: 'A routine dispute for the AI-call-fails test.',
+        call2Fields: { needs_human_call: false, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: null, owner_instruction_note_text: null },
+        keywordCheck: { flagged_protected_class: false, flagged_category: null },
+      });
+      assert.strictEqual(id, 'brand-new-complaint-id', 'expected creation to still succeed');
+      assert.strictEqual(calls.complaintsInsert[0].severity_tier, null);
+    });
+  } finally {
+    if (prevFlag === undefined) delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED; else process.env.SEVERITY_LIVE_PIPELINE_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — createComplaintRow: flag ON and the AI call succeeds, no floor needed — severity fields written at creation, plus one severity_assessed audit entry', async () => {
+  const prevFlag = process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  process.env.SEVERITY_LIVE_PIPELINE_ENABLED = 'true';
+  const fakeAnthropic = { messages: { create: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "urgent", "why": "Active dispute, explicit threat."}' }] }) } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+      await freshSignificancePass.createComplaintRow({
+        ...SEVERITY_HOOK_BASE_ARGS, category: 'dispute', why: 'An urgent dispute for the happy-path test.',
+        call2Fields: { needs_human_call: false, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: null, owner_instruction_note_text: null },
+        keywordCheck: { flagged_protected_class: false, flagged_category: null },
+      });
+      assert.strictEqual(calls.complaintsInsert[0].severity_tier, 'urgent');
+      assert.strictEqual(calls.complaintsInsert[0].severity_rationale, 'Active dispute, explicit threat.');
+      assert.strictEqual(calls.complaintsInsert[0].severity_rubric_version, 'v3');
+      const severityAudit = calls.auditLogInserts.filter((a) => a.action === 'complaint_tracking.severity_assessed');
+      assert.strictEqual(severityAudit.length, 1);
+      assert.strictEqual(severityAudit[0].details.floored, false);
+    });
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED; else process.env.SEVERITY_LIVE_PIPELINE_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — createComplaintRow: flag ON, AI says no_issue, but THIS row\'s own needs_human_call is true (set by the live_pipeline DO-lookup-failed branch, AFTER the base insertRow literal) — the floor still catches it, using the post-mutation value', async () => {
+  const prevFlag = process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  process.env.SEVERITY_LIVE_PIPELINE_ENABLED = 'true';
+  const fakeAnthropic = { messages: { create: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "no_issue", "why": "Looked routine to the model."}' }] }) } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+      await freshSignificancePass.createComplaintRow({
+        ...SEVERITY_HOOK_BASE_ARGS, category: 'dispute', why: 'A test row whose needs_human_call is true going in.',
+        // needs_human_call: true here directly (historical_backfill never runs the live_pipeline
+        // DO-lookup branch that could ALSO set it — this proves the floor reads whatever
+        // insertRow.needs_human_call ends up being, regardless of which branch set it).
+        call2Fields: { needs_human_call: true, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: null, owner_instruction_note_text: null },
+        keywordCheck: { flagged_protected_class: false, flagged_category: null },
+      });
+      assert.strictEqual(calls.complaintsInsert[0].severity_tier, 'worth_a_look', 'expected the floor to override the raw no_issue call');
+      assert.ok(calls.complaintsInsert[0].severity_rationale.includes('Floored from no_issue'));
+      const severityAudit = calls.auditLogInserts.filter((a) => a.action === 'complaint_tracking.severity_assessed');
+      assert.strictEqual(severityAudit[0].details.floored, true);
+    });
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED; else process.env.SEVERITY_LIVE_PIPELINE_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — createComplaintRow: flag ON, AI says no_issue, but THIS row\'s call2Fields.owner_instruction_rejected is \'uncertain\' (added 2026-10-02, Mason governance review gap #2) — the floor catches it, proving owner_instruction_rejected is actually threaded from call2Fields through insertRow into applySeverityFloor, not left undefined', async () => {
+  const prevFlag = process.env.SEVERITY_LIVE_PIPELINE_ENABLED;
+  process.env.SEVERITY_LIVE_PIPELINE_ENABLED = 'true';
+  const fakeAnthropic = { messages: { create: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "no_issue", "why": "Looked routine to the model."}' }] }) } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+      await freshSignificancePass.createComplaintRow({
+        ...SEVERITY_HOOK_BASE_ARGS, category: 'owner_instruction', why: 'A test row with an uncertain owner_instruction_rejected answer.',
+        call2Fields: { needs_human_call: false, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: 'uncertain', owner_instruction_note_text: 'Owner said no pets at Building C.' },
+        keywordCheck: { flagged_protected_class: false, flagged_category: null },
+      });
+      assert.strictEqual(calls.complaintsInsert[0].severity_tier, 'worth_a_look', 'expected the floor to override the raw no_issue call using owner_instruction_rejected');
+      assert.ok(calls.complaintsInsert[0].severity_rationale.includes("owner_instruction_rejected is 'uncertain'"));
+      const severityAudit = calls.auditLogInserts.filter((a) => a.action === 'complaint_tracking.severity_assessed');
+      assert.strictEqual(severityAudit[0].details.floored, true);
+    });
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.SEVERITY_LIVE_PIPELINE_ENABLED; else process.env.SEVERITY_LIVE_PIPELINE_ENABLED = prevFlag;
+  }
+});
+
+// ─── classifySeverity() itself — the live pipeline's retry-until-success
+// loop (SEVERITY_LIVE_MAX_ATTEMPTS=3), exercised directly against a fake
+// Anthropic client rather than only indirectly through createComplaintRow()
+// above, same "exercise the retry mechanism on its own" discipline this
+// file already applies to other retry/concurrency primitives (e.g.
+// mapWithConcurrency, DISPATCH_CONCURRENCY). Neither existing runCall1()
+// (significance-pass.js) has a direct test of this shape today — this is a
+// genuine, deliberate step beyond that precedent, not a gap left behind,
+// because the build task explicitly asked for "the classification
+// function's parsing/retry behavior" to be covered. ──────────────────────
+await runSerialCheck('severity-rubric — classifySeverity retries past an unparseable response and returns the eventual good result (retry-until-success, not fail-on-first-bad-response)', async () => {
+  let callCount = 0;
+  const fakeAnthropic = { messages: { create: async () => {
+    callCount++;
+    if (callCount === 1) return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'not valid json' }] };
+    return { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "just_a_record", "why": "A real disagreement, still being discussed."}' }] };
+  } } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityRubric.classifySeverity('A real disagreement, still being discussed.');
+    assert.deepStrictEqual(result, { tier: 'just_a_record', why: 'A real disagreement, still being discussed.' });
+    assert.strictEqual(callCount, 2, 'expected exactly one retry — succeeded on the second attempt');
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-rubric — classifySeverity returns null (never a guessed default) after exhausting every retry on consistently unparseable responses', async () => {
+  let callCount = 0;
+  const fakeAnthropic = { messages: { create: async () => { callCount++; return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'still not valid json' }] }; } } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityRubric.classifySeverity('x');
+    assert.strictEqual(result, null);
+    assert.strictEqual(callCount, 3, 'expected all 3 attempts (SEVERITY_LIVE_MAX_ATTEMPTS) to be used before giving up');
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-rubric — classifySeverity retries past a truncated (max_tokens) response, exactly like an unparseable one', async () => {
+  let callCount = 0;
+  const fakeAnthropic = { messages: { create: async () => {
+    callCount++;
+    if (callCount === 1) return { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"tier": "urg' }] };
+    return { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "urgent", "why": "Explicit legal threat."}' }] };
+  } } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityRubric.classifySeverity('x');
+    assert.deepStrictEqual(result, { tier: 'urgent', why: 'Explicit legal threat.' });
+    assert.strictEqual(callCount, 2);
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-rubric — classifySeverity retries past a thrown error (e.g. a transient network/timeout failure) and still returns the eventual good result', async () => {
+  let callCount = 0;
+  const fakeAnthropic = { messages: { create: async () => {
+    callCount++;
+    if (callCount === 1) throw new Error('simulated transient timeout');
+    return { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "no_issue", "why": "Routine, no dispute."}' }] };
+  } } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await severityRubric.classifySeverity('x');
+    assert.deepStrictEqual(result, { tier: 'no_issue', why: 'Routine, no dispute.' });
+    assert.strictEqual(callCount, 2);
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+  }
+});
+
+// ─── max_tokens bug fix, 2026-10-02 — real complaint d471ed02-06d3-4257-
+// 91eb-9643725bbe72 truncated (stop_reason: 'max_tokens') on three separate
+// real batch runs at the old 512 budget; the description was unremarkable,
+// so this was a token-budget problem, not a content/parser problem. Two
+// things proven below: (1) BOTH real callers of this classification
+// (classifySeverity's live, synchronous path AND buildBatchRequest's
+// batch-submission path) now share the exact same, raised
+// SEVERITY_MAX_TOKENS constant — never two independent literals that could
+// silently drift apart again — and (2) a batch result that comes back
+// truncated is still handled as a retry-worthy, stays-eligible outcome
+// (same as the classifySeverity retry test above already proves for the
+// live path), just with a log message that now names the real cause. ────
+await runSerialCheck('severity-rubric — SEVERITY_MAX_TOKENS is 1024 (bumped from 512), matching runCall1()\'s own max_tokens in significance-pass.js — the most generous existing precedent for one classification-style call in this codebase, real headroom rather than a guessed number', async () => {
+  assert.strictEqual(severityRubric.SEVERITY_MAX_TOKENS, 1024);
+});
+
+await runSerialCheck('severity-rubric — classifySeverity calls Anthropic with max_tokens === SEVERITY_MAX_TOKENS, not a second, independent literal that could drift out of sync with it', async () => {
+  let capturedParams = null;
+  const fakeAnthropic = { messages: { create: async (params) => {
+    capturedParams = params;
+    return { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"tier": "no_issue", "why": "Routine, no dispute."}' }] };
+  } } };
+  severityRubric._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    await severityRubric.classifySeverity('x');
+    assert.ok(capturedParams, 'expected the fake Anthropic client to have been called');
+    assert.strictEqual(capturedParams.max_tokens, severityRubric.SEVERITY_MAX_TOKENS);
+  } finally {
+    severityRubric._setAnthropicClientForTesting(null);
+  }
+});
+
+await runSerialCheck('severity-batch — buildBatchRequest uses severityRubric.SEVERITY_MAX_TOKENS directly for the batch submission\'s max_tokens — the exact same classification call as classifySeverity\'s, just submitted via the Batches API, so it needs the exact same token budget', async () => {
+  const request = severityBatch.buildBatchRequest({ id: 'c-1', description: 'A routine safety/habitability report.' });
+  assert.strictEqual(request.custom_id, 'c-1');
+  assert.strictEqual(request.params.model, 'claude-sonnet-5');
+  assert.strictEqual(request.params.max_tokens, severityRubric.SEVERITY_MAX_TOKENS);
+});
+
+await runSerialCheck('severity-batch — applyOneSeverityResult reproduces the real complaint d471ed02-06d3-4257-91eb-9643725bbe72 failure shape (succeeded per Anthropic, but stop_reason max_tokens cut the JSON off mid-rationale): still the same retry-worthy "no_row_written, stays eligible for the next run" outcome as any other non-parse, but now logs the real, specific cause instead of a generic "did not parse"', async () => {
+  const { client, complaintRows } = makeSeverityFakeClient([{ id: 'c-1', description: 'A routine safety/habitability report.', needs_human_call: false, category: 'dispute', flagged_protected_class: false, severity_tier: null, held_legal_fair_housing: false }]);
+  severityBatch._setSupabaseClientForTesting(client);
+  const errSpy = spyOn(console, 'error', () => {});
+  try {
+    const truncatedResult = { type: 'succeeded', message: { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"tier": "worth_a_look", "why": "A real disagree' }] } };
+    const outcome = await severityBatch.applyOneSeverityResult({ complaintId: 'c-1', result: truncatedResult });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].severity_tier, null, 'expected severity_tier to stay NULL — naturally re-eligible for the very next run, exactly the existing retry mechanism this file\'s own header describes');
+    const loggedTruncationSpecifically = errSpy.calls.some((args) => typeof args[0] === 'string' && args[0].includes('truncated by max_tokens'));
+    assert.ok(loggedTruncationSpecifically, 'expected a log message explicitly naming the max_tokens truncation, distinct from the generic "did not parse" wording the unparseable-response test above already covers');
+  } finally {
+    errSpy.restore();
+    severityBatch._setSupabaseClientForTesting(null);
+  }
+});
+
+return { name: 'severity-tier build — PART 22d sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
+})());
+
+// ─── 22e — run-severity-batch.js: pure argument parsing (require.main
+// guard keeps this a safe, no-op require — same convention run-
+// significance-batch.js's own module.exports already follows). ─────────
+test('run-severity-batch.js — parseLimitArg accepts a positive integer', () => {
+  const { parseLimitArg } = require('../run-severity-batch');
+  assert.deepStrictEqual(parseLimitArg(['--limit=25']), { limit: 25, error: null });
+});
+
+test('run-severity-batch.js — parseLimitArg rejects a non-positive value', () => {
+  const { parseLimitArg } = require('../run-severity-batch');
+  const result = parseLimitArg(['--limit=0']);
+  assert.strictEqual(result.limit, undefined);
+  assert.ok(result.error);
+});
+
+// ─── 22f — complaint-tracking/router.js: the main list endpoint's new
+// no_issue exclusion + admin audit toggle, and confirmation that home-count/
+// Property 360 (both reading complaints_needing_attention, a view that does
+// NOT yet expose severity_tier — see this file's own comment) are correctly
+// left UNCHANGED rather than worked around. ──────────────────────────────
+test('complaint-tracking/router.js — GET /api/complaint-tracking excludes severity_tier=no_issue by default, via an IS NULL-preserving .or(), never a bare .neq()', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'complaint-tracking', 'router.js'), 'utf8');
+  const start = source.indexOf("router.get('/api/complaint-tracking', requireComplaintTrackingAccess");
+  const end = source.indexOf("router.get('/api/complaint-tracking/home-count'", start);
+  assert.ok(start !== -1 && end !== -1 && end > start, 'expected to find both route boundaries');
+  const body = source.slice(start, end);
+  assert.ok(body.includes('include_no_issue'), 'expected the admin audit toggle query param');
+  assert.ok(body.includes("query.or('severity_tier.is.null,severity_tier.neq.no_issue')"), 'expected the IS NULL-preserving .or() filter, applied conditionally on the toggle');
+});
+
+test('complaint-tracking/router.js — home-count and Property 360 are left UNCHANGED by the severity-tier build — both still read complaints_needing_attention with no severity_tier reference (the view does not expose that column yet; see this file\'s own flagged comment)', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'complaint-tracking', 'router.js'), 'utf8');
+  const start = source.indexOf("router.get('/api/complaint-tracking/home-count'");
+  const end = source.indexOf("router.get('/api/complaint-tracking/property/:property_id'");
+  assert.ok(start !== -1 && end !== -1 && end > start, 'expected to find both route boundaries');
+  const body = source.slice(start, end);
+  assert.strictEqual(/severity_tier/.test(body), false, 'expected zero references to severity_tier inside the home-count route — the view does not expose that column, so referencing it here would throw at runtime, not no-op');
+  assert.ok(body.includes(".from('complaints_needing_attention')"));
+});
+
+// ─── 22g — complaint-tracking/dashboard/index.html: severity_tier as the
+// primary triage signal, with the exact legacy fallback preserved for an
+// unassessed (NULL) row, and the new no_issue lane. Static source checks,
+// same style PART 9-14 already use for router.js. ────────────────────────
+function readDashboardSource() {
+  return fs.readFileSync(path.join(__dirname, '..', '..', 'complaint-tracking', 'dashboard', 'index.html'), 'utf8');
+}
+function extractJsFunctionBody(source, functionSignature) {
+  const start = source.indexOf(functionSignature);
+  assert.ok(start !== -1, `expected to find "${functionSignature}" in dashboard/index.html`);
+  const nextFnMarkers = ['\n    function ', '\n    var '];
+  let end = source.length;
+  for (const marker of nextFnMarkers) {
+    const idx = source.indexOf(marker, start + functionSignature.length);
+    if (idx !== -1 && idx < end) end = idx;
+  }
+  return source.slice(start, end);
+}
+
+test('dashboard/index.html — triagePriority() uses severity_tier as the PRIMARY signal when a row has been assessed', () => {
+  const body = extractJsFunctionBody(readDashboardSource(), 'function triagePriority(c) {');
+  assert.ok(/severity_tier\s*===\s*'urgent'[\s\S]{0,20}return 'call'/.test(body));
+  assert.ok(/severity_tier\s*===\s*'worth_a_look'[\s\S]{0,20}return 'flagged'/.test(body));
+  assert.ok(/severity_tier\s*===\s*'just_a_record'[\s\S]{0,20}return 'log'/.test(body));
+  assert.ok(/severity_tier\s*===\s*'no_issue'[\s\S]{0,20}return 'no_issue'/.test(body));
+});
+
+test('dashboard/index.html — triagePriority() falls through to the EXACT pre-existing needs_human_call/escalation_signal logic, byte-for-byte, when severity_tier is NULL (not yet assessed)', () => {
+  const body = extractJsFunctionBody(readDashboardSource(), 'function triagePriority(c) {');
+  assert.ok(body.includes("if (c.needs_human_call) return 'call';"), 'expected the original needs_human_call fallback line, unchanged');
+  assert.ok(body.includes("if (c.escalation_signal) return 'flagged';"), 'expected the original escalation_signal fallback line, unchanged');
+});
+
+test('dashboard/index.html — applyFilters() hides severity_tier=no_issue rows unless filters.includeNoIssue is checked', () => {
+  const source = readDashboardSource();
+  const start = source.indexOf('function applyFilters(items) {');
+  const end = source.indexOf('function renderTiles(items) {');
+  assert.ok(start !== -1 && end !== -1 && end > start);
+  const body = source.slice(start, end);
+  assert.ok(body.includes("if (!filters.includeNoIssue && laneOf(c) === 'no_issue') return false;"));
+});
+
+test('dashboard/index.html — the admin audit toggle checkbox exists and is wired to filters.includeNoIssue, mirroring the pre-existing includeMerged checkbox pattern', () => {
+  const source = readDashboardSource();
+  assert.ok(source.includes('id="includeNoIssueCheck"'));
+  assert.ok(source.includes("filters.includeNoIssue = includeNoIssueCheck.checked;"));
+  assert.ok(source.includes('includeNoIssue: false'), 'expected the filters state object to carry the new field with the correct default (hidden by default)');
+});
+
+test('dashboard/index.html — No Issue rows get their own clearly-separate section inside the Log tab, never folded into the real Log lane', () => {
+  const source = readDashboardSource();
+  assert.ok(source.includes("var noIssueItems = filters.includeNoIssue ? filtered.filter(function (c) { return laneOf(c) === 'no_issue'; }) : [];"));
+  assert.ok(source.includes("'<div class=\"quiet-section-title\">No Issue ('"));
+});
+
+// ─── 22h — complaint-tracking/dashboard/index.html: "Needs Attention" tile
+// bug fix, 2026-10-02. The PART 22g tests above confirm triagePriority()/
+// laneOf() themselves use severity_tier correctly; this bug was that the
+// "Needs Attention" stat tile and its matching tile-filter were never
+// switched over when that happened — they still counted c.is_big_deal,
+// which the comment above triagePriority() documents as true on
+// effectively every row (2,732/2,733 real rows), so the number drifted
+// from the real Needs a Call / Flagged for Review lanes directly below it.
+//
+// Static source checks alone (PART 22g's own style) would pass even if
+// needsAttentionSignal() were accidentally defined as `return true;` —
+// they can only confirm the right tokens appear in the right place, not
+// that the counts come out right. So this PART goes one step further and
+// actually RUNS the dashboard's real inline <script> (via Node's vm
+// module, with the minimum possible DOM/fetch stubbing to let it load
+// without throwing) and calls the real, unmodified needsAttentionSignal/
+// applyFilters/renderTiles/triagePriority functions against fixture rows —
+// proving the real counting behavior, not just the source text. No
+// existing convention for this exists elsewhere in this file (dashboard
+// tests so far are static-source-only); this is a deliberate, scoped
+// exception for a bug that is specifically about wrong counts, not a
+// general new testing pattern for this file.
+function loadDashboardScript() {
+  const source = readDashboardSource();
+  const start = source.indexOf('<script>') + '<script>'.length;
+  const end = source.indexOf('</script>', start);
+  assert.ok(start !== -1 && end !== -1 && end > start, 'expected to find the dashboard\'s <script> tag');
+  const scriptText = source.slice(start, end);
+
+  // Minimum stubbing to let the WHOLE script run top-to-bottom without
+  // throwing (it is not wrapped in a function — every top-level
+  // function/var declaration runs immediately, ending in a real call to
+  // init()). Confirmed by inspection that document/fetch/window/setTimeout/
+  // clearTimeout/confirm are the only browser globals this script
+  // references, and that init() is the only one of them actually INVOKED
+  // at top level (everything else is only ever called from inside an
+  // event handler or a fetch callback, never reached by this stub).
+  const fakeElement = { addEventListener() {}, classList: { add() {}, remove() {}, toggle() {} }, style: {}, set innerHTML(_) {}, get innerHTML() { return ''; } };
+  const sandbox = {
+    document: { getElementById: () => fakeElement, addEventListener() {}, querySelector: () => fakeElement, querySelectorAll: () => [] },
+    window: {},
+    fetch: () => Promise.reject(new Error('no network in tests')), // init()'s own .catch(...) swallows this harmlessly.
+    setTimeout: () => 0,
+    clearTimeout() {},
+    confirm: () => true,
+    console,
+  };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(scriptText, context, { filename: 'dashboard/index.html (inline script)' });
+  return context;
+}
+
+// One shared load — the script has no side effects that would make reuse
+// across assertions unsafe (init()'s fetch rejects into a swallowed
+// .catch(), nothing else runs at top level), and re-running vm.runInContext
+// for every single assertion below would be wasteful for no real benefit.
+const dashboardCtx = loadDashboardScript();
+
+test('dashboard/index.html (real code, executed) — needsAttentionSignal/triagePriority/laneOf/applyFilters/renderTiles all actually load from the real <script> with no top-level throw', () => {
+  assert.strictEqual(typeof dashboardCtx.needsAttentionSignal, 'function');
+  assert.strictEqual(typeof dashboardCtx.triagePriority, 'function');
+  assert.strictEqual(typeof dashboardCtx.laneOf, 'function');
+  assert.strictEqual(typeof dashboardCtx.applyFilters, 'function');
+  assert.strictEqual(typeof dashboardCtx.renderTiles, 'function');
+});
+
+test('dashboard/index.html (real code, executed) — needsAttentionSignal() is true for severity_tier urgent/worth_a_look, false for just_a_record/no_issue, regardless of is_big_deal', () => {
+  const { needsAttentionSignal } = dashboardCtx;
+  // The exact regression this bug was: is_big_deal=true on every one of
+  // these, so the OLD code would have called every single row below
+  // "Needs Attention" — the new code must not.
+  assert.strictEqual(needsAttentionSignal({ is_big_deal: true, severity_tier: 'urgent' }), true);
+  assert.strictEqual(needsAttentionSignal({ is_big_deal: true, severity_tier: 'worth_a_look' }), true);
+  assert.strictEqual(needsAttentionSignal({ is_big_deal: true, severity_tier: 'just_a_record' }), false);
+  assert.strictEqual(needsAttentionSignal({ is_big_deal: true, severity_tier: 'no_issue' }), false);
+});
+
+test('dashboard/index.html (real code, executed) — needsAttentionSignal() falls through to the legacy needs_human_call/escalation_signal signal for an unassessed (severity_tier NULL) row, same as triagePriority() always has', () => {
+  const { needsAttentionSignal } = dashboardCtx;
+  assert.strictEqual(needsAttentionSignal({ severity_tier: null, needs_human_call: true }), true);
+  assert.strictEqual(needsAttentionSignal({ severity_tier: null, escalation_signal: true }), true);
+  assert.strictEqual(needsAttentionSignal({ severity_tier: null, needs_human_call: false, escalation_signal: false }), false);
+});
+
+test('dashboard/index.html (real code, executed) — renderTiles() Needs Attention number exactly equals the real count of active, non-resolved call+flagged rows (the actual bug: this used to count is_big_deal instead)', () => {
+  const { renderTiles } = dashboardCtx;
+  const rows = [
+    { id: 1, is_big_deal: true, severity_tier: 'urgent', status: 'open' },           // counts (call)
+    { id: 2, is_big_deal: true, severity_tier: 'worth_a_look', status: 'open' },     // counts (flagged)
+    { id: 3, is_big_deal: true, severity_tier: 'just_a_record', status: 'open' },    // does NOT count — old code would have, this is the bug
+    { id: 4, is_big_deal: true, severity_tier: 'no_issue', status: 'open' },         // does NOT count — old code would have, this is the bug
+    { id: 5, is_big_deal: true, severity_tier: 'urgent', status: 'resolved' },       // does NOT count — resolved, exclusion preserved
+    { id: 6, is_big_deal: true, severity_tier: 'urgent', merged_into_id: 'm-1' },    // does NOT count — merged, excluded from `active` before the filter even runs
+    { id: 7, is_big_deal: false, severity_tier: null, needs_human_call: true, status: 'open' }, // counts — legacy fallback preserved
+  ];
+  const html = renderTiles(rows);
+  const match = /tile-red[^>]*data-tile="needs_attention">\s*<div class="tile-number">(\d+)</.exec(html);
+  assert.ok(match, 'expected to find the Needs Attention tile\'s rendered number');
+  assert.strictEqual(Number(match[1]), 3, 'expected exactly rows 1, 2, and 7 to count — not is_big_deal\'s 6 out of 7');
+});
+
+test('dashboard/index.html (real code, executed) — applyFilters() with tile=\'needs_attention\' returns exactly the same rows renderTiles() counted (the top tile and the filtered list it drills into can never disagree)', () => {
+  const { applyFilters } = dashboardCtx;
+  const rows = [
+    { id: 1, is_big_deal: true, severity_tier: 'urgent', status: 'open' },
+    { id: 2, is_big_deal: true, severity_tier: 'worth_a_look', status: 'open' },
+    { id: 3, is_big_deal: true, severity_tier: 'just_a_record', status: 'open' },
+    { id: 4, is_big_deal: true, severity_tier: 'no_issue', status: 'open' },
+    { id: 7, is_big_deal: false, severity_tier: null, needs_human_call: true, status: 'open' },
+  ];
+  dashboardCtx.filters.tile = 'needs_attention';
+  try {
+    const result = dashboardCtx.applyFilters(rows);
+    assert.deepStrictEqual(result.map((c) => c.id), [1, 2, 7]);
+  } finally {
+    dashboardCtx.filters.tile = ''; // restore the default so later tests in this PART aren't affected.
+  }
+});
+
+// ─── nameMatchCallout() (migration 20261002060000) — real code, executed
+// via the same dashboardCtx the tests just above already load. ──────────
+test('dashboard/index.html (real code, executed) — nameMatchCallout() renders nothing for a complaint with no suggestion, or one already reviewed', () => {
+  const { nameMatchCallout } = dashboardCtx;
+  assert.strictEqual(nameMatchCallout({ suggested_subject_type: null }), '');
+  assert.strictEqual(nameMatchCallout({ suggested_subject_type: 'tenant', human_confirmed_subject_outcome: 'confirmed' }), '');
+});
+
+test('dashboard/index.html (real code, executed) — nameMatchCallout() renders every real candidate (Mason\'s point 1: the collision itself, not just one guess) with a dedicated confirm button carrying its own candidate id, plus one reject button, for a pending suggestion', () => {
+  const { nameMatchCallout } = dashboardCtx;
+  const html = nameMatchCallout({
+    suggested_subject_type: 'tenant',
+    suggested_subject_name_text: 'Jane Doe called about the leak',
+    human_confirmed_subject_outcome: null,
+    display: {
+      property: { name: 'Sunset Apartments', address: '123 Main St' },
+      name_match_candidates: [
+        { id: 'tenant-aaa', name: 'Jane Doe' },
+        { id: 'tenant-bbb', name: 'Jane A. Doe' },
+      ],
+    },
+  });
+  assert.ok(html.includes('2 tenants named like'), 'expected the plural collision headline naming the real candidate count');
+  assert.ok(html.includes('Sunset Apartments'), 'expected the corroborating property shown, per Mason\'s point 1');
+  assert.ok(html.includes('Jane Doe'));
+  assert.ok(html.includes('Jane A. Doe'), 'expected BOTH real candidates rendered, neither dropped');
+  assert.ok(html.includes('data-action="name-match-confirm"') && html.includes('data-candidate="tenant-aaa"'));
+  assert.ok(html.includes('data-candidate="tenant-bbb"'));
+  assert.ok(html.includes('data-action="name-match-reject"'));
+});
+
+test('dashboard/index.html (real code, executed) — nameMatchCallout() escapes a hostile candidate name/quoted text rather than injecting raw HTML', () => {
+  const { nameMatchCallout } = dashboardCtx;
+  const html = nameMatchCallout({
+    suggested_subject_type: 'owner',
+    suggested_subject_name_text: '<img src=x onerror=alert(1)>',
+    human_confirmed_subject_outcome: null,
+    display: { property: null, name_match_candidates: [{ id: 'owner-xxx', name: '<script>alert(1)</script>' }] },
+  });
+  assert.ok(!html.includes('<script>alert(1)</script>'), 'expected the candidate name to be escaped');
+  assert.ok(!html.includes('<img src=x onerror=alert(1)>'), 'expected the quoted AI text to be escaped');
+});
+
+test('dashboard/index.html (real code, executed) — renderCard() includes nameMatchCallout()\'s output for a card with a pending suggestion (wired into the real card, not just a standalone function nobody calls)', () => {
+  const { renderCard } = dashboardCtx;
+  const html = renderCard({
+    id: 'c-nm-1', created_at: new Date().toISOString(), status: 'open', category: 'dispute', description: 'A tenant mentioned something.',
+    suggested_subject_type: 'tenant', suggested_subject_name_text: 'Jane Doe', human_confirmed_subject_outcome: null,
+    display: { property: { name: 'Sunset Apartments' }, name_match_candidates: [{ id: 'tenant-aaa', name: 'Jane Doe' }] },
+  });
+  assert.ok(html.includes('data-action="name-match-confirm"'), 'expected the name-match callout to actually appear inside a real rendered card');
+});
+
+// ============================================================================
+// PART 23 — name-based complaint-to-person matching, the narrower, Mason-
+// cleared, human-confirmed build (2026-10-02, Jarvis-relayed, Peter's
+// explicit approval for THIS version only — full automatic resolution is
+// OUT OF SCOPE). Schema: supabase/migrations/20261002060000_add_name_
+// match_human_review_to_complaints.sql. Covers: (a) namesPlausiblyMatch —
+// pure; (b) buildCall1Prompt/parseCall1Response's NAME_MATCH_SUGGESTIONS_
+// ENABLED gating — pure, env-var save/restore; (c) findNameMatchCandidates —
+// DB-touching, via significancePass._setSupabaseClientForTesting (never
+// resolveUniqueMatch()'s "collapse to null on 2+" behavior — this function's
+// entire point is the opposite); (d) applyCall1Result's own gating (shadow-
+// mode flag AND property corroboration, both hard requirements) — same DI
+// seam, run end-to-end rather than spied, because applyCall1Result() calls
+// findNameMatchCandidates() as a bare same-module identifier, not through
+// an imported module object, so spyOn() (which only intercepts property
+// access on an imported module reference, e.g. significanceBatch.js calling
+// significancePass.xyz()) cannot see this particular call at all — the
+// real reason PART 20's own spyOn precedent doesn't apply here, confirmed
+// by reading how spyOn and every one of its existing call sites actually
+// work before reaching for it; (e) createComplaintRow's nameMatchSuggestion
+// merge — reuses PART 15's existing makeFakeSupabaseClient/
+// withFakeSignificancePass harness, same as PART 22d's severity-hook tests
+// just above. (c)/(d)/(e) run inside ONE sequential IIFE for the same
+// reason PART 18-22 already do: _setSupabaseClientForTesting mutates a
+// single shared module-level binding, which concurrent asyncTest()s could
+// race on.
+// ============================================================================
+
+// ─── 23a — namesPlausiblyMatch: containment, case-insensitivity, and the
+// null-safety both callers (fetchActiveTenantsAtProperty's tenant names,
+// fetchOwnersAtProperty's nullable owner.name) actually rely on. ──────────
+test('significance-pass — namesPlausiblyMatch: a quoted sentence containing the candidate\'s name (case-insensitive) matches', () => {
+  assert.strictEqual(significancePass.namesPlausiblyMatch('Jane Doe called about a leak in unit 4', 'Jane Doe'), true);
+  assert.strictEqual(significancePass.namesPlausiblyMatch('jane doe called about a leak', 'Jane Doe'), true, 'expected case-insensitive match');
+});
+
+test('significance-pass — namesPlausiblyMatch: no match when the name is not actually contained in the quoted text', () => {
+  assert.strictEqual(significancePass.namesPlausiblyMatch('John Smith called about a leak', 'Jane Doe'), false);
+});
+
+test('significance-pass — namesPlausiblyMatch: false (never throws) for a null/empty citedText or candidateName — the real shape owners.name (nullable) and a missing AI quote can both take', () => {
+  assert.strictEqual(significancePass.namesPlausiblyMatch(null, 'Jane Doe'), false);
+  assert.strictEqual(significancePass.namesPlausiblyMatch('Jane Doe called', null), false);
+  assert.strictEqual(significancePass.namesPlausiblyMatch('Jane Doe called', ''), false);
+  assert.strictEqual(significancePass.namesPlausiblyMatch('', 'Jane Doe'), false);
+});
+
+// ─── 23b — buildCall1Prompt / parseCall1Response gating: OFF means
+// literally byte-for-byte the pre-existing prompt/parse behavior; ON adds
+// exactly one new, parallel, citation-only field. ──────────────────────────
+test('significance-pass — buildCall1Prompt: NAME_MATCH_SUGGESTIONS_ENABLED unset (default) produces a prompt BYTE-FOR-BYTE identical to the flag never having existed', () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  try {
+    const prompt = significancePass.buildCall1Prompt({ threadText: '(thread text)', addressMatched: false });
+    assert.ok(prompt.includes('do not attempt to identify a specific\n   tenant or owner by name alone'), 'expected the ORIGINAL identification block wording, unchanged');
+    assert.ok(!prompt.includes('name_text'), 'expected no name_text field in the requested JSON shape while the flag is off');
+    assert.ok(!prompt.includes('If the thread\'s own text clearly names a\n   specific TENANT or OWNER'), 'expected none of the name-match variant\'s added sentences');
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+test('significance-pass — buildCall1Prompt: flag explicitly \'false\' (not just unset) behaves identically to unset — only the literal string \'true\' ever turns this on', () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'false';
+  try {
+    const prompt = significancePass.buildCall1Prompt({ threadText: '(thread text)', addressMatched: false });
+    assert.ok(!prompt.includes('name_text'));
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+test('significance-pass — buildCall1Prompt: flag \'true\' adds the name-citation sentence AND the name_text field to the requested JSON shape, never for an addressMatched=true call (identification block is omitted entirely either way)', () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  try {
+    const promptNoAddress = significancePass.buildCall1Prompt({ threadText: '(thread text)', addressMatched: false });
+    assert.ok(promptNoAddress.includes('If the thread\'s own text clearly names a\n   specific TENANT or OWNER'));
+    assert.ok(promptNoAddress.includes('"name_text": "quoted text"|null'));
+
+    const promptAddressed = significancePass.buildCall1Prompt({ threadText: '(thread text)', addressMatched: true });
+    assert.ok(!promptAddressed.includes('name_text'), 'expected no identification block AT ALL (so no name_text either) once an address already matched');
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+test('significance-pass — parseCall1Response: flag OFF never parses a name_text key, even if the raw response somehow contains one (defense in depth beyond "the model was never asked")', () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  try {
+    const raw = JSON.stringify({ resolution_status: 'open', category: 'dispute', why: 'x', tone_trend: null, identification: { property_text: null, vendor_text: null, name_text: 'Jane Doe' } });
+    const parsed = significancePass.parseCall1Response(raw, { addressMatched: false });
+    assert.strictEqual('name_text' in parsed.identification, false, 'expected the key to not even exist, not just be null');
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+test('significance-pass — parseCall1Response: flag ON parses a real name_text, trims it, and null-coerces a blank/missing one', () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  try {
+    const raw1 = JSON.stringify({ resolution_status: 'open', category: 'dispute', why: 'x', tone_trend: null, identification: { property_text: null, vendor_text: null, name_text: '  Jane Doe mentioned the leak  ' } });
+    assert.strictEqual(significancePass.parseCall1Response(raw1, { addressMatched: false }).identification.name_text, 'Jane Doe mentioned the leak');
+
+    const raw2 = JSON.stringify({ resolution_status: 'open', category: 'dispute', why: 'x', tone_trend: null, identification: { property_text: null, vendor_text: null, name_text: '   ' } });
+    assert.strictEqual(significancePass.parseCall1Response(raw2, { addressMatched: false }).identification.name_text, null);
+
+    const raw3 = JSON.stringify({ resolution_status: 'open', category: 'dispute', why: 'x', tone_trend: null, identification: { property_text: null, vendor_text: null } });
+    assert.strictEqual(significancePass.parseCall1Response(raw3, { addressMatched: false }).identification.name_text, null);
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+// ─── 23c/d — findNameMatchCandidates + applyCall1Result's gating, both
+// DB-touching via the same _setSupabaseClientForTesting seam PART 18h
+// already proved safe for this exact module (no require.cache swap). One
+// small, purpose-built fake — sized to exactly the tables this feature's
+// own lookup touches (units/leases/tenants/properties/property_owners/
+// owners) plus the handful of tables applyCall1Result's write path always
+// touches regardless (missive_conversation_significance/missive_message_
+// links/audit_log) — same "each PART's own fake, sized to what it actually
+// needs" convention PART 22's severity fake client comment already states.
+// maybeSingle()/single() added beyond makeFilteringFakeClient's own shape
+// (used elsewhere in this file) because fetchOwnersAtProperty() needs it
+// and that shared helper deliberately isn't touched here, to avoid any risk
+// of changing behavior for the many other tests already using it. ────────
+asyncResults.push((async () => {
+
+function makeNameMatchDataFakeClient(tableData) {
+  const state = { significanceUpserts: [], messageLinkInserts: [], auditLogInserts: [] };
+
+  function makeChain(table) {
+    const filters = [];
+    let op = null, payload = null;
+    const chain = {
+      select() { if (!op) op = 'select'; return chain; },
+      eq(field, value) { filters.push((row) => row[field] === value); return chain; },
+      in(field, values) { filters.push((row) => values.includes(row[field])); return chain; },
+      order() { return chain; },
+      limit() { return chain; },
+      upsert(row) { op = 'upsert'; payload = row; return chain; },
+      insert(row) { op = 'insert'; payload = row; return chain; },
+      maybeSingle() {
+        const rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
+        return Promise.resolve({ data: rows[0] || null, error: null });
+      },
+      single() {
+        if (table === 'missive_conversation_significance' && op === 'upsert') {
+          state.significanceUpserts.push(payload);
+          return Promise.resolve({ data: { id: 'sig-23-test', ...payload }, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      then(resolve, reject) {
+        let result;
+        if (table === 'missive_message_links' && op === 'insert') {
+          state.messageLinkInserts.push(payload);
+          result = { data: null, error: null };
+        } else if (table === 'audit_log' && op === 'insert') {
+          state.auditLogInserts.push(payload);
+          result = { data: null, error: null };
+        } else {
+          const rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
+          result = { data: rows, error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+  return { client: { from: (t) => makeChain(t) }, state };
+}
+
+// One small, realistic fixture: property "prop-1" (AppFolio id "af-prop-1")
+// has one active tenant, Jane Doe, and one owner, John Owner — reused,
+// with small variations, across every scenario below.
+const PROP_1 = { id: 'prop-1', name: 'Sunset Apartments', address: '123 Main St', appfolio_id: 'af-prop-1' };
+const BASE_TABLE_DATA = () => ({
+  units: [{ id: 'unit-1', property_id: 'prop-1' }],
+  leases: [{ unit_id: 'unit-1', tenant_id: 'tenant-1', status: 'active' }],
+  tenants: [{ id: 'tenant-1', first_name: 'Jane', last_name: 'Doe' }],
+  properties: [PROP_1],
+  property_owners: [{ appfolio_property_id: 'af-prop-1', appfolio_owner_id: 'af-owner-1' }],
+  owners: [{ id: 'owner-1', appfolio_id: 'af-owner-1', name: 'John Owner' }],
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: a single real tenant match at the given property is surfaced', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDataFakeClient(BASE_TABLE_DATA()).client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.deepStrictEqual(result, { subject_type: 'tenant', candidate_ids: ['tenant-1'] });
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: TWO real tenant matches at the same property are BOTH surfaced, neither silently dropped (the exact opposite of resolveUniqueMatch\'s own "2+ matches = no match" behavior)', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases.push({ unit_id: 'unit-1', tenant_id: 'tenant-2', status: 'active' });
+  tableData.tenants.push({ id: 'tenant-2', first_name: 'Jane', last_name: 'Doe' });
+  significancePass._setSupabaseClientForTesting(makeNameMatchDataFakeClient(tableData).client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.strictEqual(result.subject_type, 'tenant');
+    assert.deepStrictEqual(result.candidate_ids.slice().sort(), ['tenant-1', 'tenant-2'].sort(), 'expected BOTH real tenant candidates, not just one');
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: TWO real owner matches are also both surfaced (same non-collapsing behavior on the owner side)', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases = []; tableData.tenants = []; // no tenant named "John Owner" — isolate the owner path.
+  tableData.property_owners.push({ appfolio_property_id: 'af-prop-1', appfolio_owner_id: 'af-owner-2' });
+  tableData.owners.push({ id: 'owner-2', appfolio_id: 'af-owner-2', name: 'John Owner' });
+  significancePass._setSupabaseClientForTesting(makeNameMatchDataFakeClient(tableData).client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'spoke with John Owner this morning', propertyId: 'prop-1' });
+    assert.strictEqual(result.subject_type, 'owner');
+    assert.deepStrictEqual(result.candidate_ids.slice().sort(), ['owner-1', 'owner-2'].sort());
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: a name plausibly matching BOTH a tenant and an owner at the same property returns null (Q\'s own judgment call — a cross-type collision can\'t be expressed in one suggestion row without silently dropping real candidates of the other type)', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.owners[0].name = 'Jane Doe'; // now the SAME name as the tenant fixture.
+  significancePass._setSupabaseClientForTesting(makeNameMatchDataFakeClient(tableData).client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.strictEqual(result, null);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: no real candidate at all returns null, never a guess', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDataFakeClient(BASE_TABLE_DATA()).client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'a totally unrelated name, Bob Nobody', propertyId: 'prop-1' });
+    assert.strictEqual(result, null);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+// Shared applyCall1Result() inputs — a benign, non-protected-class thread
+// (so checkClaim()'s own Layer 1/2 never fires and never needs an
+// ANTHROPIC_API_KEY), content-identified (addressMatch all-null) rather
+// than address-matched, so Prompt B's own property/name resolution path is
+// what's actually exercised, same as every other property/vendor
+// resolution test elsewhere in this suite.
+const APPLY_CALL1_BASE_ARGS = {
+  mailbox_key: 'mb1', missive_conversation_id: 'conv-name-match-test', discoveryContext: 'historical_backfill',
+  rows: [{ missive_message_id: 'm1', screening_completed_at: '2026-01-01T00:00:00.000Z' }],
+  addressMatch: { subject_type: null, subject_id: null, vendor_id: null, property_id: null },
+  threadText: 'Just a routine note about parking — nothing contentious here.',
+  sharedDirectories: { properties: [PROP_1], vendors: [] },
+};
+
+await runSerialCheck('significance-pass — applyCall1Result: NAME_MATCH_SUGGESTIONS_ENABLED unset (default) is a TRUE no-op — nameMatchSuggestion is always null, and the new tenant/owner tables are NEVER even queried, even when the AI quoted both a resolvable property AND a real matching name', async () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  const tableData = BASE_TABLE_DATA();
+  const fake = makeNameMatchDataFakeClient(tableData);
+  // Poison the three tables findNameMatchCandidates() would need, so this
+  // test FAILS LOUDLY (not just "happens not to assert on it") if the flag
+  // being off ever lets that lookup run anyway.
+  const realUnits = fake.client.from;
+  fake.client.from = (table) => {
+    if (table === 'units' || table === 'leases' || table === 'property_owners') throw new Error(`true no-op violated: table "${table}" was queried while NAME_MATCH_SUGGESTIONS_ENABLED is unset`);
+    return realUnits(table);
+  };
+  significancePass._setSupabaseClientForTesting(fake.client);
+  try {
+    const result = await significancePass.applyCall1Result({
+      ...APPLY_CALL1_BASE_ARGS,
+      call1: { resolution_status: 'open', category: 'dispute', why: 'A routine test.', tone_trend: null, identification: { property_text: 'Sunset Apartments', vendor_text: null, name_text: 'Jane Doe called about a leak' } },
+    });
+    assert.strictEqual(result.nameMatchSuggestion, null);
+    assert.strictEqual(result.property_id, 'prop-1', 'expected property resolution itself to be completely unaffected by this flag');
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — applyCall1Result: flag ON but NO property corroboration (property_text never resolved to a real property) — the hard requirement: no suggestion is ever computed, not even attempted, regardless of how clearly a name was quoted', async () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  const tableData = BASE_TABLE_DATA();
+  const fake = makeNameMatchDataFakeClient(tableData);
+  const realFrom = fake.client.from;
+  fake.client.from = (table) => {
+    if (table === 'units' || table === 'leases' || table === 'property_owners') throw new Error(`hard requirement violated: table "${table}" was queried with no property corroboration at all`);
+    return realFrom(table);
+  };
+  significancePass._setSupabaseClientForTesting(fake.client);
+  try {
+    const result = await significancePass.applyCall1Result({
+      ...APPLY_CALL1_BASE_ARGS,
+      call1: { resolution_status: 'open', category: 'dispute', why: 'A routine test.', tone_trend: null, identification: { property_text: null, vendor_text: null, name_text: 'Jane Doe called about a leak' } },
+    });
+    assert.strictEqual(result.nameMatchSuggestion, null);
+    assert.strictEqual(result.property_id, null);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — applyCall1Result: flag ON, property_text resolves to a real property, AND a real tenant name-matches at THAT property — a full, correctly-shaped suggestion is computed (never writing subject_type/subject_id — those stay off this return value entirely)', async () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  const { client } = makeNameMatchDataFakeClient(BASE_TABLE_DATA());
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const result = await significancePass.applyCall1Result({
+      ...APPLY_CALL1_BASE_ARGS,
+      call1: { resolution_status: 'open', category: 'dispute', why: 'A routine test.', tone_trend: null, identification: { property_text: 'Sunset Apartments', vendor_text: null, name_text: 'Jane Doe called about a leak' } },
+    });
+    assert.strictEqual(result.property_id, 'prop-1');
+    assert.ok(result.nameMatchSuggestion, 'expected a real suggestion to be computed');
+    assert.strictEqual(result.nameMatchSuggestion.suggested_subject_type, 'tenant');
+    assert.deepStrictEqual(result.nameMatchSuggestion.suggested_subject_candidate_ids, ['tenant-1']);
+    assert.strictEqual(result.nameMatchSuggestion.suggested_subject_name_text, 'Jane Doe called about a leak');
+    assert.strictEqual(result.nameMatchSuggestion.suggested_subject_extracted_by, significancePass.CONTENT_PASS_VERSION);
+    assert.ok(result.nameMatchSuggestion.suggested_subject_at);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+await runSerialCheck('significance-pass — applyCall1Result: flag ON, property corroborated, but the quoted name matches NOBODY real at that property — no suggestion (null), same as no corroboration at all', async () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  const { client } = makeNameMatchDataFakeClient(BASE_TABLE_DATA());
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const result = await significancePass.applyCall1Result({
+      ...APPLY_CALL1_BASE_ARGS,
+      call1: { resolution_status: 'open', category: 'dispute', why: 'A routine test.', tone_trend: null, identification: { property_text: 'Sunset Apartments', vendor_text: null, name_text: 'Bob Nobody called about a leak' } },
+    });
+    assert.strictEqual(result.property_id, 'prop-1');
+    assert.strictEqual(result.nameMatchSuggestion, null);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
+// ─── 23e — createComplaintRow's nameMatchSuggestion merge: reuses PART
+// 15's existing makeFakeSupabaseClient/withFakeSignificancePass harness
+// (require.cache-swap-based — a DIFFERENT DI seam from _setSupabaseClient
+// ForTesting above, proven safe to mix within one sequential IIFE already,
+// by PART 18h's own identical pairing of both seams in a single test). ──
+const NAME_MATCH_HOOK_BASE_ARGS = {
+  mailbox_key: 'mb1', missive_conversation_id: 'conv-name-match-createrow-test', discoveryContext: 'historical_backfill',
+  property_id: 'prop-1', vendor_id: null, addressMatch: { subject_type: null, subject_id: null },
+  category: 'dispute', why: 'A routine test for the name-match createComplaintRow hook.',
+  call2Fields: { needs_human_call: false, blocked_reason: null, blocked_party: null, escalation_signal: 'none', owner_instruction_rejected: null, owner_instruction_note_text: null },
+  keywordCheck: { flagged_protected_class: false, flagged_category: null },
+};
+
+await runSerialCheck('significance-pass — createComplaintRow: nameMatchSuggestion omitted/null (the default — flag off, or no corroboration, or no real candidate) writes NONE of the suggested_subject_* columns, and subject_type/subject_id stay exactly what addressMatch said (never written from this path)', async () => {
+  await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+    await freshSignificancePass.createComplaintRow({ ...NAME_MATCH_HOOK_BASE_ARGS });
+    const row = calls.complaintsInsert[0];
+    assert.strictEqual('suggested_subject_type' in row, false);
+    assert.strictEqual(row.subject_type, null);
+    assert.strictEqual(row.subject_id, null);
+  });
+});
+
+await runSerialCheck('significance-pass — createComplaintRow: a real nameMatchSuggestion is attached to the newly-created row\'s suggested_subject_* columns, and subject_type/subject_id are STILL never written from it (Mason\'s hard "full automatic resolution is OUT OF SCOPE" rule, enforced structurally: this function has no code path that copies a suggestion into subject_type/subject_id)', async () => {
+  const suggestion = {
+    suggested_subject_type: 'tenant',
+    suggested_subject_name_text: 'Jane Doe called about a leak',
+    suggested_subject_candidate_ids: ['tenant-1', 'tenant-2'],
+    suggested_subject_extracted_by: significancePass.CONTENT_PASS_VERSION,
+    suggested_subject_at: new Date().toISOString(),
+  };
+  await withFakeSignificancePass({ conversationRows: [], existingComplaint: null }, async (freshSignificancePass, calls) => {
+    await freshSignificancePass.createComplaintRow({ ...NAME_MATCH_HOOK_BASE_ARGS, nameMatchSuggestion: suggestion });
+    const row = calls.complaintsInsert[0];
+    assert.strictEqual(row.suggested_subject_type, 'tenant');
+    assert.strictEqual(row.suggested_subject_name_text, 'Jane Doe called about a leak');
+    assert.deepStrictEqual(row.suggested_subject_candidate_ids, ['tenant-1', 'tenant-2']);
+    assert.strictEqual(row.suggested_subject_extracted_by, significancePass.CONTENT_PASS_VERSION);
+    assert.ok(row.suggested_subject_at);
+    // The hard rule, checked directly on the actual row sent to the DB —
+    // not inferred from the absence of a code path.
+    assert.strictEqual(row.subject_type, null, 'expected subject_type to NEVER be set from a suggestion — only a later human confirm action (router.js) may ever do that');
+    assert.strictEqual(row.subject_id, null, 'expected subject_id to NEVER be set from a suggestion');
+    // needs_matching's existing formula (unchanged by this build) is keyed
+    // on property_id/subject_type/vendor_id, not on whether a SUBJECT is
+    // resolved specifically — and a name-match suggestion can only ever
+    // exist when property_id is ALREADY resolved (Mason's hard
+    // corroboration requirement), so needs_matching is correctly false
+    // here, same as any other property-only-resolved complaint today. The
+    // router.js test suite (complaint-tracking/test/run-tests.js) is where
+    // "a rejection leaves needs_matching=TRUE" is actually proven, against
+    // a complaint that was needs_matching=true to begin with.
+    assert.strictEqual(row.needs_matching, false, 'expected needs_matching to follow the existing, unchanged formula (property_id is resolved here, same as any other content-identified complaint)');
+  });
+});
+
+return { name: 'name-match build (PART 23) — sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
 })());
 
 // ─── Report ──────────────────────────────────────────────────────────────

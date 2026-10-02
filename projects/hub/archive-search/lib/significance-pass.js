@@ -87,6 +87,11 @@ const { toThreadShape, collectAllAddresses, threadFullText } = require('../../co
 const { matchParticipantsToRecords } = require('../../complaint-tracking/lib/subject-match');
 const { findPossibleDuplicate } = require('../../complaint-tracking/lib/duplicate-check');
 const { computeSilenceContext, lookupSingleDirectorOfOperations } = require('../../complaint-tracking/lib/process-pending-messages');
+// Added 2026-10-02 for severity tiering at creation time (createComplaintRow,
+// below) — the SAME rubric/parser/floor the retroactive batch tool
+// (lib/severity-batch.js) uses, never a second copy of the prompt. See that
+// module's own header for the full rubric/schema context.
+const severityRubric = require('./severity-rubric');
 // Added 2026-10-01 for the per-run failure alert below (sendSignificancePassAlertEmail)
 // — the SAME shared mailer significance-batch.js's sendCall2BatchCompletionNotification
 // already uses, required the identical way (as the module object, not destructured)
@@ -288,7 +293,44 @@ const IDENTIFICATION_BLOCK = `5. IDENTIFICATION — no participant email address
    tenant or owner by name alone. If you cannot confidently tell from the
    text itself, leave the relevant field null.`;
 
+// ============================================================
+// NAME_MATCH_SUGGESTIONS_ENABLED variant — added 2026-10-02, the narrower,
+// Mason-cleared, human-confirmed name-based-matching build (schema:
+// supabase/migrations/20261002060000_add_name_match_human_review_to_
+// complaints.sql; Peter's explicit approval for THIS version only, relayed
+// via Jarvis — full automatic resolution is OUT OF SCOPE, Mason said to
+// drop it outright). Shadow-mode gated the same way SEVERITY_LIVE_
+// PIPELINE_ENABLED already gates the severity-tier build below
+// (createComplaintRow) — NAME_MATCH_SUGGESTIONS_ENABLED must be the
+// literal string 'true', off by default, never wired to true anywhere in
+// this build.
+//
+// While the flag is OFF, buildCall1Prompt() sends IDENTIFICATION_BLOCK
+// above completely UNCHANGED, byte-for-byte — this variant is never
+// substituted in, and no third identification field is ever asked for or
+// parsed. This is still a citation-only request, same discipline as
+// property_text/vendor_text ("quote... do not guess an id") — it never
+// asks the model to resolve a tenant/owner's identity, only to cite text
+// that might name one. What happens with that quote afterward (ONLY ever
+// used if applyCall1Result() can ALSO corroborate it against a real
+// tenant/owner at a property this pipeline already resolved
+// deterministically from THIS SAME identification block — Mason's hard
+// narrowing condition, point 2) is entirely downstream of this prompt and
+// is not expressed here.
+// ============================================================
+const IDENTIFICATION_BLOCK_WITH_NAME = `5. IDENTIFICATION — no participant email address in this thread matched a
+   tenant, owner, or vendor on file. If the thread's own text clearly
+   names a specific PROPERTY (an address or property name) or a specific
+   VENDOR (a company name), quote the exact sentence or phrase that tells
+   you so — do not guess an id. If the thread's own text clearly names a
+   specific TENANT or OWNER, also quote the exact sentence or phrase that
+   names them — a citation only, never a resolved identity; do not guess
+   an id for a person either. If you cannot confidently tell from the
+   text itself, leave the relevant field null.`;
+
 function buildCall1Prompt({ threadText, addressMatched }) {
+  const nameMatchEnabled = process.env.NAME_MATCH_SUGGESTIONS_ENABLED === 'true';
+  const identificationBlock = nameMatchEnabled ? IDENTIFICATION_BLOCK_WITH_NAME : IDENTIFICATION_BLOCK;
   return `You are reviewing one email conversation from a Southern California property management company's (Rincon Management) shared-inbox archive, for a combined significance-tagging and triage pass.
 
 1. RESOLUTION STATUS — is this conversation open, resolved, or unknown? Judge only from what the thread's own content actually shows. Silence alone is not proof of resolution — do not infer "resolved" just because nobody has replied recently.
@@ -298,7 +340,7 @@ function buildCall1Prompt({ threadText, addressMatched }) {
 3. WHY — a short (1-2 sentence), plain-English explanation of what this conversation is actually about and why you chose that category and resolution status.
 
 ${TONE_BLOCK}
-${addressMatched ? '' : `\n${IDENTIFICATION_BLOCK}\n`}
+${addressMatched ? '' : `\n${identificationBlock}\n`}
 Conversation (oldest message first):
 """
 ${threadText}
@@ -309,7 +351,7 @@ Respond with EXACTLY one JSON object, no markdown fence, no explanation before o
  "category": one of ["routine_logistics","maintenance_standard","dispute","safety_issue","legal_exposure","accommodation_related","owner_instruction","other"],
  "why": "...",
  "tone_trend": "stable"|"escalating"|null${addressMatched ? '' : `,
- "identification": {"property_text": "quoted text"|null, "vendor_text": "quoted text"|null}`}}`;
+ "identification": {"property_text": "quoted text"|null, "vendor_text": "quoted text"|null${nameMatchEnabled ? ', "name_text": "quoted text"|null' : ''}}`}}`;
 }
 
 // ============================================================
@@ -364,6 +406,14 @@ function parseCall1Response(rawText, { addressMatched }) {
       vendor_text: typeof parsed.identification.vendor_text === 'string' && parsed.identification.vendor_text.trim()
         ? parsed.identification.vendor_text.trim() : null,
     };
+    // Gated the same way the prompt itself is gated, just above — defense
+    // in depth, not just "the model was never asked so it never answers."
+    // When the flag is off, identification.name_text is simply never set
+    // (undefined), so every downstream read of it is falsy and inert.
+    if (process.env.NAME_MATCH_SUGGESTIONS_ENABLED === 'true') {
+      identification.name_text = typeof parsed.identification.name_text === 'string' && parsed.identification.name_text.trim()
+        ? parsed.identification.name_text.trim() : null;
+    }
   }
 
   return {
@@ -630,17 +680,31 @@ function resolveOwnerInstructionNoteText({ category, owner_instruction_summary }
 }
 
 // ============================================================
-// Complaints-creation logic — the EXACT condition from the migration's own
-// header comment (20260913020000_..._schema.sql, "COMPLAINTS-CREATION
-// LOGIC"), copied verbatim, not re-derived. Applies identically to
-// live_pipeline and historical_backfill rows (spec Section 4's fix).
+// Complaints-creation logic — originally the EXACT condition from the
+// migration's own header comment (20260913020000_..._schema.sql,
+// "COMPLAINTS-CREATION LOGIC"). Extended 2026-10-02 (Mason's scoped
+// governance review of the severity-tier build, gap #1 of 3) to add
+// category === 'accommodation_related' to the unconditional-creation list,
+// same treatment legal_exposure and owner_instruction already got. Mason's
+// own words on why this is the most important of the three gaps: "nothing
+// downstream can protect a row that never gets created" — applySeverityFloor()
+// and the DB's complaints_no_issue_excludes_protected_signals CHECK both
+// already guard against an accommodation_related row being UNDER-severitied
+// once it exists, but neither one can do anything for a conversation that
+// never became a complaints row in the first place. Before this change, an
+// accommodation_related conversation with no escalation_signal, no
+// needs_human_call, and no owner_instruction_rejected answer (the common
+// case — a disability/accommodation request can be a live Fair Housing
+// matter without ever reading as "obstruction" to Call 2) created nothing
+// at all. Applies identically to live_pipeline and historical_backfill rows,
+// same as every other branch here (spec Section 4's fix).
 // ============================================================
 function shouldCreateComplaint({ escalation_signal, needs_human_call, owner_instruction_rejected, category }) {
   return (
     escalation_signal !== 'none' && escalation_signal != null
   ) || !!needs_human_call
     || owner_instruction_rejected !== null && owner_instruction_rejected !== undefined // IS DISTINCT FROM NULL — any answered value (true/false/'uncertain')
-    || category === 'legal_exposure' || category === 'owner_instruction';
+    || category === 'legal_exposure' || category === 'owner_instruction' || category === 'accommodation_related';
 }
 
 // ============================================================
@@ -760,6 +824,119 @@ function resolveUniqueMatch(citedText, directory, fieldNames) {
     fieldNames.some((f) => row[f] && needle.includes(String(row[f]).toLowerCase()))
   );
   return matches.length === 1 ? matches[0] : null;
+}
+
+// ============================================================
+// Name-based tenant/owner match-candidate lookup — Mason's narrower,
+// human-confirmed design (migration 20261002060000's own header; Peter's
+// explicit approval for THIS version only, relayed via Jarvis — full
+// automatic resolution is OUT OF SCOPE). Deliberately NOT resolveUniqueMatch()
+// above: that function silently collapses 2+ matches to "no match," which
+// is the exact opposite of what this feature needs — the whole point is
+// to SURFACE every real candidate to a human, never discard one. Scoped
+// ONLY to tenants/owners at the ALREADY-RESOLVED property_id (Mason's hard
+// narrowing condition, point 2) — never a portfolio-wide name search; that
+// scoping is what makes a real collision rare on this data in the first
+// place (the migration's own header cites 0 of 13 real tenant name-
+// collision groups sharing an active-lease property).
+//
+// Same citation-containment convention resolveUniqueMatch() already uses
+// (the quoted sentence CONTAINS the candidate's name, not the reverse) —
+// nameText is a full quoted sentence from the conversation; a person's
+// name is a short token expected to appear inside it.
+// ============================================================
+function namesPlausiblyMatch(citedText, candidateName) {
+  if (!citedText || !candidateName) return false;
+  const needle = citedText.toLowerCase();
+  const name = candidateName.trim().toLowerCase();
+  return !!name && needle.includes(name);
+}
+
+// Active tenants at a given property — leases.unit_id -> units.property_id,
+// leases.status = 'active' only (same "active lease only, never a stale or
+// expired one" discipline subject-match.js's own resolveActivePropertyForTenant()
+// already applies in the other direction). A tenant with no name on file
+// can't happen (tenants.first_name/last_name are both NOT NULL) so no null
+// filtering is needed here the way fetchOwnersAtProperty() needs it below.
+async function fetchActiveTenantsAtProperty(propertyId) {
+  const { data: units, error: unitErr } = await supabase.from('units').select('id').eq('property_id', propertyId);
+  if (unitErr) throw unitErr;
+  const unitIds = (units || []).map((u) => u.id);
+  if (!unitIds.length) return [];
+
+  const { data: leases, error: leaseErr } = await supabase.from('leases').select('tenant_id').in('unit_id', unitIds).eq('status', 'active');
+  if (leaseErr) throw leaseErr;
+  const tenantIds = [...new Set((leases || []).map((l) => l.tenant_id))];
+  if (!tenantIds.length) return [];
+
+  const { data: tenants, error: tenantErr } = await supabase.from('tenants').select('id, first_name, last_name').in('id', tenantIds);
+  if (tenantErr) throw tenantErr;
+  return tenants || [];
+}
+
+// Owners at a given property — property_owners carries NO uuid FKs (by
+// design, per that migration's own header: it joins by raw AppFolio id so
+// the nightly sync can write rows regardless of load order), so this goes
+// properties.id -> properties.appfolio_id -> property_owners.appfolio_
+// property_id -> property_owners.appfolio_owner_id -> owners.appfolio_id
+// -> owners.id. owners.name is nullable (appfolio_id is the only required
+// field on that table) — an owner with no name on file can never plausibly
+// match a quoted name, so namesPlausiblyMatch() above already returns
+// false for a null candidateName; no extra filtering needed here either.
+async function fetchOwnersAtProperty(propertyId) {
+  const { data: property, error: propErr } = await supabase.from('properties').select('appfolio_id').eq('id', propertyId).maybeSingle();
+  if (propErr) throw propErr;
+  if (!property || !property.appfolio_id) return [];
+
+  const { data: links, error: linkErr } = await supabase.from('property_owners').select('appfolio_owner_id').eq('appfolio_property_id', property.appfolio_id);
+  if (linkErr) throw linkErr;
+  const ownerAppfolioIds = [...new Set((links || []).map((l) => l.appfolio_owner_id))];
+  if (!ownerAppfolioIds.length) return [];
+
+  const { data: owners, error: ownerErr } = await supabase.from('owners').select('id, name').in('appfolio_id', ownerAppfolioIds);
+  if (ownerErr) throw ownerErr;
+  return owners || [];
+}
+
+/**
+ * The lookup itself — called from applyCall1Result() ONLY after
+ * property_text has already resolved to a real property_id via
+ * resolveUniqueMatch() (Mason's point 2: the name match must be
+ * corroborated by a property this pipeline can already resolve
+ * deterministically; never a bare, uncorroborated name guess).
+ *
+ * Returns null (no suggestion — caller writes nothing, complaint stays
+ * needs_matching = TRUE exactly as it behaves today) when there is no real
+ * candidate. Returns { subject_type, candidate_ids } — EVERY real
+ * candidate, never just the first/best one — when there is at least one.
+ *
+ * Judgment call, not spelled out in the task brief (flagged here, not
+ * silently assumed): if the quoted name plausibly matches BOTH a tenant
+ * AND an owner at this same property, this returns null rather than
+ * picking one type — the schema stores exactly one subject_type per
+ * suggestion row (complaints.suggested_subject_type), so a cross-type
+ * collision can't be expressed without silently dropping one type's real
+ * candidates. "No suggestion" is safer than a guess that discards real
+ * candidates, consistent with this feature's whole "never discard a real
+ * match" design intent.
+ * @returns {Promise<{subject_type:'tenant'|'owner', candidate_ids:string[]}|null>}
+ */
+async function findNameMatchCandidates({ nameText, propertyId }) {
+  const [tenants, owners] = await Promise.all([
+    fetchActiveTenantsAtProperty(propertyId),
+    fetchOwnersAtProperty(propertyId),
+  ]);
+
+  const tenantMatches = tenants.filter((t) => namesPlausiblyMatch(nameText, `${t.first_name} ${t.last_name}`));
+  const ownerMatches = owners.filter((o) => namesPlausiblyMatch(nameText, o.name));
+
+  if (tenantMatches.length && ownerMatches.length) {
+    console.error(`[significance-pass] name-match suggestion skipped: "${nameText}" plausibly matches both a tenant and an owner at property ${propertyId} — ambiguous across subject_type, not surfaced (see findNameMatchCandidates()'s own header comment).`);
+    return null;
+  }
+  if (tenantMatches.length) return { subject_type: 'tenant', candidate_ids: tenantMatches.map((t) => t.id) };
+  if (ownerMatches.length) return { subject_type: 'owner', candidate_ids: ownerMatches.map((o) => o.id) };
+  return null;
 }
 
 // ============================================================
@@ -1840,6 +2017,7 @@ async function processConversation({ mailbox_key, missive_conversation_id }, dis
     thread, threadText, rows, addressMatch,
     flaggedProtectedClass: applied.keywordCheck.flagged_protected_class, flaggedCategory: applied.keywordCheck.flagged_category,
     property_id: applied.property_id, vendor_id: applied.vendor_id,
+    nameMatchSuggestion: applied.nameMatchSuggestion,
   });
 }
 
@@ -1865,7 +2043,7 @@ async function processConversation({ mailbox_key, missive_conversation_id }, dis
 // significance-batch.js's own header for why (Peter reviews Call 1's real
 // results before Call 2 is ever submitted, deliberately, as its own later
 // batch).
-// @returns {Promise<{significanceId:string, property_id:string|null, vendor_id:string|null, keywordCheck:object}>}
+// @returns {Promise<{significanceId:string, property_id:string|null, vendor_id:string|null, keywordCheck:object, nameMatchSuggestion:object|null}>}
 // ============================================================
 async function applyCall1Result({ mailbox_key, missive_conversation_id, discoveryContext, call1, rows, addressMatch, threadText, sharedDirectories }) {
   const addressMatched = !!(addressMatch.subject_type || addressMatch.vendor_id);
@@ -1882,6 +2060,53 @@ async function applyCall1Result({ mailbox_key, missive_conversation_id, discover
     if (call1.identification.vendor_text) {
       const vendorMatch = resolveUniqueMatch(call1.identification.vendor_text, sharedDirectories.vendors, ['company_name']);
       if (vendorMatch) vendor_id = vendorMatch.id;
+    }
+  }
+
+  // ============================================================
+  // Name-match suggestion — added 2026-10-02, the narrower, Mason-cleared,
+  // human-confirmed name-based-matching build (see IDENTIFICATION_BLOCK_
+  // WITH_NAME's own header above for the full governance context). Shadow-
+  // mode gated — a complete no-op unless NAME_MATCH_SUGGESTIONS_ENABLED is
+  // the literal string 'true' (never wired to true anywhere in this
+  // build). Computed HERE (not inside createComplaintRow(), where the
+  // suggestion columns actually get written) because this is where
+  // property_id gets resolved from property_text — the corroborating
+  // property Mason's point 2 hard-requires MUST be this same, already-
+  // resolved value, never a second, independent resolution. The computed
+  // result travels through runCall2Phase() -> applyCall2Fields() exactly
+  // the same way property_id/vendor_id already do, and is only ever
+  // WRITTEN if/when createComplaintRow() actually creates a complaints row
+  // (a conversation that never becomes a complaint has nothing to attach a
+  // suggestion to, and gets none).
+  //
+  // Mason's point 2 — the hard narrowing condition — enforced structurally
+  // here, not just by convention: this only ever runs when property_id was
+  // JUST resolved from the AI's own content-extracted citation in THIS
+  // call (!addressMatched && property_id is set) — never when there is no
+  // property corroboration at all. If there is no property corroboration,
+  // nameMatchSuggestion stays null and no suggestion is ever computed or
+  // written — the complaint behaves exactly as it does today
+  // (needs_matching = TRUE).
+  // ============================================================
+  let nameMatchSuggestion = null;
+  if (process.env.NAME_MATCH_SUGGESTIONS_ENABLED === 'true' && !addressMatched && property_id && call1.identification.name_text) {
+    const candidates = await findNameMatchCandidates({ nameText: call1.identification.name_text, propertyId: property_id });
+    if (candidates) {
+      nameMatchSuggestion = {
+        suggested_subject_type: candidates.subject_type,
+        suggested_subject_name_text: call1.identification.name_text,
+        suggested_subject_candidate_ids: candidates.candidate_ids,
+        // Reuses CONTENT_PASS_VERSION, same versioning convention as every
+        // other extracted_by column this file writes — NOT bumped for this
+        // addition (see IDENTIFICATION_BLOCK_WITH_NAME's own header): while
+        // the flag is off, the prompt this constant stamps is byte-for-byte
+        // unchanged, so bumping it now would misrepresent every OTHER row's
+        // provenance as having changed when it hasn't. Whoever later turns
+        // the flag on should reconsider whether a bump is warranted then.
+        suggested_subject_extracted_by: CONTENT_PASS_VERSION,
+        suggested_subject_at: new Date().toISOString(),
+      };
     }
   }
 
@@ -1962,7 +2187,7 @@ async function applyCall1Result({ mailbox_key, missive_conversation_id, discover
     });
   }
 
-  return { significanceId: upserted.id, property_id, vendor_id, keywordCheck };
+  return { significanceId: upserted.id, property_id, vendor_id, keywordCheck, nameMatchSuggestion };
 }
 
 /**
@@ -2005,6 +2230,15 @@ async function retryCall2ForExistingRow(existingRow) {
     category, resolution_status, why, thread, threadText, rows, addressMatch,
     flaggedProtectedClass: keyword_check_flagged_protected_class, flaggedCategory: keyword_check_flagged_category,
     property_id: addressMatch.property_id || null, vendor_id: addressMatch.vendor_id || null,
+    // Known, deliberate scope limit — same class of gap this function's own
+    // header already documents for property_id/vendor_id above: a name-
+    // match suggestion can only ever be computed from a FRESH Call 1 result
+    // (it needs call1.identification.name_text, the AI's own quoted text
+    // from THIS call), and this retry path deliberately never re-runs Call
+    // 1. A complaint created via this retry path simply never gets a
+    // name-match suggestion — not wrong, just less enriched, exactly the
+    // same honest trade-off already accepted here for property/vendor.
+    nameMatchSuggestion: null,
   });
 }
 
@@ -2021,7 +2255,7 @@ async function retryCall2ForExistingRow(existingRow) {
 async function runCall2Phase({
   significanceId, mailbox_key, missive_conversation_id, discoveryContext,
   category, resolution_status, why, thread, threadText, rows, addressMatch,
-  flaggedProtectedClass, flaggedCategory, property_id, vendor_id,
+  flaggedProtectedClass, flaggedCategory, property_id, vendor_id, nameMatchSuggestion,
 }) {
   // Call 2 gate — spec Section 4, deliberately biased generous.
   const gate = needsCall2({ category, resolution_status });
@@ -2042,7 +2276,7 @@ async function runCall2Phase({
   return applyCall2Fields({
     significanceId, mailbox_key, missive_conversation_id, discoveryContext,
     category, why, call2Result, rows, addressMatch,
-    flaggedProtectedClass, flaggedCategory, property_id, vendor_id,
+    flaggedProtectedClass, flaggedCategory, property_id, vendor_id, nameMatchSuggestion,
   });
 }
 
@@ -2074,7 +2308,7 @@ async function runCall2Phase({
 async function applyCall2Fields({
   significanceId, mailbox_key, missive_conversation_id, discoveryContext,
   category, why, call2Result, rows, addressMatch,
-  flaggedProtectedClass, flaggedCategory, property_id, vendor_id,
+  flaggedProtectedClass, flaggedCategory, property_id, vendor_id, nameMatchSuggestion,
 }) {
   let call2Fields;
   if (call2Result.ok) {
@@ -2150,6 +2384,13 @@ async function applyCall2Fields({
         keywordCheck: { flagged_protected_class: flaggedProtectedClass, flagged_category: flaggedCategory },
         property_id, vendor_id, addressMatch,
         blockedSinceIso: lastMessageDate || new Date().toISOString(),
+        // Only ever relevant on this branch — a BRAND NEW complaints row.
+        // The idempotency-reuse branch just above (existingComplaint) never
+        // gets a suggestion attached here even if it has none yet — not
+        // asked for by this build, and consistent with every other field
+        // on that branch (property_id/vendor_id/category/etc. are also
+        // never re-applied onto an existing row there).
+        nameMatchSuggestion,
       });
     }
     call2Fields.complaint_id = complaintId;
@@ -2246,7 +2487,7 @@ async function findExistingComplaintForConversation(missive_conversation_id) {
 // only (complaints_config_required_unless_held's historical exemption);
 // DO assignment is live_pipeline only (spec Section 6's hard gate).
 // ============================================================
-async function createComplaintRow({ mailbox_key, missive_conversation_id, discoveryContext, category, why, call2Fields, keywordCheck, property_id, vendor_id, addressMatch, blockedSinceIso }) {
+async function createComplaintRow({ mailbox_key, missive_conversation_id, discoveryContext, category, why, call2Fields, keywordCheck, property_id, vendor_id, addressMatch, blockedSinceIso, nameMatchSuggestion = null }) {
   // Real pilot bug found live 2026-09-29: this row never set `description`
   // at all, so every AI-created complaint rendered with no visible text
   // (dashboard has no fallback) and could never match router.js's own
@@ -2309,6 +2550,86 @@ async function createComplaintRow({ mailbox_key, missive_conversation_id, discov
     else insertRow.needs_human_call = true;
   }
 
+  // ============================================================
+  // SEVERITY TIERING AT CREATION — added 2026-10-02 (Jarvis-relayed build
+  // task; schema: supabase/migrations/20261002010000_add_severity_tier_to_
+  // complaints.sql and .../20261002020000_add_no_issue_protected_signal_
+  // guard_to_complaints.sql, Neo). Feature-flagged OFF by default
+  // (SEVERITY_LIVE_PIPELINE_ENABLED must be the literal string 'true') —
+  // Asimov/Mason's review of the accommodation/protected-class interaction
+  // is still in progress (relayed via Jarvis). While unset/false, every
+  // newly created row's severity_tier/severity_rationale/severity_assessed_at/
+  // severity_rubric_version stays NULL, byte-for-byte the same insert this
+  // function has always done — the flag's whole job is to make "not yet
+  // built" and "built but not yet activated" the same observable behavior
+  // until Mason clears this.
+  //
+  // Placed HERE — after the live_pipeline block above, not earlier — so the
+  // floor (applySeverityFloor) sees insertRow.needs_human_call AFTER its own
+  // possible mutation just above (`else insertRow.needs_human_call = true`
+  // on a failed DO lookup). Using the pre-mutation value would be exactly
+  // the kind of stale-input gap Asimov's review named as unacceptable for
+  // this specific field (20261002020000's own header).
+  //
+  // A classification failure (no ANTHROPIC_API_KEY, a timeout, 3 unparseable
+  // retries — see classifySeverity()'s own contract) NEVER blocks or fails
+  // complaint creation — it only leaves severity_tier NULL ("not yet
+  // assessed"), exactly the same state a row would be in if this feature
+  // were still off. The retroactive batch tool (lib/severity-batch.js) will
+  // pick up any row left NULL here on its own next run.
+  // ============================================================
+  let severityFields = { severity_tier: null, severity_rationale: null, severity_assessed_at: null, severity_rubric_version: null };
+  let severityFloored = false;
+  if (process.env.SEVERITY_LIVE_PIPELINE_ENABLED === 'true' && description) {
+    try {
+      const raw = await severityRubric.classifySeverity(description);
+      if (raw) {
+        const floored = severityRubric.applySeverityFloor({
+          tier: raw.tier,
+          why: raw.why,
+          needs_human_call: insertRow.needs_human_call,
+          category: insertRow.category,
+          flagged_protected_class: insertRow.flagged_protected_class,
+          // Added 2026-10-02 (Mason governance review, gap #2) — same
+          // insertRow field the floor's other inputs already read from,
+          // already set at line ~2282 from call2Fields.owner_instruction_
+          // rejected (a string 'true'/'false'/'uncertain' or null), so no
+          // extra read or re-derivation is needed here.
+          owner_instruction_rejected: insertRow.owner_instruction_rejected,
+        });
+        severityFloored = floored.floored;
+        severityFields = {
+          severity_tier: floored.tier,
+          severity_rationale: floored.why,
+          severity_assessed_at: new Date().toISOString(),
+          severity_rubric_version: severityRubric.SEVERITY_RUBRIC_VERSION,
+        };
+      } else {
+        console.error('[significance-pass] severity classification failed at creation time (3 retries exhausted) — severity_tier left NULL, picked up later by the retroactive batch tool.');
+      }
+    } catch (err) {
+      console.error('[significance-pass] severity classification threw at creation time:', err.message, '— severity_tier left NULL, picked up later by the retroactive batch tool.');
+    }
+  }
+  Object.assign(insertRow, severityFields);
+
+  // ============================================================
+  // NAME-MATCH SUGGESTION — added 2026-10-02, the narrower, Mason-cleared,
+  // human-confirmed name-based-matching build. Already fully computed and
+  // gated by applyCall1Result() (shadow-mode flag, property corroboration,
+  // real-candidate check all happened there) — nothing left to decide
+  // here except "attach it to the row being created, or don't." Never
+  // writes subject_type/subject_id (Mason's hard "full automatic
+  // resolution is OUT OF SCOPE" rule) — only the suggested_subject_*
+  // columns, which a human later reviews via the dedicated confirm/reject
+  // routes in complaint-tracking/router.js. null (the default) means
+  // either the flag is off, there was no property corroboration, or no
+  // real candidate was found — insertRow simply never gains these keys,
+  // same "undefined key is a no-op" behavior severityFields above relies
+  // on when its own feature flag is off.
+  // ============================================================
+  if (nameMatchSuggestion) Object.assign(insertRow, nameMatchSuggestion);
+
   const { data: inserted, error } = await supabase.from('complaints').insert(insertRow).select().single();
   if (error) throw error;
 
@@ -2318,6 +2639,20 @@ async function createComplaintRow({ mailbox_key, missive_conversation_id, discov
     risk_level: 'medium', privacy_category: 'collection',
     details: { category: inserted.category, escalation_signal: inserted.escalation_signal, discovery_context: discoveryContext, source_missive_conversation_id: missive_conversation_id },
   });
+
+  if (inserted.severity_tier != null) {
+    await writeAuditLog({
+      action: 'complaint_tracking.severity_assessed', entity_type: 'complaint', entity_id: inserted.id,
+      actor_type: 'ai_agent', actor_id: CONTENT_PASS_VERSION, property_id: inserted.property_id,
+      risk_level: 'medium', privacy_category: 'processing',
+      details: {
+        severity_tier: inserted.severity_tier,
+        severity_rationale: inserted.severity_rationale,
+        severity_rubric_version: inserted.severity_rubric_version,
+        floored: severityFloored,
+      },
+    });
+  }
 
   return inserted.id;
 }
@@ -2572,5 +2907,11 @@ module.exports = {
   significancePassFailureCount,
   significancePassAlertShouldFire,
   sendSignificancePassAlertEmail,
+  // Added 2026-10-02 for the narrower, Mason-cleared, human-confirmed
+  // name-based-matching build (migration 20261002060000) — exported for
+  // direct unit tests, same "pure helper gets its own direct test" style
+  // as resolveUniqueMatch's neighbors above.
+  namesPlausiblyMatch,
+  findNameMatchCandidates,
   _setSupabaseClientForTesting,
 };

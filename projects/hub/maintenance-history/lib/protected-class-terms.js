@@ -36,9 +36,19 @@
  * audit_log.actor_version for every keyword-layer exclusion (see
  * extract-claims.js and router.js), so a compliance review can always tell
  * which version of this list produced a given flag.
+ *
+ * v2 (archive-search-technical-spec.md, "Resolving Finding 4"): adds the
+ * discrimination_general category below. No standalone discriminat* trigger
+ * existed anywhere in this file before — only the phrase 'age
+ * discrimination' under the age category. Uses this file's own existing,
+ * unchanged compilation mechanism (every term already gets a \b-bounded
+ * regex automatically via FLAT_TERMS) — no function code changed, only a
+ * new data entry, per this file's own stated design stance (quoted above):
+ * "this list is intentionally broad/recall-oriented... When in doubt, this
+ * list errs toward flagging."
  */
 
-const TERMS_VERSION = 'protected-class-terms-v1';
+const TERMS_VERSION = 'protected-class-terms-v2';
 
 // Each category maps to an array of lowercase terms/phrases. Matching is
 // case-insensitive, whole-word-ish (see matchesTerm below) against the
@@ -101,6 +111,15 @@ const CATEGORIES = {
   genetic_information: [
     'genetic information', 'genetic testing', 'genetic condition',
     'family medical history',
+  ],
+  // v2 addition (archive-search-technical-spec.md, Finding 4) — a bare
+  // discrimination accusation, in property-management correspondence, is in
+  // practice essentially never an unrelated use of the word. Kept as its own
+  // category (not folded into an existing one) since it can co-occur with,
+  // or stand apart from, any specific protected-class term already listed.
+  discrimination_general: [
+    'discriminate', 'discriminated', 'discriminating', 'discriminates',
+    'discrimination', 'discriminatory',
   ],
 };
 

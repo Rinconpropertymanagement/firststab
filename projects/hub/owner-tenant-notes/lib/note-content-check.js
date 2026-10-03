@@ -69,4 +69,59 @@ async function checkManualNoteContent(noteText) {
   };
 }
 
-module.exports = { checkManualNoteContent };
+/**
+ * checkAIProposedNoteContent — sibling to checkManualNoteContent above, for
+ * the ai_proposed creation path (spec Section 5: "for ai_proposed notes,
+ * the drafting model self-reports via the same modelFlag/modelCategory
+ * convention extract-claims.js already uses" — i.e. the CALLER, the future
+ * AI pipeline that drafted note_text in the first place, supplies its own
+ * Layer 2 judgment here; this function does not call classifyManualNote or
+ * make any Claude call of its own, unlike checkManualNoteContent).
+ *
+ * Layer 1 (protected-class-terms.js) still runs independently and
+ * unconditionally here, regardless of what the caller self-reports — same
+ * defense-in-depth discipline as the manual path and as extract-claims.js
+ * itself (whose own prompt says the model's self-flag is "independent of,
+ * and in addition to, an automated keyword scan that also runs on your
+ * output"): never trust a single layer, even a self-report from the model
+ * that drafted the content being checked.
+ *
+ * Synchronous — there is no I/O here (no Claude call), unlike
+ * checkManualNoteContent, which awaits classifyManualNote.
+ *
+ * @param {string} noteText
+ * @param {{ modelFlag?: boolean, modelCategory?: string|null }} [selfReport] - the calling pipeline's own Layer-2 judgment. Both fields optional: a caller that has no self-report of its own (or omits it) still gets a real answer, from Layer 1 alone.
+ * @returns {{
+ *   flagged_protected_class: boolean,
+ *   flagged_category: string|null,
+ *   matched_layer: 'keyword'|'model'|'keyword+model'|null,
+ *   terms_version: string,
+ * }}
+ */
+function checkAIProposedNoteContent(noteText, selfReport) {
+  const layer1 = scanText(noteText);
+  const layer2Hit = !!(selfReport && selfReport.modelFlag);
+  const flagged = layer1.flagged || layer2Hit;
+
+  if (!flagged) {
+    return { flagged_protected_class: false, flagged_category: null, matched_layer: null, terms_version: TERMS_VERSION };
+  }
+
+  const categories = new Set(layer1.categories);
+  if (layer2Hit && selfReport.modelCategory) categories.add(String(selfReport.modelCategory).trim());
+  else if (layer2Hit) categories.add('model_judgment_unspecified');
+
+  let matched_layer;
+  if (layer1.flagged && layer2Hit) matched_layer = 'keyword+model';
+  else if (layer1.flagged) matched_layer = 'keyword';
+  else matched_layer = 'model';
+
+  return {
+    flagged_protected_class: true,
+    flagged_category: Array.from(categories).join(', '),
+    matched_layer,
+    terms_version: TERMS_VERSION,
+  };
+}
+
+module.exports = { checkManualNoteContent, checkAIProposedNoteContent };

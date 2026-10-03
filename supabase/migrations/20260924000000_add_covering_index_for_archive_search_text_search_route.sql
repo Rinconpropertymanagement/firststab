@@ -1,0 +1,314 @@
+-- ============================================================
+-- Migration: 20260924000000_add_covering_index_for_archive_search_text_search_route
+-- Created:   2026-09-24
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live production bug: GET /api/archive-search/search
+-- (router.js, ~line 427-480) returns 500 on every query — confirmed live,
+-- Postgres 57014 (statement timeout), including on "tenant," an extremely
+-- common word in this corpus. The exact query:
+--
+--   SELECT id, mailbox_key, missive_conversation_id, subject, from_address,
+--          delivered_at, body_text
+--   FROM missive_message_intake_search_safe
+--   WHERE search_document @@ websearch_to_tsquery('english', :q)
+--   ORDER BY delivered_at DESC
+--   LIMIT 51 OFFSET :offset;
+--
+-- ============================================================
+-- REVISION NOTE — what changed from this file's first draft, and why
+-- ============================================================
+-- The first draft of this migration could not find
+-- 20260923000000_archive_search_flagged_release_gate_removal.sql
+-- anywhere in this checkout and, on that basis, built the fix against
+-- the view's OLD predicate (screening_result = 'clear' only), while
+-- flagging the discrepancy rather than trusting an unverified claim.
+--
+-- That file is real. It lives on a separate branch, feature/archive-
+-- search-flagged-release-gate-removal, that this checkout never merged
+-- — confirmed directly this time, not re-asserted: `git log` on that
+-- branch shows it as a real commit (b5fe4ae, Peter McKenzie,
+-- 2026-09-23 21:31:57), and that same commit carries all six governance
+-- documents it cites as tracked files (compliance/archive-search-
+-- flagged-release-attorney-question.md, -outside-counsel-opinion.md,
+-- -asimov-confirmation.md, -mason-confirmation.md, -gate-removal-asimov-
+-- confirmation.md, -gate-removal-mason-confirmation.md), plus the spec
+-- and the owner-risk-acceptance. This isn't a second unverified claim
+-- layered on the first — the branch, the commit, the SQL, and the
+-- governance trail all independently check out.
+--
+-- Real, live current state of missive_message_intake_search_safe
+-- (Peter, this session, re-confirmed directly against production):
+--   total visible: 255,280 | clear: 254,494 | flagged_protected_class: 786
+-- Branch 1's predicate is genuinely `screening_result IN ('clear',
+-- 'flagged_protected_class')` today, not `= 'clear'`. 786 rows is ~0.3%
+-- of the total, nowhere near a doubling — the "roughly doubled+" framing
+-- in this migration's original task brief was wrong and is not relied on
+-- here or in this file's diagnosis. My own independent alternate
+-- diagnosis (a common search term forcing a full sort before LIMIT,
+-- precedented by 20260913010000's "maintenance"/"rent" findings) still
+-- stands as the real mechanism — this revision targets it against the
+-- CORRECT current WHERE clause instead of the old one.
+--
+-- Practical consequence for Peter: production's live schema is already
+-- ahead of this checkout's migration history by one file. This
+-- migration is written to apply cleanly on top of that live state
+-- (it does not re-create or depend on anything from 20260923000000
+-- beyond the view definition already being live), but the
+-- feature/archive-search-flagged-release-gate-removal branch should
+-- still get merged so this checkout's migration history matches
+-- production — flagging this, not fixing it here, it's a branch-
+-- management decision, not a schema one.
+--
+-- ============================================================
+-- ROOT CAUSE — the real, verifiable mechanism
+-- ============================================================
+-- 20260913010000_increase_search_document_statistics_target.sql already
+-- diagnosed the shape of this bug, live, with real TARS timings: a
+-- common search term ("maintenance," 24% of rows) took 4.9-8.0s on
+-- EVERY call; a rare term ("thermostat," 0.5%) was consistently
+-- 150-435ms. Root cause, per that migration's own header: no index in
+-- this schema lets Postgres get "rows matching this tsquery" AND "rows
+-- already in delivered_at order" from one structure. For a common term,
+-- the planner can either (A) use the GIN index on search_document to
+-- find every match, then SORT that entire (large, wide) match set by
+-- delivered_at before LIMIT can apply, or (B) walk an index already in
+-- delivered_at order and Filter each candidate by the tsquery, stopping
+-- once enough matches are found. That migration raised search_document's
+-- statistics target — real and additive for a borderline case, but its
+-- own "WHAT THIS DOES NOT CLAIM" section says plainly: better statistics
+-- can only route the planner onto the cheaper of the two EXISTING
+-- strategies more reliably, not manufacture a strategy that doesn't
+-- exist. "Tenant" — reproducing 500s on every attempt per this incident
+-- — is a highly plausible case of Strategy A genuinely being what the
+-- cost model favors: very likely an even larger share of this corpus
+-- than "maintenance" or "rent," both already shown broken/unreliable at
+-- their measured selectivity.
+--
+-- Nothing since 20260913010000 closes this gap for THIS route.
+-- 20260917010000 added idx_missive_message_intake_clear_delivered_at_id
+-- (delivered_at, id) WHERE screening_result = 'clear' — the right shape
+-- (already in delivered_at order) — but for a different query (the
+-- significance driver's sinceDate path, no full-text predicate at all),
+-- with no search_document column, and scoped to a predicate that is now
+-- ALSO stale (see below).
+--
+-- A second, newly-discovered fact, worth flagging plainly rather than
+-- silently working around: 20260923000000's view change means every
+-- existing partial index on this table scoped to `WHERE screening_result
+-- = 'clear'` alone — idx_missive_message_intake_clear_id (20260914000000),
+-- idx_missive_message_intake_clear_delivered_at_id (20260917010000), and
+-- idx_missive_message_intake_clear_id_covering (20260922010000) — is now
+-- UNDER-SCOPED relative to Branch 1's real predicate: none of them can
+-- serve a plan that needs flagged_protected_class rows too, since a
+-- partial index can only be used when the query's condition provably
+-- implies the index's own predicate, and `screening_result IN ('clear',
+-- 'flagged_protected_class')` does not imply `screening_result =
+-- 'clear'`. This does not corrupt results (Postgres never returns wrong
+-- rows over a mismatched partial index — it simply can't use it, and
+-- falls back to a slower plan), but it is a real, live performance
+-- regression risk for every OTHER route built against those three
+-- indexes — most notably the significance driver. Flagged here because
+-- it was found while diagnosing this bug, not because this migration
+-- fixes it — that is a separate, deliberate follow-up (see note at the
+-- bottom of this file), out of scope for a same-day fix already
+-- carrying real risk of its own.
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- A new partial, covering B-tree index, scoped to Branch 1's REAL,
+-- CURRENT predicate — `screening_result IN ('clear',
+-- 'flagged_protected_class')`, not the old 'clear'-only one — keyed
+-- (delivered_at, id) so Postgres can walk it backward for `ORDER BY
+-- delivered_at DESC` (a plain ASC btree serves DESC order via a
+-- backward scan at equal cost — no separate DESC index needed), with
+-- search_document and the route's other SELECT-list columns as INCLUDE
+-- columns:
+--
+--   CREATE INDEX CONCURRENTLY idx_missive_message_intake_search_delivered_at_covering
+--     ON missive_message_intake (delivered_at, id)
+--     INCLUDE (search_document, mailbox_key, missive_conversation_id)
+--     WHERE screening_result IN ('clear', 'flagged_protected_class');
+--
+-- With search_document available directly in the index, Postgres can
+-- walk this index BACKWARD (already in the order the route asks for),
+-- evaluate `search_document @@ tsquery(...)` as an in-scan Filter on the
+-- INCLUDE column with NO heap visit for non-matching rows (a genuine
+-- Index Only Scan, once VACUUM below marks the table all-visible), and
+-- stop the moment it has OFFSET + LIMIT + 1 matches — regardless of how
+-- common the term is, because it never has to materialize or sort the
+-- full match set. A heap visit is still needed, unavoidably, for the
+-- handful of rows that actually make it onto the page (subject/
+-- from_address/body_text — impractical to index) — bounded by page
+-- size, not match count, which is the entire fix.
+--
+-- The escalations and flagged_suppressions exclusions (both NOT EXISTS
+-- correlated subqueries in the live view) are unaffected by this index
+-- either way — small, separately-indexed antijoins evaluated per
+-- candidate row, same cost regardless of how Branch 1 itself is scanned.
+--
+-- Not touching, dropping, or renaming idx_missive_message_intake_clear_id,
+-- idx_missive_message_intake_clear_delivered_at_id, or idx_missive_
+-- message_intake_clear_id_covering — all three stay in place, unmodified.
+-- This migration is scoped to the search route's live production outage;
+-- re-scoping the significance driver's own indexes to the new predicate
+-- is a real, separate decision (see bottom note).
+--
+-- Honest tradeoff, not glossed over: storing search_document a THIRD
+-- time (base column, the existing unrestricted GIN index, now this
+-- covering index) meaningfully increases this index's on-disk size —
+-- tsvector entries are not small, and this now covers ~255,000+ rows
+-- (both clear and flagged_protected_class, a slightly larger population
+-- than any prior single-predicate index on this table). That cost buys
+-- unconditional correctness-of-plan (no dependency on the planner
+-- guessing right) for a route that is completely broken in production
+-- right now.
+--
+-- ****************************************************************
+-- RUN EACH STATEMENT BELOW ONE AT A TIME, ON ITS OWN, IN SUPABASE'S SQL
+-- EDITOR. CREATE INDEX CONCURRENTLY and VACUUM both fail with ERROR
+-- 25001 ("cannot run inside a transaction block") the moment a second
+-- statement is pasted alongside either of them — this table's own
+-- migration history (20260910030000, 20260912020000, 20260922010000)
+-- has hit this exact failure mode from a whole-file paste more than
+-- once. Do not paste this file as one script.
+-- ****************************************************************
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DOES NOT CLAIM
+-- ============================================================
+-- NOT independently confirmed with a real EXPLAIN ANALYZE plan — same
+-- standing constraint every migration on this table documents (no
+-- DATABASE_URL/psql in this environment, PostgREST's EXPLAIN feature
+-- confirmed disabled by 20260914000000's live 406 test, no SQL-execution
+-- RPC anywhere in this codebase). The reasoning above is HIGH confidence
+-- on documented Postgres behavior (a GIN index cannot supply rows in an
+-- unrelated column's sort order; INCLUDE columns are usable as Index
+-- Only Scan filters without a heap visit once the visibility map is
+-- current) and on this table's own already-measured symptom data
+-- (20260913010000's live timings). It is NOT confirmed that "tenant"
+-- specifically has the same profile as "maintenance"/"rent" — plausible
+-- given this corpus, not measured. Peter/TARS should run the EXPLAIN
+-- below, and re-run the real /api/archive-search/search?q=tenant call,
+-- after applying this.
+--
+-- Also does not resolve the open risk 20260913010000 already named
+-- honestly: an OR query (websearch_to_tsquery supports explicit "OR")
+-- can still union two large match sets into a worse candidate set than
+-- either term alone. This index makes even that case bounded-scan-able
+-- rather than sort-everything, which should still help substantially,
+-- but it was not specifically measured.
+--
+-- Does NOT fix the significance driver's own indexes' now-stale
+-- 'clear'-only scoping (see ROOT CAUSE above) — flagged, not fixed,
+-- here.
+--
+-- ============================================================
+-- EXPLAIN ANALYZE — copy-pasteable, read-only, safe to run BEFORE and
+-- AFTER applying this migration, in Supabase's SQL Editor.
+-- ============================================================
+--
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, subject, from_address, delivered_at, body_text
+--   FROM missive_message_intake_search_safe
+--   WHERE search_document @@ websearch_to_tsquery('english', 'tenant')
+--   ORDER BY delivered_at DESC
+--   LIMIT 51 OFFSET 0;
+--   ROLLBACK;
+--
+-- What to look for:
+--   - BEFORE: expect a "Sort" node (Sort Key: delivered_at) whose "actual
+--     rows" is large (tens of thousands), fed by a Bitmap Heap Scan via
+--     the search_document GIN index — confirms Strategy A directly.
+--   - AFTER: expect "Index Only Scan Backward using idx_missive_message_
+--     intake_search_delivered_at_covering" (or "Index Scan Backward" if
+--     some pages aren't yet all-visible), no Sort node, a low/zero "Heap
+--     Fetches," and Execution Time in the tens of milliseconds rather
+--     than seconds.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. Adds one index and runs
+--       VACUUM (ANALYZE) — no row, column, or constraint touched. A
+--       partial index whose predicate matches Branch 1's current WHERE
+--       clause exactly cannot change which rows any query returns.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes — read by every archive-search
+--       route via missive_message_intake_search_safe, and by
+--       screening-pass.js directly. Adding an index changes no reader's
+--       or writer's behavior beyond query plans; CONCURRENTLY takes no
+--       lock that blocks ordinary reads or writes. VACUUM (non-FULL)
+--       blocks neither reads nor writes.
+--   [x] Additive or destructive? Fully additive — one new index, one
+--       VACUUM (routine maintenance). Nothing removed or restructured;
+--       the three now-under-scoped 'clear'-only indexes are left exactly
+--       as they are.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here carries. Mitigated by: this cannot alter query results
+--       (see above); it is trivially reversible (DROP INDEX); and the
+--       EXPLAIN protocol above lets Peter/TARS verify the real, live
+--       plan and timing before and after, on real data.
+--   [x] Governance go-ahead needed? No — this migration only changes
+--       HOW FAST an already-live, already-governance-cleared WHERE
+--       clause is evaluated (the clearance for `screening_result IN
+--       ('clear', 'flagged_protected_class')` itself is 20260923000000's
+--       own, already obtained per its header — outside counsel, Asimov,
+--       Mason, Peter, all 2026-09-23, independently confirmed present on
+--       that branch this session). This file adds no column, no table
+--       with new access, and changes which rows no person or AI agent
+--       can see — identical query results before and after, only speed.
+--       Not a compliance build, same classification every prior
+--       performance migration on this view/table already carries.
+-- ============================================================
+
+-- STATEMENT 1 of 2 — run alone:
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_missive_message_intake_search_delivered_at_covering
+  ON missive_message_intake (delivered_at, id)
+  INCLUDE (search_document, mailbox_key, missive_conversation_id)
+  WHERE screening_result IN ('clear', 'flagged_protected_class');
+
+-- STATEMENT 2 of 2 — run alone, AFTER statement 1 completes. Marks the
+-- table's visibility map current so the new index can serve genuine
+-- Index Only Scans immediately rather than waiting on the next
+-- autovacuum cycle (same reasoning and same "cannot share a transaction
+-- with CREATE INDEX CONCURRENTLY" restriction as 20260922010000):
+--
+--   VACUUM (ANALYZE) missive_message_intake;
+--
+-- (COMMENT ON INDEX deliberately omitted from this file, same reasoning
+-- 20260912020000's header already gives: pairing it with a CONCURRENTLY
+-- statement risks ERROR 25001 the moment both land in one paste. The
+-- full reasoning above already documents what a COMMENT would have
+-- carried.)
+
+-- ============================================================
+-- FOLLOW-UP WORTH A SEPARATE MIGRATION, NOT BUNDLED HERE
+-- ============================================================
+-- The significance driver (lib/significance-pass.js, the RPC in
+-- 20260921020000) still reads through indexes scoped to `screening_result
+-- = 'clear'` only (idx_missive_message_intake_clear_id and its covering
+-- upgrade). Since 20260923000000, missive_message_intake_search_safe's
+-- Branch 1 also includes flagged_protected_class rows, which those
+-- indexes cannot serve — the driver's queries will fall back to a
+-- slower plan for any page whose candidate set includes flagged rows,
+-- and are worth re-testing live, not assumed fine. Real, not
+-- hypothetical — surfaced here because it was found while diagnosing
+-- this bug — but deliberately not fixed in this file: this migration is
+-- already a same-day production-outage fix, and widening the
+-- significance driver's own indexes is a distinct, deliberate change
+-- that deserves its own EXPLAIN-verified migration rather than being
+-- folded in under time pressure.
+-- ============================================================
+
+-- ============================================================
+-- ROLLBACK
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_message_intake_search_delivered_at_covering;
+-- (The VACUUM step is routine maintenance — nothing to roll back for it.)
+-- ============================================================

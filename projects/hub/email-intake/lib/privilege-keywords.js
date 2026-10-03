@@ -21,9 +21,29 @@
  * (see privilege-filter.js — this module only scans one string at a time;
  * the caller is responsible for checking every message, not just the
  * first).
+ *
+ * v4 (archive-search-technical-spec.md, "Resolving Finding 4"): two fixes,
+ * both scoped entirely inside this file — privilege-filter.js needs NO
+ * changes for either.
+ *   1. 'lawyer' added to HOLD_TERMS, alongside the existing 'attorney'.
+ *   2. A new co-occurrence check (HOLD_COOCCURRENCE_PAIRS, below) closes
+ *      the word-order gap in the three Fair Housing complaint phrases
+ *      ('fair housing complaint', 'hud complaint', 'crd complaint') — see
+ *      that constant's own comment for why a flat phrase list can't fix
+ *      this in general.
+ *
+ * v5 (TARS/Judge bug fix, 2026-09-10): the v4 co-occurrence complaint-word
+ * regex was built on the noun stem "complaint" with suffixes (s|ed|ing),
+ * which only ever produces "complaint"/"complaints" plus the non-words
+ * "complainted"/"complainting" — it never matched the actual verb forms
+ * people use in real correspondence ("complain," "complains,"
+ * "complained," "complaining"). Real sentence that was missed: "She
+ * complained to the Civil Rights Department about how she was treated."
+ * Fixed by building the regex on the verb stem "complain" instead, with
+ * both verb and noun suffixes.
  */
 
-const TERMS_VERSION = 'privilege-keywords-v3';
+const TERMS_VERSION = 'privilege-keywords-v5';
 
 // Tier 1 — TAG. Routine code-enforcement / regulatory-agency correspondence,
 // plus bare litigation/lawsuit/small-claims mentions with no other signal.
@@ -47,12 +67,32 @@ const TAG_TERMS = [
 // demand letters, formal fair-housing complaints.
 const HOLD_TERMS = [
   'attorney',
+  'lawyer',
   'counsel',
   'subpoena',
   'demand letter',
   'fair housing complaint',
   'hud complaint',
   'crd complaint',
+];
+
+// Co-occurrence check — a new match type, independent of the flat term
+// list above, added for v4 (archive-search-technical-spec.md, "Resolving
+// Finding 4"). Today 'fair housing complaint', 'hud complaint', and 'crd
+// complaint' are exact-phrase matches only — "a complaint about fair
+// housing" or "filed a complaint with HUD" matches none of them, and no
+// amount of adding more literal phrases closes that gap in general (word
+// order has too many real permutations to enumerate). Fires HOLD when a
+// regulator/subject-matter token and a complaint-word both appear
+// ANYWHERE in the same text, regardless of order or distance — two
+// independent regex tests, ANDed, not one .*-spanning regex (which would
+// risk catastrophic backtracking over a full message body).
+const HOLD_COOCCURRENCE_PAIRS = [
+  {
+    id: 'fair_housing_complaint_cooccurrence',
+    a: /\b(fair housing|housing discrimination|hud|department of housing and urban development|crd|civil rights department|dfeh)\b/i,
+    b: /\bcomplain(?:s|ed|ing|t|ts)?\b/i,
+  },
 ];
 
 function escapeRegex(s) {
@@ -99,11 +139,26 @@ function scanForTagKeywords(text) {
 }
 
 /**
- * Scans a single piece of text for Tier 2 (hold) trigger terms.
+ * Scans a single piece of text for Tier 2 (hold) trigger terms — the flat
+ * HOLD_TERMS list PLUS the HOLD_COOCCURRENCE_PAIRS check above. A
+ * co-occurrence hit adds a synthetic entry (its `id`, e.g.
+ * 'fair_housing_complaint_cooccurrence') to matchedTerms alongside any
+ * literal-phrase matches, so callers (and audit_log) can tell which
+ * mechanism fired. checkThread()/checkMessage() in privilege-filter.js
+ * need NO changes — they only ever call scanForHoldKeywords(text) and read
+ * .matched/.matchedTerms, both still present in the same shape.
  * @returns {{ matched: boolean, matchedTerms: string[] }}
  */
 function scanForHoldKeywords(text) {
-  return scan(text, COMPILED_HOLD_TERMS);
+  const normalized = String(text || '');
+  const base = scan(normalized, COMPILED_HOLD_TERMS);
+  const matchedTerms = [...base.matchedTerms];
+  for (const pair of HOLD_COOCCURRENCE_PAIRS) {
+    if (pair.a.test(normalized) && pair.b.test(normalized)) {
+      matchedTerms.push(pair.id);
+    }
+  }
+  return { matched: matchedTerms.length > 0, matchedTerms };
 }
 
 module.exports = {
@@ -111,5 +166,6 @@ module.exports = {
   scanForHoldKeywords,
   TAG_TERMS,
   HOLD_TERMS,
+  HOLD_COOCCURRENCE_PAIRS,
   TERMS_VERSION,
 };

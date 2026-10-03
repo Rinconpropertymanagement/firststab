@@ -441,6 +441,25 @@ Flags:
                                 fully in parallel with another process
                                 handling the other mailbox on the primary
                                 token.
+  --checkpoint-suffix <name>    Use a checkpoint key of
+                                'backfill:team:<id>:<name>' instead of the
+                                plain 'backfill:team:<id>' — a second,
+                                independent progress row for the SAME
+                                mailbox, so a second process splitting that
+                                mailbox's remaining backlog never reads or
+                                writes the first process's progress.
+  --start-before <unix-secs>    Seed a fresh segment's starting point —
+                                only takes effect on that segment's very
+                                first run, before it has a checkpoint of
+                                its own (a real checkpoint, once written,
+                                always wins on every later run).
+  --stop-before <unix-secs>     Stop this run as soon as a conversation's
+                                last_activity_at is at or before this
+                                value — marks THIS SEGMENT complete, not
+                                the whole mailbox. Checked per
+                                conversation, so a boundary in the middle
+                                of a page still stops at exactly the right
+                                one.
   --help                        Show this help and exit.
 
 With no flags: runs for real, for as long as it takes, against both
@@ -450,11 +469,18 @@ true end of its history.
 Running two mailboxes in parallel on two tokens:
   node backfill-missive-history.js --only faria
   node backfill-missive-history.js --only solimar --use-secondary-token
+
+Splitting ONE mailbox's remaining backlog across two tokens (e.g. once
+the other mailbox finishes and its token joins in) — pick a midpoint
+timestamp M so each half is roughly even, then:
+  node backfill-missive-history.js --only solimar --stop-before M
+  node backfill-missive-history.js --only solimar --use-secondary-token \
+    --checkpoint-suffix segment2 --start-before M
 `.trim());
 }
 
 function parseArgs(argv) {
-  const args = { dryRun: false, maxConversations: null, help: false, only: null };
+  const args = { dryRun: false, maxConversations: null, help: false, only: null, checkpointSuffix: null, startBefore: null, stopBefore: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
@@ -475,6 +501,14 @@ function parseArgs(argv) {
     // MISSIVE_API_TOKEN itself in main(), so lib/missive-connector.js
     // needs no changes at all.
     else if (a === '--use-secondary-token') args.useSecondaryToken = true;
+    // The three flags below split ONE mailbox's remaining backlog across
+    // two independent processes — e.g. once Faria finishes, its token
+    // joins Solimar's, each covering half the remaining date range.
+    // Always used together in practice; kept as separate flags so each
+    // one's meaning stays obvious on its own in a process list / log.
+    else if (a === '--checkpoint-suffix') args.checkpointSuffix = String(argv[++i] || '').trim();
+    else if (a === '--start-before') args.startBefore = Number(argv[++i]);
+    else if (a === '--stop-before') args.stopBefore = Number(argv[++i]);
   }
   return args;
 }
@@ -660,10 +694,16 @@ async function recordMailboxFailure({ label, progressKey, dryRun, err, conversat
 // ─── Per-mailbox backfill — pages to the true natural end, ignoring any ──
 // ongoing-sync watermark. See file header "RESUMABILITY" for the exact
 // checkpoint-per-conversation guarantee this loop provides.
-async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
+async function backfillMailbox(teamId, { dryRun, maxConversations, batchId, checkpointSuffix, startBefore, stopBefore }) {
   assertAllowedTeam(teamId, `backfill mailbox team:${teamId}`); // structurally always true here (teamId always comes from MISSIVE_ALLOWED_TEAM_IDS) — defense-in-depth, same reasoning as router.js's own call site
   const label = MAILBOX_LABELS[teamId] || teamId;
-  const progressKey = `backfill:team:${teamId}`; // THIS backfill's own checkpoint — never the ongoing sync's 'team:<id>' key
+  // checkpointSuffix splits ONE mailbox's remaining backlog across two
+  // independent processes/tokens — e.g. 'segment2' on Solimar once Faria's
+  // token frees up and joins in. Each suffix gets its own row in
+  // missive_sync_state, so two processes on the same mailbox never read
+  // or write each other's progress. Default (no suffix) is the original,
+  // single-process key — fully backward compatible.
+  const progressKey = `backfill:team:${teamId}${checkpointSuffix ? `:${checkpointSuffix}` : ''}`;
   const contentMailboxKey = `team:${teamId}`; // what actually gets written to missive_message_intake — same convention the incremental job uses
   const mailboxRunStart = Date.now(); // for this mailbox's wall_clock_seconds in the new completed/stopped_early audit rows
   const retryCountAtMailboxStart = missive.getRetryCount(); // snapshot — mailboxes run sequentially (see main()), so a diff against this gives THIS mailbox's 429 retries, not the whole batch's
@@ -697,6 +737,15 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
   const isResumedRun = until != null; // see file header "RESUME CURSOR FORMAT" for why this matters
   if (until) {
     console.log(`[${ts()}] ${label}: resuming from checkpoint '${progressKey}' — oldest conversation reached so far: ${state.last_synced_conversation_id} @ ${state.last_synced_activity_at} (until=${until}).`);
+  } else if (startBefore != null) {
+    // Seeds a FRESH segment's starting point (e.g. a second process
+    // joining partway through a mailbox, per checkpointSuffix above) —
+    // only used on that segment's very first run, before it has any
+    // checkpoint of its own. A checkpoint, once written, always wins on
+    // every later run (the branch above) — this is a one-time seed, not
+    // an override.
+    until = startBefore;
+    console.log(`[${ts()}] ${label}: starting fresh at seeded point (until=${until}) — no prior checkpoint for '${progressKey}'.`);
   } else {
     console.log(`[${ts()}] ${label}: starting fresh — no prior backfill checkpoint found for '${progressKey}'.`);
   }
@@ -709,6 +758,7 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
   let naturalEndReached = false;
   let stoppedForLimit = false;
   let suspiciousResumeEnd = false;
+  let reachedAssignedFloor = false;
   let latestConv = null;
   let pageNumber = 0;
 
@@ -766,6 +816,18 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
       for (const conv of conversations) {
         if (maxConversations != null && conversationsThisRun >= maxConversations) {
           stoppedForLimit = true;
+          break outer;
+        }
+        // stopBefore is this segment's assigned floor (see checkpointSuffix
+        // above) — the boundary another process's segment picks up from.
+        // Checked PER CONVERSATION, not just per page, so a floor that
+        // falls in the middle of a 50-result page still stops exactly at
+        // the right conversation instead of overshooting into the other
+        // segment's territory. Deliberately >=, not >: the conversation
+        // sitting exactly at the floor belongs to the NEXT segment
+        // (the one seeded with startBefore = this same value), never both.
+        if (stopBefore != null && conv.last_activity_at <= stopBefore) {
+          reachedAssignedFloor = true;
           break outer;
         }
 
@@ -855,9 +917,17 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
 
   const status = naturalEndReached
     ? 'complete'
-    : (stoppedForLimit ? 'partial_test_limit' : (suspiciousResumeEnd ? 'suspicious_resume_end' : 'partial'));
+    // reachedAssignedFloor: this SEGMENT is done (hit the boundary another
+    // process's segment picks up from), not the whole mailbox — a
+    // distinct status from 'complete' specifically so it's never confused
+    // with genuine full-mailbox completion in logs or audit rows, even
+    // though missive_sync_state itself records 'complete' below (correct
+    // for THIS checkpoint row/segment: re-running it should skip, exactly
+    // like a fully-complete mailbox would).
+    : (reachedAssignedFloor ? 'segment_complete'
+      : (stoppedForLimit ? 'partial_test_limit' : (suspiciousResumeEnd ? 'suspicious_resume_end' : 'partial')));
 
-  if (naturalEndReached) {
+  if (naturalEndReached || reachedAssignedFloor) {
     if (!dryRun) {
       await upsertSyncState(progressKey, {
         last_run_at: new Date().toISOString(),
@@ -865,7 +935,9 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
         last_error: null,
       });
     }
-    console.log(`[${ts()}] ${label}: reached the true beginning of this mailbox's history — marked complete.${dryRun ? ' (DRY RUN — checkpoint not actually written)' : ''}`);
+    console.log(naturalEndReached
+      ? `[${ts()}] ${label}: reached the true beginning of this mailbox's history — marked complete.${dryRun ? ' (DRY RUN — checkpoint not actually written)' : ''}`
+      : `[${ts()}] ${label}: reached this segment's assigned floor (stopBefore=${stopBefore}) — marked complete for THIS segment only, not the whole mailbox.${dryRun ? ' (DRY RUN — checkpoint not actually written)' : ''}`);
   } else if (stoppedForLimit) {
     console.log(`[${ts()}] ${label}: stopped after --max-conversations ${maxConversations} (testing limit) — NOT marked complete; a later run without the limit continues from here.`);
   } else if (suspiciousResumeEnd) {
@@ -917,6 +989,20 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId }) {
         });
       } catch (err) {
         console.error(`[${ts()}] ${label}: failed to write missive_backfill.completed audit row (batch ${batchId}):`, err.message);
+      }
+    } else if (reachedAssignedFloor) {
+      try {
+        await writeAuditLog({
+          action: 'missive_backfill.segment_complete',
+          entity_type: 'missive_backfill_batch',
+          entity_id: batchId,
+          actor_id: 'email-intake-missive-backfill',
+          privacy_category: 'collection',
+          risk_level: 'low',
+          details: { ...commonDetails, stop_before: stopBefore, checkpoint_suffix: checkpointSuffix || null },
+        });
+      } catch (err) {
+        console.error(`[${ts()}] ${label}: failed to write missive_backfill.segment_complete audit row (batch ${batchId}):`, err.message);
       }
     } else if (stoppedForLimit) {
       try {
@@ -1068,7 +1154,14 @@ async function main() {
   const results = [];
   for (const teamId of mailboxTeamIds) {
     try {
-      const result = await backfillMailbox(teamId, { dryRun: args.dryRun, maxConversations: args.maxConversations, batchId });
+      const result = await backfillMailbox(teamId, {
+        dryRun: args.dryRun,
+        maxConversations: args.maxConversations,
+        batchId,
+        checkpointSuffix: args.checkpointSuffix,
+        startBefore: args.startBefore,
+        stopBefore: args.stopBefore,
+      });
       results.push(result);
     } catch (err) {
       // backfillMailbox is written to catch everything it can meaningfully

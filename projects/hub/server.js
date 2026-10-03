@@ -122,18 +122,14 @@ GET  /scorecard               Scoreboard — the business's weekly metrics,
                               login + a role in tool='scorecard' — see
                               scorecard/router.js)
      /api/scorecard/*         Scoreboard API routes
-GET  /rental-analysis         Rental Analysis — enter an address, get an
-                              automated rent recommendation grounded in
-                              real comps (requires login + a role in
-                              tool='rental_analysis' — see
-                              rental-analysis/router.js). Folded in from
-                              the standalone deployment. Home-page tile is
-                              itself role-gated (checks GET /api/rental-
-                              analysis/auth/me before rendering), so it only
-                              appears for someone who already has access —
-                              not a broader announcement that the tool is
-                              open to everyone.
-     /api/rental-analysis/*   Rental Analysis API routes
+GET  /audits                  Audits & Admin Tools — internal oversight
+                              tools, starting with Property 360 Views (who
+                              viewed which property, and when). Requires
+                              login + role='admin' for tool='archive_search'
+                              (reused, not a new role — see audits/router.js's
+                              own ACCESS CONTROL comment for why). Linked
+                              from the Hub home page only for admins.
+     /api/audits/*            Audits API routes
 
 Environment variables required (.env file):
   SUPABASE_URL
@@ -230,42 +226,6 @@ gracefully otherwise, see .env.example):
                               (content-engine/lib/viral-scan.js).
   ENABLE_WEB_SEARCH_CITATIONS    Used by drafting/revision for non-legal
                               source citations; defaults to enabled if unset.
-
-Optional (Rental Analysis — each checked lazily, per-request, inside its
-own lib/*.js file, not at startup; a missing one degrades just that source/
-feature rather than taking down this section or the rest of the Hub — see
-rental-analysis/router.js's own startup warnings):
-  RENTCAST_API_KEY               Pulls comps + property-lookup pre-fill
-                              (developers.rentcast.io, free tier: 50
-                              requests/month). Without it, every analysis
-                              fails at the "no comps" step.
-  GOOGLE_PLACES_API_KEY          Live address autocomplete, via Google
-                              Places Autocomplete (New) (Google Cloud
-                              Console, free tier: 10,000 Autocomplete
-                              Requests/month). Switched from LocationIQ
-                              2026-09-20. Without it, address-suggest just
-                              returns no suggestions — typing an address
-                              manually still works.
-  MAPTILER_API_KEY               Background tiles for the comp map
-                              (maptiler.com, free tier: 100,000 tile
-                              loads/month). Read by the BROWSER via
-                              GET /api/rental-analysis/map-config, not
-                              this server directly. Switched from
-                              OpenStreetMap's own tile servers 2026-09-20
-                              after they began actively blocking this
-                              tool's real traffic — see the CSP comment
-                              below. Without it, the comp map renders with
-                              no background tiles, everything else on the
-                              page still works.
-  RECORE_CLIENT_ID, RECORE_CLIENT_SECRET, RECORE_SERVER_TOKEN,
-  RECORE_BROWSER_TOKEN           CRMLS comp source (rental-analysis/
-                              lib/crmls.js). Without these, that one comp
-                              source is silently skipped.
-  ANTHROPIC_API_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
-                              Shared with the other tools above — no
-                              rental-analysis-specific values needed for
-                              these three (confirmed identical between the
-                              old standalone app's .env and the Hub's).
 `);
   process.exit(0);
 }
@@ -293,6 +253,7 @@ const { internalRouter: emailIntakeInternalRouter } = require('./email-intake/ro
 const { router: complaintTrackingRouter, internalRouter: complaintTrackingInternalRouter } = require('./complaint-tracking/router');
 const { router: archiveSearchRouter, internalRouter: archiveSearchInternalRouter } = require('./archive-search/router');
 const { router: scorecardRouter, internalRouter: scorecardInternalRouter } = require('./scorecard/router');
+const { router: auditsRouter } = require('./audits/router');
 const { router: rentalAnalysisRouter } = require('./rental-analysis/router');
 
 // ─── Config ───────────────────────────────────────────────────────────────
@@ -399,32 +360,12 @@ app.use((req, res, next) => {
 // moving those inline scripts to files and switching to a nonce instead.
 //
 // img-src additionally widened for Rental Analysis's comp map
-// (rental-analysis/dashboard/index.html, projects/rental-analysis/
-// HUB-INTEGRATION-SPEC.md): Leaflet's own JS/CSS/marker-icon files are
-// self-hosted (rental-analysis/dashboard/vendor/leaflet/, served
-// same-origin — see rental-analysis/router.js) specifically so this shared,
-// app-wide CSP would NOT need script-src widened for a third-party CDN.
-// But the map TILES themselves are fetched live, at runtime, from a tile
-// host (L.tileLayer('https://api.maptiler.com/maps/...') in that
-// dashboard's own JS — not visible in a plain grep of the HTML source,
-// only in the running page, so confirmed by actually loading the page and
-// checking, not assumed) — there's no reasonable way to self-host a global
-// map tile set the way a small, fixed set of library files can be. img-src
-// is the narrowest directive that can be widened for this: unlike
-// script-src, an img-src exception can't be used to run attacker script or
-// exfiltrate more than "a viewer loaded a map tile," and this only adds
-// one specific host — not a blanket https: allowance.
-//
-// SWITCHED 2026-09-20 from OpenStreetMap's own tile servers
-// (*.tile.openstreetmap.org) to MapTiler (api.maptiler.com): OSM's tile
-// servers are documented (operations.osmfoundation.org/policies/tiles/) as
-// casual/personal use only and started returning "Access blocked" /
-// x-blocked responses under this tool's real usage — confirmed live via
-// curl, not a fluke. MapTiler is a real production tile provider (free
-// tier: 100,000 loads/month) meant for exactly this. The old OSM entry is
-// removed, not just supplemented — this tool no longer requests tiles from
-// OpenStreetMap's servers at all, so keeping that allowance around would
-// just be unused CSP surface.
+// (rental-analysis/dashboard/index.html): map tiles are fetched live from
+// MapTiler (api.maptiler.com) at runtime — there's no reasonable way to
+// self-host a global map tile set, so this is the narrowest directive that
+// can be widened for it (unlike script-src, an img-src exception can't be
+// used to run attacker script or exfiltrate more than "a viewer loaded a
+// map tile").
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -954,6 +895,7 @@ app.get('/', (req, res) => {
             <span>The business's weekly numbers, one row per metric, with the person accountable for each</span>
           </a>
           <span id="complaint-tracking-tile-slot"></span>
+          <span id="audits-tile-slot"></span>
           <span id="rental-analysis-tile-slot"></span>
         </div>
         <div class="note">More tools will show up here as they move into the hub.</div>
@@ -993,18 +935,42 @@ app.get('/', (req, res) => {
               .catch(function () { /* role lookup or count failed — tile stays absent, rest of the home page still works */ });
           })();
 
+          // Audits & Admin Tools tile — audits/router.js's own GET /audits.
+          // Same "check first, mount only on success, no hint it exists
+          // otherwise" discipline as the two tiles just above. This page
+          // reuses Archive Search's own admin gate rather than a role of
+          // its own (see audits/router.js's file header, "ACCESS CONTROL"),
+          // so this check calls that same already-built, already-gated
+          // GET /api/archive-search/auth/me — not a new /api/audits/auth/me
+          // round trip for a tile that would just ask the identical
+          // question a second time. The page's OWN routes (GET /audits and
+          // everything under /api/audits/*) still re-check this for real,
+          // server-side, every time — this is only what decides whether the
+          // tile itself renders. No role lookup happens in server.js
+          // itself — team_member_tool_roles is never queried here.
+          (function () {
+            fetch('/api/archive-search/auth/me', { credentials: 'include' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (me) {
+                if (!me || me.role !== 'admin') return; // not an admin — tile never appears, no hint it exists
+
+                var slot = document.getElementById('audits-tile-slot');
+                if (!slot) return;
+                var el = document.createElement('a');
+                el.className = 'section-link';
+                el.href = '/audits';
+                el.innerHTML = '<strong>Audits &amp; Admin Tools</strong>' +
+                  '<span>Internal oversight tools — starting with who viewed which property on Property 360, and when</span>';
+                slot.replaceWith(el);
+              })
+              .catch(function () { /* role lookup failed — tile stays absent, rest of the home page still works */ });
+          })();
+
           // Rental Analysis's home-page tile — same "check first, mount
-          // only on success, no hint it exists otherwise" pattern as
-          // Complaint Tracking's tile just above, but simpler (no count):
-          // calls the already-built, already-gated
-          // GET /api/rental-analysis/auth/me directly. Only Peter has a
-          // role for tool='rental_analysis' today (his own explicit call:
-          // "nothing actually gives them access until i say — i need the
-          // tool to be better before i roll it out"), so this tile is
-          // invisible to everyone else, same as the route itself already
-          // was — this just gives the one person who does have access a
-          // real link to click instead of needing to type the URL from
-          // memory. No role lookup happens in server.js itself.
+          // only on success, no hint it exists otherwise" pattern as the
+          // tiles above, but simpler (no count): calls the already-built,
+          // already-gated GET /api/rental-analysis/auth/me directly. No
+          // role lookup happens in server.js itself.
           (function () {
             fetch('/api/rental-analysis/auth/me', { credentials: 'include' })
               .then(function (r) { return r.ok ? r.json() : null; })
@@ -1156,6 +1122,23 @@ app.use(complaintTrackingRouter);
 // built in this pass either (see archive-search/router.js's own header).
 app.use(archiveSearchRouter);
 
+// ─── Audits & Admin Tools section ──────────────────────────────────────
+// audits/router.js — a new shell page for internal oversight/admin
+// tooling, starting with "Property 360 Views" (audit_log rows written by
+// property-360/router.js's own writeAuditLog() call, action=
+// 'property_360.viewed'). Mounted here, right after archiveSearchRouter,
+// because this router reuses THAT tool's own real, unmodified
+// attachArchiveSearchRole/requireArchiveSearchAdmin gate (tool=
+// 'archive_search', role='admin') rather than a new team_member_tool_roles
+// `tool` value of its own — see audits/router.js's own file header,
+// "ACCESS CONTROL," for the full reasoning and the trade-off it names.
+// Mount order relative to archiveSearchRouter doesn't actually matter for
+// correctness (audits/router.js calls router.use(attachArchiveSearchRole)
+// on its own router, not relying on middleware already having run), but
+// sits here for readability, next to the tool whose access check it's
+// borrowing.
+app.use(auditsRouter);
+
 // ─── Scoreboard section ────────────────────────────────────────────────
 // supabase/migrations/20260912000000_scorecard_weekly.sql, and the final
 // metric definitions in call-stats/COMMITTED-NOT-BUILT.md §0a. Same shape
@@ -1179,13 +1162,8 @@ app.use(scorecardRouter);
 // does its own additional check — does this specific person hold a role
 // in team_member_tool_roles for tool='rental_analysis' (only the shared
 // 'admin' value is used — this tool has no permission tiers of its own).
-// The migration widening that table's tool CHECK inserts zero rows on its
-// own; nobody has real access yet until Peter explicitly grants it — see
-// that router.js's own file header. No home-page tile is added for this
-// section yet, on purpose (reachable only by typing /rental-analysis
-// directly) — matching Peter's own "the tool needs to be better before I
-// roll it out" call; a tile is Tron/Peter's decision for later, not part
-// of this pass.
+// Peter already holds that role (granted 2026-09-20); nobody else does
+// until he explicitly grants it.
 app.use(rentalAnalysisRouter);
 
 // ─── Central error handler — must be registered last ──────────────────────

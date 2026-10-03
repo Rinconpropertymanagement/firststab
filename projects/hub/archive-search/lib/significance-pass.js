@@ -2913,5 +2913,35 @@ module.exports = {
   // as resolveUniqueMatch's neighbors above.
   namesPlausiblyMatch,
   findNameMatchCandidates,
+  // Added 2026-10-02 for the RETROACTIVE name-match backfill build
+  // (lib/name-match-backfill.js, Jarvis-relayed build task — applying this
+  // same narrower, Mason-cleared design to the ~1,800+ existing needs_
+  // matching=TRUE backlog, not just new conversations). Same "do not
+  // reimplement the database write/lookup logic" instruction every other
+  // 2026-09-17/2026-09-29 Batches-API build in this file's own export list
+  // already followed (applyCall1Result, createComplaintRow, etc.) — these
+  // two were the only pieces that build needed and didn't already have:
+  //   - resolveUniqueMatch: the exact deterministic property-citation
+  //     resolver applyCall1Result() already uses internally for property_
+  //     text/vendor_text, needed here for the SAME property-corroboration
+  //     step on a complaint re-examined after the fact, outside applyCall1Result's
+  //     own call chain (reusing applyCall1Result() itself would re-run the
+  //     WHOLE Call 1 write path — a full significance-row upsert, a second
+  //     writeMessageLinks insert, a second checkClaim — against a
+  //     conversation already fully processed once; this build only needs
+  //     the pure property-matching function, not everything downstream of
+  //     it).
+  //   - buildConversationContext: already exported (2026-09-17, above) —
+  //     reused as-is for its own threadText, the one real conversation
+  //     field this build's identification prompt needs.
+  //   - IDENTIFICATION_BLOCK_WITH_NAME: exported so the retroactive tool's
+  //     own, narrower prompt (just the identification citation — it
+  //     already has this complaint's stored category/resolution_status/
+  //     why from the original Call 1, so it never re-asks Call 1's other
+  //     four questions) quotes Mason's own cleared wording verbatim,
+  //     sourced from ONE place, not copy-pasted into a second file where
+  //     the two could silently drift apart.
+  resolveUniqueMatch,
+  IDENTIFICATION_BLOCK_WITH_NAME,
   _setSupabaseClientForTesting,
 };

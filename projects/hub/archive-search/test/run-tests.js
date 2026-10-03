@@ -39,6 +39,12 @@ const vm = require('vm'); // PART 22h (Needs Attention tile bug fix) runs compla
 process.env.SEVERITY_BATCH_STATE_PATH = process.env.SEVERITY_BATCH_STATE_PATH
   || path.join(os.tmpdir(), `test-severity-batch-state-${process.pid}.json`);
 
+// Retroactive name-match backfill build (2026-10-02) — same reasoning as
+// SEVERITY_BATCH_STATE_PATH immediately above, for lib/name-match-backfill.js's
+// own STATE_PATH (computed once, at require() time, below).
+process.env.NAME_MATCH_BACKFILL_STATE_PATH = process.env.NAME_MATCH_BACKFILL_STATE_PATH
+  || path.join(os.tmpdir(), `test-name-match-backfill-state-${process.pid}.json`);
+
 const results = [];
 const asyncResults = [];
 
@@ -1136,6 +1142,18 @@ const significanceBatch = require('../lib/significance-batch');
 // significancePass, so none of PART 18's own load-order gotcha applies here.
 const severityRubric = require('../lib/severity-rubric');
 const severityBatch = require('../lib/severity-batch');
+// Retroactive name-match backfill build (2026-10-02) — required here, same
+// load-order discipline as severityBatch immediately above: this module
+// requires BOTH ../lib/significance-pass (findNameMatchCandidates,
+// resolveUniqueMatch, buildConversationContext, fetchPropertyDirectory,
+// IDENTIFICATION_BLOCK_WITH_NAME) and ../lib/significance-batch (the pure
+// Batches-API utilities), so requiring it only after both of those are
+// already in require.cache (lines above) guarantees its internal
+// references resolve to the SAME already-loaded significancePass/
+// significanceBatch objects this suite's own later PARTs (15-23) may
+// temporarily swap fakes onto — the exact load-order gotcha PART 18's own
+// header comment, above, already tells the full story of.
+const nameMatchBackfill = require('../lib/name-match-backfill');
 const { computeSilenceContext } = require('../../complaint-tracking/lib/process-pending-messages');
 // lib/notify.js — required here, the same whole-module way significance-
 // batch.js itself now requires it (see that file's own comment on its
@@ -6998,6 +7016,20 @@ test('run-severity-batch.js — parseLimitArg rejects a non-positive value', () 
   assert.ok(result.error);
 });
 
+// ─── run-name-match-backfill.js: pure argument parsing (same require.main
+// guard / no-op-require convention as run-severity-batch.js, just above). ──
+test('run-name-match-backfill.js — parseLimitArg accepts a positive integer', () => {
+  const { parseLimitArg } = require('../run-name-match-backfill');
+  assert.deepStrictEqual(parseLimitArg(['--limit=25']), { limit: 25, error: null });
+});
+
+test('run-name-match-backfill.js — parseLimitArg rejects a non-positive value', () => {
+  const { parseLimitArg } = require('../run-name-match-backfill');
+  const result = parseLimitArg(['--limit=0']);
+  assert.strictEqual(result.limit, undefined);
+  assert.ok(result.error);
+});
+
 // ─── 22f — complaint-tracking/router.js: the main list endpoint's new
 // no_issue exclusion + admin audit toggle, and confirmation that home-count/
 // Property 360 (both reading complaints_needing_attention, a view that does
@@ -7665,6 +7697,554 @@ await runSerialCheck('significance-pass — createComplaintRow: a real nameMatch
 });
 
 return { name: 'name-match build (PART 23) — sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
+})());
+
+// ============================================================================
+// PART 24 — retroactive name-match backfill build (2026-10-02, Jarvis-relayed
+// build task). Schema: supabase/migrations/
+// 20261002070000_add_retroactive_name_match_checked_at_to_complaints.sql
+// (not yet applied — see lib/name-match-backfill.js's own header).
+// Applies the SAME narrower, Mason-cleared, human-confirmed name-based-
+// matching design PART 23 just proved for the live pipeline to the existing
+// needs_matching=TRUE backlog instead. Covers: (a) pure prompt/parser
+// functions — plain, synchronous test()s; (b) the driver query, mailbox-key
+// join, batch submission, and write-back decision — sequential, inside its
+// own runSerialCheck IIFE, same discipline as PART 22/23 above, for the
+// identical reason (shared mutable test-override singletons on
+// significancePass/nameMatchBackfill).
+// ============================================================================
+
+// ─── 24a — buildIdentificationPrompt: reuses significancePass's own
+// IDENTIFICATION_BLOCK_WITH_NAME verbatim (imported, never copy-pasted —
+// proven here by checking the prompt contains that exact exported string),
+// substitutes threadText, and asks for the right JSON shape. ─────────────
+test('name-match-backfill — buildIdentificationPrompt embeds significancePass.IDENTIFICATION_BLOCK_WITH_NAME verbatim (sourced from one place, never a second, copy-pasted wording)', () => {
+  const prompt = nameMatchBackfill.buildIdentificationPrompt('some thread text');
+  assert.ok(prompt.includes(significancePass.IDENTIFICATION_BLOCK_WITH_NAME), 'expected the exact, exported IDENTIFICATION_BLOCK_WITH_NAME text to appear in the prompt, unmodified');
+});
+
+test('name-match-backfill — buildIdentificationPrompt substitutes the thread text verbatim inside the """ ... """ block', () => {
+  const prompt = nameMatchBackfill.buildIdentificationPrompt('Jane Doe called about a leak at Sunset Apartments.');
+  assert.ok(prompt.includes('"""\nJane Doe called about a leak at Sunset Apartments.\n"""'));
+});
+
+test('name-match-backfill — buildIdentificationPrompt never asks for resolution_status/category/why/tone_trend — this complaint\'s original Call 1 already answered those; re-asking would be a second, redundant, billed judgment', () => {
+  const prompt = nameMatchBackfill.buildIdentificationPrompt('x');
+  assert.strictEqual(/resolution_status|tone_trend/.test(prompt), false);
+});
+
+test('name-match-backfill — buildIdentificationPrompt requests exactly the {identification: {property_text, vendor_text, name_text}} JSON shape, no markdown fence', () => {
+  const prompt = nameMatchBackfill.buildIdentificationPrompt('x');
+  assert.ok(prompt.includes('Respond with EXACTLY one JSON object, no markdown fence'));
+  assert.ok(prompt.includes('{"identification": {"property_text": "quoted text"|null, "vendor_text": "quoted text"|null, "name_text": "quoted text"|null}}'));
+});
+
+// ─── 24b — parseIdentificationResponse: valid, missing/malformed, stray
+// markdown fence (defensive, same posture every other parser in this
+// codebase takes), non-string input. ─────────────────────────────────────
+test('name-match-backfill — parseIdentificationResponse accepts a clean, valid response with all three fields', () => {
+  const parsed = nameMatchBackfill.parseIdentificationResponse('{"identification": {"property_text": "123 Main St", "vendor_text": null, "name_text": "Jane Doe"}}');
+  assert.deepStrictEqual(parsed, { property_text: '123 Main St', vendor_text: null, name_text: 'Jane Doe' });
+});
+
+test('name-match-backfill — parseIdentificationResponse tolerates a stray markdown fence', () => {
+  const parsed = nameMatchBackfill.parseIdentificationResponse('```json\n{"identification": {"property_text": null, "vendor_text": null, "name_text": "Bob Nobody"}}\n```');
+  assert.deepStrictEqual(parsed, { property_text: null, vendor_text: null, name_text: 'Bob Nobody' });
+});
+
+test('name-match-backfill — parseIdentificationResponse treats blank/whitespace-only strings as null', () => {
+  const parsed = nameMatchBackfill.parseIdentificationResponse('{"identification": {"property_text": "   ", "vendor_text": null, "name_text": null}}');
+  assert.deepStrictEqual(parsed, { property_text: null, vendor_text: null, name_text: null });
+});
+
+test('name-match-backfill — parseIdentificationResponse rejects a response with no "identification" object at all', () => {
+  assert.strictEqual(nameMatchBackfill.parseIdentificationResponse('{"foo": "bar"}'), null);
+});
+
+test('name-match-backfill — parseIdentificationResponse rejects malformed JSON', () => {
+  assert.strictEqual(nameMatchBackfill.parseIdentificationResponse('{"identification": {'), null);
+});
+
+test('name-match-backfill — parseIdentificationResponse rejects a non-string response', () => {
+  assert.strictEqual(nameMatchBackfill.parseIdentificationResponse(null), null);
+  assert.strictEqual(nameMatchBackfill.parseIdentificationResponse(undefined), null);
+});
+
+// ─── 24c — lib/name-match-backfill.js's driver/submit/write-back — sequential
+// (see this PART's own header for why). ──────────────────────────────────
+asyncResults.push((async () => {
+
+// Every asyncResults.push((async () => {...})()) entry starts running
+// IMMEDIATELY and interleaves with every other one at each other's own
+// await boundaries — this is what "its own sequential runSerialCheck
+// runner" (this PART's own header) means: sequential WITHIN itself, not
+// isolated FROM the others. PART 23, just above, and this PART are the only
+// two that both mutate the SAME shared singleton
+// (significancePass._setSupabaseClientForTesting / spyOn(significancePass,
+// ...)) — without waiting for every earlier entry to fully settle first,
+// this PART's own setup/teardown could stomp on PART 23's fake client or
+// spy mid-test (a real race, caught live while building this PART: PART
+// 23's own "NAME_MATCH_SUGGESTIONS_ENABLED unset... TRUE no-op" test failed
+// with "Cannot read properties of null" when this PART's cleanup ran
+// concurrently and reset the shared client to null mid-test). Snapshotting
+// the array BEFORE this IIFE's own promise is pushed into it (a few lines
+// above) and awaiting that snapshot ensures this waits for exactly
+// "everything already running," never itself.
+await Promise.all(asyncResults.slice());
+
+// A minimal, stateful, filtering fake for the `complaints`/
+// `missive_conversation_significance` tables this module actually touches —
+// purpose-built, same "each PART's own fake, sized to what it actually
+// needs" convention PART 22's own makeSeverityFakeClient already states and
+// follows. Deliberately does NOT attempt to fake missive_message_intake_
+// search_safe/tenants/owners/leases/units/property_owners/vendors — tests
+// below that need buildConversationContext() or findNameMatchCandidates()
+// to actually run instead spy on/inject significancePass's own real,
+// already-tested functions (via _setSupabaseClientForTesting and spyOn),
+// exactly the isolation style PART 22/23 already use for the identical
+// reason: those functions are already proven correct elsewhere in this
+// suite (PART 13/23) — re-simulating their entire dependency chain here
+// would test this build's own glue code through a maze of unrelated fakes,
+// not the glue code itself.
+function complaintsRowMatchesFilters(row, filters) {
+  return filters.every((f) => {
+    if (f.type === 'eq') return row[f.col] === f.val;
+    if (f.type === 'is') return f.val === null ? (row[f.col] === null || row[f.col] === undefined) : row[f.col] === f.val;
+    if (f.type === 'not-is-null') return !(row[f.col] === null || row[f.col] === undefined);
+    return true;
+  });
+}
+function makeNameMatchBackfillFakeClient(initialComplaintRows, sigRows = []) {
+  const complaintRows = initialComplaintRows.map((r) => ({ ...r }));
+  function makeChain(table) {
+    const filters = [];
+    let op = null, updateFields = null, rangeArgs = null, limitArg = null;
+    const chain = {
+      select() { if (!op) op = 'select'; return chain; },
+      update(fields) { op = 'update'; updateFields = fields; return chain; },
+      eq(col, val) { filters.push({ type: 'eq', col, val }); return chain; },
+      is(col, val) { filters.push({ type: 'is', col, val }); return chain; },
+      not(col, operator, val) { if (operator === 'is' && val === null) filters.push({ type: 'not-is-null', col }); return chain; },
+      order() { return chain; },
+      range(from, to) { rangeArgs = [from, to]; return chain; },
+      limit(n) { limitArg = n; return chain; },
+      maybeSingle() {
+        if (table === 'complaints' && op === 'select') {
+          const match = complaintRows.find((r) => complaintsRowMatchesFilters(r, filters));
+          return Promise.resolve({ data: match ? { ...match } : null, error: null });
+        }
+        if (table === 'complaints' && op === 'update') {
+          const idx = complaintRows.findIndex((r) => complaintsRowMatchesFilters(r, filters));
+          if (idx === -1) return Promise.resolve({ data: null, error: null });
+          complaintRows[idx] = { ...complaintRows[idx], ...updateFields };
+          return Promise.resolve({ data: { ...complaintRows[idx] }, error: null });
+        }
+        if (table === 'missive_conversation_significance' && op === 'select') {
+          const matches = sigRows.filter((r) => complaintsRowMatchesFilters(r, filters));
+          const limited = limitArg ? matches.slice(0, limitArg) : matches;
+          return Promise.resolve({ data: limited[0] || null, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      then(resolve, reject) {
+        let result;
+        if (table === 'complaints' && op === 'select') {
+          let matches = complaintRows.filter((r) => complaintsRowMatchesFilters(r, filters));
+          if (rangeArgs) matches = matches.slice(rangeArgs[0], rangeArgs[1] + 1);
+          result = { data: matches.map((r) => ({ ...r })), error: null };
+        } else {
+          result = { data: [], error: null };
+        }
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+  return { client: { from: (t) => makeChain(t) }, complaintRows };
+}
+
+const succeededResult = (identification) => ({ type: 'succeeded', message: { content: [{ type: 'text', text: JSON.stringify({ identification }) }] } });
+
+// ─── governance gate ──────────────────────────────────────────────────────
+await runSerialCheck('name-match-backfill — submitNameMatchBackfillBatch refuses to run when NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED is not \'true\' (checked BEFORE any Supabase/Anthropic call)', async () => {
+  const prevFlag = process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED;
+  delete process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED;
+  try {
+    await assert.rejects(
+      nameMatchBackfill.submitNameMatchBackfillBatch({}),
+      (err) => { assert.ok(err.message.includes('NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED')); return true; }
+    );
+  } finally {
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED; else process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED = prevFlag;
+  }
+});
+
+// ─── fetchEligibleComplaints — the driver query's own filters ────────────
+await runSerialCheck('name-match-backfill — fetchEligibleComplaints excludes held rows, already-checked rows, and rows with no conversation to re-read; returns only the genuinely eligible ones', async () => {
+  const { client } = makeNameMatchBackfillFakeClient([
+    { id: 'c-eligible', needs_matching: true, held_legal_fair_housing: false, retroactive_name_match_checked_at: null, source_missive_conversation_id: 'conv-1', property_id: null },
+    { id: 'c-held', needs_matching: true, held_legal_fair_housing: true, retroactive_name_match_checked_at: null, source_missive_conversation_id: 'conv-2', property_id: null },
+    { id: 'c-already-checked', needs_matching: true, held_legal_fair_housing: false, retroactive_name_match_checked_at: '2026-10-01T00:00:00.000Z', source_missive_conversation_id: 'conv-3', property_id: null },
+    { id: 'c-no-conversation', needs_matching: true, held_legal_fair_housing: false, retroactive_name_match_checked_at: null, source_missive_conversation_id: null, property_id: null },
+    { id: 'c-not-needs-matching', needs_matching: false, held_legal_fair_housing: false, retroactive_name_match_checked_at: null, source_missive_conversation_id: 'conv-4', property_id: 'prop-1' },
+  ]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const rows = await nameMatchBackfill.fetchEligibleComplaints(500);
+    assert.deepStrictEqual(rows.map((r) => r.id), ['c-eligible'], 'expected only the genuinely eligible row');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+  }
+});
+
+// ─── resolveMailboxKeyForConversation ─────────────────────────────────────
+await runSerialCheck('name-match-backfill — resolveMailboxKeyForConversation returns the mailbox_key for a known conversation, and null when none is on file', async () => {
+  const { client } = makeNameMatchBackfillFakeClient([], [{ missive_conversation_id: 'conv-1', mailbox_key: 'mb-1' }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    assert.strictEqual(await nameMatchBackfill.resolveMailboxKeyForConversation('conv-1'), 'mb-1');
+    assert.strictEqual(await nameMatchBackfill.resolveMailboxKeyForConversation('conv-unknown'), null);
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+  }
+});
+
+// ─── submitNameMatchBackfillBatch — happy path + the unreadable-conversation
+// skip, isolating buildConversationContext via spyOn (already proven
+// correct by PART 13 — not re-tested here). ───────────────────────────────
+await runSerialCheck('name-match-backfill — submitNameMatchBackfillBatch: happy path builds one request per eligible, readable complaint, submits ONE Anthropic batch, and records state; a complaint with no resolvable mailbox_key is skipped, left unchecked', async () => {
+  process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED = 'true';
+  nameMatchBackfill.clearState();
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient(
+    [
+      { id: 'c-1', needs_matching: true, held_legal_fair_housing: false, retroactive_name_match_checked_at: null, source_missive_conversation_id: 'conv-1', property_id: null },
+      { id: 'c-no-mailbox', needs_matching: true, held_legal_fair_housing: false, retroactive_name_match_checked_at: null, source_missive_conversation_id: 'conv-missing', property_id: null },
+    ],
+    [{ missive_conversation_id: 'conv-1', mailbox_key: 'mb-1' }]
+  );
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  const contextSpy = spyOn(significancePass, 'buildConversationContext', async () => ({ threadText: 'Jane Doe called about a leak.' }));
+  const batchesCreateCalls = [];
+  nameMatchBackfill._setAnthropicClientForTesting({ beta: { messages: { batches: { create: async (args) => { batchesCreateCalls.push(args); return { id: 'batch_nm_1', processing_status: 'in_progress' }; } } } } });
+  try {
+    const result = await nameMatchBackfill.submitNameMatchBackfillBatch({});
+    assert.strictEqual(result.submitted, true);
+    assert.strictEqual(result.requestCount, 1, 'expected only the one readable complaint to produce a request');
+    assert.strictEqual(result.skippedUnreadable, 1, 'expected the no-mailbox complaint to be skipped as unreadable');
+    assert.strictEqual(batchesCreateCalls.length, 1);
+    assert.strictEqual(batchesCreateCalls[0].requests.length, 1);
+    assert.strictEqual(batchesCreateCalls[0].requests[0].custom_id, 'c-1');
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-1').retroactive_name_match_checked_at, null, 'expected submission alone to write nothing to complaints yet — only write-back writes anything');
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-no-mailbox').retroactive_name_match_checked_at, null, 'expected the skipped-as-unreadable row to stay unchecked, not stamped');
+
+    const state = nameMatchBackfill.readState();
+    assert.strictEqual(state.anthropic_batch_id, 'batch_nm_1');
+    assert.deepStrictEqual(state.complaint_ids, ['c-1']);
+  } finally {
+    contextSpy.restore();
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    nameMatchBackfill._setAnthropicClientForTesting(null);
+    nameMatchBackfill.clearState();
+    delete process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED;
+  }
+});
+
+await runSerialCheck('name-match-backfill — submitNameMatchBackfillBatch: an unfinished in-flight batch refuses to submit a new one, and makes ZERO Anthropic calls', async () => {
+  process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED = 'true';
+  nameMatchBackfill.writeState({ anthropic_batch_id: 'batch_in_flight', anthropic_status: 'in_progress', submitted_at: new Date().toISOString(), complaint_ids: ['c-1'], results_retrieved_at: null, submitted_by: 'test' });
+  nameMatchBackfill._setAnthropicClientForTesting({ beta: { messages: { batches: { create: async () => { throw new Error('must not be called while a batch is already in flight'); } } } } });
+  try {
+    const result = await nameMatchBackfill.submitNameMatchBackfillBatch({});
+    assert.strictEqual(result.submitted, false);
+    assert.strictEqual(result.reason, 'unfinished_batch_exists');
+  } finally {
+    nameMatchBackfill._setAnthropicClientForTesting(null);
+    nameMatchBackfill.clearState();
+    delete process.env.NAME_MATCH_BACKFILL_GOVERNANCE_CLEARED;
+  }
+});
+
+// ─── applyOneNameMatchResult — the write-back decision, the task's own
+// required scenarios. Tests below that need findNameMatchCandidates() to
+// actually run give significancePass its OWN directory fixture via this
+// small, purpose-built fake — it must support .maybeSingle() (fetchOwnersAtProperty's
+// own `.from('properties')...eq('id', propertyId).maybeSingle()` call,
+// significance-pass.js, needed on EVERY findNameMatchCandidates() call,
+// property-less or not) as well as plain array results (.eq/.in without
+// .maybeSingle(), for units/leases/tenants/property_owners/owners) — a real
+// gap an earlier draft of these tests had (no .maybeSingle() at all),
+// caught by these very tests failing for real against significance-pass.js's
+// actual query shape rather than a guessed one. ───────────────────────────
+function makeNameMatchDirectoryFakeClient(tableData) {
+  function makeChain(table) {
+    const filters = [];
+    const chain = {
+      select() { return chain; },
+      eq(col, val) { filters.push((row) => row[col] === val); return chain; },
+      in(col, vals) { filters.push((row) => vals.includes(row[col])); return chain; },
+      maybeSingle() {
+        const rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
+        return Promise.resolve({ data: rows[0] || null, error: null });
+      },
+      then(resolve, reject) {
+        const rows = (tableData[table] || []).filter((row) => filters.every((f) => f(row)));
+        return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
+      },
+    };
+    return chain;
+  }
+  return { from: (t) => makeChain(t) };
+}
+
+const PROP_1 = { id: 'prop-1', name: 'Sunset Apartments', address: '123 Main St', appfolio_id: 'af-prop-1' };
+const PROPERTY_DIRECTORY = [PROP_1];
+// Shared fixture: one property, one active tenant (Jane Doe), no owners —
+// reused, as-is, by every scenario below that needs a real name-match
+// candidate lookup to actually run.
+const NAME_MATCH_TABLE_DATA = () => ({
+  units: [{ id: 'unit-1', property_id: 'prop-1' }],
+  leases: [{ unit_id: 'unit-1', tenant_id: 'tenant-1', status: 'active' }],
+  tenants: [{ id: 'tenant-1', first_name: 'Jane', last_name: 'Doe' }],
+  property_owners: [],
+  owners: [],
+  properties: [PROP_1],
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: a non-succeeded batch result writes nothing (errored/canceled/expired contract) — stays eligible for the next run', async () => {
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: null, held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({ complaintId: 'c-1', result: { type: 'errored', error: { type: 'api_error' } }, propertyDirectory: PROPERTY_DIRECTORY });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].retroactive_name_match_checked_at, null);
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: a succeeded-but-unparseable response writes nothing (no in-batch retry is possible)', async () => {
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: null, held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({ complaintId: 'c-1', result: { type: 'succeeded', message: { content: [{ type: 'text', text: 'not json at all' }] } }, propertyDirectory: PROPERTY_DIRECTORY });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].retroactive_name_match_checked_at, null);
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: a held row at write-back time is NEVER touched, even just to stamp "checked, found nothing" (defense in depth, even though the DB CHECK would also reject it)', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchBackfillFakeClient([]).client); // poisoned-by-omission: findNameMatchCandidates must never be reached for a held row.
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: true, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({ complaintId: 'c-1', result: succeededResult({ property_text: null, vendor_text: null, name_text: 'Jane Doe called about a leak' }), propertyDirectory: PROPERTY_DIRECTORY });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].retroactive_name_match_checked_at, null, 'expected a held row to never get retroactive_name_match_checked_at set');
+    assert.strictEqual('suggested_subject_type' in complaintRows[0], false);
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: a row already checked at write-back time is skipped, not re-written (idempotent against a re-run or a race)', async () => {
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: false, retroactive_name_match_checked_at: '2026-10-01T00:00:00.000Z' }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({ complaintId: 'c-1', result: succeededResult({ property_text: null, vendor_text: null, name_text: 'Jane Doe called about a leak' }), propertyDirectory: PROPERTY_DIRECTORY });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].retroactive_name_match_checked_at, '2026-10-01T00:00:00.000Z', 'expected the already-checked timestamp to never be overwritten');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: PROPERTY-LESS complaint — property_text is resolved against the real directory FIRST, then a real name-match candidate at that resolved property is found and written, alongside retroactive_name_match_checked_at', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDirectoryFakeClient(NAME_MATCH_TABLE_DATA()));
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: null, held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({
+      complaintId: 'c-1',
+      result: succeededResult({ property_text: 'Sunset Apartments', vendor_text: null, name_text: 'Jane Doe called about a leak' }),
+      propertyDirectory: PROPERTY_DIRECTORY,
+    });
+    assert.strictEqual(outcome, 'written_with_suggestion');
+    const row = complaintRows[0];
+    assert.strictEqual(row.suggested_subject_type, 'tenant');
+    assert.strictEqual(row.suggested_subject_name_text, 'Jane Doe called about a leak');
+    assert.deepStrictEqual(row.suggested_subject_candidate_ids, ['tenant-1']);
+    assert.strictEqual(row.suggested_subject_extracted_by, nameMatchBackfill.NAME_MATCH_BACKFILL_TOOL_VERSION);
+    assert.ok(row.suggested_subject_at);
+    assert.ok(row.retroactive_name_match_checked_at);
+    assert.strictEqual(row.property_id, null, 'expected the freshly-resolved property_id to be used only in-memory, never written back onto the complaint (a deliberate, documented scope decision)');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: ALREADY-PROPERTIED complaint — skips re-resolving property_text entirely (resolveUniqueMatch never called), uses the complaint\'s own stored property_id directly for the name-match corroboration', async () => {
+  const resolveUniqueMatchSpy = spyOn(significancePass, 'resolveUniqueMatch', () => { throw new Error('must not be called — property_id was already resolved on the row'); });
+  significancePass._setSupabaseClientForTesting(makeNameMatchDirectoryFakeClient(NAME_MATCH_TABLE_DATA()));
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({
+      complaintId: 'c-1',
+      // property_text present but must be IGNORED — this complaint already has a property_id.
+      result: succeededResult({ property_text: 'A totally different, unrelated address', vendor_text: null, name_text: 'Jane Doe called about a leak' }),
+      propertyDirectory: PROPERTY_DIRECTORY,
+    });
+    assert.strictEqual(outcome, 'written_with_suggestion');
+    assert.deepStrictEqual(complaintRows[0].suggested_subject_candidate_ids, ['tenant-1'], 'expected the candidate lookup to use the EXISTING property_id, never the (ignored) property_text');
+  } finally {
+    resolveUniqueMatchSpy.restore();
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: NO property corroboration at all (no stored property_id, and property_text never resolves to a real property) — the candidate lookup is never even attempted; checked_at is stamped, suggestion fields stay null', async () => {
+  significancePass._setSupabaseClientForTesting({ from: () => { throw new Error('must not be queried — no property corroboration exists, so findNameMatchCandidates must never run'); } });
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: null, held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({
+      complaintId: 'c-1',
+      result: succeededResult({ property_text: 'a property that matches nothing on file', vendor_text: null, name_text: 'Jane Doe called about a leak' }),
+      propertyDirectory: PROPERTY_DIRECTORY,
+    });
+    assert.strictEqual(outcome, 'written_no_suggestion');
+    const row = complaintRows[0];
+    assert.ok(row.retroactive_name_match_checked_at, 'expected checked_at to be stamped even with zero property corroboration');
+    assert.strictEqual('suggested_subject_type' in row, false, 'expected the five suggestion columns to be completely absent from the update, not just null');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: real property corroboration, but the quoted name matches NOBODY real at that property — checked_at stamped, suggestion fields stay null (same observable outcome as no corroboration at all)', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDirectoryFakeClient(NAME_MATCH_TABLE_DATA()));
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({
+      complaintId: 'c-1',
+      result: succeededResult({ property_text: null, vendor_text: null, name_text: 'a totally unrelated name, Bob Nobody' }),
+      propertyDirectory: PROPERTY_DIRECTORY,
+    });
+    assert.strictEqual(outcome, 'written_no_suggestion');
+    assert.ok(complaintRows[0].retroactive_name_match_checked_at);
+    assert.strictEqual('suggested_subject_type' in complaintRows[0], false);
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('name-match-backfill — applyOneNameMatchResult: lost a race (retroactive_name_match_checked_at set by something else between the read and the write) — skipped, not overwritten', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDirectoryFakeClient(NAME_MATCH_TABLE_DATA()));
+  // The fresh re-fetch (inside applyOneNameMatchResult) sees NULL (so it proceeds), but
+  // the update's own `.is('retroactive_name_match_checked_at', null)` filter — applied
+  // against the fake client's CURRENT row state at update time — is what actually
+  // models the race: flip the row to already-checked between the read and the update
+  // by using a client whose maybeSingle() (the read) always reports the ORIGINAL row,
+  // while the row array itself has already moved on.
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([{ id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: false, retroactive_name_match_checked_at: null }]);
+  const realFrom = client.from;
+  client.from = (table) => {
+    const chain = realFrom(table);
+    if (table === 'complaints') {
+      const realMaybeSingle = chain.maybeSingle.bind(chain);
+      const realUpdate = chain.update.bind(chain);
+      chain.update = (fields) => { complaintRows[0].retroactive_name_match_checked_at = '2026-10-01T00:00:00.000Z'; return realUpdate(fields); }; // simulates another process winning the race the instant this update is issued.
+      chain.maybeSingle = realMaybeSingle;
+    }
+    return chain;
+  };
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  try {
+    const outcome = await nameMatchBackfill.applyOneNameMatchResult({
+      complaintId: 'c-1',
+      result: succeededResult({ property_text: null, vendor_text: null, name_text: 'Jane Doe called about a leak' }),
+      propertyDirectory: PROPERTY_DIRECTORY,
+    });
+    assert.strictEqual(outcome, 'no_row_written');
+    assert.strictEqual(complaintRows[0].retroactive_name_match_checked_at, '2026-10-01T00:00:00.000Z', 'expected the concurrent writer\'s value to survive, never overwritten');
+    assert.strictEqual('suggested_subject_type' in complaintRows[0], false, 'expected this call\'s own suggestion to never be written once it lost the race');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+// ─── checkAndWriteBackNameMatchBackfillBatch ──────────────────────────────
+await runSerialCheck('name-match-backfill — checkAndWriteBackNameMatchBackfillBatch reports {found:false} when no in-flight batch is known', async () => {
+  nameMatchBackfill.clearState();
+  const result = await nameMatchBackfill.checkAndWriteBackNameMatchBackfillBatch();
+  assert.deepStrictEqual(result, { found: false });
+});
+
+await runSerialCheck('name-match-backfill — checkAndWriteBackNameMatchBackfillBatch reports status, not complete, while Anthropic still shows the batch in_progress (never streams results early)', async () => {
+  nameMatchBackfill.writeState({ anthropic_batch_id: 'batch_nm_test_1', anthropic_status: 'in_progress', submitted_at: new Date().toISOString(), complaint_ids: ['c-1'], results_retrieved_at: null, submitted_by: 'test' });
+  nameMatchBackfill._setAnthropicClientForTesting({ beta: { messages: { batches: {
+    retrieve: async () => ({ processing_status: 'in_progress' }),
+    results: async () => { throw new Error('must not be called while still in_progress'); },
+  } } } });
+  try {
+    const result = await nameMatchBackfill.checkAndWriteBackNameMatchBackfillBatch();
+    assert.strictEqual(result.alreadyComplete, false);
+    assert.strictEqual(result.status, 'in_progress');
+  } finally {
+    nameMatchBackfill._setAnthropicClientForTesting(null);
+    nameMatchBackfill.clearState();
+  }
+});
+
+await runSerialCheck('name-match-backfill — checkAndWriteBackNameMatchBackfillBatch, once Anthropic reports \'ended\', streams real results, writes them back (including the resumability proof: re-running it is a pure no-op), and marks the state file fully retrieved', async () => {
+  significancePass._setSupabaseClientForTesting(makeNameMatchDirectoryFakeClient(NAME_MATCH_TABLE_DATA()));
+  const { client, complaintRows } = makeNameMatchBackfillFakeClient([
+    { id: 'c-1', property_id: 'prop-1', held_legal_fair_housing: false, retroactive_name_match_checked_at: null },
+    { id: 'c-2', property_id: null, held_legal_fair_housing: false, retroactive_name_match_checked_at: null },
+  ]);
+  nameMatchBackfill._setSupabaseClientForTesting(client);
+  nameMatchBackfill.writeState({ anthropic_batch_id: 'batch_nm_test_2', anthropic_status: 'in_progress', submitted_at: new Date().toISOString(), complaint_ids: ['c-1', 'c-2'], results_retrieved_at: null, submitted_by: 'test' });
+
+  const fakeAnthropic = { beta: { messages: { batches: {
+    retrieve: async () => ({ processing_status: 'ended' }),
+    results: async () => asyncIterableFromArray([
+      { custom_id: 'c-1', result: succeededResult({ property_text: null, vendor_text: null, name_text: 'Jane Doe called about a leak' }) },
+      { custom_id: 'c-2', result: { type: 'errored', error: { type: 'api_error' } } },
+    ]),
+  } } } };
+  nameMatchBackfill._setAnthropicClientForTesting(fakeAnthropic);
+  try {
+    const result = await nameMatchBackfill.checkAndWriteBackNameMatchBackfillBatch();
+    assert.strictEqual(result.alreadyComplete, true);
+    assert.strictEqual(result.justCompleted, true);
+    assert.strictEqual(result.summary.processed, 2);
+    assert.strictEqual(result.summary.written_with_suggestion, 1);
+    assert.strictEqual(result.summary.no_row_written, 1);
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-1').suggested_subject_type, 'tenant');
+    assert.strictEqual(complaintRows.find((r) => r.id === 'c-2').retroactive_name_match_checked_at, null, 'expected the errored item to stay unchecked');
+    assert.ok(result.state.results_retrieved_at);
+
+    const second = await nameMatchBackfill.checkAndWriteBackNameMatchBackfillBatch();
+    assert.strictEqual(second.alreadyComplete, true);
+    assert.strictEqual(second.justCompleted, undefined, 'expected a re-run to be a pure no-op — proves the file-based resumability contract actually holds');
+  } finally {
+    nameMatchBackfill._setSupabaseClientForTesting(null);
+    nameMatchBackfill._setAnthropicClientForTesting(null);
+    significancePass._setSupabaseClientForTesting(null);
+    nameMatchBackfill.clearState();
+  }
+});
+
+return { name: 'name-match backfill build (PART 24) — sequential runner completed (each scenario above already reported its own PASS/FAIL)', pass: true };
 })());
 
 // ─── Report ──────────────────────────────────────────────────────────────

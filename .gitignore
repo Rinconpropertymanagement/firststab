@@ -10,3 +10,10 @@ projects/property-brain-experiment/extractions/
 projects/property-brain-experiment/trial-1-results.md
 projects/hub/maintenance-history/backfill-backups/
 projects/hub/call-stats/.backfill-state/
+
+# Never commit: protected-class data export, and a one-time script with a database admin key inside
+projects/hub/maintenance-history/scratch-docs/oracle-snapshot-flagged-rows.json
+projects/calendar-assistant/seed.js
+
+# Leftover agent copies of the project
+.claude/worktrees/

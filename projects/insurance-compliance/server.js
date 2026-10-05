@@ -34,11 +34,29 @@ POST /api/insurance/save
   JSON body with verified policy fields
   Returns: { success: true, insurance_id }
 
+GET  /api/insurance/review-queue
+  Returns pending_review and escalated records for PM/DO review
+
+POST /api/insurance/approve/:id
+  Body: { reviewer_name, reviewer_notes? }
+  PM approves a pending record; non-compliant AI status auto-escalates to DO
+
+POST /api/insurance/escalate-confirm/:id
+  Body: { reviewer_name, reviewer_notes? }
+  DO confirms a non-compliant policy (sets final status)
+
+POST /api/insurance/reject/:id
+  Body: { reviewer_name, reason }
+  Removes a record (marks is_current=false) — for bad uploads
+
 Environment variables required (.env file):
   ANTHROPIC_API_KEY
   SUPABASE_URL
   SUPABASE_SERVICE_ROLE_KEY
-  INSURANCE_PORT  (optional, default 3456)
+  INSURANCE_PORT        (optional, default 3456)
+  GMAIL_USER            (for email notifications)
+  GMAIL_APP_PASSWORD    (Gmail app password)
+  DO_EMAIL              (Director of Operations email for escalations)
 `);
   process.exit(0);
 }
@@ -50,6 +68,82 @@ const fs         = require('fs');
 const crypto     = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { extractPolicy } = require('./extract-policy');
+const session     = require('express-session');
+const FileStore   = require('session-file-store')(session);
+const { google }  = require('googleapis');
+
+// ─── Nodemailer (email notifications) ────────────────────────────────────────
+// Install with: npm install nodemailer
+// Add to .env:
+//   GMAIL_USER=peter@rinconmanagement.com
+//   GMAIL_APP_PASSWORD=your-16-char-gmail-app-password
+//   DO_EMAIL=stephen@rinconmanagement.com   (Director of Operations)
+// Pod emails are hardcoded:
+//   Faria pod  → fariateam@rinconmanagement.com
+//   Solimar pod → solimarteam@rinconmanagement.com
+let nodemailer = null;
+try {
+  nodemailer = require('nodemailer');
+} catch (e) {
+  console.warn('[email] nodemailer not installed — email notifications disabled. Run: npm install nodemailer');
+}
+
+function createMailer() {
+  if (!nodemailer || !process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) return null;
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+  });
+}
+
+async function sendPMQueueEmail(toEmail, entries) {
+  try {
+    const mailer = createMailer();
+    if (!mailer) return;
+    const list = entries.map(e =>
+      `- ${e.address}: AI flagged as ${e.aiStatus || 'pending review'}`
+    ).join('\n');
+    await mailer.sendMail({
+      from: process.env.GMAIL_USER,
+      to: toEmail,
+      subject: `Insurance Review Queue: ${entries.length} new polic${entries.length === 1 ? 'y' : 'ies'} need review`,
+      text: `The following policies were uploaded and need your review:\n\n${list}\n\nLog in to the Insurance Compliance dashboard to review.`,
+    });
+    console.log(`[email] PM queue notification sent to ${toEmail}`);
+  } catch (err) {
+    console.error('[email] Failed to send PM queue email:', err.message);
+  }
+}
+
+async function sendEscalationEmail(rec, reviewerName, notes, aiStatus) {
+  try {
+    const mailer = createMailer();
+    if (!mailer || !process.env.DO_EMAIL) return;
+    const addr = rec.property_address_on_policy || 'Unknown property';
+    await mailer.sendMail({
+      from: process.env.GMAIL_USER,
+      to: process.env.DO_EMAIL,
+      subject: `Insurance Escalation: ${addr} flagged as ${aiStatus}`,
+      text: [
+        'A policy has been escalated for your review.',
+        '',
+        `Property:   ${addr}`,
+        `Insurer:    ${rec.insurer_name || '—'}`,
+        `Policy #:   ${rec.policy_number || '—'}`,
+        `Expiration: ${rec.expiration_date || '—'}`,
+        `Coverage:   ${rec.coverage_amount ? '$' + Number(rec.coverage_amount).toLocaleString() : '—'}`,
+        `AI Status:  ${aiStatus}`,
+        `Escalated by: ${reviewerName}`,
+        notes ? `Notes: ${notes}` : '',
+        '',
+        'Please log in to the Insurance Compliance dashboard to confirm.',
+      ].filter(l => l !== null).join('\n'),
+    });
+    console.log('[email] Escalation email sent to DO');
+  } catch (err) {
+    console.error('[email] Failed to send escalation email:', err.message);
+  }
+}
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT    = process.env.INSURANCE_PORT || 3456;
@@ -57,11 +151,15 @@ const missing = [];
 if (!process.env.ANTHROPIC_API_KEY)          missing.push('ANTHROPIC_API_KEY');
 if (!process.env.SUPABASE_URL)               missing.push('SUPABASE_URL');
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY)  missing.push('SUPABASE_SERVICE_ROLE_KEY');
+if (!process.env.SESSION_SECRET)             missing.push('SESSION_SECRET');
 
 if (missing.length > 0) {
   console.error(`[ERROR] Missing environment variables: ${missing.join(', ')}`);
   process.exit(1);
 }
+
+if (!process.env.GOOGLE_CLIENT_ID)     console.warn('[auth] GOOGLE_CLIENT_ID not set — OAuth login disabled');
+if (!process.env.GOOGLE_CLIENT_SECRET) console.warn('[auth] GOOGLE_CLIENT_SECRET not set — OAuth login disabled');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -94,17 +192,139 @@ const upload = multer({
 const app = express();
 app.use(express.json({ limit: '100mb' }));
 
-// Allow all origins — dashboard and server may be on different ports
+// CORS — reflect origin with credentials so session cookies are accepted
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  const origin = req.headers.origin || '';
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
+// ─── Session ──────────────────────────────────────────────────────────────────
+app.use(session({
+  store: new FileStore({
+    path:    '/var/www/insurance-compliance/sessions',
+    ttl:     8 * 60 * 60,
+    retries: 1,
+    logFn:   () => {},
+  }),
+  secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: false,   // nginx terminates TLS; Express sees HTTP internally
+    httpOnly: true,
+    maxAge: 8 * 60 * 60 * 1000,
+    sameSite: 'lax',
+  },
+}));
+
+// ─── OAuth client ─────────────────────────────────────────────────────────────
+const OAUTH_REDIRECT = 'https://srv1784739.hstgr.cloud/api/insurance/auth/callback';
+const ALLOWED_DOMAIN = 'rinconmanagement.com';
+
+function createOAuthClient() {
+  return new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID || process.env.GMAIL_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET || process.env.GMAIL_CLIENT_SECRET,
+    OAUTH_REDIRECT
+  );
+}
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  if (req.session && req.session.user) return next();
+  // Always return 401 JSON for API routes so the dashboard can redirect
+  if (req.path.startsWith('/api/') || (req.headers.accept && req.headers.accept.includes('application/json'))) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  return res.redirect('/insurance/login.html');
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.session || !req.session.user) return res.status(401).json({ error: 'Not authenticated' });
+    if (!roles.includes(req.session.user.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions', required: roles, actual: req.session.user.role });
+    }
+    next();
+  };
+}
+
+// ─── GET /api/insurance/auth/login ───────────────────────────────────────────
+app.get('/api/insurance/auth/login', (req, res) => {
+  const oauth2Client = createOAuthClient();
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'online',
+    scope: ['openid', 'email', 'profile'],
+    hd: ALLOWED_DOMAIN,
+    prompt: 'select_account',
+  });
+  res.redirect(url);
+});
+
+// ─── GET /api/insurance/auth/callback ────────────────────────────────────────
+app.get('/api/insurance/auth/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error || !code) return res.redirect('/insurance/login.html?error=access_denied');
+  try {
+    const oauth2Client = createOAuthClient();
+    const { tokens }   = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+    const ticket  = await oauth2Client.verifyIdToken({
+      idToken:  tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID || process.env.GMAIL_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const email   = payload.email;
+    const name    = payload.name;
+    if (!email.endsWith('@' + ALLOWED_DOMAIN)) return res.redirect('/insurance/login.html?error=wrong_domain');
+    const { data: roleRow, error: roleErr } = await supabase
+      .from('insurance_user_roles').select('role').eq('email', email).single();
+    if (roleErr || !roleRow) return res.redirect('/insurance/login.html?error=no_access');
+    await supabase.from('insurance_user_roles')
+      .update({ last_login: new Date().toISOString() }).eq('email', email);
+    req.session.user = { email, name, role: roleRow.role };
+    res.redirect('/insurance/');
+  } catch (err) {
+    console.error('[auth] callback error:', err.message);
+    res.redirect('/insurance/login.html?error=auth_failed');
+  }
+});
+
+// ─── GET /api/insurance/auth/logout ──────────────────────────────────────────
+app.get('/api/insurance/auth/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/insurance/login.html'));
+});
+
+// ─── GET /api/insurance/auth/me ──────────────────────────────────────────────
+app.get('/api/insurance/auth/me', requireAuth, (req, res) => {
+  res.json(req.session.user);
+});
+
+// ─── GET /api/insurance/records ──────────────────────────────────────────────
+app.get('/api/insurance/records', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('property_insurance')
+    .select(`
+      id, document_id, policy_number, insurer_name, expiration_date, effective_date,
+      coverage_amount, additional_insured_verified, coverage_amount_verified,
+      status, ai_suggested_status, updated_at, created_at, notes, named_insured,
+      property_address_on_policy,
+      properties ( name, pod, address, appfolio_id ),
+      documents ( id, file_name, file_path )
+    `)
+    .eq('is_current', true)
+    .order('expiration_date', { ascending: true, nullsFirst: false });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
 // ─── POST /api/insurance/upload ───────────────────────────────────────────────
-app.post('/api/insurance/upload', upload.single('file'), async (req, res) => {
+app.post('/api/insurance/upload', requireAuth, upload.single('file'), async (req, res) => {
   const ts = new Date().toISOString();
   const appfolio_property_id = req.body.appfolio_property_id;
 
@@ -157,16 +377,27 @@ app.post('/api/insurance/upload', upload.single('file'), async (req, res) => {
     console.warn(`[${ts}] Property lookup warning:`, err.message);
   }
 
-  // Step 3: Build the target path on Sally (file copy happens in a future storeDocument step)
-  const year        = new Date().getFullYear();
-  const targetPath  = `/var/www/documents/insurance_certificate/${year}/${Date.now()}-${appfolio_property_id}${ext}`;
+  // Step 3: Upload file to Supabase Storage before deleting temp copy
+  await ensureStorageBucket();
+  const fileBuffer  = fs.readFileSync(filePath);
+  const storageKey  = makeCleanFilename(extracted, ext);
+  const { error: uploadErr } = await supabase.storage
+    .from('insurance-documents')
+    .upload(storageKey, fileBuffer, { contentType: mimeType, upsert: true });
 
-  // Step 4: Insert a row into documents
+  fs.unlink(filePath, () => {}); // safe to delete now regardless of outcome
+
+  if (uploadErr) {
+    console.error(`[${ts}] Storage upload error:`, uploadErr.message);
+    return res.status(500).json({ error: 'Failed to store document file.', detail: uploadErr.message });
+  }
+
+  // Step 4: Insert a row into documents (storageKey is used by the signed-URL endpoint)
   const { data: docRows, error: docErr } = await supabase
     .from('documents')
     .insert({
-      file_name:   originalName,
-      file_path:   targetPath,
+      file_name:   storageKey,
+      file_path:   storageKey,
       file_type:   'insurance_certificate',
       entity_type: 'property',
       entity_id:   propertyId,
@@ -180,9 +411,6 @@ app.post('/api/insurance/upload', upload.single('file'), async (req, res) => {
     return res.status(500).json({ error: 'Failed to save document record.', detail: docErr.message });
   }
 
-  // Clean up the temp file after processing
-  fs.unlink(filePath, () => {});
-
   return res.json({
     document_id:           docRows.id,
     appfolio_property_id,
@@ -192,7 +420,7 @@ app.post('/api/insurance/upload', upload.single('file'), async (req, res) => {
 });
 
 // ─── POST /api/insurance/save ─────────────────────────────────────────────────
-app.post('/api/insurance/save', async (req, res) => {
+app.post('/api/insurance/save', requireAuth, async (req, res) => {
   const ts = new Date().toISOString();
   const {
     appfolio_property_id,
@@ -236,7 +464,19 @@ app.post('/api/insurance/save', async (req, res) => {
   }
 
   // Step 2: Insert new policy row
-  const now = new Date().toISOString();
+  const now        = new Date().toISOString();
+  const covAmt     = coverage_amount != null && coverage_amount !== '' ? Number(coverage_amount) : null;
+  const isExpired  = expiration_date && new Date(expiration_date) < new Date();
+  const daysToExp  = expiration_date ? Math.floor((new Date(expiration_date) - new Date()) / 86400000) : null;
+  const isExpiring = daysToExp !== null && daysToExp >= 0 && daysToExp <= 30;
+  const belowMin   = covAmt != null && covAmt < 500000;
+  const noAddlIns  = !additional_insured_verified;
+  const aiStatus   = isExpired    ? 'expired'
+                   : belowMin     ? 'insufficient_liability'
+                   : noAddlIns    ? 'no_additional_insured'
+                   : isExpiring   ? 'expiring_soon'
+                   :                'compliant';
+
   const { data: insRows, error: insErr } = await supabase
     .from('property_insurance')
     .insert({
@@ -247,14 +487,15 @@ app.post('/api/insurance/save', async (req, res) => {
       insurer_name,
       effective_date:             effective_date || null,
       expiration_date,
-      coverage_amount:            coverage_amount || null,
+      coverage_amount:            covAmt,
       named_insured:              named_insured || null,
       property_address_on_policy: property_address_on_policy || null,
       additional_insured_verified: !!additional_insured_verified,
       coverage_amount_verified:    !!coverage_amount_verified,
       notes:                      notes || null,
       is_current:                 true,
-      status:                     'compliant',
+      status:                     'pending_review',
+      ai_suggested_status:        aiStatus,
       verified_at:                now,
     })
     .select('id')
@@ -302,7 +543,7 @@ app.post('/api/insurance/save', async (req, res) => {
 });
 
 // ─── PATCH /api/insurance/policy/:id ─────────────────────────────────────────
-app.patch('/api/insurance/policy/:id', async (req, res) => {
+app.patch('/api/insurance/policy/:id', requireAuth, async (req, res) => {
   const allowed = ['additional_insured_verified', 'coverage_amount_verified'];
   const updates = {};
   for (const field of allowed) {
@@ -321,7 +562,7 @@ app.patch('/api/insurance/policy/:id', async (req, res) => {
 });
 
 // ─── GET /api/insurance/document/:id ─────────────────────────────────────────
-app.get('/api/insurance/document/:id', async (req, res) => {
+app.get('/api/insurance/document/:id', requireAuth, async (req, res) => {
   const { data: doc, error } = await supabase
     .from('documents')
     .select('file_name, file_path')
@@ -408,7 +649,7 @@ async function ensureStorageBucket() {
 }
 
 // ─── GET /api/insurance/properties ───────────────────────────────────────────
-app.get('/api/insurance/properties', async (req, res) => {
+app.get('/api/insurance/properties', requireAuth, async (req, res) => {
   const { data, error } = await supabase
     .from('properties')
     .select('id, name, address, appfolio_id')
@@ -418,7 +659,7 @@ app.get('/api/insurance/properties', async (req, res) => {
 });
 
 // ─── POST /api/insurance/batch-upload ────────────────────────────────────────
-app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, res) => {
+app.post('/api/insurance/batch-upload', requireAuth, upload.array('files', 50), async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded.' });
   }
@@ -463,6 +704,9 @@ app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, r
           has_existing_policy = !!(existing && existing.length > 0);
         }
 
+        // Flag records where AI could not extract any identifying fields
+        const extractionFailed = !extracted.policy_number && !extracted.insurer_name && !extracted.expiration_date;
+
         results.push({
           original_filename:   file.originalname,
           clean_filename:      cleanFilename,
@@ -473,6 +717,7 @@ app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, r
             ? { id: matched.id, appfolio_id: matched.appfolio_id, name: matched.name, address: matched.address }
             : null,
           has_existing_policy,
+          extraction_failed:   extractionFailed,
           error:               null,
         });
       }
@@ -497,7 +742,7 @@ app.post('/api/insurance/batch-upload', upload.array('files', 50), async (req, r
 });
 
 // ─── POST /api/insurance/batch-save ──────────────────────────────────────────
-app.post('/api/insurance/batch-save', async (req, res) => {
+app.post('/api/insurance/batch-save', requireAuth, async (req, res) => {
   const ts = new Date().toISOString();
   const records = req.body.records;
 
@@ -518,6 +763,7 @@ app.post('/api/insurance/batch-save', async (req, res) => {
   let saved = 0;
   const failures = [];
   const outcomes = [];
+  const queueEntries = []; // accumulate for PM notification email
 
   for (const record of records) {
     const {
@@ -577,18 +823,26 @@ app.post('/api/insurance/batch-save', async (req, res) => {
 
       // Insert new property_insurance record
       const now        = new Date().toISOString();
-      const covAmt     = (extracted && extracted.coverage_amount) || null;
-      const expDate    = (extracted && extracted.expiration_date) || null;
-      const isExpired  = expDate && new Date(expDate) < new Date();
-      const belowMin   = covAmt != null && covAmt < 500000;
+      // Parse coverage_amount as a number — it may arrive as a string or 0, and
+      // (value || null) would wrongly coerce 0 to null.
+      const rawCov     = extracted && extracted.coverage_amount;
+      const covAmt     = (rawCov != null && rawCov !== '')
+                           ? (isNaN(Number(rawCov)) ? null : Number(rawCov))
+                           : null;
+      const expDate      = (extracted && extracted.expiration_date) || null;
+      const isExpired    = expDate && new Date(expDate) < new Date();
+      const daysToExp    = expDate ? Math.floor((new Date(expDate) - new Date()) / 86400000) : null;
+      const isExpiring   = daysToExp !== null && daysToExp >= 0 && daysToExp <= 30;
+      const belowMin     = covAmt != null && covAmt < 500000;
       const noAddlInsured = !additional_insured_verified;
-      const recStatus  = isExpired        ? 'expired'
-                       : belowMin         ? 'insufficient_liability'
-                       : noAddlInsured    ? 'no_additional_insured'
-                       :                    'compliant';
+      const recStatus    = isExpired      ? 'expired'
+                         : belowMin       ? 'insufficient_liability'
+                         : noAddlInsured  ? 'no_additional_insured'
+                         : isExpiring     ? 'expiring_soon'
+                         :                  'compliant';
 
       const { error: insErr } = await supabase.from('property_insurance').insert({
-        property_id,
+        property_id:                 property_id || null,
         appfolio_property_id,
         policy_number:               (extracted && extracted.policy_number)    || null,
         insurer_name:                (extracted && extracted.insurer_name)     || null,
@@ -599,10 +853,10 @@ app.post('/api/insurance/batch-save', async (req, res) => {
         property_address_on_policy:  (extracted && extracted.property_address) || null,
         additional_insured_verified: !!additional_insured_verified,
         coverage_amount_verified:    !!coverage_amount_verified,
-        status:                      recStatus,
+        status:                      'pending_review',
+        ai_suggested_status:         recStatus,
         is_current:                  true,
         document_id:                 docRow.id,
-        verified_at:                 now,
         notes:                       belowMin && coverage_amount_verified
           ? `Low liability accepted: $${covAmt.toLocaleString()} (below $500K minimum — manually accepted)`
           : null,
@@ -623,10 +877,46 @@ app.post('/api/insurance/batch-save', async (req, res) => {
 
       saved++;
       outcomes.push(label + ': saved');
+      queueEntries.push({ address: label, aiStatus: recStatus, property_id: property_id || null });
     } catch (err) {
       console.error(`[${ts}] Batch save error (${label}):`, err.message);
       failures.push({ address: label, error: err.message });
       outcomes.push(label + ': error — ' + err.message);
+    }
+  }
+
+  // ── Send PM notification emails, routed by pod ───────────────────────────
+  if (queueEntries.length > 0) {
+    try {
+      // Look up pod for each saved property_id in one query
+      const propIds = [...new Set(queueEntries.map(e => e.property_id).filter(Boolean))];
+      let podMap = {};
+      if (propIds.length > 0) {
+        const { data: propRows } = await supabase
+          .from('properties')
+          .select('id, pod')
+          .in('id', propIds);
+        if (propRows) propRows.forEach(p => { podMap[p.id] = p.pod; });
+      }
+      // Group entries by pod
+      const byPod = { Faria: [], Solimar: [], unknown: [] };
+      queueEntries.forEach(e => {
+        const pod = podMap[e.property_id] || null;
+        if (pod === 'Faria')   byPod.Faria.push(e);
+        else if (pod === 'Solimar') byPod.Solimar.push(e);
+        else byPod.unknown.push(e);
+      });
+      if (byPod.Faria.length > 0)
+        await sendPMQueueEmail('fariateam@rinconmanagement.com', byPod.Faria);
+      if (byPod.Solimar.length > 0)
+        await sendPMQueueEmail('solimarteam@rinconmanagement.com', byPod.Solimar);
+      // Unmatched properties go to both pod inboxes
+      if (byPod.unknown.length > 0) {
+        await sendPMQueueEmail('fariateam@rinconmanagement.com',   byPod.unknown);
+        await sendPMQueueEmail('solimarteam@rinconmanagement.com', byPod.unknown);
+      }
+    } catch (emailErr) {
+      console.error(`[${ts}] PM email error:`, emailErr.message);
     }
   }
 
@@ -652,6 +942,334 @@ app.post('/api/insurance/batch-save', async (req, res) => {
     total:  records.length,
     ...(failures.length > 0 && { errors: failures }),
   });
+});
+
+// ─── GET /api/insurance/review-queue ─────────────────────────────────────────
+// Returns records in 'pending_review' or 'escalated' status.
+// The dashboard filters by role on the frontend.
+app.get('/api/insurance/review-queue', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('property_insurance')
+    .select(`
+      id, property_id, policy_number, insurer_name, expiration_date,
+      coverage_amount, additional_insured_verified, status, ai_suggested_status,
+      property_address_on_policy, named_insured, created_at, document_id,
+      properties ( name, address )
+    `)
+    .in('status', ['pending_review', 'escalated'])
+    .eq('is_current', true)
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
+// ─── POST /api/insurance/approve/:id ─────────────────────────────────────────
+// PM approves a pending record.
+// If AI suggested non-compliant status → set status = 'escalated', email DO.
+// If AI suggested compliant/expiring_soon → set that status directly.
+app.post('/api/insurance/approve/:id', requireAuth, requireRole('admin', 'director_of_operations', 'property_manager'), async (req, res) => {
+  const ts = new Date().toISOString();
+  const { reviewer_name, reviewer_notes } = req.body;
+  const id = req.params.id;
+
+  if (!reviewer_name) return res.status(400).json({ error: 'reviewer_name is required.' });
+
+  const { data: rec, error: fetchErr } = await supabase
+    .from('property_insurance')
+    .select('ai_suggested_status, property_address_on_policy, insurer_name, expiration_date, coverage_amount, policy_number')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !rec) return res.status(404).json({ error: 'Record not found.' });
+
+  const aiStatus = rec.ai_suggested_status || 'compliant';
+  const now = new Date().toISOString();
+  // Non-compliant statuses require DO confirmation
+  const nonCompliant = ['expired', 'insufficient_liability', 'no_additional_insured'];
+  const newStatus = nonCompliant.includes(aiStatus) ? 'escalated' : aiStatus;
+
+  const { data: updated, error: updateErr } = await supabase
+    .from('property_insurance')
+    .update({
+      status:         newStatus,
+      reviewed_by:    reviewer_name,
+      reviewed_at:    now,
+      reviewer_notes: reviewer_notes || null,
+      updated_at:     now,
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+  if (newStatus === 'escalated') {
+    await sendEscalationEmail(rec, reviewer_name, reviewer_notes || '', aiStatus);
+    console.log(`[${ts}] Approved→escalated: id=${id} aiStatus=${aiStatus}`);
+  } else {
+    console.log(`[${ts}] Approved as ${newStatus}: id=${id}`);
+  }
+
+  return res.json({ success: true, record: updated });
+});
+
+// ─── POST /api/insurance/escalate-confirm/:id ─────────────────────────────────
+// Director of Operations confirms a non-compliant policy.
+// Sets status to the AI-suggested value (expired, insufficient_liability, etc.).
+app.post('/api/insurance/escalate-confirm/:id', requireAuth, requireRole('admin', 'director_of_operations'), async (req, res) => {
+  const ts = new Date().toISOString();
+  const { reviewer_name, reviewer_notes } = req.body;
+  const id = req.params.id;
+
+  if (!reviewer_name) return res.status(400).json({ error: 'reviewer_name is required.' });
+
+  const { data: rec, error: fetchErr } = await supabase
+    .from('property_insurance')
+    .select('ai_suggested_status')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !rec) return res.status(404).json({ error: 'Record not found.' });
+
+  const finalStatus = rec.ai_suggested_status || 'expired';
+  const now = new Date().toISOString();
+
+  const { data: updated, error: updateErr } = await supabase
+    .from('property_insurance')
+    .update({
+      status:         finalStatus,
+      escalated_by:   reviewer_name,
+      escalated_at:   now,
+      reviewer_notes: reviewer_notes || null,
+      updated_at:     now,
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+  console.log(`[${ts}] DO confirmed non-compliant: id=${id} status=${finalStatus}`);
+  return res.json({ success: true, record: updated });
+});
+
+// ─── POST /api/insurance/reject/:id ──────────────────────────────────────────
+// Mark a record as removed (is_current = false).
+// Used when a document is wrong, unreadable, or uploaded by mistake.
+app.post('/api/insurance/reject/:id', requireAuth, requireRole('admin', 'director_of_operations', 'property_manager'), async (req, res) => {
+  const ts = new Date().toISOString();
+  const { reviewer_name, reason } = req.body;
+  const id = req.params.id;
+
+  if (!reviewer_name) return res.status(400).json({ error: 'reviewer_name is required.' });
+
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from('property_insurance')
+    .update({
+      is_current:     false,
+      reviewed_by:    reviewer_name,
+      reviewed_at:    now,
+      reviewer_notes: `REJECTED by ${reviewer_name}: ${reason || '(no reason given)'}`,
+      updated_at:     now,
+    })
+    .eq('id', id);
+
+  if (error) return res.status(500).json({ error: error.message });
+  console.log(`[${ts}] Record rejected: id=${id} by=${reviewer_name}`);
+  return res.json({ success: true });
+});
+
+// ─── POST /api/insurance/internal/check-new-properties ───────────────────────
+// Called nightly by cron after AppFolio sync. Finds properties added in the
+// last 48 hours with no insurance record, creates no_policy rows, and emails
+// all inspection coordinators.
+app.post('/api/insurance/internal/check-new-properties', async (req, res) => {
+  const secret = req.headers['x-cron-secret'];
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const ts     = new Date().toISOString();
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+  // Properties added in the last 48 hours
+  const { data: newProps, error: propErr } = await supabase
+    .from('properties')
+    .select('id, name, address, appfolio_id')
+    .gte('created_at', cutoff);
+
+  if (propErr) {
+    console.error(`[${ts}] check-new-properties error:`, propErr.message);
+    return res.status(500).json({ error: propErr.message });
+  }
+
+  if (!newProps || !newProps.length) {
+    console.log(`[${ts}] check-new-properties: no new properties`);
+    return res.json({ flagged: 0 });
+  }
+
+  // Filter to those with no current insurance record
+  const uninsured = [];
+  for (const prop of newProps) {
+    const { data: existing } = await supabase
+      .from('property_insurance')
+      .select('id')
+      .eq('property_id', prop.id)
+      .eq('is_current', true)
+      .limit(1);
+    if (!existing || !existing.length) uninsured.push(prop);
+  }
+
+  if (!uninsured.length) {
+    console.log(`[${ts}] check-new-properties: all new properties already have insurance records`);
+    return res.json({ flagged: 0 });
+  }
+
+  // Create no_policy records so they show up in the dashboard
+  for (const prop of uninsured) {
+    const { error: insErr } = await supabase.from('property_insurance').insert({
+      property_id:          prop.id,
+      appfolio_property_id: prop.appfolio_id || null,
+      is_current:           true,
+      status:               'no_policy',
+      ai_suggested_status:  'no_policy',
+    });
+    if (insErr) console.warn(`[${ts}] no_policy insert warn (${prop.name}):`, insErr.message);
+  }
+
+  // Email all inspection coordinators
+  try {
+    const mailer = createMailer();
+    if (mailer) {
+      const { data: ics } = await supabase
+        .from('insurance_user_roles')
+        .select('email')
+        .eq('role', 'inspection_coordinator');
+
+      if (ics && ics.length) {
+        const list = uninsured.map(p => `- ${p.name || p.address}`).join('\n');
+        await mailer.sendMail({
+          from:    process.env.GMAIL_USER,
+          to:      ics.map(u => u.email).join(', '),
+          subject: `Action Required: ${uninsured.length} New ${uninsured.length === 1 ? 'Property' : 'Properties'} — Insurance Documents Needed`,
+          text:    [
+            `${uninsured.length} new ${uninsured.length === 1 ? 'property has' : 'properties have'} been added to the portfolio and need insurance documents:`,
+            '',
+            list,
+            '',
+            'Please log in to the Insurance Compliance dashboard and upload the declaration page for each.',
+          ].join('\n'),
+        });
+        console.log(`[${ts}] check-new-properties: notified ${ics.length} inspection coordinator(s)`);
+      }
+    }
+  } catch (emailErr) {
+    console.error(`[${ts}] check-new-properties email error:`, emailErr.message);
+  }
+
+  console.log(`[${ts}] check-new-properties: flagged ${uninsured.length} properties`);
+  return res.json({ flagged: uninsured.length, properties: uninsured.map(p => p.name || p.address) });
+});
+
+// ─── GET /api/insurance/notes/:insuranceId ───────────────────────────────────
+app.get('/api/insurance/notes/:insuranceId', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('insurance_notes')
+    .select('id, note, created_by, created_at')
+    .eq('insurance_id', req.params.insuranceId)
+    .order('created_at', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
+// ─── POST /api/insurance/notes/:insuranceId ──────────────────────────────────
+app.post('/api/insurance/notes/:insuranceId', requireAuth, async (req, res) => {
+  const { note } = req.body;
+  if (!note || !note.trim()) return res.status(400).json({ error: 'Note text is required.' });
+  const created_by = req.session.user.name || req.session.user.email;
+  const { error } = await supabase.from('insurance_notes').insert({
+    insurance_id: req.params.insuranceId,
+    note:         note.trim(),
+    created_by,
+  });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ success: true });
+});
+
+// ─── GET /api/insurance/document/:id/download ────────────────────────────────
+// Streams the file with Content-Disposition: attachment so the browser downloads
+// it instead of opening it — ready to attach in AppFolio.
+app.get('/api/insurance/document/:id/download', requireAuth, async (req, res) => {
+  const { data: doc, error } = await supabase
+    .from('documents')
+    .select('file_name, mime_type')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !doc) return res.status(404).send('Document not found.');
+
+  const { data: fileData, error: downloadErr } = await supabase.storage
+    .from('insurance-documents')
+    .download(doc.file_name);
+
+  if (downloadErr || !fileData) return res.status(500).send('Could not retrieve file.');
+
+  const buffer = Buffer.from(await fileData.arrayBuffer());
+  res.setHeader('Content-Disposition', `attachment; filename="${doc.file_name}"`);
+  res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+  res.send(buffer);
+});
+
+// ─── GET /api/insurance/users ─────────────────────────────────────────────────
+app.get('/api/insurance/users', requireAuth, requireRole('admin'), async (req, res) => {
+  const { data, error } = await supabase
+    .from('insurance_user_roles')
+    .select('email, role, assigned_by, assigned_at, last_login')
+    .order('assigned_at');
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data || []);
+});
+
+// ─── POST /api/insurance/users ────────────────────────────────────────────────
+app.post('/api/insurance/users', requireAuth, requireRole('admin'), async (req, res) => {
+  const { email, role } = req.body;
+  if (!email || !role) return res.status(400).json({ error: 'email and role are required.' });
+  if (!email.endsWith('@' + ALLOWED_DOMAIN)) return res.status(400).json({ error: 'Only @rinconmanagement.com accounts allowed.' });
+  const validRoles = ['admin', 'director_of_operations', 'property_manager', 'inspection_coordinator'];
+  if (!validRoles.includes(role)) return res.status(400).json({ error: 'Invalid role.' });
+  const { error } = await supabase.from('insurance_user_roles').insert({
+    email, role, assigned_by: req.session.user.email,
+  });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ success: true });
+});
+
+// ─── PATCH /api/insurance/users/:email ───────────────────────────────────────
+app.patch('/api/insurance/users/:email', requireAuth, requireRole('admin'), async (req, res) => {
+  const { role } = req.body;
+  const targetEmail = req.params.email;
+  const validRoles = ['admin', 'director_of_operations', 'property_manager', 'inspection_coordinator'];
+  if (!validRoles.includes(role)) return res.status(400).json({ error: 'Invalid role.' });
+  const { data: existing } = await supabase.from('insurance_user_roles').select('role').eq('email', targetEmail).single();
+  const oldRole = existing ? existing.role : null;
+  const { error } = await supabase.from('insurance_user_roles')
+    .update({ role, assigned_by: req.session.user.email, assigned_at: new Date().toISOString() })
+    .eq('email', targetEmail);
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase.from('insurance_role_changes').insert({
+    changed_by: req.session.user.email, target_email: targetEmail, old_role: oldRole, new_role: role,
+  });
+  return res.json({ success: true });
+});
+
+// ─── DELETE /api/insurance/users/:email ──────────────────────────────────────
+app.delete('/api/insurance/users/:email', requireAuth, requireRole('admin'), async (req, res) => {
+  const targetEmail = req.params.email;
+  if (targetEmail === req.session.user.email) return res.status(400).json({ error: 'You cannot remove your own access.' });
+  const { error } = await supabase.from('insurance_user_roles').delete().eq('email', targetEmail);
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ success: true });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

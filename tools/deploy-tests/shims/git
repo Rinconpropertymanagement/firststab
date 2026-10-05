@@ -1,0 +1,15 @@
+#!/bin/bash
+# TEST SHIM for git: passes through, except fails the sub-command named in SHIM_FAIL_GIT
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="${SHIM_LOG:-$SHIM_DIR/shim.log}"
+REAL_PATH="$(echo "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)"
+REAL_GIT="$(PATH="$REAL_PATH" command -v git)"
+args=("$@"); i=0; sub=""
+while [ $i -lt ${#args[@]} ]; do
+  case "${args[$i]}" in -C|-c) i=$((i+2)) ;; -*) i=$((i+1)) ;; *) sub="${args[$i]}"; break ;; esac
+done
+if [ -n "$SHIM_FAIL_GIT" ] && [ "$sub" = "$SHIM_FAIL_GIT" ]; then
+  echo "$(date '+%H:%M:%S') INJECTED-FAILURE git $sub" >> "$LOG"; echo "fatal: injected git failure ($sub)" >&2; exit 128
+fi
+if [ -n "$SHIM_FAIL_GIT_ARGS" ]; then case "$*" in *"$SHIM_FAIL_GIT_ARGS"*) echo "$(date '+%H:%M:%S') INJECTED-FAILURE git $*" >> "$LOG"; echo "fatal: injected git failure ($*)" >&2; exit 128 ;; esac; fi
+exec "$REAL_GIT" "$@"

@@ -1,0 +1,1018 @@
+#!/bin/bash
+# deploy-guard-lib.sh
+#
+# Shared safety checks for the two Hub deploy scripts:
+#   - deploy-to-sally.sh          (whole Hub)
+#   - deploy-feature-to-sally.sh  (only the paths you name)
+# This file is "sourced" (loaded) by those two scripts. It is not run on its
+# own. Both scripts load this same file, so they can never drift apart.
+#
+# THIS FILE IS EXCLUDED FROM THE DEPLOY (see DEPLOY_EXCLUDE_PATTERNS below). It
+# is a tool that runs on your computer, so it is never copied to Sally.
+#
+# WHAT THE SAFETY CHECKS DO (all of them run BEFORE anything is sent):
+#
+#   1. NO DELETING BY DEFAULT. A deploy only adds and updates files. Files
+#      that exist only on Sally are left alone. Deleting needs the explicit
+#      flag --delete-on-server, and then:
+#        - every file that would be deleted is listed, marked either
+#          "NOT IN GIT - would be lost permanently" or "recorded in git
+#          (commit X)";
+#        - deleting a file git has never recorded is refused unless you ALSO
+#          add --allow-lose-unrecorded-files;
+#        - you must type the word DELETE. --yes does NOT answer this question,
+#          and with no terminal attached (a script, a pipe) it is refused.
+#
+#   2. PREVIEW, THEN ASK. It shows exactly which files would be added and
+#      which would be overwritten (and deleted, if you asked), then asks
+#      y/N. --yes skips only that y/N question, never the checks below.
+#      Files are compared by CONTENT (checksum), so a file whose only
+#      difference is its timestamp is not treated as a change.
+#
+#   3. DON'T OVERWRITE NEWER WORK. For everything the deploy would overwrite
+#      or replace on Sally:
+#        (a) Sally's current copy must be a version git has recorded in its
+#            history. If not, the deploy STOPS: "Sally has changes git doesn't
+#            know about" (someone edited it on Sally and nobody saved it).
+#            This includes a Sally file, link or folder that sits where your
+#            deploy needs a different kind of thing (a file where you have a
+#            folder, a link where you have a file) - rsync would quietly
+#            remove it to make room, so these are checked too.
+#            Override: --allow-unrecorded-server-changes
+#        (b) your local copy must be committed to git. If a file you are
+#            about to send is edited-but-uncommitted, or brand new and never
+#            committed, the deploy STOPS.
+#            Override: --allow-uncommitted
+#      Both stops apply even with --yes. An override flag prints a loud
+#      warning and the y/N question is still asked (unless --yes is also
+#      given).
+#
+#   4. FAILS CLOSED. If ssh, rsync or git cannot finish a check, the deploy
+#      is cancelled before anything is sent, with a plain-English reason.
+#
+#   5. NOTHING CHANGES BETWEEN "YES" AND "SEND". After you say yes, every
+#      check is run a second time and compared with what you approved
+#      (including which git commit your files are at). If anything moved (a
+#      file was edited here or on Sally, or git's commit changed, while you
+#      were deciding), it cancels instead of sending.
+#
+# EXIT CODES: 0 = done (or nothing to do); 1 = you said no / bad arguments;
+#             2 = a safety check stopped the deploy; 3 = a check could not be
+#             completed (fail closed).
+#
+# HOW "RECORDED IN GIT" IS DECIDED: the content of Sally's copy is hashed the
+# way git hashes files (git hash-object, no line-ending conversion) and
+# looked up in the list of every file version reachable from any branch, tag
+# or HEAD (git rev-list --objects --all, ignoring the stash). A version that
+# only exists in an uncommitted or stashed state does not count.
+# "COMMITTED" for your local files means: byte-for-byte the same as the copy
+# in the current commit (HEAD).
+#
+# HOW COLLISIONS ARE FOUND: besides rsync's own dry run, each deploy asks Sally
+# (read-only, one `find`) what is already there, so a Sally file/link/folder
+# sitting at a spot where the deploy would put something of a different kind
+# is caught even though rsync labels it just "new".
+#
+# KNOWN LIMIT: there is a window of a second or two between the final re-check
+# and the actual copy. Something edited on Sally in exactly that window would
+# still be overwritten. (An idea for later: send only the approved list.)
+#
+# Written for bash 3.2 (the macOS default): no associative arrays, no mapfile.
+
+# ---------------------------------------------------------------------------
+# Settings shared by both scripts
+# ---------------------------------------------------------------------------
+
+# Never sent to Sally and never deleted from Sally (rsync protects excluded
+# names from deletion on the receiving side). A name matches if ANY folder or
+# file name in its path matches one of these.
+#   node_modules    rebuilt on Sally by npm install
+#   .env*           secrets - managed by hand on Sally (.env, .env.local ...)
+#   .git            git's own data
+#   cron-*.sh       wrapper scripts edited on Sally by hand (2026-09-01
+#                   incident; see deploy-to-sally.sh). NOTE: this also means
+#                   edits to the cron-*.sh files tracked in git NEVER reach
+#                   Sally through these scripts.
+#   *.bak  *.bak-1 *.bak.old *.bak2 (the "*.bak[-._0-9]*" form)  and  *.js.pre-*
+#                   rollback copies such as server.js.bak-20261001153325 and
+#                   server.js.pre-rental-analysis-restore.bak. Kept narrower than
+#                   a bare "*.bak*" / "*.pre-*" so a real source file such as
+#                   lib.pre-process.js or bakery.js is not skipped by mistake.
+#   deploy-guard-lib.sh  this file (it runs on your computer, not on Sally)
+DEPLOY_EXCLUDE_PATTERNS=(
+  'node_modules'
+  '.env*'
+  '.git'
+  '.DS_Store'
+  '*.log'
+  'cron-*.sh'
+  '*.bak'
+  '*.bak[-._0-9]*'
+  '*.js.pre-*'
+  'deploy-guard-lib.sh'
+)
+DEPLOY_EXCLUDES=()
+for _guard_pat in "${DEPLOY_EXCLUDE_PATTERNS[@]}"; do
+  DEPLOY_EXCLUDES+=(--exclude "$_guard_pat")
+done
+unset _guard_pat
+
+# -r folders, -l symlinks, -p permissions, -z compress, --checksum compare by
+# content, -8 print accented file names as they are. Deliberately NOT -t
+# (times), -o (owner), -g (group): files whose content is the same are not
+# touched at all, and the Mac's user/group names are not stamped onto Sally's
+# files. --timeout: give up (instead of hanging) if the connection goes quiet.
+GUARD_RSYNC_OPTS=(-rlpz -8 --checksum --no-owner --no-group --timeout=120)
+
+# ssh: never ask for a password, and notice a dead connection instead of hanging.
+GUARD_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+
+# Treat every file name as plain bytes. Without this, macOS's tr/awk/grep can
+# stumble on an odd (non-UTF-8) file name and silently drop it from a check.
+export LC_ALL=C
+
+OPT_YES=false
+OPT_DELETE=false
+OPT_LOSE_UNRECORDED=false
+OPT_ALLOW_UNRECORDED_SERVER=false
+OPT_ALLOW_UNCOMMITTED=false
+
+UNIT_PATHS=()      # what to deploy: (.) for the whole Hub, or the named paths
+GUARD_WORK=""      # private temp folder, removed when the script ends
+GUARD_TAB="$(printf '\t')"
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+# Flags shared by both scripts. Returns 0 if $1 was one of them.
+guard_parse_flag() {
+  case "$1" in
+    --yes)                             OPT_YES=true ;;
+    --delete-on-server)                OPT_DELETE=true ;;
+    --allow-lose-unrecorded-files)     OPT_LOSE_UNRECORDED=true ;;
+    --allow-unrecorded-server-changes) OPT_ALLOW_UNRECORDED_SERVER=true ;;
+    --allow-uncommitted)               OPT_ALLOW_UNCOMMITTED=true ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+guard_flags_help() {
+  echo "  Safety flags:"
+  echo "    --yes                              Skip the final y/N question only. Never skips a safety stop."
+  echo "    --delete-on-server                 Also delete files that exist only on Sally (off by default)."
+  echo "    --allow-lose-unrecorded-files      With --delete-on-server: allow deleting files git has never recorded."
+  echo "    --allow-unrecorded-server-changes  Allow overwriting a Sally file that has changes git doesn't know about."
+  echo "    --allow-uncommitted                Allow sending files that are not committed to git."
+}
+
+# Check flag combinations once, right after the arguments are read.
+guard_check_flags() {
+  if [ "$OPT_LOSE_UNRECORDED" = true ] && [ "$OPT_DELETE" != true ]; then
+    echo ""
+    echo "  !!! --allow-lose-unrecorded-files only makes sense together with --delete-on-server."
+    echo "  !!! Nothing was deployed."
+    exit 1
+  fi
+  return 0
+}
+
+# Fail closed: a check could not be completed, so nothing is sent.
+guard_fail_closed() {
+  local reason="$1" line
+  shift
+  echo ""
+  echo "  !!! COULD NOT VERIFY: $reason"
+  for line in "$@"; do
+    if [ -n "$line" ]; then echo "  !!!   $line"; fi
+  done
+  echo "  !!! To be safe, the deploy was cancelled BEFORE anything was sent to Sally."
+  exit 3
+}
+
+# Used by the deploy scripts when a step AFTER the safety checks fails
+# (the copy, npm install, the restart). Says plainly what was and was not done.
+# Call it as:  some-command || guard_step_failed "what failed" "what state things are in"
+guard_step_failed() {
+  local rc=$?
+  echo ""
+  echo "  !!! FAILED: $1 (error code $rc)."
+  echo "  !!! $2"
+  echo "  !!! Nothing further was run. It is safe to run the same command again."
+  exit "$rc"
+}
+
+guard_count() {  # number of lines in a file
+  wc -l < "$1" | tr -d ' '
+}
+
+guard_cleanup() {
+  case "$GUARD_WORK" in
+    */hub-deploy.??????) if [ -d "$GUARD_WORK" ]; then rm -rf "$GUARD_WORK"; fi ;;
+  esac
+  return 0
+}
+
+# Run a command on Sally. The safety checks only ever use this for read-only
+# commands; the deploy scripts use it for npm install / pm2 after the copy.
+guard_ssh() {
+  ssh -n "${GUARD_SSH_OPTS[@]}" "$SALLY" "$1"
+}
+
+# Does this relative path contain a folder or file name that is on the
+# never-deployed list? Prints the matching pattern and returns 0 if so.
+guard_path_is_excluded() {
+  local rest="$1" seg pat
+  while [ -n "$rest" ]; do
+    seg="${rest%%/*}"
+    case "$rest" in
+      */*) rest="${rest#*/}" ;;
+      *)   rest="" ;;
+    esac
+    for pat in "${DEPLOY_EXCLUDE_PATTERNS[@]}"; do
+      # shellcheck disable=SC2254
+      case "$seg" in
+        $pat) echo "$pat"; return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
+guard_type_word() {  # find's one-letter file type -> plain English
+  case "$1" in
+    f) echo "a file" ;;
+    d) echo "a folder" ;;
+    l) echo "a symbolic link" ;;
+    *) echo "something unusual (type $1)" ;;
+  esac
+}
+
+# Fingerprint (git's own hash, no line-ending conversion) every file named in
+# list file $1 (absolute paths, one per line). Writes one hash per line to $2.
+guard_hash_list() {
+  local list="$1" out="$2" want got
+  git -C "$REPO_ROOT" hash-object --no-filters --stdin-paths < "$list" > "$out" 2> "$out.err" \
+    || guard_fail_closed "git could not fingerprint some files" "$(head -2 "$out.err" | tr '\n' ' ')"
+  want="$(guard_count "$list")"
+  got="$(guard_count "$out")"
+  if [ "$want" != "$got" ]; then
+    guard_fail_closed "git fingerprinted $got of $want files"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Set-up: needs SALLY, REMOTE_DIR and LOCAL_DIR to be set by the calling script
+# ---------------------------------------------------------------------------
+guard_init() {
+  local tool
+  for tool in git rsync ssh awk; do
+    command -v "$tool" >/dev/null 2>&1 || guard_fail_closed "the '$tool' program was not found on this computer"
+  done
+
+  REPO_ROOT="$(git -C "$LOCAL_DIR" rev-parse --show-toplevel 2>/dev/null)" \
+    || guard_fail_closed "this folder is not inside a git repository, so I can't tell what git has saved"
+  REPO_PREFIX="$(git -C "$LOCAL_DIR" rev-parse --show-prefix 2>/dev/null)" \
+    || guard_fail_closed "git could not tell me where this folder sits inside the repository"
+  git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1 \
+    || guard_fail_closed "git has no saved commits in this repository"
+
+  GUARD_WORK="$(mktemp -d "${TMPDIR:-/tmp}/hub-deploy.XXXXXX")" \
+    || guard_fail_closed "could not create a temporary work folder"
+  trap guard_cleanup EXIT
+  trap 'exit 130' INT     # Ctrl-C: exit normally so the temp folder is removed
+  trap 'exit 143' TERM
+
+  guard_ssh "test -d $REMOTE_DIR" >/dev/null 2>&1 \
+    || guard_fail_closed "could not reach Sally over ssh (or $REMOTE_DIR does not exist there)"
+}
+
+# The source and destination rsync should use for one deploy "unit".
+# "." means the whole Hub folder; anything else is a file or folder inside it.
+# Sets U_SRC, U_DEST, U_PREFIX (what to put in front of rsync's file names),
+# U_NAME (the unit with any trailing slash removed), U_IS_FILE.
+guard_unit_endpoints() {
+  local u="$1"
+  while [ "${u%/}" != "$u" ]; do u="${u%/}"; done
+  U_NAME="$u"
+  U_IS_FILE=false
+  if [ "$u" = "." ] || [ -z "$u" ]; then
+    U_NAME="."
+    U_SRC="$LOCAL_DIR/"
+    U_DEST="$SALLY:$REMOTE_DIR/"
+    U_PREFIX=""
+  elif [ -d "$LOCAL_DIR/$u" ]; then
+    # trailing slash on a folder = "copy its contents into the matching folder"
+    U_SRC="$LOCAL_DIR/$u/"
+    U_DEST="$SALLY:$REMOTE_DIR/$u/"
+    U_PREFIX="$u/"
+  else
+    U_SRC="$LOCAL_DIR/$u"
+    U_DEST="$SALLY:$REMOTE_DIR/$u"
+    U_PREFIX=""
+    U_IS_FILE=true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Step A0: look at what is ALREADY on Sally for one unit (read-only `find`).
+# Writes "type<TAB>path" lines (path relative to the Hub folder) into
+# $GUARD_WORK/plan/inventory. type is find's letter: f file, d folder, l link.
+# Also checks the unit's own spot on Sally: the folder above it must exist
+# (rsync only creates one new folder level), and a folder unit must not be
+# sitting on a Sally file or link.
+# ---------------------------------------------------------------------------
+guard_unit_inventory() {
+  local n="$1" plan="$GUARD_WORK/plan" parent base target raw fmt root_type
+  fmt='%y\t%P\n'
+  raw="$plan/root-$n"
+  target="$REMOTE_DIR"
+  root_type="d"
+
+  if [ "$U_NAME" != "." ]; then
+    case "$U_NAME" in
+      */*) parent="$REMOTE_DIR/${U_NAME%/*}"; base="${U_NAME##*/}" ;;
+      *)   parent="$REMOTE_DIR"; base="$U_NAME" ;;
+    esac
+    target="$REMOTE_DIR/$U_NAME"
+    if ! guard_ssh "find '$parent' -maxdepth 1 -name '$base' -printf '%y\\n'" > "$raw.out" 2> "$raw.err"; then
+      guard_fail_closed "could not look at '$U_NAME' on Sally" \
+        "Either Sally could not be reached, or the folder '${parent#$REMOTE_DIR}' does not exist on Sally yet." \
+        "This script creates at most one new folder level. Name a folder that already exists on Sally," \
+        "or ask Jarvis to create the missing folder first."
+    fi
+    root_type="$(head -1 "$raw.out")"
+  fi
+
+  if [ "$U_IS_FILE" = true ]; then
+    if [ -n "$root_type" ]; then printf '%s\t%s\n' "$root_type" "$U_NAME" >> "$plan/inventory"; fi
+    return 0
+  fi
+
+  case "$root_type" in
+    "") return 0 ;;   # a brand-new folder on Sally: nothing there to protect
+    d)  ;;
+    *)  guard_fail_closed "Sally has $(guard_type_word "$root_type") named '$U_NAME' where this deploy needs a folder" \
+          "Deploying would remove it to make room. Ask Jarvis to look at it on Sally first." ;;
+  esac
+
+  if ! guard_ssh "find '$target' '(' -name node_modules -o -name .git ')' -prune -o -printf '$fmt'" > "$raw.inv" 2> "$raw.inv.err"; then
+    guard_fail_closed "could not list what is on Sally under '$U_NAME'" "$(head -2 "$raw.inv.err" | tr '\n' ' ')"
+  fi
+  PFX="$U_PREFIX" awk -F'\t' 'length($2) > 0 { print $1 "\t" ENVIRON["PFX"] $2 }' "$raw.inv" >> "$plan/inventory"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Step A: ask rsync what WOULD change (dry run, nothing is written) and sort
+# it into lists inside $GUARD_WORK/plan:
+#   new          files that do not exist on Sally yet
+#   new-dirs     folders that do not exist on Sally yet
+#   changed      files on Sally whose content differs from yours
+#   mode         files/folders with identical content but different permissions
+#   server-only  files that exist only on Sally (left alone unless --delete-on-server)
+#   inventory    everything already on Sally (type<TAB>path), see above
+# The dry run always includes --delete so Sally-only files are discovered; the
+# REAL run only gets --delete if --delete-on-server was given.
+# ---------------------------------------------------------------------------
+guard_scan() {
+  local plan="$GUARD_WORK/plan" n=0 unit out line flags name rel f saw_delete rest
+  rm -rf "$plan"
+  mkdir -p "$plan"
+  for f in new new-dirs changed mode server-only server-only-dirs inventory; do : > "$plan/$f"; done
+
+  for unit in "${UNIT_PATHS[@]}"; do
+    n=$((n + 1))
+    guard_unit_endpoints "$unit"
+    echo "    comparing '$U_NAME' with Sally..."
+    guard_unit_inventory "$n"
+
+    out="$plan/rsync-$n"
+    if ! rsync "${GUARD_RSYNC_OPTS[@]}" -n --itemize-changes --delete \
+         "${DEPLOY_EXCLUDES[@]}" "$U_SRC" "$U_DEST" > "$out.out" 2> "$out.err"; then
+      guard_fail_closed "could not compare '$U_NAME' with Sally" \
+        "rsync said: $(head -3 "$out.err" | tr '\n' ' ')"
+    fi
+
+    saw_delete=false
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -z "$line" ] && continue
+      case "$line" in
+        *' '*) ;;
+        *) guard_fail_closed "rsync printed a line this check cannot read" "$line" ;;
+      esac
+      # rsync's line is "<flags> <name>". The flags have no spaces, and the name
+      # is everything after the FIRST space (so names that start with a space
+      # are kept exactly). "*deleting" lines are padded with extra spaces by some
+      # rsync versions, so for those all leading spaces are stripped; that is
+      # only safe if no Sally name starts with a space, which is checked below.
+      case "$line" in
+        '*deleting'*)
+          flags="*deleting"
+          name="${line#\*deleting}"
+          while [ "${name# }" != "$name" ]; do name="${name# }"; done
+          saw_delete=true
+          ;;
+        *)
+          flags="${line%% *}"
+          name="${line#* }"
+          ;;
+      esac
+      case "$name" in
+        *\\*) guard_fail_closed "a file name has unusual characters (backslash or control character), which this check can't handle safely" "$name" ;;
+      esac
+      if [ "$U_IS_FILE" = true ]; then
+        rel="$U_NAME"
+      elif [ "$name" = "./" ]; then
+        rel="$U_NAME/"
+      else
+        rel="$U_PREFIX$name"
+      fi
+
+      case "$flags" in
+        '*deleting')
+          case "$name" in
+            */) echo "$rel" >> "$plan/server-only-dirs" ;;
+            *)  echo "$rel" >> "$plan/server-only" ;;
+          esac
+          ;;
+        '<f'*|'>f'*)
+          rest="${flags#??}"
+          if [ -z "$(printf '%s' "$rest" | tr -d '+')" ]; then
+            echo "$rel" >> "$plan/new"
+          else
+            echo "$rel" >> "$plan/changed"
+          fi
+          ;;
+        'cd'*)
+          # a folder being created. (The unit's own top folder was checked in
+          # guard_unit_inventory, so skip "./".)
+          if [ "$name" != "./" ]; then echo "${rel%/}" >> "$plan/new-dirs"; fi
+          ;;
+        .f*|.d*)
+          # identical content; only matters if the permissions differ
+          if [ "${flags:5:1}" = "p" ]; then echo "$rel" >> "$plan/mode"; fi
+          ;;
+        .L*|.S*|.D*)
+          : # unchanged link / special file: nothing to protect
+          ;;
+        *)
+          guard_fail_closed "rsync reported something this check does not understand (a new or changed symbolic link or special file?)" "$line"
+          ;;
+      esac
+    done < "$out.out"
+
+    # The "strip all the padding spaces" rule above is only safe if no name on
+    # Sally starts with a space. If one does, we cannot be sure which file a
+    # "*deleting" line means, so fail closed.
+    if [ "$saw_delete" = true ]; then
+      if awk -F'\t' '$2 ~ /^ / || $2 ~ /\/ / { found = 1 } END { exit !found }' "$plan/inventory"; then
+        guard_fail_closed "a file or folder name on Sally starts with a space, so this check cannot tell exactly which file rsync means" \
+          "Ask Jarvis to look at the odd-looking name on Sally first."
+      fi
+    fi
+  done
+
+  for f in new new-dirs changed mode server-only server-only-dirs; do
+    LC_ALL=C sort -u "$plan/$f" > "$plan/$f.sorted"
+    mv "$plan/$f.sorted" "$plan/$f"
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Step A2: collisions. rsync labels a file/folder "new" when nothing of the
+# same KIND is at that spot - even if Sally has a different kind of thing there
+# (a file where you have a folder, a link where you have a file). It then
+# quietly removes that Sally item to make room. Look every "new" path up in the
+# list of what is already on Sally; anything found is a collision, recorded in
+# plan/replaced as "type<TAB>path". These are NOT "left alone" Sally-only files.
+# ---------------------------------------------------------------------------
+guard_find_conflicts() {
+  local plan="$GUARD_WORK/plan"
+  : > "$plan/replaced"
+  cat "$plan/new" "$plan/new-dirs" > "$plan/created"
+  if [ -s "$plan/created" ] && [ -s "$plan/inventory" ]; then
+    awk -F'\t' 'NR == FNR { t[$2] = $1; next } ($0 in t) { print t[$0] "\t" $0 }' \
+      "$plan/inventory" "$plan/created" > "$plan/replaced.raw"
+    LC_ALL=C sort -u "$plan/replaced.raw" > "$plan/replaced"
+  fi
+  if [ -s "$plan/replaced" ]; then
+    # they are being replaced, so they are not "Sally-only files left alone"
+    awk -F'\t' 'NR == FNR { r[$2] = 1; next } !($0 in r)' "$plan/replaced" "$plan/server-only" > "$plan/server-only.x"
+    mv "$plan/server-only.x" "$plan/server-only"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Step B: the list of every file version git has ever recorded (built once)
+# ---------------------------------------------------------------------------
+guard_history() {
+  if [ -s "$GUARD_WORK/history" ]; then return 0; fi
+  git -C "$REPO_ROOT" rev-list --objects --exclude=refs/stash --all > "$GUARD_WORK/history.raw" 2> "$GUARD_WORK/history.err" \
+    || guard_fail_closed "git could not list its saved history" "$(head -2 "$GUARD_WORK/history.err" | tr '\n' ' ')"
+  cut -d' ' -f1 "$GUARD_WORK/history.raw" | LC_ALL=C sort -u > "$GUARD_WORK/history"
+  if [ ! -s "$GUARD_WORK/history" ]; then
+    guard_fail_closed "git's saved history came back empty"
+  fi
+  return 0
+}
+
+# Copy the listed files FROM Sally into a private temp folder (read-only on
+# Sally) so they can be fingerprinted. $1 = list file, $2 = folder to fill.
+# The list is passed with NUL separators so odd file names cannot be misread.
+guard_pull() {
+  local list="$1" dest="$2"
+  if grep -Eq '(^|/)\.env' "$list"; then
+    guard_fail_closed "a secrets file (.env) ended up on a list of files to check; refusing to copy it"
+  fi
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  tr '\n' '\0' < "$list" > "$dest.list0"
+  rsync -rl --timeout=120 --from0 --files-from="$dest.list0" "$SALLY:$REMOTE_DIR/" "$dest/" > "$dest.out" 2> "$dest.err" \
+    || guard_fail_closed "could not fetch Sally's copies of files to check them against git" "rsync said: $(head -3 "$dest.err" | tr '\n' ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# Check (b): is every file we are about to send committed to git?
+# Fingerprints all new + changed local files in one go and compares each with
+# the copy in the current commit (HEAD). Any git error stops the deploy.
+# ---------------------------------------------------------------------------
+guard_check_local() {
+  local plan="$GUARD_WORK/plan" rel tag f
+  : > "$plan/local-abs"; : > "$plan/local-tags"
+  for f in new changed; do
+    if [ "$f" = new ]; then tag=NEW; else tag=CHANGED; fi
+    while IFS= read -r rel; do
+      if [ ! -f "$LOCAL_DIR/$rel" ]; then
+        guard_fail_closed "local file '$rel' vanished or is not a regular file while checking it"
+      fi
+      echo "$LOCAL_DIR/$rel" >> "$plan/local-abs"
+      printf '%s\t%s\n' "$tag" "$rel" >> "$plan/local-tags"
+    done < "$plan/$f"
+  done
+  if [ ! -s "$plan/local-abs" ]; then return 0; fi
+
+  echo "    checking $(guard_count "$plan/local-abs") local file(s) against git..."
+  guard_hash_list "$plan/local-abs" "$plan/local-hashes"
+  paste "$plan/local-tags" "$plan/local-hashes" > "$plan/local3"     # TAG<TAB>path<TAB>hash
+
+  # What the current commit (HEAD) holds for this folder: "git-path<TAB>hash".
+  # Any git failure here must stop the deploy - never treat it as "not committed".
+  if [ -n "$REPO_PREFIX" ]; then
+    git -C "$REPO_ROOT" ls-tree -r -z HEAD -- "$REPO_PREFIX" > "$plan/head-tree.z" 2> "$plan/head-tree.err" \
+      || guard_fail_closed "git could not read the files in your current commit" "$(head -2 "$plan/head-tree.err" | tr '\n' ' ')"
+  else
+    git -C "$REPO_ROOT" ls-tree -r -z HEAD > "$plan/head-tree.z" 2> "$plan/head-tree.err" \
+      || guard_fail_closed "git could not read the files in your current commit" "$(head -2 "$plan/head-tree.err" | tr '\n' ' ')"
+  fi
+  # (The first line is a harmless placeholder so the file is never empty: awk's
+  # "first file" test below misreads the second file as the first when the first is empty.)
+  printf '\t\n' > "$plan/head-map"
+  tr '\0' '\n' < "$plan/head-tree.z" | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[3] }' >> "$plan/head-map"
+
+  PFX="$REPO_PREFIX" awk -F'\t' '
+    NR == FNR { head[$1] = $2; next }
+    { g = ENVIRON["PFX"] $2
+      if (!(g in head))       print $2 "\tnew file, never committed to git"
+      else if (head[g] != $3) print $2 "\tedited since the last commit" }
+  ' "$plan/head-map" "$plan/local3" >> "$plan/uncommitted"
+  awk -F'\t' '{ print $1 " " $2 " " $3 }' "$plan/local3" >> "$plan/fingerprint"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Check (a): is Sally's current copy of everything we'd overwrite or replace a
+# version git has recorded? Fills plan/unrecorded (one path per line).
+#   - files whose content differs: fetch Sally's copy, fingerprint, look up
+#   - Sally items replaced by a different kind of thing (see guard_find_conflicts):
+#     a regular file is checked the same way; a link or folder counts as unrecorded
+# ---------------------------------------------------------------------------
+guard_check_server_copies() {
+  local plan="$GUARD_WORK/plan" rel f t h
+  : > "$plan/unrecorded"; : > "$plan/pull-list"
+  cat "$plan/changed" >> "$plan/pull-list"
+  while IFS="$GUARD_TAB" read -r t rel; do
+    if [ "$t" = f ]; then
+      echo "$rel" >> "$plan/pull-list"
+    else
+      echo "$rel" >> "$plan/unrecorded"
+      echo "SERVERITEM $rel type-$t" >> "$plan/fingerprint"
+    fi
+  done < "$plan/replaced"
+  if [ ! -s "$plan/pull-list" ]; then return 0; fi
+
+  guard_history
+  echo "    fetching $(guard_count "$plan/pull-list") Sally file(s) to check them against git..."
+  guard_pull "$plan/pull-list" "$GUARD_WORK/sally-copies"
+  : > "$plan/pulled-abs"; : > "$plan/pulled-names"
+  while IFS= read -r rel; do
+    f="$GUARD_WORK/sally-copies/$rel"
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      guard_fail_closed "Sally's copy of '$rel' could not be fetched for checking (did it change during the check?)"
+    fi
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      echo "$rel" >> "$plan/unrecorded"
+      echo "SERVERCOPY $rel not-a-regular-file" >> "$plan/fingerprint"
+      continue
+    fi
+    echo "$f" >> "$plan/pulled-abs"
+    echo "$rel" >> "$plan/pulled-names"
+  done < "$plan/pull-list"
+  if [ ! -s "$plan/pulled-abs" ]; then return 0; fi
+
+  guard_hash_list "$plan/pulled-abs" "$plan/pulled-hashes"
+  paste "$plan/pulled-names" "$plan/pulled-hashes" > "$plan/pulled2"
+  while IFS="$GUARD_TAB" read -r rel h; do
+    echo "SERVERCOPY $rel $h" >> "$plan/fingerprint"
+    grep -Fxq -- "$h" "$GUARD_WORK/history" || echo "$rel" >> "$plan/unrecorded"
+  done < "$plan/pulled2"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Deletion check (only when --delete-on-server was given): which Sally-only
+# files are recorded in git, and which would be lost for good?
+#   del-recorded    "path<TAB>commit"
+#   del-unrecorded  "path"
+# ---------------------------------------------------------------------------
+guard_check_deletes() {
+  local plan="$GUARD_WORK/plan" rel f h commit
+  : > "$plan/del-recorded"; : > "$plan/del-unrecorded"
+  if [ "$OPT_DELETE" != true ] || [ ! -s "$plan/server-only" ]; then return 0; fi
+  guard_history
+  echo "    fetching $(guard_count "$plan/server-only") Sally-only file(s) to check them against git..."
+  guard_pull "$plan/server-only" "$GUARD_WORK/sally-delete"
+  : > "$plan/del-abs"; : > "$plan/del-names"
+  while IFS= read -r rel; do
+    f="$GUARD_WORK/sally-delete/$rel"
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      guard_fail_closed "Sally's copy of '$rel' (marked for deletion) could not be fetched for checking"
+    fi
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      echo "$rel" >> "$plan/del-unrecorded"
+      echo "DELETE $rel not-a-regular-file" >> "$plan/fingerprint"
+      continue
+    fi
+    echo "$f" >> "$plan/del-abs"
+    echo "$rel" >> "$plan/del-names"
+  done < "$plan/server-only"
+  if [ ! -s "$plan/del-abs" ]; then return 0; fi
+
+  guard_hash_list "$plan/del-abs" "$plan/del-hashes"
+  paste "$plan/del-names" "$plan/del-hashes" > "$plan/del2"
+  while IFS="$GUARD_TAB" read -r rel h; do
+    echo "DELETE $rel $h" >> "$plan/fingerprint"
+    if grep -Fxq -- "$h" "$GUARD_WORK/history"; then
+      # The FIRST commit that saved this exact content (--reverse = oldest first).
+      git -C "$REPO_ROOT" log --exclude=refs/stash --all --find-object="$h" --reverse --format=%h \
+          > "$GUARD_WORK/commit-lookup" 2> "$GUARD_WORK/commit-lookup.err" \
+        || guard_fail_closed "git could not look up which commit holds Sally's copy of '$rel'" "$(head -2 "$GUARD_WORK/commit-lookup.err" | tr '\n' ' ')"
+      commit="$(head -1 "$GUARD_WORK/commit-lookup")"
+      [ -n "$commit" ] || commit="a saved version, commit not located"
+      printf '%s\t%s\n' "$rel" "$commit" >> "$plan/del-recorded"
+    else
+      echo "$rel" >> "$plan/del-unrecorded"
+    fi
+  done < "$plan/del2"
+  return 0
+}
+
+# Run every check from scratch and write the fingerprint of the plan.
+guard_analyze() {
+  local plan="$GUARD_WORK/plan" rel head
+  guard_scan
+  guard_find_conflicts
+  : > "$plan/fingerprint"; : > "$plan/uncommitted"
+  head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+    || guard_fail_closed "git could not tell me which commit your files are at"
+  echo "HEAD $head" >> "$plan/fingerprint"
+  guard_check_local
+  guard_check_server_copies
+  guard_check_deletes
+  while IFS= read -r rel; do echo "MODE $rel" >> "$plan/fingerprint"; done < "$plan/mode"
+  awk -F'\t' '{ print "REPLACED " $2 " " $1 }' "$plan/replaced" >> "$plan/fingerprint"
+  awk '{ print "UNRECORDED " $0 }' "$plan/unrecorded" >> "$plan/fingerprint"
+  awk -F'\t' '{ print "UNCOMMITTED " $1 " " $2 }' "$plan/uncommitted" >> "$plan/fingerprint"
+  awk '{ print "DELUNRECORDED " $0 }' "$plan/del-unrecorded" >> "$plan/fingerprint"
+  LC_ALL=C sort "$plan/fingerprint" > "$plan/fingerprint.sorted"
+  mv "$plan/fingerprint.sorted" "$plan/fingerprint"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Show the plan, apply the stops, ask for confirmation
+# ---------------------------------------------------------------------------
+guard_show_list() {  # $1 = file of paths, $2 = marker
+  local rel
+  while IFS= read -r rel; do
+    echo "      $2 $rel"
+  done < "$1"
+  return 0
+}
+
+guard_show_plan() {
+  local plan="$GUARD_WORK/plan" rel t n_new n_changed n_mode n_only n_dirs n_replaced commit now tag
+  n_new="$(guard_count "$plan/new")"
+  n_changed="$(guard_count "$plan/changed")"
+  n_mode="$(guard_count "$plan/mode")"
+  n_only="$(guard_count "$plan/server-only")"
+  n_dirs="$(guard_count "$plan/server-only-dirs")"
+  n_replaced="$(guard_count "$plan/replaced")"
+
+  echo ""
+  echo "==================================================="
+  echo "  PREVIEW - this is what the deploy would do on Sally."
+  echo "  Nothing has been sent yet."
+  echo "==================================================="
+
+  echo ""
+  echo "  Files that would be ADDED (new on Sally): $n_new"
+  guard_show_list "$plan/new" "+"
+
+  echo ""
+  echo "  Files that would be OVERWRITTEN with your version: $n_changed"
+  while IFS= read -r rel; do
+    if grep -Fxq -- "$rel" "$plan/unrecorded"; then
+      echo "      ~ $rel   <-- Sally's copy is NOT saved anywhere in git"
+    else
+      echo "      ~ $rel"
+    fi
+  done < "$plan/changed"
+
+  if [ "$n_replaced" -gt 0 ]; then
+    echo ""
+    echo "  Things on Sally that would be REPLACED by a different KIND of thing: $n_replaced"
+    echo "  (rsync quietly removes them to make room - they are not 'left alone')"
+    while IFS="$GUARD_TAB" read -r t rel; do
+      if grep -Fxq -- "$rel" "$plan/new-dirs"; then now="a folder"; else now="a file"; fi
+      if grep -Fxq -- "$rel" "$plan/unrecorded"; then
+        tag="<-- NOT saved anywhere in git"
+      else
+        tag="(this exact file is saved in git)"
+      fi
+      echo "      ! $rel   Sally has $(guard_type_word "$t") here; your deploy puts $now there   $tag"
+    done < "$plan/replaced"
+  fi
+
+  if [ "$n_mode" -gt 0 ]; then
+    echo ""
+    echo "  Files/folders whose content is identical but whose permissions would change: $n_mode"
+    guard_show_list "$plan/mode" "p"
+  fi
+
+  echo ""
+  if [ "$OPT_DELETE" = true ]; then
+    echo "  Files that would be PERMANENTLY DELETED from Sally: $n_only (plus $n_dirs folder(s))"
+    while IFS= read -r rel; do
+      if grep -Fxq -- "$rel" "$plan/del-unrecorded"; then
+        echo "      x $rel   NOT IN GIT - would be lost permanently"
+      else
+        commit="$(awk -F '\t' -v r="$rel" '$1 == r { print $2; exit }' "$plan/del-recorded")"
+        echo "      x $rel   recorded in git (commit $commit)"
+      fi
+    done < "$plan/server-only"
+    if [ "$n_dirs" -gt 0 ]; then
+      echo "      (folders that would be removed once empty:)"
+      guard_show_list "$plan/server-only-dirs" "x"
+    fi
+  else
+    echo "  Files that exist only on Sally: $n_only - these will be LEFT ALONE."
+    echo "  (Deploys never delete anything unless you add --delete-on-server.)"
+  fi
+  return 0
+}
+
+guard_stop_a() {   # $1 = heading, $2 = "overridden" to leave out the how-to-fix hints
+  local plan="$GUARD_WORK/plan" rel first
+  echo ""
+  echo "  !!! $1"
+  echo "  !!! These items on Sally are not any version git has ever recorded. Sending"
+  echo "  !!! your version would overwrite or replace them and the Sally version could not be recovered:"
+  first=""
+  while IFS= read -r rel; do
+    echo "  !!!     $rel"
+    [ -n "$first" ] || first="$rel"
+  done < "$plan/unrecorded"
+  if [ "$2" != "overridden" ]; then
+    echo "  !!!"
+    if grep -Fxq -- "$first" "$plan/changed"; then
+      echo "  !!! To see what is different:  ssh $SALLY cat '$REMOTE_DIR/$first' | diff - '$LOCAL_DIR/$first'"
+    else
+      echo "  !!! To look at one:  ssh $SALLY ls -ld '$REMOTE_DIR/$first'"
+    fi
+    echo "  !!! Safest fix: save Sally's version into git first (ask Jarvis), then deploy again."
+    echo "  !!! If you are sure you want to overwrite it anyway: --allow-unrecorded-server-changes"
+  fi
+  return 0
+}
+
+guard_stop_b() {   # $1 = heading, $2 = "overridden" to leave out the how-to-fix hints
+  local plan="$GUARD_WORK/plan" rel why
+  echo ""
+  echo "  !!! $1"
+  echo "  !!! Sending them would put work on Sally that git has no record of:"
+  while IFS="$GUARD_TAB" read -r rel why; do
+    echo "  !!!     $rel   ($why)"
+  done < "$plan/uncommitted"
+  if [ "$2" != "overridden" ]; then
+    echo "  !!!"
+    echo "  !!! Safest fix: commit them first (ask Jarvis), then deploy again."
+    echo "  !!! If you are sure you want to send them anyway: --allow-uncommitted"
+  fi
+  return 0
+}
+
+guard_stop_delete() {   # $1 = heading, $2 = "overridden" to leave out the how-to-fix hints
+  local plan="$GUARD_WORK/plan" n
+  n="$(guard_count "$plan/del-unrecorded")"
+  echo ""
+  echo "  !!! $1"
+  echo "  !!! $n file(s) marked for deletion are not saved anywhere in git (each is marked"
+  echo "  !!! \"NOT IN GIT\" in the list above). Deleting them would lose them permanently."
+  if [ "$2" != "overridden" ]; then
+    echo "  !!!"
+    echo "  !!! Safest fix: copy them into git first (ask Jarvis), or leave --delete-on-server off."
+    echo "  !!! If you are sure you want to lose them: add --allow-lose-unrecorded-files"
+  fi
+  return 0
+}
+
+# Decide: stop, or ask, or go. Exits the script unless the deploy may proceed.
+guard_decide() {
+  local plan="$GUARD_WORK/plan" stops=0 warned=false answer rc
+  local n_new n_changed n_mode n_only n_dirs n_del n_replaced
+  n_new="$(guard_count "$plan/new")"
+  n_changed="$(guard_count "$plan/changed")"
+  n_mode="$(guard_count "$plan/mode")"
+  n_only="$(guard_count "$plan/server-only")"
+  n_dirs="$(guard_count "$plan/server-only-dirs")"
+  n_replaced="$(guard_count "$plan/replaced")"
+  n_del=$((n_only + n_dirs))     # files and folders that --delete-on-server would remove
+
+  guard_show_plan
+
+  # Nothing to send and nothing to delete: done.
+  if [ "$n_new" -eq 0 ] && [ "$n_changed" -eq 0 ] && [ "$n_mode" -eq 0 ] && [ "$n_replaced" -eq 0 ] \
+     && { [ "$OPT_DELETE" != true ] || [ "$n_del" -eq 0 ]; }; then
+    echo ""
+    echo "==> Nothing to send: for the files these scripts deploy, Sally already has the same content."
+    echo "    Nothing was changed (and the Hub was not restarted)."
+    exit 0
+  fi
+
+  # --- the stops (all are reported together) ---
+  if [ -s "$plan/unrecorded" ]; then
+    if [ "$OPT_ALLOW_UNRECORDED_SERVER" = true ]; then
+      guard_stop_a "WARNING (OVERRIDDEN): SALLY HAS CHANGES GIT DOESN'T KNOW ABOUT" overridden
+      echo "  !!! --allow-unrecorded-server-changes was given: continuing, those Sally versions WILL be overwritten."
+      warned=true
+    else
+      guard_stop_a "STOPPED - SALLY HAS CHANGES GIT DOESN'T KNOW ABOUT"
+      stops=1
+    fi
+  fi
+  if [ -s "$plan/uncommitted" ]; then
+    if [ "$OPT_ALLOW_UNCOMMITTED" = true ]; then
+      guard_stop_b "WARNING (OVERRIDDEN): SOME FILES YOU ARE ABOUT TO SEND ARE NOT SAVED IN GIT" overridden
+      echo "  !!! --allow-uncommitted was given: continuing, git will have NO record of what is sent."
+      warned=true
+    else
+      guard_stop_b "STOPPED - SOME FILES YOU ARE ABOUT TO SEND ARE NOT SAVED IN GIT"
+      stops=1
+    fi
+  fi
+  if [ "$OPT_DELETE" = true ] && [ -s "$plan/del-unrecorded" ]; then
+    if [ "$OPT_LOSE_UNRECORDED" = true ]; then
+      guard_stop_delete "WARNING (OVERRIDDEN): FILES MARKED FOR DELETION ARE NOT SAVED ANYWHERE IN GIT" overridden
+      echo "  !!! --allow-lose-unrecorded-files was given: continuing, those files will be GONE FOR GOOD."
+      warned=true
+    else
+      guard_stop_delete "STOPPED - SOME FILES MARKED FOR DELETION ARE NOT SAVED ANYWHERE IN GIT"
+      stops=1
+    fi
+  fi
+  # The calling script may add its own stop by defining guard_extra_stops.
+  # It prints its own message and returns 0 (no problem), 1 (stop) or 2 (stop
+  # that was overridden with its own flag; continue after a warning).
+  if declare -F guard_extra_stops >/dev/null 2>&1; then
+    rc=0
+    guard_extra_stops || rc=$?
+    case "$rc" in
+      0) ;;
+      1) stops=1 ;;
+      *) warned=true ;;
+    esac
+  fi
+  if [ "$OPT_DELETE" = true ] && [ "$n_del" -gt 0 ] && [ ! -t 0 ]; then
+    echo ""
+    echo "  !!! DELETING FILES NEEDS A PERSON AT THE KEYBOARD"
+    echo "  !!! --delete-on-server asks you to type the word DELETE. This run has no terminal"
+    echo "  !!! attached (it is a script or a pipe), so the delete request is refused."
+    stops=1
+  fi
+  if [ "$stops" -ne 0 ]; then
+    echo ""
+    echo "  Deploy STOPPED by a safety check. Nothing was sent to Sally and nothing was changed."
+    echo "  (--yes does not get past these stops.)"
+    exit 2
+  fi
+
+  # --- summary of the safety checks (so a clean run is visibly clean) ---
+  echo ""
+  echo "  Safety checks:"
+  if [ "$n_changed" -eq 0 ] && [ "$n_replaced" -eq 0 ]; then
+    echo "    OK  No Sally files are being overwritten."
+  elif [ -s "$plan/unrecorded" ]; then
+    echo "    OVERRIDDEN  Some Sally files being overwritten or replaced are not saved in git."
+  else
+    echo "    OK  Sally's current copy of every file being overwritten or replaced is a version saved in git."
+  fi
+  if [ -s "$plan/uncommitted" ]; then
+    echo "    OVERRIDDEN  Some files being sent are not committed to git."
+  else
+    echo "    OK  Every file being sent is committed to git."
+  fi
+
+  # --- the y/N question (--yes skips only this) ---
+  if [ "$OPT_YES" != true ]; then
+    echo ""
+    if [ "$warned" = true ]; then
+      echo "  You are overriding a safety check (see the warnings above)."
+    fi
+    printf '%s' "Proceed with this deploy? [y/N] " >&2
+    read -r answer || answer=""
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *)
+        echo "Aborted. Nothing was deployed."
+        exit 1
+        ;;
+    esac
+  else
+    echo ""
+    echo "  (--yes given: skipping the y/N question. Safety stops above still applied.)"
+  fi
+
+  # --- the DELETE question (--yes does NOT skip this) ---
+  # NOTE: "has a terminal" only means stdin is a terminal. Whoever runs this must
+  # make Peter type DELETE himself; nothing here can tell a person from a program
+  # that is driving a terminal.
+  if [ "$OPT_DELETE" = true ] && [ "$n_del" -gt 0 ]; then
+    echo ""
+    echo "  You asked for $n_only file(s) and $n_dirs folder(s) to be PERMANENTLY DELETED from Sally."
+    echo "  To go ahead, type the word DELETE (capital letters, nothing else) and press Enter."
+    echo "  Anything else cancels. (--yes does not answer this question.)"
+    printf '%s' "Type DELETE: " >&2
+    IFS= read -r answer || answer=""
+    if [ "$answer" != "DELETE" ]; then
+      echo "Aborted - that was not the word DELETE. Nothing was deployed."
+      exit 1
+    fi
+  fi
+  return 0
+}
+
+# After you said yes: run every check again and make sure nothing moved.
+guard_recheck() {
+  echo ""
+  echo "==> Re-checking that nothing changed while you were deciding..."
+  cp "$GUARD_WORK/plan/fingerprint" "$GUARD_WORK/approved-fingerprint"
+  guard_analyze
+  if ! cmp -s "$GUARD_WORK/approved-fingerprint" "$GUARD_WORK/plan/fingerprint"; then
+    echo ""
+    echo "  !!! Something changed (on Sally, in your files, or in git) between the preview and your yes."
+    echo "  !!! To be safe the deploy was cancelled before anything was sent. Run it again"
+    echo "  !!! and review the new preview."
+    exit 3
+  fi
+  echo "    OK - same as the preview you approved."
+  return 0
+}
+
+# The real copy. Same options as the dry run, minus -n; --delete only if asked.
+guard_transfer() {
+  local unit
+  for unit in "${UNIT_PATHS[@]}"; do
+    guard_unit_endpoints "$unit"
+    echo "  -- $U_NAME --"
+    if [ "$OPT_DELETE" = true ]; then
+      rsync "${GUARD_RSYNC_OPTS[@]}" --delete "${DEPLOY_EXCLUDES[@]}" "$U_SRC" "$U_DEST" || return $?
+    else
+      rsync "${GUARD_RSYNC_OPTS[@]}" "${DEPLOY_EXCLUDES[@]}" "$U_SRC" "$U_DEST" || return $?
+    fi
+  done
+  return 0
+}
+
+# One call for "check, show, ask, re-check" (used by both scripts).
+guard_run_checks_and_confirm() {
+  echo ""
+  echo "==> Checking what would change on Sally and whether it is safe (nothing is sent yet)..."
+  guard_analyze
+  guard_decide
+  guard_recheck
+}

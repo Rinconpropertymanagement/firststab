@@ -1,0 +1,90 @@
+#!/bin/bash
+# TEST SHIM for ssh. Read-only commands only against "sally".
+#   Real mode (FAKE_SERVER_DIR unset): read-only commands go to real ssh; anything
+#     that could write is BLOCKED (exit 99) and never leaves this machine.
+#   Fake mode (FAKE_SERVER_DIR set): read-only commands run LOCALLY against the
+#     fake folder; npm install / pm2 restart are SIMULATED (canned output).
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="${SHIM_LOG:-$SHIM_DIR/shim.log}"
+REAL_PATH="$(echo "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)"
+REAL_SSH="$(PATH="$REAL_PATH" command -v ssh)"
+FAKE="$FAKE_SERVER_DIR"
+log() { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
+
+ORIG=("$@")
+log "ARGV   ssh ${ORIG[*]}"
+log "ENV    LC_ALL=${LC_ALL-<unset>} (ssh call)"
+# --- failure injection for fail-closed tests: SHIM_FAIL=ssh (everything) | ssh-cat (only 'cat ...')
+case ",$SHIM_FAIL," in *,ssh,*) log "INJECTED-FAILURE ssh $*"; echo "ssh: connect to host sally port 22: Connection refused" >&2; exit 255 ;; esac
+HOST=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -[oipFJEbcmSWwLRDeOBIQl]) shift 2 ;;
+    -*) shift ;;
+    *) HOST="$1"; shift; break ;;
+  esac
+done
+CMD="$*"
+
+block() { log "BLOCKED ssh ${ORIG[*]}"; echo "SHIM: BLOCKED ssh $*" >&2; exit 99; }
+[ "$HOST" = "sally" ] || block "(host '$HOST' is not sally)"
+[ -n "$CMD" ] || block "(no remote command / interactive login)"
+
+# rsync's own server end, started by rsync over ssh
+case "$CMD" in
+  "rsync --server"*)
+    if echo "$CMD" | grep -q -- ' --sender'; then log "ALLOW  ssh(rsync pull) $CMD"; exec "$REAL_SSH" "${ORIG[@]}"
+    elif echo "$CMD" | grep -qE '^rsync --server( --[a-z-]+(=[^ ]*)?)* -[A-Za-z]*n'; then log "ALLOW  ssh(rsync dry-run) $CMD"; exec "$REAL_SSH" "${ORIG[@]}"
+    else block "(rsync server end that is neither a pull nor a dry run) $CMD"; fi ;;
+esac
+
+# Strip a leading "cd DIR &&" and harmless /dev/null redirects before judging
+JUDGE="$(echo "$CMD" | sed -E 's#^cd [^ ]+ && ##; s#2>/dev/null##g; s#>/dev/null##g; s#-o /dev/null##g')"
+case "$JUDGE" in *';'*|*'|'*|*'`'*|*'$('*|*'&&'*|*'>'*|*'<'*) 
+  # allow ONLY the simulated write set in fake mode (checked below); otherwise block
+  ;;
+esac
+
+case ",$SHIM_FAIL," in *,ssh-find,*) case "$CMD" in find*) log "INJECTED-FAILURE ssh $CMD"; echo "ssh: injected find failure" >&2; exit 255 ;; esac ;; esac
+case ",$SHIM_FAIL," in *,ssh-npm,*) case "$CMD" in *"npm install"*) log "INJECTED-FAILURE ssh $CMD"; echo "ssh: connection lost" >&2; exit 255 ;; esac ;; esac
+case ",$SHIM_FAIL," in *,ssh-pm2,*) case "$CMD" in *"pm2 restart"*) log "INJECTED-FAILURE ssh $CMD"; echo "ssh: connection lost" >&2; exit 255 ;; esac ;; esac
+case ",$SHIM_FAIL," in *,ssh-cat,*) case "$CMD" in cat*) log "INJECTED-FAILURE ssh $CMD"; exit 1 ;; esac ;; esac
+is_sim_write=false
+case "$JUDGE" in
+  "npm install"*|"pm2 restart"*) is_sim_write=true ;;
+esac
+
+if [ "$is_sim_write" = true ]; then
+  if [ -n "$FAKE" ]; then
+    log "SIMULATED ssh $CMD (fake server only, nothing executed)"
+    case "$JUDGE" in "npm install"*) echo "up to date (simulated)";; "pm2 restart"*) echo "[PM2] simulated restart";; esac
+    exit 0
+  fi
+  block "$CMD"
+fi
+
+# Read-only allow-list (first word), with no chaining/redirects
+FIRST="${JUDGE%% *}"
+case "$JUDGE" in *';'*|*'|'*|*'`'*|*'$('*|*'&&'*|*'>'*) block "(chaining/redirect) $CMD" ;; esac
+case "$FIRST" in
+  cat|md5sum|ls|stat|test|find|getent|hostname|id|wc|head|tail|date|uname) 
+    case "$JUDGE" in *' -delete'*|*' -exec'*|*' -ok'*) block "$CMD" ;; esac ;;
+  pm2)
+    case "$JUDGE" in "pm2 jlist"|"pm2 status"|"pm2 list"|"pm2 ls") 
+        if [ -n "$FAKE" ]; then log "SIMULATED ssh $CMD (canned)"; echo '[{"name":"hub","pm2_env":{"status":"online","restart_time":0}}]'; exit 0; fi ;;
+      *) block "$CMD" ;; esac ;;
+  curl)
+    case "$JUDGE" in *"http://localhost:3500/healthz"*) 
+        if [ -n "$FAKE" ]; then log "SIMULATED ssh $CMD (canned 200)"; printf '200'; exit 0; fi ;;
+      *) block "$CMD" ;; esac ;;
+  *) block "$CMD" ;;
+esac
+
+if [ -n "$FAKE" ]; then
+  LOCALCMD="${CMD//\/var\/www\/hub/$FAKE}"
+  log "ALLOW  ssh(read-only, run on FAKE server) $CMD"
+  case "$FIRST" in find) exec python3 "$SHIM_DIR/fake-find.py" "$LOCALCMD" ;; esac
+  exec bash -c "$LOCALCMD"
+fi
+log "ALLOW  ssh(read-only, REAL sally) $CMD"
+exec "$REAL_SSH" "${ORIG[@]}"

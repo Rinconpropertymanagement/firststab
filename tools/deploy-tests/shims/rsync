@@ -1,0 +1,84 @@
+#!/bin/bash
+# TEST SHIM for rsync. Never lets a real write reach "sally".
+#   - Real mode (FAKE_SERVER_DIR unset): talking to sally is allowed ONLY for
+#     dry runs (-n) and pulls FROM sally into a local temp folder. A push
+#     to sally without -n is BLOCKED (exit 99) before real rsync ever starts.
+#   - Fake mode (FAKE_SERVER_DIR set): "sally:/var/www/hub" is rewritten to
+#     that local folder, so real writes land in a local fake server.
+# Local destinations are allowed only under temp/scratch roots.
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="${SHIM_LOG:-$SHIM_DIR/shim.log}"
+REAL_PATH="$(echo "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)"
+REAL_RSYNC="$(PATH="$REAL_PATH" command -v rsync)"
+SCRATCH="${DEPLOY_TEST_WORK:-}"   # the test harness's own scratch folder (a throw-away temp folder, also under the temp roots below)
+log() { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
+
+# --- failure injection: SHIM_FAIL=rsync-dry (any dry run) | rsync-pull (any --files-from pull)
+for a in "$@"; do
+  case "$a" in
+    --files-from=*) case ",$SHIM_FAIL," in *,rsync-pull,*) log "INJECTED-FAILURE rsync pull"; echo "rsync: injected pull failure" >&2; exit 12 ;; esac ;;
+    -[A-Za-z]*n*itemize*|--itemize-changes) case ",$SHIM_FAIL," in *,rsync-dry,*) log "INJECTED-FAILURE rsync dry-run"; echo "rsync: injected dry-run failure" >&2; exit 12 ;; esac ;;
+  esac
+done
+# SHIM_FAIL=rsync-send : fail the REAL (non-dry-run, non-pull) transfer after it has started
+case ",$SHIM_FAIL," in *,rsync-send,*)
+  _dry=false; _pull=false
+  for a in "$@"; do case "$a" in --dry-run) _dry=true ;; --*) ;; -*n*) _dry=true ;; esac; case "$a" in --files-from=*) _pull=true ;; esac; done
+  if [ "$_dry" = false ] && [ "$_pull" = false ]; then log "INJECTED-FAILURE rsync real transfer"; echo "rsync: injected transfer failure" >&2; exit 23; fi ;;
+esac
+# SHIM_FAIL_RSYNC_NTH=n : fail only the n-th rsync call of this run (counted in "$LOG.nth")
+if [ -n "$SHIM_FAIL_RSYNC_NTH" ]; then
+  _n=$(cat "$LOG.nth" 2>/dev/null || echo 0); _n=$((_n+1)); echo "$_n" > "$LOG.nth"
+  if [ "$_n" = "$SHIM_FAIL_RSYNC_NTH" ]; then log "INJECTED-FAILURE rsync call #$_n: $*"; echo "rsync: injected failure on call #$_n" >&2; exit 12; fi
+fi
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    sally:/var/www/hub*) if [ -n "$FAKE_SERVER_DIR" ]; then a="$FAKE_SERVER_DIR${a#sally:/var/www/hub}"; fi ;;
+  esac
+  ARGS+=("$a")
+done
+
+DRY=false
+for a in "${ARGS[@]}"; do
+  case "$a" in
+    --dry-run) DRY=true ;;
+    --*) ;;
+    -*n*) case "$a" in -[A-Za-z]*) DRY=true ;; esac ;;
+  esac
+done
+DEST="${ARGS[$((${#ARGS[@]}-1))]}"
+
+case "$DEST" in
+  [A-Za-z0-9._@-]*:*)   # remote destination (push, or dry-run to a remote)
+    if [ "$DRY" = true ]; then log "ALLOW  rsync(dry-run to remote) ${ARGS[*]}"
+    else log "BLOCKED rsync ${ARGS[*]}"; echo "SHIM: BLOCKED rsync write to remote: ${ARGS[*]}" >&2; exit 99; fi ;;
+  *)                    # local destination
+    ok=false
+    for root in "$SCRATCH" "$TMPDIR" /tmp /private/tmp /var/folders /private/var/folders; do
+      [ -n "$root" ] && case "$DEST" in "$root"*) ok=true ;; esac
+    done
+    if [ "$ok" = true ]; then log "ALLOW  rsync(local dest) ${ARGS[*]}"
+    else log "BLOCKED rsync(local dest outside temp) ${ARGS[*]}"; echo "SHIM: BLOCKED rsync to $DEST" >&2; exit 99; fi ;;
+esac
+# Real Sally's rsync (3.x) prints "created directory <path>" first when a dry run's destination
+# folder does not exist yet; a local rsync never does. Emulate that in fake mode so the fake
+# server behaves like the real one here (found by TARS 2026-10-03).
+if [ "$DRY" = true ] && [ -n "$FAKE_SERVER_DIR" ]; then
+  ORIG_DEST="${!#}"
+  case "$ORIG_DEST" in
+    # only when the destination is written as a folder (trailing slash); a single FILE going to a new name creates no folder
+    sally:/var/www/hub*/) if [ ! -e "$DEST" ]; then printf 'created directory %s\n' "${ORIG_DEST#sally:}" | sed 's#/$##'; fi ;;
+  esac
+fi
+# Test hook: print one extra line first on a dry run (to prove unexpected output fails closed).
+if [ "$DRY" = true ] && [ -n "$SHIM_EXTRA_DRY_LINE" ]; then printf '%s\n' "$SHIM_EXTRA_DRY_LINE"; fi
+# Test hook: run a command right before a REAL (non-dry, non-pull) transfer starts, to simulate
+# somebody editing Sally's files in the gap between the final re-check and the copy.
+if [ "$DRY" = false ] && [ -n "$SHIM_BEFORE_REAL_RSYNC" ]; then
+  _pull=false; for a in "$@"; do case "$a" in --files-from=*) _pull=true ;; esac; done
+  if [ "$_pull" = false ]; then log "HOOK   before real rsync: $SHIM_BEFORE_REAL_RSYNC"; bash -c "$SHIM_BEFORE_REAL_RSYNC"; fi
+fi
+# Log what locale variable (if any) the real tools would pass on to Sally (ssh forwards LC_*).
+log "ENV    LC_ALL=${LC_ALL-<unset>} (rsync call)"
+exec "$REAL_RSYNC" "${ARGS[@]}"

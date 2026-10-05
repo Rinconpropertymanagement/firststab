@@ -36,22 +36,25 @@
  *     by lib/sources.js's runActiveSources(), from the rental_comp_sources
  *     row's own name) — that exact string is what the exemption keys off.
  *
- * COORDINATES / RADIUS TIERING (added for the distance-based comp tiering
- * build — see lib/constants.js): leadsimple_new_leases now carries a
+ * COORDINATES / RADIUS (added for the distance-based comp tiering build —
+ * see lib/constants.js): leadsimple_new_leases now carries a
  * latitude/longitude column pair (migration 20260919000000), geocoded by
  * sync-move-in-leases.js via LocationIQ — NOT read from LeadSimple itself,
  * which has no coordinates anywhere in its own data (confirmed live). A row
  * geocoded before this build, or one whose geocode failed, simply has null
  * coordinates — pullLeadSimpleComps() below degrades to exactly the
  * previous zip-only behavior for those, never throws. The query itself
- * stays zip-scoped either way (no DB-side radius query exists here); the
- * narrow/wide tiering only decides which of the already zip-fetched rows to
- * keep.
+ * stays zip-scoped either way (no DB-side radius query exists here); this
+ * file computes real distance_miles and bounds each row to
+ * WIDE_SEARCH_RADIUS_MILES, but no longer decides narrow vs. wide for
+ * itself — that decision is now made once, across all three comp sources
+ * together, by applyCombinedRadiusTiering() in lib/sources.js, after every
+ * active source has reported back.
  */
 
 const { select } = require('./supabase');
 const { extractZip, haversineMiles } = require('./crmls');
-const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+const { WIDE_SEARCH_RADIUS_MILES } = require('./constants');
 
 // "The last year or two at the most," per Peter's own words (spec, "What Q
 // Needs to Build This") — scopes which of Rincon's own confirmed-current
@@ -178,13 +181,15 @@ async function pullLeadSimpleComps(subject) {
   const query = `select=*&zip_code=eq.${encodeURIComponent(zip)}&closed_at=gte.${cutoffDate}`;
   const rows = await select('leadsimple_new_leases', query);
 
-  // Radius tiering — same policy as lib/rentcast.js/lib/crmls.js (see
+  // Distance/radius bound — same policy as lib/rentcast.js/lib/crmls.js (see
   // lib/constants.js), applied on top of the zip-scoped rows already
   // fetched above rather than a second query (no DB-side radius query
   // exists for this table). Only runs when the subject itself has real
   // coordinates (fed forward by lib/sources.js from RentCast, when active);
   // otherwise every row is mapped as-is, distance_miles null throughout —
-  // exactly today's zip-only behavior, never a throw.
+  // exactly today's zip-only behavior, never a throw. The narrow/wide
+  // decision itself no longer happens here — see applyCombinedRadiusTiering()
+  // in lib/sources.js.
   const hasSubjectCoords = typeof subject.latitude === 'number' && typeof subject.longitude === 'number';
   let comps;
   if (hasSubjectCoords) {
@@ -201,9 +206,7 @@ async function pullLeadSimpleComps(subject) {
     // with no distance (not yet geocoded/backfilled) is kept as-is, same
     // "no basis to compute or drop it" rule lib/crmls.js uses.
     const bounded = withDistance.filter(({ distanceMiles }) => distanceMiles === null || distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
-    const narrow = bounded.filter(({ distanceMiles }) => typeof distanceMiles === 'number' && distanceMiles <= NARROW_SEARCH_RADIUS_MILES);
-    const tiered = narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS ? narrow : bounded;
-    comps = tiered.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles));
+    comps = bounded.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles));
   } else {
     comps = (rows || []).map(row => mapComparable(row));
   }

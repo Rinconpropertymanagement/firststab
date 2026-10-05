@@ -25,8 +25,8 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 
 const assert = require('node:assert/strict');
 
-const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
-const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails, applyRadiusTiering } = require('./lib/rentcast');
+const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, exclusionReason, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
+const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails } = require('./lib/rentcast');
 const {
   mapComparable: mapCrmlsComparable,
   haversineMiles,
@@ -46,10 +46,11 @@ const {
 const { findBestPropertyMatch, normalizeAddress, houseNumber, hasParseableHouseNumber, unitIdentifier, addressesMatch, dedupeComps } = require('./lib/property-matching');
 const { parseNarrativeOutput, buildPrompt, describeComp } = require('./lib/narrative');
 const { suggestAddresses, mapSuggestion, geocodeAddress } = require('./lib/locationiq');
+const { suggestAddresses: suggestAddressesGoogle, mapSuggestion: mapSuggestionGoogle } = require('./lib/google-places');
 const marketDataLib = require('./lib/market-data');
 const { mapMarketData, fetchMarketData, getMarketData, normalizeZip, isFresh, FRESHNESS_WINDOW_DAYS } = marketDataLib;
 const sourcesLib = require('./lib/sources');
-const { runActiveSources } = sourcesLib;
+const { runActiveSources, applyCombinedRadiusTiering } = sourcesLib;
 
 let passed = 0;
 
@@ -350,6 +351,63 @@ async function main() {
     const allSameType = comps.slice(0, 3);
     assert.deepEqual(computeRawRange(allSameType, 4, 'single_family'), computeRawRange(allSameType, 4));
     assert.deepEqual(computeRecommendedRange(allSameType, 4, 'single_family'), computeRecommendedRange(allSameType, 4));
+  });
+
+  console.log('--- lib/weighting.js exclusionReason() ---');
+
+  await check('exclusionReason() returns null for a comp that contributes full weight (exact bedroom and property type match)', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns null for a comp that contributes partial weight (1 bedroom off is still counted, just at half weight)', () => {
+    assert.equal(exclusionReason({ bedrooms: 3, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns "rincon_managed" for a Rincon-managed comp not from a trusted, self-sourced source, even when its type/bedrooms match perfectly', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: true, source_name: 'RentCast' }, 4, 'single_family'), 'rincon_managed');
+  });
+
+  await check('exclusionReason() returns null for a Rincon-managed comp from a trusted, self-sourced source (e.g. LeadSimple Move-Ins) — it counts, so it is never "excluded"', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'single_family', is_rincon_managed: true, source_name: 'LeadSimple Move-Ins' }, 4, 'single_family'), null);
+  });
+
+  await check('exclusionReason() returns "property_type_mismatch" for a known, different property type', () => {
+    assert.equal(exclusionReason({ bedrooms: 4, property_type: 'townhouse', is_rincon_managed: false }, 4, 'single_family'), 'property_type_mismatch');
+  });
+
+  await check('exclusionReason() returns "size_mismatch" for a 2+ bedroom gap', () => {
+    assert.equal(exclusionReason({ bedrooms: 2, property_type: 'single_family', is_rincon_managed: false }, 4, 'single_family'), 'size_mismatch');
+  });
+
+  await check('exclusionReason() prioritizes "rincon_managed" over a property-type/size mismatch when a comp fails more than one check at once (real shape: 530 Coronado Street\'s duplex analysis had a 3bd Rincon-managed townhouse comp against a 1bd duplex subject — wrong on all three)', () => {
+    assert.equal(
+      exclusionReason({ bedrooms: 3, property_type: 'townhouse', is_rincon_managed: true, source_name: 'RentCast' }, 1, 'duplex'),
+      'rincon_managed',
+      'rincon_managed must win over property_type_mismatch/size_mismatch, since it is a different KIND of problem (not real outside market data), not just a worse match'
+    );
+  });
+
+  await check('exclusionReason() prioritizes "property_type_mismatch" over "size_mismatch" when both apply (property type has no partial-credit tier, so it is the more fundamental reason)', () => {
+    assert.equal(
+      exclusionReason({ bedrooms: 1, property_type: 'townhouse', is_rincon_managed: false }, 4, 'single_family'),
+      'property_type_mismatch'
+    );
+  });
+
+  await check('exclusionReason() reproduces the real 530 Coronado Street duplex bug Judge found live (2026-09-20): single-family and townhouse comps the old narrative cited as "supporting the upper end"/"a real current floor" were actually zero-weighted for a 1bd duplex subject', () => {
+    // Real stored comp data (rental_comps for analysis
+    // 90403536-726d-4d08-8175-8642ccddb525) — subject is 1bd/duplex.
+    const dosCaminos263 = { bedrooms: 1, property_type: 'single_family', is_rincon_managed: false }; // "Comp 5" in the old rationale
+    const dosCaminos264 = { bedrooms: 1, property_type: 'single_family', is_rincon_managed: false }; // "Comp 6"
+    const arcadeDr404   = { bedrooms: 2, property_type: 'townhouse',     is_rincon_managed: false }; // "Comp 15"
+    const evaSt211       = { bedrooms: 2, property_type: 'single_family', is_rincon_managed: false }; // "Comp 13"
+    for (const comp of [dosCaminos263, dosCaminos264, arcadeDr404, evaSt211]) {
+      assert.equal(exclusionReason(comp, 1, 'duplex'), 'property_type_mismatch', JSON.stringify(comp));
+    }
+    // And the one comp the old rationale correctly treated as real evidence
+    // (1078 S Seaward, unknown property type, exact bedroom match) must
+    // still NOT be excluded.
+    assert.equal(exclusionReason({ bedrooms: 1, property_type: null, is_rincon_managed: false }, 1, 'duplex'), null);
   });
 
   console.log('--- lib/rentcast.js ---');
@@ -771,6 +829,58 @@ async function main() {
     assert.equal(deduped[0].source_name, 'LeadSimple Move-Ins', 'leased (3x) must still beat active (2x) regardless of trusted-source status');
   });
 
+  console.log('--- lib/property-matching.js dedupeComps() exclusion-aware tie-break (subjectBedrooms/subjectPropertyType) ---');
+
+  await check('dedupeComps() called with no subjectBedrooms/subjectPropertyType behaves EXACTLY as before (backward compatible) — keeps the higher-weight (leased) duplicate even though it would actually be excluded from the range, since the caller never opted in to the exclusion-aware check', () => {
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'off_market', monthly_rent: 2000, bedrooms: 1, property_type: 'single_family' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 4000, bedrooms: 4, property_type: 'townhouse' },
+    ];
+    const deduped = dedupeComps(comps);
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'with no subject context passed, the old status-weight-only rule must still decide this, unchanged');
+  });
+
+  await check('dedupeComps() WITH subjectBedrooms/subjectPropertyType prefers the duplicate that would actually count toward the range over a higher-weight one that would be excluded — the exact bug this build fixes: two sources disagreeing on the same real unit\'s type/bedrooms', () => {
+    const comps = [
+      // Same real unit, reported differently by two sources: RentCast says
+      // a 4bd townhouse (wrong on both counts vs. a 1bd single_family
+      // subject) and leased (highest status weight); CRMLS says the real
+      // 1bd single_family truth, but only active (lower status weight).
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 4000, bedrooms: 4, property_type: 'townhouse', source_name: 'RentCast' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2100, bedrooms: 1, property_type: 'single_family', source_name: 'CRMLS' },
+    ];
+    const withoutSubjectContext = dedupeComps(comps);
+    assert.equal(withoutSubjectContext[0].source_name, 'RentCast', 'sanity check: without subject context, the old status-weight rule keeps the (wrong) leased townhouse');
+
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].source_name, 'CRMLS', 'the comp that would actually count toward the range must survive, even though it has a lower status weight');
+  });
+
+  await check('dedupeComps() exclusion-aware check is a genuine no-op when both duplicates agree on excluded status — falls through to the unchanged status-weight tie-break', () => {
+    // Both candidates are a matching type/bedroom count for the subject
+    // (neither excluded) -> step 0 has nothing to decide, so the ordinary
+    // status-weight rule (leased beats active) must still apply.
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2000, bedrooms: 1, property_type: 'single_family' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 2050, bedrooms: 1, property_type: 'single_family' },
+    ];
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'neither candidate is excluded, so the status-weight tie-break must still decide this, unchanged');
+  });
+
+  await check('dedupeComps() exclusion-aware check also fires when BOTH duplicates would be excluded (both wrong type) — falls through to the unchanged status-weight tie-break rather than making an arbitrary choice', () => {
+    const comps = [
+      { address: '1 Test St, Ventura, CA 93001', listing_status: 'active', monthly_rent: 2000, bedrooms: 4, property_type: 'townhouse' },
+      { address: '1 Test Street, Ventura, CA 93001', listing_status: 'leased', monthly_rent: 2050, bedrooms: 4, property_type: 'condo' },
+    ];
+    const deduped = dedupeComps(comps, 1, 'single_family');
+    assert.equal(deduped.length, 1);
+    assert.equal(deduped[0].listing_status, 'leased', 'both candidates are excluded either way, so status-weight still decides which single row is kept for display');
+  });
+
   console.log('--- lib/rentcast.js pullRentCastComps() coordinates ---');
 
   // pullRentCastComps() calls the real global fetch(), so these mock it the
@@ -915,30 +1025,6 @@ async function main() {
     }
   });
 
-  await check('applyRadiusTiering() prefers the <=1mi subset when it meets MIN_COMPS_FOR_NARROW_RADIUS', () => {
-    const comps = [
-      { distance_miles: 0.2 }, { distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: 1.0 },
-      { distance_miles: 1.5 }, { distance_miles: 1.9 },
-    ];
-    const tiered = applyRadiusTiering(comps);
-    assert.equal(tiered.length, 4, 'exactly the 4 comps at <= 1 mile should survive');
-    assert.ok(tiered.every(c => c.distance_miles <= NARROW_SEARCH_RADIUS_MILES));
-  });
-
-  await check('applyRadiusTiering() falls back to the full wide set when the narrow subset does not meet MIN_COMPS_FOR_NARROW_RADIUS', () => {
-    const comps = [{ distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: 1.8 }]; // only 2 within 1 mile
-    const tiered = applyRadiusTiering(comps);
-    assert.equal(tiered.length, 3, 'below threshold at 1 mile -> keep the full wide (already-queried) set, no second request needed');
-  });
-
-  await check('applyRadiusTiering() treats a comp with no distance_miles as never countable toward the narrow subset, only ever kept via the wide fallback', () => {
-    const comps = [{ distance_miles: 0.2 }, { distance_miles: 0.5 }, { distance_miles: 0.9 }, { distance_miles: null }];
-    // Only 3 real comps within 1 mile — below the threshold of 4 — so the
-    // full set (including the no-distance comp) must be kept.
-    const tiered = applyRadiusTiering(comps);
-    assert.equal(tiered.length, 4);
-  });
-
   console.log('--- lib/narrative.js ---');
 
   await check('parseNarrativeOutput() parses a well-formed trailing marker line', () => {
@@ -1013,6 +1099,41 @@ async function main() {
   await check('describeComp() says nothing about Rincon-managed status at all for a comp that is not Rincon-managed', () => {
     const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', is_rincon_managed: false, source_name: 'RentCast' }, 0);
     assert.doesNotMatch(desc, /Rincon-managed/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "property_type_mismatch" as NOT COUNTED — the real bug this build fixes (Claude previously had no way to know a comp had been zero-weighted)', () => {
+    const desc = describeComp({ address: '404 Arcade Drive', monthly_rent: 3475, listing_status: 'leased', bedrooms: 2, property_type: 'townhouse', exclusion_reason: 'property_type_mismatch' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "size_mismatch" as NOT COUNTED', () => {
+    const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'off_market', bedrooms: 5, exclusion_reason: 'size_mismatch' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+  });
+
+  await check('describeComp() marks a comp with exclusion_reason "rincon_managed" as NOT COUNTED, taking priority over the older is_rincon_managed-only wording (exclusion_reason is always the authoritative, server-computed answer)', () => {
+    const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', is_rincon_managed: true, source_name: 'RentCast', exclusion_reason: 'rincon_managed' }, 0);
+    assert.match(desc, /NOT COUNTED in the range/);
+    assert.match(desc, /internal reference only/);
+  });
+
+  await check('describeComp() with exclusion_reason explicitly null (the normal "counted" case from server.js/router.js) behaves exactly like exclusion_reason being absent', () => {
+    const withNull = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', bedrooms: 3, exclusion_reason: null }, 0);
+    const withoutField = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', bedrooms: 3 }, 0);
+    assert.equal(withNull, withoutField);
+    assert.doesNotMatch(withNull, /NOT COUNTED/);
+  });
+
+  await check('buildPrompt() hard rules explicitly tell Claude never to cite a NOT COUNTED comp as evidence for the range — the exact instruction added to fix the 530 Coronado Street duplex bug (Judge found live, 2026-09-20)', () => {
+    const prompt = buildPrompt({
+      ...narrativePromptFixture,
+      comps: [
+        { address: '2 Comp St', bedrooms: 3, bathrooms: 2, sqft: 1450, monthly_rent: 3000, listing_status: 'leased', exclusion_reason: null },
+        { address: '404 Arcade Drive', bedrooms: 2, bathrooms: 1.8, sqft: 1000, monthly_rent: 3475, listing_status: 'leased', property_type: 'townhouse', exclusion_reason: 'property_type_mismatch' },
+      ],
+    });
+    assert.match(prompt, /NEVER cite a NOT COUNTED comp as a reason, a floor, a ceiling, support, or justification/);
+    assert.match(prompt, /COMP 1: 404 Arcade Drive.*NOT COUNTED in the range/);
   });
 
   console.log('--- lib/sources.js ---');
@@ -1146,6 +1267,223 @@ async function main() {
       assert.equal('latitude' in crmlsReceivedSubject, false);
       assert.equal('longitude' in crmlsReceivedSubject, false);
     } finally {
+      sourcesLib.SOURCE_HANDLERS.CRMLS = originalCrmls;
+    }
+  });
+
+  console.log('--- lib/sources.js applyCombinedRadiusTiering() / runActiveSources() cross-source radius coordination ---');
+
+  // NOTE (2026-09-20 revision): this test and the 3 after it (genuinely-wide,
+  // type-mismatch-doesn't-count, unknown-type-counts) all still pass
+  // unchanged under the corrected logic — verified by hand, see
+  // CROSS-SOURCE-RADIUS-SPEC.md's Test Plan. None of them happen to include
+  // a genuine match beyond 1 mile, so they don't exercise the one behavior
+  // this revision actually changes (a far genuine match surviving the cut).
+  // See the new "Rainier Street regression" test below for that coverage.
+  await check('runActiveSources(): the real 5537 Rainier Street bug, reconstructed — RentCast alone finds enough close comps, so CRMLS\'s own far-away condos must NOT survive even though CRMLS itself only found 1 close comp', async () => {
+    const originalRentCast = sourcesLib.SOURCE_HANDLERS.RentCast;
+    const originalCrmls = sourcesLib.SOURCE_HANDLERS.CRMLS;
+    sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({
+      comps: [
+        { monthly_rent: 4200, listing_status: 'active', property_type: 'single_family', distance_miles: 0.2 },
+        { monthly_rent: 4300, listing_status: 'active', property_type: 'single_family', distance_miles: 0.4 },
+        { monthly_rent: 4250, listing_status: 'active', property_type: 'single_family', distance_miles: 0.6 },
+        { monthly_rent: 4400, listing_status: 'active', property_type: 'single_family', distance_miles: 0.9 },
+      ],
+    });
+    sourcesLib.SOURCE_HANDLERS.CRMLS = async () => ({
+      comps: [
+        { monthly_rent: 4350, listing_status: 'active', property_type: 'single_family', distance_miles: 0.8 },
+        { monthly_rent: 3800, listing_status: 'active', property_type: 'condo', distance_miles: 1.71, address: '1300 Saratoga Ave' },
+        { monthly_rent: 3750, listing_status: 'active', property_type: 'condo', distance_miles: 1.83, address: '1237 Saratoga Ave' },
+        { monthly_rent: 3900, listing_status: 'active', property_type: 'condo', distance_miles: 1.91, address: '3700 Dean' },
+      ],
+    });
+    try {
+      const result = await runActiveSources(
+        [{ id: 'src-rc', name: 'RentCast' }, { id: 'src-crmls', name: 'CRMLS' }],
+        { address: '5537 Rainier Street, Ventura, CA', propertyType: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1600 }
+      );
+      const addresses = result.comps.map(c => c.address);
+      assert.ok(!addresses.includes('1300 Saratoga Ave'), 'condo 1.71mi away must not survive — RentCast alone already had enough close comps');
+      assert.ok(!addresses.includes('1237 Saratoga Ave'));
+      assert.ok(!addresses.includes('3700 Dean'));
+      assert.equal(result.comps.length, 5, 'the 4 RentCast comps plus the 1 close CRMLS comp — every surviving comp within 1 mile');
+    } finally {
+      sourcesLib.SOURCE_HANDLERS.RentCast = originalRentCast;
+      sourcesLib.SOURCE_HANDLERS.CRMLS = originalCrmls;
+    }
+  });
+
+  await check('applyCombinedRadiusTiering(): genuinely few close comps combined -> stays wide, every comp every source found out to 2mi survives', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.3 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'single_family', distance_miles: 0.9 },
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: 'condo', distance_miles: 1.7 },
+      { source_name: 'LeadSimple Move-Ins', monthly_rent: 4000, property_type: 'single_family', distance_miles: 1.9 },
+    ]; // only 2 within 1 mile -> below MIN_COMPS_FOR_NARROW_RADIUS
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 4, 'a genuinely wide case must keep every comp from every source');
+  });
+
+  await check('applyCombinedRadiusTiering(): a property-type mismatch within 1 mile does not count toward the threshold', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.4 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'townhouse', distance_miles: 0.5 }, // mismatch — doesn't count
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: 'condo', distance_miles: 0.6 }, // mismatch — doesn't count
+    ]; // only 2 countable (the two single_family) -> below threshold of 4
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 4, 'only 2 countable comps -> stays wide -> every comp (including the mismatches) survives');
+  });
+
+  await check('applyCombinedRadiusTiering(): an unknown property type (null) still counts toward the threshold, per exclusionReason()\'s "don\'t punish missing data" rule', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.4 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: null, distance_miles: 0.5 }, // unknown — counts
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: null, distance_miles: 0.6 }, // unknown — counts
+      { source_name: 'CRMLS', monthly_rent: 3950, property_type: 'condo', distance_miles: 1.7 }, // mismatch, beyond 1mi anyway
+    ];
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 4, 'the 4 within 1 mile (2 single_family + 2 unknown-type) clear the threshold -> goes narrow');
+    assert.ok(result.every(c => c.distance_miles <= NARROW_SEARCH_RADIUS_MILES));
+  });
+
+  await check('applyCombinedRadiusTiering(): comps with no distance_miles never push the decision narrow, but survive in the wide result', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.4 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'single_family', distance_miles: 0.6 },
+      { source_name: 'LeadSimple Move-Ins', monthly_rent: 4000, property_type: 'single_family', distance_miles: null }, // not yet geocoded
+    ]; // only 3 countable (real distances within 1mi) -> below threshold of 4
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 4, 'stays wide — the no-distance comp cannot prove it is close, so it never helps clear the threshold');
+    assert.ok(result.some(c => c.distance_miles === null), 'the no-distance comp must still be present in the wide result');
+  });
+
+  await check('applyCombinedRadiusTiering(): a GENUINE match with no distance_miles always survives, even once enough OTHER genuine nearby comps clear the threshold', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.4 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'single_family', distance_miles: 0.6 },
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: 'single_family', distance_miles: 0.9 },
+      { source_name: 'LeadSimple Move-Ins', monthly_rent: 4000, property_type: 'single_family', distance_miles: null }, // genuine match (same type), just not yet geocoded
+    ]; // 4 other genuine comps within 1 mile -> clears MIN_COMPS_FOR_NARROW_RADIUS
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 5, 'the threshold clearing must not remove the genuine no-distance comp — this is the exact case the original (regressed) design\'s judgment call #3 got wrong');
+    assert.ok(result.some(c => c.source_name === 'LeadSimple Move-Ins' && c.distance_miles === null), 'the genuine no-distance comp must survive unconditionally');
+  });
+
+  await check('applyCombinedRadiusTiering(): a NON-genuine match with no distance_miles is dropped once enough genuine nearby comps clear the threshold (mirror of the case above)', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.4 },
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'single_family', distance_miles: 0.6 },
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: 'single_family', distance_miles: 0.9 },
+      { source_name: 'CRMLS', monthly_rent: 3950, property_type: 'condo', distance_miles: null }, // NOT a genuine match (wrong type), and can't be proven close
+    ]; // 4 genuine comps within 1 mile -> clears MIN_COMPS_FOR_NARROW_RADIUS
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 4, 'the non-genuine no-distance comp must be dropped once the threshold clears — it can\'t prove it belongs');
+    assert.ok(!result.some(c => c.property_type === 'condo'), 'the non-genuine no-distance comp must not survive');
+  });
+
+  await check('applyCombinedRadiusTiering(): once the threshold clears, the distance cut only ever removes a NON-genuine far comp — a genuine match beyond 1mi (even from a source that also supplied narrow comps) survives', () => {
+    const comps = [
+      { source_name: 'RentCast', monthly_rent: 4200, property_type: 'single_family', distance_miles: 0.2 },
+      { source_name: 'RentCast', monthly_rent: 4300, property_type: 'single_family', distance_miles: 0.5 },
+      { source_name: 'RentCast', monthly_rent: 4400, property_type: 'single_family', distance_miles: 1.6 }, // same source as two narrow comps, itself beyond 1mi, but STILL a genuine match (single_family)
+      { source_name: 'CRMLS', monthly_rent: 3800, property_type: 'single_family', distance_miles: 0.7 },
+      { source_name: 'CRMLS', monthly_rent: 3900, property_type: 'single_family', distance_miles: 0.9 },
+      { source_name: 'LeadSimple Move-Ins', monthly_rent: 4000, property_type: 'single_family', distance_miles: 1.8 }, // also a genuine match, beyond 1mi
+      { source_name: 'RentCast', monthly_rent: 3500, property_type: 'condo', distance_miles: 1.6 }, // NOT a genuine match (wrong type) — this is the only kind of comp this function can cut
+    ]; // 4 genuine comps within 1 mile -> clears threshold, but nothing else in this mock is non-genuine except the condo
+    const result = applyCombinedRadiusTiering(comps, { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(result.length, 6, 'all 6 single_family comps survive — the corrected logic only ever cuts a comp that is BOTH far AND not a genuine match');
+    assert.ok(result.some(c => c.source_name === 'RentCast' && c.property_type === 'single_family' && c.distance_miles === 1.6), 'the 1.6mi single_family RentCast comp is a genuine match and must survive (flipped from the old, regressed assertion)');
+    assert.ok(!result.some(c => c.property_type === 'condo'), 'the newly-added 1.6mi condo is not a genuine match and must still be cut — proves the cut is scoped to non-matches only, not "every far comp"');
+  });
+
+  await check('runActiveSources() + computeRecommendedRange(): the Rainier Street regression (analysis 9ab946b1-2c6b-405a-adbd-d8f1c91f31e1) — genuine matches beyond 1 mile survive and the range recomputes to the exact live figure', async () => {
+    // Reconstructed directly from the real rental_comps rows for this
+    // analysis (pulled live from Supabase, 2026-09-20) — not hand-guessed.
+    // RentCast's 4 close same-type comps within 1 mile (555 Skyline Rd is
+    // one of Rincon's own managed properties — is_rincon_managed isn't set
+    // yet at this point in the pipeline, same as real handler output; it's
+    // applied below, right before computeRecommendedRange(), mirroring
+    // where server.js actually sets it via findBestPropertyMatch(), after
+    // runActiveSources() returns).
+    const rentCastComps = [
+      { address: '555 Skyline Rd, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, distance_miles: 0.19, monthly_rent: 4395, listing_status: 'off_market' },
+      { address: '5651 N Bryn Mawr St, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, distance_miles: 0.56, monthly_rent: 4500, listing_status: 'off_market' },
+      { address: '201 Burnett Ave, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, distance_miles: 0.69, monthly_rent: 4500, listing_status: 'off_market' },
+      { address: '6237 Hunter St, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, distance_miles: 0.82, monthly_rent: 4200, listing_status: 'off_market' },
+    ];
+    // CRMLS's close comp (480 Day Road), the two genuine matches beyond
+    // 1 mile this revision exists to bring back (1148 Colina Vista, 7275
+    // Coolidge Street — both leased, both real regression evidence), the
+    // 5 condo rows across the 3 addresses that triggered the original bug
+    // (1300 Saratoga Ave x3 units, 1237 Saratoga Ave, 3700 Dean — all
+    // 1.71-1.91mi, wrong property type), and the other non-genuine
+    // far comps (6bd mismatch, wrong type, 2-bedroom-off) that must also
+    // still be cut.
+    const crmlsComps = [
+      { address: '480 Day Road, Ventura, CA 93003', property_type: 'single_family', bedrooms: 3, distance_miles: 0.44, monthly_rent: 4600, listing_status: 'active' },
+      { address: '1148 Colina Vista, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, distance_miles: 1.10, monthly_rent: 5650, listing_status: 'leased' },
+      { address: '642 Creekmont Court, Ventura, CA 93003', property_type: 'single_family', bedrooms: 6, distance_miles: 1.12, monthly_rent: 6500, listing_status: 'active' }, // 2+ bedrooms off -> not genuine
+      { address: '60 Brentwood Avenue, Ventura, CA 93003', property_type: 'apartment', bedrooms: 0, distance_miles: 1.37, monthly_rent: 1400, listing_status: 'leased' }, // wrong type -> not genuine
+      { address: '7275 Coolidge Street, Ventura, CA 93003', property_type: 'single_family', bedrooms: 3, distance_miles: 1.47, monthly_rent: 4195, listing_status: 'leased' },
+      { address: '86 College Drive, Ventura, CA 93003', property_type: null, bedrooms: 2, distance_miles: 1.6, monthly_rent: 2795, listing_status: 'leased' }, // 2 bedrooms off -> not genuine, even with unknown type
+      { address: '1300 Saratoga Avenue, Unit 2204, Ventura, CA 93003', property_type: 'condo', bedrooms: 2, distance_miles: 1.71, monthly_rent: 3100, listing_status: 'active' },
+      { address: '1300 Saratoga Avenue, Unit 108, Ventura, CA 93003', property_type: 'condo', bedrooms: 2, distance_miles: 1.71, monthly_rent: 2550, listing_status: 'active' },
+      { address: '1237 Saratoga Avenue, Ventura, CA 93003', property_type: 'condo', bedrooms: 2, distance_miles: 1.72, monthly_rent: 2500, listing_status: 'active' },
+      { address: '1300 Saratoga Avenue, Unit 1212, Ventura, CA 93003', property_type: 'condo', bedrooms: 2, distance_miles: 1.73, monthly_rent: 2850, listing_status: 'active' },
+      { address: '3700 Dean, Unit 2106, Ventura, CA 93003', property_type: 'condo', bedrooms: 2, distance_miles: 1.91, monthly_rent: 2950, listing_status: 'active' },
+      { address: '3296 San Luis Street, Ventura, CA 93003', property_type: null, bedrooms: 3, distance_miles: 1.96, monthly_rent: 3750, listing_status: 'active' }, // unknown type + 1bd off -> still genuine
+      { address: '1220 Johnson Drive, Unit 4, Ventura, CA 93003', property_type: 'manufactured', bedrooms: 2, distance_miles: 1.99, monthly_rent: 3000, listing_status: 'active' }, // wrong type -> not genuine
+    ];
+
+    const originalRentCast = sourcesLib.SOURCE_HANDLERS.RentCast;
+    const originalCrmls = sourcesLib.SOURCE_HANDLERS.CRMLS;
+    sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ comps: rentCastComps });
+    sourcesLib.SOURCE_HANDLERS.CRMLS = async () => ({ comps: crmlsComps });
+    try {
+      const result = await runActiveSources(
+        [{ id: 'src-rc', name: 'RentCast' }, { id: 'src-crmls', name: 'CRMLS' }],
+        { address: '5537 Rainier Street, Ventura, CA', propertyType: 'single_family', bedrooms: 4, bathrooms: 2.5, sqft: 2139 }
+      );
+      const addresses = result.comps.map(c => c.address);
+
+      assert.ok(addresses.includes('1148 Colina Vista, Ventura, CA 93003'), '1148 Colina Vista (1.10mi, leased $5,650, exact 4bd match) must survive — the exact comp the regression dropped');
+      assert.ok(addresses.includes('7275 Coolidge Street, Ventura, CA 93003'), '7275 Coolidge Street (1.47mi, leased $4,195, 1bd off) must survive — the other comp the regression dropped');
+
+      const saratogaAndDeanAddresses = [
+        '1300 Saratoga Avenue, Unit 2204, Ventura, CA 93003',
+        '1300 Saratoga Avenue, Unit 108, Ventura, CA 93003',
+        '1237 Saratoga Avenue, Ventura, CA 93003',
+        '1300 Saratoga Avenue, Unit 1212, Ventura, CA 93003',
+        '3700 Dean, Unit 2106, Ventura, CA 93003',
+      ];
+      for (const addr of saratogaAndDeanAddresses) {
+        assert.ok(!addresses.includes(addr), `${addr} must still be absent — the original bug fix (non-genuine comps cut by distance) must still hold`);
+      }
+      assert.ok(!addresses.includes('642 Creekmont Court, Ventura, CA 93003'), 'the 6bd (2+ off) comp must still be cut');
+      assert.ok(!addresses.includes('60 Brentwood Avenue, Ventura, CA 93003'), 'the wrong-type comp must still be cut');
+      assert.ok(!addresses.includes('86 College Drive, Ventura, CA 93003'), 'the 2bd (2+ off) comp must still be cut');
+      assert.ok(!addresses.includes('1220 Johnson Drive, Unit 4, Ventura, CA 93003'), 'the manufactured-type comp must still be cut');
+
+      // is_rincon_managed is set downstream of runActiveSources() in the
+      // real pipeline (server.js's findBestPropertyMatch(), after this
+      // function returns) — applied here on the one comp it's true for,
+      // mirroring that real ordering, before computing the range.
+      const forRangeCalc = result.comps.map(c =>
+        c.address === '555 Skyline Rd, Ventura, CA 93003' ? { ...c, is_rincon_managed: true } : c
+      );
+      const range = computeRecommendedRange(forRangeCalc, 4, 'single_family');
+      assert.deepEqual(range, { low: 4197.5, mid: 4500, high: 5650 },
+        `expected the exact live recommended_rent_low/mid/high from analysis 9ab946b1-2c6b-405a-adbd-d8f1c91f31e1, got ${JSON.stringify(range)}`);
+    } finally {
+      sourcesLib.SOURCE_HANDLERS.RentCast = originalRentCast;
       sourcesLib.SOURCE_HANDLERS.CRMLS = originalCrmls;
     }
   });
@@ -1341,9 +1679,9 @@ async function main() {
     }
   });
 
-  console.log('--- lib/crmls.js radius tiering (narrow vs wide) ---');
+  console.log('--- lib/crmls.js radius search always returns the full <=2mi set (narrow/wide decision moved to lib/sources.js) ---');
 
-  await check('pullCrmlsComps() prefers the <=1mi subset when it has enough comps (MIN_COMPS_FOR_NARROW_RADIUS), dropping farther box-search comps from the result', async () => {
+  await check('pullCrmlsComps() always returns the full box-search set out to <=2mi, real distance_miles on each, even when enough of them are within 1 mile (the narrow cut no longer happens here)', async () => {
     const originalFetch = global.fetch;
     const originalToken = process.env.RECORE_SERVER_TOKEN;
     process.env.RECORE_SERVER_TOKEN = 'test-token';
@@ -1357,7 +1695,9 @@ async function main() {
     // beyond 1 (1.3/1.7) — offsets built the same latDelta = miles/69.0 way
     // buildBoundingBox() itself does, same-longitude so Haversine distance
     // is effectively the offset in miles (verified to <0.01mi tolerance by
-    // the haversineMiles() test above).
+    // the haversineMiles() test above). Before this fix, 4 within 1 mile
+    // would have met MIN_COMPS_FOR_NARROW_RADIUS and cut the other 2 —
+    // now that decision happens in lib/sources.js, not here.
     const milesOffsets = [0.3, 0.5, 0.7, 0.9, 1.3, 1.7];
     const records = milesOffsets.map((mi, i) => ({
       ...baseFields, StreetNumberNumeric: 100 + i, StreetName: `Comp${i}`,
@@ -1370,15 +1710,15 @@ async function main() {
     };
     try {
       const result = await pullCrmlsComps({ address: '1895 Dorrit St, Newbury Park, CA 91320', latitude: subjectLat, longitude: subjectLon });
-      assert.equal(result.comps.length, 4, 'the 4 comps within 1 mile meet MIN_COMPS_FOR_NARROW_RADIUS -> narrow subset used');
-      assert.ok(result.comps.every(c => c.distance_miles <= NARROW_SEARCH_RADIUS_MILES), 'every surviving comp must be within the narrow radius');
+      assert.equal(result.comps.length, 6, 'all 6 comps out to 2mi must be returned, regardless of how many are within 1 mile');
+      assert.ok(result.comps.every(c => typeof c.distance_miles === 'number' && c.distance_miles <= WIDE_SEARCH_RADIUS_MILES), 'every comp must carry its real distance_miles, all within the wide bound');
     } finally {
       global.fetch = originalFetch;
       process.env.RECORE_SERVER_TOKEN = originalToken;
     }
   });
 
-  await check('pullCrmlsComps() falls back to the full <=2mi set when the <=1mi subset does not have enough comps', async () => {
+  await check('pullCrmlsComps() still returns the full <=2mi set when few comps are within 1 mile (same always-wide behavior, not a "fallback" anymore)', async () => {
     const originalFetch = global.fetch;
     const originalToken = process.env.RECORE_SERVER_TOKEN;
     process.env.RECORE_SERVER_TOKEN = 'test-token';
@@ -1388,8 +1728,7 @@ async function main() {
       StandardStatus: 'Active', PropertySubType: 'Single Family Residence',
       StreetSuffix: 'St', City: 'Newbury Park', StateOrProvince: 'CA', PostalCode: '91320', ListPrice: 4200,
     };
-    // Only 2 within 1 mile (below MIN_COMPS_FOR_NARROW_RADIUS), 2 more
-    // between 1 and 2 miles.
+    // Only 2 within 1 mile, 2 more between 1 and 2 miles.
     const milesOffsets = [0.3, 0.5, 1.3, 1.7];
     const records = milesOffsets.map((mi, i) => ({
       ...baseFields, StreetNumberNumeric: 200 + i, StreetName: `Comp${i}`,
@@ -1402,7 +1741,7 @@ async function main() {
     };
     try {
       const result = await pullCrmlsComps({ address: '1895 Dorrit St, Newbury Park, CA 91320', latitude: subjectLat, longitude: subjectLon });
-      assert.equal(result.comps.length, 4, 'only 2 within 1 mile -> below threshold -> keep the full wide (<=2mi) set, no second request');
+      assert.equal(result.comps.length, 4, 'all 4 comps out to 2mi returned, unconditionally');
     } finally {
       global.fetch = originalFetch;
       process.env.RECORE_SERVER_TOKEN = originalToken;
@@ -1507,9 +1846,9 @@ async function main() {
     assert.equal(withDistance.distance_miles, 0.75);
   });
 
-  console.log('--- lib/leadsimple.js radius tiering (coordinates added for this build) ---');
+  console.log('--- lib/leadsimple.js radius (coordinates added for this build) always returns the full <=2mi bounded set ---');
 
-  await check('pullLeadSimpleComps() computes real distance_miles and prefers the <=1mi subset when the subject has coordinates and enough rows do too', async () => {
+  await check('pullLeadSimpleComps() computes real distance_miles and returns every row out to <=2mi, even when enough of them are within 1 mile (the narrow cut no longer happens here)', async () => {
     const originalFetch = global.fetch;
     const subjectLat = 34.179615, subjectLon = -119.198962;
     const milesOffsets = [0.3, 0.5, 0.7, 0.9, 1.3, 1.7]; // 4 within 1mi, 2 more within 2mi
@@ -1530,14 +1869,14 @@ async function main() {
     };
     try {
       const result = await pullLeadSimpleComps({ address: '1 Comp St, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
-      assert.equal(result.comps.length, 4, 'the 4 rows within 1 mile meet MIN_COMPS_FOR_NARROW_RADIUS -> narrow subset used');
-      assert.ok(result.comps.every(c => typeof c.distance_miles === 'number' && c.distance_miles <= NARROW_SEARCH_RADIUS_MILES));
+      assert.equal(result.comps.length, 6, 'all 6 rows out to 2mi must be returned, regardless of how many are within 1 mile');
+      assert.ok(result.comps.every(c => typeof c.distance_miles === 'number' && c.distance_miles <= WIDE_SEARCH_RADIUS_MILES));
     } finally {
       global.fetch = originalFetch;
     }
   });
 
-  await check('pullLeadSimpleComps() falls back to the full <=2mi bounded set when the <=1mi subset does not have enough rows', async () => {
+  await check('pullLeadSimpleComps() still returns the full <=2mi bounded set when few rows are within 1 mile (same always-wide behavior, not a "fallback" anymore)', async () => {
     const originalFetch = global.fetch;
     const subjectLat = 34.179615, subjectLon = -119.198962;
     const milesOffsets = [0.3, 0.5, 1.3, 1.7]; // only 2 within 1mi
@@ -1557,7 +1896,7 @@ async function main() {
     };
     try {
       const result = await pullLeadSimpleComps({ address: '1 Comp St, Oxnard, CA 93036', latitude: subjectLat, longitude: subjectLon });
-      assert.equal(result.comps.length, 4, 'only 2 within 1 mile -> below threshold -> keep the full <=2mi set');
+      assert.equal(result.comps.length, 4, 'all 4 rows out to 2mi returned, unconditionally');
     } finally {
       global.fetch = originalFetch;
     }
@@ -2086,6 +2425,188 @@ async function main() {
       }
     } finally {
       global.fetch = originalFetch;
+    }
+  });
+
+  console.log('--- lib/google-places.js ---');
+
+  await check('mapSuggestion() maps a real-shaped Google Places Autocomplete (New) placePrediction to just {formattedAddress}', () => {
+    // Field names match developers.google.com's real REST reference for
+    // AutocompleteSuggestion/PlacePrediction/FormattableText (confirmed
+    // against Google's real docs, not guessed) — this is the field-masked
+    // shape this project's own request actually asks for
+    // (X-Goog-FieldMask: suggestions.placePrediction.text.text).
+    const googleSuggestion = {
+      placePrediction: {
+        text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA', matches: [{ startOffset: 0, endOffset: 4 }] },
+      },
+    };
+    const mapped = mapSuggestionGoogle(googleSuggestion);
+    assert.deepEqual(mapped, { formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' });
+    // Only formattedAddress — place/placeId/structuredFormat/types/etc.
+    // must not pass through; nothing downstream needs more than the string.
+    assert.deepEqual(Object.keys(mapped), ['formattedAddress']);
+  });
+
+  await check('mapSuggestion() returns null (not a throw) for a queryPrediction (a generic search suggestion with no real place behind it)', () => {
+    // Google's Autocomplete (New) can mix queryPrediction entries into the
+    // same suggestions array — this tool only wants real addresses, and
+    // the field mask sent by suggestAddresses() means a query-only entry
+    // comes back with neither `placePrediction` nor `queryPrediction`
+    // populated, so this also covers a bare `{}` entry.
+    assert.equal(mapSuggestionGoogle({ queryPrediction: { text: { text: 'pizza near me' } } }), null);
+    assert.equal(mapSuggestionGoogle({}), null);
+    assert.equal(mapSuggestionGoogle(null), null);
+  });
+
+  await check('suggestAddresses() returns [] without calling fetch at all for a query under 3 characters (never wastes a request)', async () => {
+    const originalFetch = global.fetch;
+    let fetchCalled = false;
+    global.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => ({ suggestions: [] }) }; };
+    try {
+      assert.deepEqual(await suggestAddressesGoogle(''), []);
+      assert.deepEqual(await suggestAddressesGoogle('1'), []);
+      assert.deepEqual(await suggestAddressesGoogle('12'), []);
+      assert.deepEqual(await suggestAddressesGoogle('  1 '), []); // whitespace-only-effective length still under 3
+      assert.equal(fetchCalled, false, 'a too-short query must never reach fetch()');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await check('suggestAddresses() POSTs to places:autocomplete with the documented auth header, field mask, and JSON body — and maps a real-shaped multi-result response', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    let requestedUrl = null;
+    let requestedOptions = null;
+    global.fetch = async (url, options) => {
+      requestedUrl = url;
+      requestedOptions = options;
+      return {
+        ok: true,
+        json: async () => ({
+          suggestions: [
+            { placePrediction: { text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA' } } },
+            { placePrediction: { text: { text: '1895 Dorrit Ave, Oxnard, CA 93030, USA' } } },
+          ],
+        }),
+      };
+    };
+    try {
+      const suggestions = await suggestAddressesGoogle('1895 Dorrit');
+      assert.deepEqual(suggestions, [
+        { formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' },
+        { formattedAddress: '1895 Dorrit Ave, Oxnard, CA 93030, USA' },
+      ]);
+      // Confirms this hits the real documented endpoint, not a guessed one.
+      assert.equal(requestedUrl, 'https://places.googleapis.com/v1/places:autocomplete');
+      assert.equal(requestedOptions.method, 'POST');
+      // Confirms the key is sent as the documented `X-Goog-Api-Key` header,
+      // not a query param (LocationIQ's convention) or RentCast's
+      // `X-Api-Key` header name.
+      assert.equal(requestedOptions.headers['X-Goog-Api-Key'], 'test-key');
+      // Confirms the field mask requests exactly (and only) the field
+      // mapSuggestion() needs — never anything that would pull in a Place
+      // Details-priced field.
+      assert.equal(requestedOptions.headers['X-Goog-FieldMask'], 'suggestions.placePrediction.text.text');
+      const body = JSON.parse(requestedOptions.body);
+      assert.equal(body.input, '1895 Dorrit');
+      assert.deepEqual(body.includedRegionCodes, ['us']);
+      assert.ok(body.locationRestriction && body.locationRestriction.rectangle, 'expected a locationRestriction.rectangle to hard-restrict to Southern California');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() caps results at 5 even when Google returns more', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        suggestions: Array.from({ length: 8 }, (_, i) => ({ placePrediction: { text: { text: `${100 + i} Dorrit St, Newbury Park, CA` } } })),
+      }),
+    });
+    try {
+      const suggestions = await suggestAddressesGoogle('Dorrit St');
+      assert.equal(suggestions.length, 5);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() skips queryPrediction entries mixed into a real response rather than passing them through', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          { placePrediction: { text: { text: '1895 Dorrit St, Newbury Park, CA 91320, USA' } } },
+          { queryPrediction: { text: { text: 'dorrit street apartments' } } },
+        ],
+      }),
+    });
+    try {
+      const suggestions = await suggestAddressesGoogle('Dorrit');
+      assert.deepEqual(suggestions, [{ formattedAddress: '1895 Dorrit St, Newbury Park, CA 91320, USA' }]);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) on a non-OK HTTP response', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({ ok: false, status: 403, text: async () => 'API key not valid' });
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) when fetch itself rejects (network error)', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => { throw new Error('network is down'); };
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() returns [] (not a throw) when Google returns a body with no suggestions array (e.g. an error object)', async () => {
+    const originalFetch = global.fetch;
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+    global.fetch = async () => ({ ok: true, json: async () => ({ error: { code: 400, message: 'Invalid request' } }) });
+    try {
+      assert.deepEqual(await suggestAddressesGoogle('1895 Dorrit St'), []);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
+    }
+  });
+
+  await check('suggestAddresses() throws a clear error when GOOGLE_PLACES_API_KEY is missing — the one case address-suggest\'s server.js route logs before still returning []', async () => {
+    const originalKey = process.env.GOOGLE_PLACES_API_KEY;
+    delete process.env.GOOGLE_PLACES_API_KEY;
+    try {
+      await assert.rejects(() => suggestAddressesGoogle('1895 Dorrit St'), /Missing GOOGLE_PLACES_API_KEY/);
+    } finally {
+      process.env.GOOGLE_PLACES_API_KEY = originalKey;
     }
   });
 

@@ -150,7 +150,10 @@ const supabase = createClient(
 
 // Still a sensible guard on who can be GRANTED insurance-compliance access,
 // independent of how they sign in — kept from the standalone app.
-const ALLOWED_DOMAIN = 'rinconmanagement.com';
+// quickturnmaintenance.com added 2026-09-09 — Peter confirmed it's a sister
+// company he owns (not an unaffiliated outside vendor), same trust level as
+// rinconmanagement.com for Hub access purposes.
+const ALLOWED_DOMAINS = ['rinconmanagement.com', 'quickturnmaintenance.com'];
 
 // ─── Multer (file upload) — unchanged from the standalone app ─────────────
 const upload = multer({
@@ -1248,8 +1251,8 @@ router.post('/api/insurance/users', requireInsuranceRole('admin'), async (req, r
   if (!email || !role) return res.status(400).json({ error: 'email and role are required.' });
 
   const normalizedEmail = String(email).toLowerCase().trim();
-  if (!normalizedEmail.endsWith('@' + ALLOWED_DOMAIN)) {
-    return res.status(400).json({ error: 'Only @' + ALLOWED_DOMAIN + ' accounts allowed.' });
+  if (!ALLOWED_DOMAINS.some(d => normalizedEmail.endsWith('@' + d))) {
+    return res.status(400).json({ error: 'Only ' + ALLOWED_DOMAINS.map(d => '@' + d).join(' or ') + ' accounts allowed.' });
   }
   const validRoles = ['admin', 'director_of_operations', 'property_manager', 'inspection_coordinator'];
   if (!validRoles.includes(role)) return res.status(400).json({ error: 'Invalid role.' });

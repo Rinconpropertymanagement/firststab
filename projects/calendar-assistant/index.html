@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#534AB7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Rincon">
+  <title>Rincon Assistant</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --purple:  #534AB7;
+      --green:   #1D9E75;
+      --red:     tomato;
+      --gray:    #888780;
+      --amber:   #F59E0B;
+      --bg:      #FFFFFF;
+      --surface: #F5F5F5;
+      --border:  #E5E5E5;
+      --text:    #1A1A1A;
+      --muted:   #6B6B6B;
+      --radius:  12px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Layout ── */
+    #app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+      max-width: 480px;
+      margin: 0 auto;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 20px 20px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .greeting {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .date-line {
+      font-size: 14px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .badge-group {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-top: 4px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge-purple { background: #EDE9FF; color: var(--purple); }
+    .badge-gray   { background: #F0F0F0; color: var(--gray); }
+    .badge-week   { background: var(--surface); color: var(--muted); }
+
+    /* ── Alert bar ── */
+    #alert-bar {
+      margin: 12px 20px 0;
+      padding: 10px 14px;
+      background: #FFFBEB;
+      border: 1px solid #FDE68A;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #92400E;
+      display: none;
+    }
+    #alert-bar.visible { display: block; }
+
+    /* ── Offline banner ── */
+    #offline-banner {
+      background: #FEF2F2;
+      border-bottom: 1px solid #FECACA;
+      color: #991B1B;
+      text-align: center;
+      font-size: 13px;
+      padding: 8px;
+      display: none;
+    }
+    #offline-banner.visible { display: block; }
+
+    /* ── Scrollable body ── */
+    main {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 16px 20px;
+    }
+
+    section { margin-bottom: 24px; }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* ── Schedule list ── */
+    .schedule-list { display: flex; flex-direction: column; gap: 2px; }
+
+    .schedule-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: var(--surface);
+      min-height: 48px;
+    }
+    .schedule-pip {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .schedule-time {
+      font-size: 12px;
+      color: var(--muted);
+      width: 72px;
+      flex-shrink: 0;
+    }
+    .schedule-body {
+      flex: 1;
+      min-width: 0;
+    }
+    .schedule-title {
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .schedule-location {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .schedule-cal-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--muted);
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
+    /* ── Task list ── */
+    .task-list { display: flex; flex-direction: column; gap: 2px; }
+
+    .task-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--surface);
+      min-height: 52px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .task-item.done { opacity: 0.45; }
+    .task-item.done .task-title { text-decoration: line-through; }
+
+    .task-check {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .task-item.done .task-check {
+      background: var(--purple);
+      border-color: var(--purple);
+    }
+    .task-check-mark {
+      display: none;
+      color: #fff;
+      font-size: 13px;
+      line-height: 1;
+    }
+    .task-item.done .task-check-mark { display: block; }
+
+    .task-body { flex: 1; min-width: 0; }
+    .task-title { font-size: 15px; font-weight: 500; }
+    .task-meta  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    .priority-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .priority-strategic   { background: var(--purple); }
+    .priority-decision    { background: var(--amber); }
+    .priority-relationship{ background: var(--green); }
+    .priority-admin       { background: var(--gray); }
+
+    .empty-state {
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      padding: 28px 0;
+    }
+
+    /* ── Week at a glance ── */
+    .week-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+    }
+    .week-day {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 10px 0;
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .week-day.today { background: #EDE9FF; }
+    .week-day.selected { background: #F3F0FF; border: 1.5px solid var(--purple); }
+    .week-day-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .week-day.today .week-day-label { color: var(--purple); }
+    .week-day-num {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .week-pips {
+      display: flex;
+      gap: 3px;
+      flex-wrap: wrap;
+      justify-content: center;
+      min-height: 10px;
+    }
+    .pip {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .legend-pip {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+
+    /* ── View toggle ── */
+    .view-toggle {
+      background: none;
+      border: none;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--muted);
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, color 0.15s;
+    }
+    .view-toggle.active {
+      background: var(--bg);
+      color: var(--purple);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    /* ── Month grid ── */
+    .month-day-hdr {
+      text-align: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      padding: 4px 0;
+    }
+    .month-cell {
+      min-height: 48px;
+      border-radius: 6px;
+      background: var(--surface);
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .month-cell.today { background: #EDE9FF; }
+    .month-cell.selected { background: #F3F0FF; border: 1.5px solid var(--purple); }
+    .month-cell.other-month { opacity: 0.35; }
+    .month-cell-num {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1;
+    }
+    .month-cell.today .month-cell-num { color: var(--purple); }
+    .month-pips { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; }
+    .month-pip { width: 6px; height: 6px; border-radius: 50%; }
+
+    /* ── Loading skeleton ── */
+    .skeleton {
+      background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 8px;
+      height: 48px;
+      margin-bottom: 2px;
+    }
+    @keyframes shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* ── Input bar ── */
+    #input-bar {
+      padding: 12px 20px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    #task-input {
+      flex: 1;
+      height: 44px;
+      border: 1.5px solid var(--border);
+      border-radius: 22px;
+      padding: 0 16px;
+      font-size: 15px;
+      font-family: inherit;
+      outline: none;
+      background: var(--surface);
+      color: var(--text);
+      transition: border-color 0.15s;
+    }
+    #task-input:focus { border-color: var(--purple); }
+    #task-input::placeholder { color: var(--muted); }
+
+    #mic-btn, #add-btn {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 20px;
+      transition: opacity 0.15s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #mic-btn:active, #add-btn:active { transform: scale(0.93); }
+
+    #add-btn {
+      background: var(--purple);
+      color: #fff;
+    }
+    #add-btn:disabled { opacity: 0.4; cursor: default; }
+
+    #mic-btn {
+      background: var(--surface);
+      color: var(--muted);
+    }
+    #mic-btn.listening {
+      background: #FEE2E2;
+      color: var(--red);
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50%       { transform: scale(1.07); }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="offline-banner">You are offline — showing saved data</div>
+
+  <header>
+    <div class="header-top">
+      <div>
+        <div class="greeting" id="greeting">Good morning, Peter</div>
+        <div class="date-line" id="date-line">Loading...</div>
+      </div>
+      <div class="badge-group">
+        <span class="badge badge-week" id="week-badge">W—</span>
+      </div>
+    </div>
+    <div class="badge-group" style="margin-top:10px;" id="summary-badges">
+      <span class="badge badge-purple" id="meeting-badge">— meetings</span>
+      <span class="badge badge-gray"   id="task-badge">— tasks</span>
+    </div>
+  </header>
+
+  <div id="alert-bar"></div>
+
+  <main>
+
+    <!-- Today's Schedule -->
+    <section id="schedule-section">
+      <div class="section-title">Today's Schedule</div>
+      <div class="schedule-list" id="schedule-list">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+    </section>
+
+    <!-- Today's Tasks -->
+    <section id="tasks-section">
+      <div class="section-title">Today's Tasks</div>
+      <div class="task-list" id="task-list">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+    </section>
+
+    <!-- Week / Month view -->
+    <section id="week-section">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+        <div style="display:flex; background:var(--surface); border-radius:8px; padding:3px; gap:2px;">
+          <button id="view-week" class="view-toggle active" onclick="setView('week')">Week</button>
+          <button id="view-month" class="view-toggle" onclick="setView('month')">Month</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button id="prev-period" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);padding:4px 8px;-webkit-tap-highlight-color:transparent;">‹</button>
+          <span id="period-label" style="font-size:13px;color:var(--muted);min-width:90px;text-align:center;font-weight:500;"></span>
+          <button id="next-period" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);padding:4px 8px;-webkit-tap-highlight-color:transparent;">›</button>
+        </div>
+      </div>
+
+      <div id="week-grid-wrap">
+        <div class="week-grid" id="week-grid"></div>
+      </div>
+
+      <div id="month-grid-wrap" style="display:none;">
+        <div id="month-day-headers" style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px;"></div>
+        <div id="month-grid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;"></div>
+      </div>
+
+      <div class="legend" style="margin-top:10px;">
+        <div class="legend-item"><div class="legend-pip" style="background:var(--purple)"></div> Rincon</div>
+        <div class="legend-item"><div class="legend-pip" style="background:#0EA5E9"></div> Coastal Inn</div>
+        <div class="legend-item"><div class="legend-pip" style="background:var(--amber)"></div> Holidays</div>
+        <div class="legend-item"><div class="legend-pip" style="background:var(--green)"></div> Deep work</div>
+        <div class="legend-item"><div class="legend-pip" style="background:var(--red)"></div> Gym</div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="input-bar">
+    <input type="text" id="task-input" placeholder="Add a task..." autocomplete="off" autocorrect="on">
+    <button id="add-btn" disabled title="Add task">+</button>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

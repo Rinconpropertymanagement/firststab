@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    MORNING EMAIL TEMPLATE — Rincon Management
+    Subject: Good morning, Peter — {{DAY}}, {{DATE}}
+
+    Variables the cron script must replace before sending:
+      {{DAY}}         e.g. Thursday
+      {{DATE}}        e.g. June 26, 2026
+      {{MEETINGS}}    HTML block of <tr> rows (or placeholder text)
+      {{TASKS}}       HTML block of <tr> rows (or placeholder text)
+      {{WEEK_ROWS}}   HTML block of <tr> rows for week-at-a-glance
+      {{ALERTS}}      Plain text alert string (or empty string)
+      {{ALERT_DISPLAY}} "display:block" or "display:none"
+
+    Dashboard URL: https://srv1784739.hstgr.cloud
+  -->
+  <title>Good morning, Peter</title>
+</head>
+<body style="margin:0;padding:0;background:#F5F5F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
+
+  <!-- Wrapper -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F5F5F5;padding:24px 0;">
+    <tr>
+      <td align="center">
+
+        <!-- Card -->
+        <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:#534AB7;padding:28px 32px;">
+              <p style="margin:0;color:rgba(255,255,255,0.7);font-size:13px;text-transform:uppercase;letter-spacing:0.08em;">Rincon Management</p>
+              <h1 style="margin:6px 0 0;color:#ffffff;font-size:24px;font-weight:700;">Good morning, Peter</h1>
+              <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:15px;">{{DAY}}, {{DATE}}</p>
+            </td>
+          </tr>
+
+          <!-- Alert bar (hidden when no alerts) -->
+          <tr style="display:{{ALERT_DISPLAY}}">
+            <td style="background:#FFFBEB;border-bottom:1px solid #FDE68A;padding:12px 32px;font-size:13px;color:#92400E;">
+              {{ALERTS}}
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:28px 32px;">
+
+              <!-- Today's meetings -->
+              <h2 style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6B6B6B;">Today's Schedule</h2>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
+                {{MEETINGS}}
+              </table>
+
+              <!-- Today's tasks -->
+              <h2 style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6B6B6B;">Today's Tasks</h2>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
+                {{TASKS}}
+              </table>
+
+              <!-- Week at a glance -->
+              <h2 style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6B6B6B;">This Week</h2>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:32px;">
+                <tr>
+                  <th style="text-align:left;font-size:11px;color:#6B6B6B;padding-bottom:6px;font-weight:600;">Day</th>
+                  <th style="text-align:left;font-size:11px;color:#6B6B6B;padding-bottom:6px;font-weight:600;">Blocks</th>
+                </tr>
+                {{WEEK_ROWS}}
+              </table>
+
+              <!-- CTA button -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center">
+                    <a href="https://srv1784739.hstgr.cloud"
+                       style="display:inline-block;background:#534AB7;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">
+                      Open My Dashboard
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:20px 32px;border-top:1px solid #E5E5E5;font-size:12px;color:#6B6B6B;text-align:center;">
+              Rincon Management &middot; Southern California<br>
+              <a href="https://srv1784739.hstgr.cloud" style="color:#534AB7;text-decoration:none;">Open dashboard</a>
+            </td>
+          </tr>
+
+        </table>
+        <!-- /Card -->
+
+        <!-- Plain text fallback note -->
+        <!--
+        =============================================
+        PLAIN TEXT VERSION
+        =============================================
+        Good morning, Peter — {{DAY}}, {{DATE}}
+
+        TODAY'S SCHEDULE
+        {{MEETINGS_TEXT}}
+
+        TODAY'S TASKS
+        {{TASKS_TEXT}}
+
+        THIS WEEK
+        {{WEEK_TEXT}}
+
+        Open your dashboard: https://srv1784739.hstgr.cloud
+        =============================================
+        -->
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>

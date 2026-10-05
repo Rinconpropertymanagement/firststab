@@ -1,0 +1,14 @@
+{
+  "name": "rincon-calendar-assistant",
+  "version": "1.0.0",
+  "description": "Morning email briefing and calendar assistant for Rincon Management",
+  "main": "send-morning-email.js",
+  "scripts": {
+    "email": "node send-morning-email.js",
+    "setup-gmail": "node get-gmail-token.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0"
+  }
+}

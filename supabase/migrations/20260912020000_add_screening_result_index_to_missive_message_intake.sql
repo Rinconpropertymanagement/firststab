@@ -1,0 +1,124 @@
+-- ============================================================
+-- Migration: 20260912020000_add_screening_result_index_to_missive_message_intake
+-- Created:   2026-09-12
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live bug TARS confirmed while testing Archive Search:
+-- any query that filters missive_message_intake on screening_result =
+-- 'clear', 'held', or 'flagged_protected_class' times out in production
+-- (Postgres error 57014, statement timeout, ~8s) — even a trivial query,
+-- on the 254,000+ row live table.
+--
+-- ROOT CAUSE: 20260910030000_archive_search_schema.sql gave this column
+-- exactly one index, and it is PARTIAL —
+--   idx_missive_message_intake_screening_pending
+--     ON missive_message_intake (delivered_at) WHERE screening_result IS NULL
+-- — built on purpose to serve only the screening pass's own driver query
+-- ("WHERE screening_result IS NULL", the not-yet-screened work queue).
+-- A partial index can only ever satisfy a query whose WHERE clause
+-- matches (or is provably narrower than) the partial predicate it was
+-- built with. "screening_result IS NULL" does not match, and cannot be
+-- used to satisfy, "screening_result = 'clear'" (or 'held', or
+-- 'flagged_protected_class') — Postgres has no index that helps any of
+-- those three lookups, so it falls back to a full sequential scan of the
+-- whole table every time. That scan is what is timing out.
+--
+-- This hits two real, already-shipped things, confirmed directly by
+-- reading both:
+--   1. missive_message_intake_search_safe (the view every archive-search
+--      search/message route reads) — its WHERE clause is
+--      "m.screening_result = 'clear' OR EXISTS (...)"
+--      (supabase/migrations/20260912010000_archive_search_flagged_
+--      overrides_schema.sql, Section 3). The screening_result = 'clear'
+--      half of that OR is exactly the unindexed lookup above.
+--   2. GET /api/archive-search/screening-status (screening-pass.js's
+--      getScreeningStatus() -> countByScreeningResult()) — runs
+--      .eq('screening_result', 'held'), .eq('screening_result',
+--      'flagged_protected_class'), and .eq('screening_result', 'clear')
+--      as three of its five counts (the fourth, .is('screening_result',
+--      null), is the one value that already has a usable index — but
+--      note it isn't idx_missive_message_intake_screening_pending either:
+--      that index's indexed column is delivered_at, not screening_result,
+--      so even the NULL case is served by a full index scan today, not
+--      an index condition on the value itself). All three non-NULL counts
+--      hit the same full-table-scan problem as the view above.
+--
+-- THE FIX: one plain B-tree index on screening_result itself. A plain
+-- index (no WHERE clause) supports an equality lookup on ANY value the
+-- column can hold — 'clear', 'held', 'flagged_protected_class', or NULL
+-- — so it fixes all three broken lookups above with a single index,
+-- and it does not replace or duplicate
+-- idx_missive_message_intake_screening_pending: that index is still the
+-- better (smaller, cheaper-to-maintain) choice for the screening pass's
+-- own "WHERE screening_result IS NULL" driver query specifically,
+-- because it also carries delivered_at as the indexed column (this new
+-- index does not), which the driver query orders by. The two indexes
+-- serve different queries and both stay.
+--
+-- Built CONCURRENTLY, same operational discipline every prior index on
+-- this exact table already documents (20260910030000, 20260911010000):
+-- this table has 254,000+ live rows and a live Missive sync cron job
+-- writing to it on its own schedule, with no staging copy of the data to
+-- rehearse against. A plain CREATE INDEX takes a SHARE lock that blocks
+-- every write to the table for the full duration of the build (a table
+-- this size will not build a fresh index instantly); CONCURRENTLY avoids
+-- that at the cost of building the index in two scans instead of one
+-- (slower overall, but non-blocking) — same tradeoff already accepted
+-- for every other index on this table.
+--
+-- ****************************************************************
+-- RUN ON ITS OWN, IN SUPABASE'S SQL EDITOR — same restriction every
+-- other CONCURRENTLY statement in this schema documents. CREATE INDEX
+-- CONCURRENTLY cannot run inside a transaction block; pasting this file
+-- alongside other statements (or inside a multi-statement script) will
+-- make Postgres reject it outright.
+-- ****************************************************************
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one index and
+--       changes no column, no constraint, no row, and no view. Purely
+--       additive.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes — but only by adding an index.
+--       Every existing reader/writer (the Missive sync cron job, the
+--       screening pass, complaint-tracking's own pipeline) is
+--       unaffected: an index changes how fast a matching query runs,
+--       never what it returns.
+--   [x] Additive or destructive? Fully additive — one new index, nothing
+--       removed, nothing narrowed.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       against this table has carried to date. Mitigated by
+--       CONCURRENTLY (above) and by this being the lowest-risk kind of
+--       schema change this table can receive: a single-column index with
+--       no WHERE clause, no expression, no lock beyond CONCURRENTLY's
+--       own reduced one.
+--   [x] Governance go-ahead needed? No — this is a pure performance fix
+--       to an already-approved, already-live schema (20260910030000 and
+--       20260912010000, both already cleared). It adds no new column, no
+--       new table, no new personal-data field, and changes what no
+--       person or AI agent can see — GOVERNANCE.md Rule 4's data
+--       inventory is unaffected. Not a compliance build.
+-- ============================================================
+
+-- SINGLE STATEMENT ONLY, ON PURPOSE — a COMMENT ON INDEX statement was
+-- deliberately removed from this file. TARS and Judge both caught that an
+-- earlier draft paired one here, which would have broken the "RUN ON ITS
+-- OWN" instruction above the moment Peter pastes the whole file: a
+-- multi-statement paste gets wrapped in one implicit transaction, and
+-- CREATE INDEX CONCURRENTLY cannot run inside any transaction block —
+-- this exact table has already failed this exact way once
+-- (20260910030000_archive_search_schema_PART1_run_this_first.sql). The
+-- full reasoning that a COMMENT would have carried already lives in this
+-- file's own header above, so nothing is lost by leaving it out here.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_missive_message_intake_screening_result
+  ON missive_message_intake (screening_result);
+
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration)
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_message_intake_screening_result;
+-- ============================================================

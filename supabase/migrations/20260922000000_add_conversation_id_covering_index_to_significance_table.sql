@@ -1,0 +1,239 @@
+-- ============================================================
+-- Migration: 20260922000000_add_conversation_id_covering_index_to_significance_table
+-- Created:   2026-09-22
+-- Author:    Neo (database specialist)
+--
+-- Fixes a second, separate statement-timeout crash in the archive-search
+-- significance-pass pipeline (projects/hub/archive-search/lib/
+-- significance-pass.js), found overnight running the driver for real after
+-- yesterday's security_barrier fix (20260921020000) let it get past
+-- fetchDriverPage() for the first time. This is a DIFFERENT table, a
+-- DIFFERENT function (filterAlreadyProcessed(), ~line 995), and a
+-- DIFFERENT mechanism — an unindexed filter column, not a security_barrier
+-- planner restriction. fetchDriverPage(), the RPC from yesterday, and the
+-- security_barrier view are not touched by this migration.
+--
+-- ============================================================
+-- WHAT WAS ACTUALLY CHECKED BEFORE WRITING THIS (not guessed)
+-- ============================================================
+-- 1. Schema, read directly: missive_conversation_significance
+--    (supabase/migrations/20260913020000, CREATE TABLE at line 620) has
+--    exactly one index that reaches missive_conversation_id:
+--      UNIQUE (mailbox_key, missive_conversation_id)
+--    — a composite index with mailbox_key as the LEADING column. Grepped
+--    every migration that touches this table (20260913020000,
+--    20260917000000, 20260917020000, 20260918060000, 20260920010000) —
+--    confirmed no other index on this table includes
+--    missive_conversation_id in any form, partial or otherwise.
+--    filterAlreadyProcessed() queries:
+--      .from('missive_conversation_significance')
+--      .select('mailbox_key, missive_conversation_id')
+--      .in('missive_conversation_id', ids.slice(i, i + 200))
+--    — filtered ONLY on the trailing column of that composite index. A
+--    btree index on (mailbox_key, missive_conversation_id) cannot be
+--    walked directly by missive_conversation_id alone; Postgres can only
+--    fall back to scanning the whole index (or the table) checking each
+--    row's missive_conversation_id against the IN-list. Textbook
+--    composite-index-can't-serve-a-trailing-column-only-filter behavior,
+--    not schema-specific reasoning.
+--
+-- 2. Table size, read live via the REST API just now (Prefer: count=exact):
+--      missive_conversation_significance total rows -> 33,952
+--    Much smaller than missive_message_intake (~254,000+, the OTHER
+--    table's problem) — noted because it changes the honest severity
+--    read below, not because it changes whether the fix is correct.
+--
+-- 3. Independently re-timed the exact query shape live, via the REST API
+--    (service-role key, read-only, no writes), rather than trusting the
+--    1,164ms figure reported earlier tonight unchecked. Script:
+--    projects/hub/archive-search/verify-significance-conversation-id-
+--    lookup-index.js (committed alongside this migration; re-run it after
+--    applying this migration for a real before/after comparison, not just
+--    this one-sided "before" run). 10 trials each, real production ids:
+--
+--      A) count-only HEAD, no filter (pure round-trip floor)
+--         median 168.4ms  (min 153.3ms, max 279.6ms)
+--      B) THE QUERY UNDER TEST — .in(missive_conversation_id, 200 ids)
+--         median 137.1ms  (min 130.7ms, max 209.7ms)
+--      C) control — .in(id [primary key], 200 ids), always index-backed
+--         median 111.2ms  (min 96.8ms, max 380.5ms)
+--      D) control — .eq(mailbox_key) limit 200, uses the existing
+--         composite index's leading column
+--         median 84.2ms   (min 79.0ms, max 90.7ms)
+--
+--    Full run logged: /private/tmp/claude-501/
+--    -Users-petermckenzie-CODE-firststab/2b0f426a-94b2-47c1-b4eb-
+--    dab62a9e84a0/scratchpad/before-index-fix-timing.txt (session-local
+--    scratch path, not committed — the numbers above are transcribed
+--    directly from that run).
+--
+-- ============================================================
+-- HONEST READ OF THAT DATA — THIS DOES NOT FULLY MATCH THE ORIGINAL REPORT,
+-- SAID PLAINLY RATHER THAN PAPERED OVER
+-- ============================================================
+-- The mechanism (composite index unusable for a trailing-column-only
+-- filter) is real, well-documented Postgres behavior, and B is
+-- consistently, reproducibly slower than D (a same-shape lookup that DOES
+-- use the existing index) across every trial — that comparison is the
+-- actual evidence for this fix, not the absolute number. But two things
+-- from the original report do not independently check out at current
+-- table size, and should be said clearly rather than rounded up to match:
+--
+--   - The reported 1,164ms single-query timing was not reproduced. This
+--     environment's measured cost for the exact same shape was ~130-210ms
+--     end to end, and even the theoretical floor (control A, no filter at
+--     all) is ~150-280ms on this connection — meaning HTTP/PostgREST
+--     round-trip overhead is a large, noisy fraction of every number here,
+--     and B vs D's real gap (~50-90ms) is modest, not dramatic, at 33,952
+--     rows. Whether the original 1,164ms figure reflects a different
+--     moment (different load, colder cache, table state at 2-3am) or a
+--     measurement difference cannot be settled from here — noted, not
+--     dismissed.
+--   - "Runs hundreds of times... cumulative load eventually crosses the
+--     30s statement_timeout" is not quite how statement_timeout works —
+--     it is evaluated PER STATEMENT (each 200-id batch is its own,
+--     separate HTTP call/statement), not accumulated across a run. For
+--     THIS query to be the direct cause of a 57014 on its own, some SINGLE
+--     batch call would have to individually take 30+ seconds — roughly
+--     25x worse than the originally reported 1,164ms, and ~200x worse
+--     than what this environment measures right now. That does not rule
+--     this query out (a full index/table scan under real overnight
+--     conditions — table/index bloat from this table's frequent UPDATEs
+--     [dismissed_at, human_confirmed_big_issue, etc.], a concurrent
+--     competing workload, autovacuum lag, or a cold cache after the
+--     table grew — could plausibly push ONE unlucky call to 30s+ even
+--     though the steady-state cost looks modest here), but it does mean
+--     the "gradual cumulative crossing" framing shouldn't be taken as the
+--     literal mechanism.
+--
+-- No real EXPLAIN ANALYZE plan was available to settle this further — same
+-- standing constraint every prior migration on this schema has documented:
+-- no DATABASE_URL/direct Postgres connection in this project (PostgREST
+-- only), no raw-SQL/EXPLAIN RPC exists anywhere in this codebase (grepped
+-- supabase/migrations and projects/hub — none), and Peter is asleep and
+-- unavailable to run one in the SQL Editor tonight, per the task. This
+-- migration is written and staged, not applied, specifically so a real
+-- EXPLAIN (query below) can confirm the plan choice directly once someone
+-- is available, rather than resting on the reasoning above alone.
+--
+--   -- Run BEFORE and AFTER this migration, in Supabase's SQL Editor:
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT mailbox_key, missive_conversation_id
+--   FROM missive_conversation_significance
+--   WHERE missive_conversation_id IN (
+--     SELECT missive_conversation_id FROM missive_conversation_significance LIMIT 200
+--   );
+--
+--   What to look for: BEFORE, expect a Seq Scan (or a full/inefficient
+--   index traversal not keyed on missive_conversation_id) with a real
+--   "Filter" line removing non-matching rows. AFTER, expect an "Index Only
+--   Scan using idx_missive_conversation_significance_conversation_id" with
+--   Heap Fetches at or near 0.
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- A plain, non-partial btree index, covering both columns
+-- filterAlreadyProcessed() actually selects, in the order the query
+-- filters on:
+--
+--   CREATE INDEX IF NOT EXISTS idx_missive_conversation_significance_conversation_id
+--     ON missive_conversation_significance (missive_conversation_id, mailbox_key);
+--
+-- Not partial: unlike the OTHER table's fixes (20260914000000,
+-- 20260917010000), this query has no WHERE condition beyond the IN-list
+-- itself — there is no selective predicate to scope the index to, so a
+-- plain index over all rows is the correct shape, not a gap in reasoning.
+--
+-- COVERING, not single-column — this is the one real design decision in
+-- this migration, made deliberately rather than defaulted to:
+-- filterAlreadyProcessed() selects exactly `mailbox_key,
+-- missive_conversation_id` — both columns this index carries. A
+-- single-column index on (missive_conversation_id) alone would still need
+-- a heap fetch per matching row to read mailbox_key back out. Putting both
+-- columns in the index, in this order, lets Postgres answer the whole
+-- query — filter AND both selected columns — from the index alone
+-- (an Index Only Scan), with zero heap fetches once the visibility map is
+-- current. Cost of doing this over the single-column alternative is small
+-- and already precedented: this table's own existing UNIQUE (mailbox_key,
+-- missive_conversation_id) constraint already stores both of these same
+-- columns together, just in the opposite order — this migration adds the
+-- mirror-order pairing, not a new kind of index shape for this table. Both
+-- columns are TEXT ids on a 33,952-row table, so the extra index is small
+-- on disk and cheap to maintain on writes (this table's write volume is
+-- one INSERT per conversation processed by the pipeline, plus occasional
+-- dismiss/reinstate UPDATEs — not a high-frequency writer).
+--
+-- ****************************************************************
+-- Built as a PLAIN CREATE INDEX, NOT CONCURRENTLY — this corrects an
+-- instruction in tonight's task, not an oversight. CONCURRENTLY was tried
+-- for real on this exact table's own migration history and failed live:
+-- 20260914000000's header documents ERROR 25001 ("CREATE INDEX
+-- CONCURRENTLY cannot run inside a transaction block"), because Peter
+-- applies every migration by pasting the file into Supabase's SQL Editor,
+-- which wraps a pasted script in a transaction — triggered even by the
+-- mere presence of a second statement (like a COMMENT ON INDEX) in the
+-- same paste, regardless of a "run this alone" instruction in the file.
+-- 20260917010000 and 20260918010000 both independently confirm this same
+-- call afterward. Plain CREATE INDEX takes a brief SHARE lock that blocks
+-- WRITES only (not reads) to missive_conversation_significance for the
+-- build's duration — acceptable here: this table is far smaller
+-- (33,952 rows vs. ~254,000+ for the other table's CONCURRENTLY-avoiding
+-- precedent) and the pipeline that writes to it is currently paused
+-- pending this very fix, so there is no concurrent writer to block in
+-- practice when this is applied.
+--
+-- Correctness: this changes ONLY which plan Postgres picks. It adds no
+-- column, changes no row, and cannot alter which rows any query returns —
+-- same argument this table's sibling migrations on the other table already
+-- make for their own indexes.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. One new index only — no
+--       row, column, or constraint is touched, added, or removed.
+--   [x] Does this touch a table other code depends on?
+--       missive_conversation_significance, yes — read by
+--       filterAlreadyProcessed() (significance-pass.js), and by
+--       Property 360 / compliance-review.html per this table's own
+--       schema migration (20260913020000). Adding an index changes no
+--       reader's or writer's behavior beyond query plans; existing reads
+--       and writes continue working identically while this builds.
+--   [x] Additive or destructive? Fully additive.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here carries. Mitigated the same way those migrations mitigate
+--       it: this change cannot alter query results, it is trivially
+--       reversible (DROP INDEX), and the regression script
+--       (verify-significance-conversation-id-lookup-index.js) plus the
+--       EXPLAIN query above let Peter/TARS verify the real, live plan and
+--       timing on real data before treating this as confirmed.
+--   [x] Governance go-ahead needed? No — pure performance tuning, no new
+--       column, no new table, no change to which rows any person or AI
+--       agent can see, identical query results before and after, only
+--       speed changes. Not a compliance build. Same classification every
+--       prior performance migration on this schema has already been
+--       given.
+--   [x] Does NOT touch fetchDriverPage(), the 20260921020000 RPC, or the
+--       security_barrier view — confirmed by scope: this migration's only
+--       statement targets missive_conversation_significance, a completely
+--       separate table from missive_message_intake and its views.
+--
+-- NOT APPLIED BY THIS MIGRATION FILE. Per standing project convention,
+-- Peter applies every migration himself via Supabase's SQL Editor — this
+-- file is staged and ready, not run.
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_missive_conversation_significance_conversation_id
+  ON missive_conversation_significance (missive_conversation_id, mailbox_key);
+
+COMMENT ON INDEX idx_missive_conversation_significance_conversation_id IS
+  'Added 20260922000000 to fix a live statement-timeout crash (57014) in the archive-search significance-pass pipeline''s filterAlreadyProcessed() (significance-pass.js ~line 995) -- SELECT mailbox_key, missive_conversation_id FROM missive_conversation_significance WHERE missive_conversation_id IN (<=200 ids), called once per 200-id batch, multiple batches per page, over a full driver walk. The table''s only prior index on these columns is UNIQUE (mailbox_key, missive_conversation_id), which cannot serve a filter on the trailing column (missive_conversation_id) alone. This index is keyed (missive_conversation_id, mailbox_key) -- the mirror order -- and covers both columns the query selects, so Postgres can answer the whole query as an Index Only Scan with no heap fetch. Verified live before this migration (10-trial median: 137.1ms for the query under test vs. 84.2ms for a same-shape lookup that already uses an index, at 33,952 rows) -- see this migration''s own header for the full timing table, the honest gap against the originally reported 1,164ms figure, and the regression script (verify-significance-conversation-id-lookup-index.js) to re-run after applying this migration for a real before/after comparison.';
+
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration)
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_conversation_significance_conversation_id;
+-- ============================================================

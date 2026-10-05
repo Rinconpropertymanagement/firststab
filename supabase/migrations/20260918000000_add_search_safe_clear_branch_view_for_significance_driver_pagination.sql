@@ -1,0 +1,321 @@
+-- ============================================================
+-- Migration: 20260918000000_add_search_safe_clear_branch_view_for_significance_driver_pagination
+-- Created:   2026-09-18
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live incident blocking tonight's planned 84,408-conversation
+-- archive-search significance backfill: fetchDriverPage()
+-- (projects/hub/archive-search/lib/significance-pass.js) times out
+-- (Postgres 57014, statement timeout) reliably at page 7 of its id-ordered
+-- pagination against missive_message_intake_search_safe. Reproduced live,
+-- tonight, by me (Neo), independently of whatever Peter's own SQL Editor
+-- session already showed him — see "WHAT WAS ACTUALLY CHECKED" below for
+-- exactly what I ran and measured, separate from anything relayed to me.
+--
+-- ============================================================
+-- WHAT WAS ACTUALLY CHECKED BEFORE WRITING THIS (all four run live tonight,
+-- via the real service-role REST connection, on the real project — not
+-- guessed, not assumed from an earlier session)
+-- ============================================================
+-- 1. Reproduced the failure exactly: fetchDriverPage()'s real query shape
+--    (SELECT id, mailbox_key, missive_conversation_id, delivered_at FROM
+--    missive_message_intake_search_safe ORDER BY id ASC LIMIT 500, paged
+--    by id cursor) against the live view — pages 1-6 fast (304-1353ms
+--    each), page 7 failed after 8193ms: "canceling statement due to
+--    statement timeout." Matches the symptom description exactly (fast
+--    through page 5-6, dead by page 7).
+--
+-- 2. Real, live row counts (Prefer: count=exact, not assumed):
+--      missive_message_intake total                          -> 254,807
+--      missive_message_intake WHERE screening_result='clear'  -> 249,952
+--      archive_search_flagged_overrides WHERE revoked_at IS NULL -> 127
+--      archive_search_escalations (any status)                 ->     0
+--    The override branch is genuinely tiny (127 rows) — small enough that
+--    fetching it in full, on demand, is cheap regardless of table growth.
+--
+-- 3. Tested whether adding an outer filter to the EXISTING view resolves
+--    it (the simplest possible fix, tried first because it would have
+--    needed no schema change at all): added `.eq('screening_result',
+--    'clear')` on top of a query against missive_message_intake_search_safe
+--    itself. Result: still failed, at page 8, after 8173ms — the outer
+--    filter does not change the plan shape the view's own UNION ALL forces.
+--    This rules out "just filter the view" as a fix; ruling it out before
+--    writing a new migration matters — this environment does not have a
+--    real EXPLAIN available (see point 5), so an unconfirmed guess is
+--    exactly how this bug has already produced three failed fix attempts
+--    this week. This migration does not add a fourth guess; it is built on
+--    the isolation test in point 4.
+--
+-- 4. Isolated the UNION ALL itself as the mechanism (not the filter, not
+--    security_barrier alone, not the escalations NOT EXISTS clause): ran
+--    the EXACT SAME filter (screening_result = 'clear'), id-ordered, paged,
+--    directly against the BASE TABLE — no view, no UNION ALL, no
+--    security_barrier — for 50 real pages (25,000 rows). Every page
+--    succeeded. First page (cold) 1057ms; every page after that
+--    177-239ms, no growth with depth, no timeout. This is a genuine,
+--    already-working incremental index scan, using the partial index
+--    20260914000000 already built for exactly this shape
+--    (idx_missive_message_intake_clear_id). Compare directly against point
+--    1's page-7 failure on the identical filter, through the view: the
+--    only difference between a query that sustains 50 pages cleanly and
+--    one that dies at page 7 is whether it goes through the view's UNION
+--    ALL structure. That isolates the mechanism precisely: Postgres cannot
+--    do an incremental Merge Append across the view's two UNION ALL
+--    branches (the override branch, driven by a Nested Loop Anti Join
+--    against a small override table, has no id-ordered access path), so
+--    ANY query against the view with ORDER BY id + LIMIT falls back to
+--    sorting the full remaining candidate set on every single page —
+--    proportionally more expensive, and increasingly disk-bound rather
+--    than cache-resident, the deeper the cursor goes. This matches
+--    standard, documented Postgres UNION ALL / Merge Append planner
+--    behavior, not a guess specific to this schema, and is now supported
+--    by a direct, controlled, same-filter comparison (point 1 vs. point 4)
+--    run minutes apart against the same live data — not just reasoned from
+--    a plan shape.
+--
+-- 5. Checked again for a way to get a real EXPLAIN ANALYZE before writing
+--    this (same check every prior migration on this view has repeated,
+--    re-verified rather than assumed stale): no RPC/Postgres function for
+--    running raw SQL or EXPLAIN exists anywhere in this codebase; no
+--    DATABASE_URL/connection string in .env; no psql in this environment;
+--    PostgREST's own opt-in EXPLAIN feature is confirmed disabled on this
+--    project (prior migration's live 406 test). Same standing constraint:
+--    Peter has to run the real EXPLAIN himself in Supabase's SQL Editor —
+--    two copy-pasteable queries are at the bottom of this file, to confirm
+--    this diagnosis and this fix's real plan before or after applying it.
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- missive_message_intake_search_safe ITSELF IS NOT CHANGED BY THIS
+-- MIGRATION — not one character. Every existing caller (router.js's
+-- search, message-fetch, and escalation routes; screening-pass.js's one
+-- named direct-base-table exception) keeps exactly the view it already
+-- has, unconditionally including override rows and the escalation
+-- exclusion, with zero risk of behavior change.
+--
+-- This migration adds ONE new, narrow, read-only view containing ONLY the
+-- existing view's own Branch 1 WHERE clause, copied verbatim (not
+-- reinterpreted, not re-derived) from missive_message_intake_search_safe's
+-- live definition (20260913000000) — the "screening_result = 'clear'"
+-- branch, with the identical escalation-exclusion NOT EXISTS clause:
+--
+--   missive_message_intake_search_safe_clear_branch
+--
+-- This is used ONLY by significance-pass.js's fetchDriverPage() (Q's
+-- change, on top of this migration, not made here — see the note at the
+-- bottom of this file) for its bulk, id-ordered pagination. It is a
+-- PROVABLE SUBSET of missive_message_intake_search_safe's own existing
+-- output: every row this new view returns is a row Branch 1 of the main
+-- view already returns today, using the exact same WHERE fragment. It
+-- adds no new interpretation of who can see what.
+--
+-- The override branch (currently 127 rows, expected to stay small by
+-- design — archive_search_flagged_overrides's own migration header) is
+-- NOT included in this new view. It continues to be read exclusively
+-- through the existing, unmodified missive_message_intake_search_safe view
+-- — the driver fetches the small, known set of active override
+-- (mailbox_key, missive_conversation_id) pairs from
+-- archive_search_flagged_overrides (id/key columns only, no message
+-- content — the same table archive-search's own override-grant route
+-- already reads), then asks missive_message_intake_search_safe (the real,
+-- full, governance-cleared view — never the base table) for exactly those
+-- conversations. Measured live tonight: 508ms + 189ms for the full
+-- 127-row round trip. This can be re-fetched at negligible cost as often
+-- as the batch run wants during a long backfill, rather than once.
+--
+-- The net effect: the driver's bulk pagination path never touches
+-- missive_message_intake directly (preserving this codebase's standing
+-- rule, restated as recently as this file's own router.js at the
+-- escalation-report route: confirm visibility via
+-- missive_message_intake_search_safe, never the base table), and never
+-- re-derives the escalation-exclusion or override logic independently —
+-- both remain authored exactly once, in the existing view's own WHERE
+-- clauses, either directly (this new narrow view, copied verbatim) or
+-- through the existing view itself (the override lookup).
+--
+-- ============================================================
+-- CORRECTNESS
+-- ============================================================
+-- This migration changes NO row anyone can see through any existing
+-- route. missive_message_intake_search_safe is untouched. The new view
+-- returns exactly the set of rows Branch 1 of that view already returns —
+-- proven by using the identical WHERE fragment, not a new one. Combined
+-- (by Q's application-code change, not this migration) with the existing
+-- view's own override-branch rows, the driver's effective eligible set is
+-- unchanged from what missive_message_intake_search_safe already returns
+-- today — same rows, same escalation exclusion, same override honoring,
+-- only fetched via two cheap, indexed paths instead of one path Postgres
+-- cannot execute incrementally.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DOES NOT CLAIM
+-- ============================================================
+-- Point 4 above is real, live, measured evidence (50 real pages, 25,000
+-- real rows, run minutes before this file was written) that the
+-- underlying partial index already gives a genuine incremental scan once
+-- the UNION ALL is out of the query's own plan. It is NOT a substitute for
+-- a real EXPLAIN ANALYZE of THIS NEW VIEW specifically. The two queries at
+-- the bottom of this file let Peter (or TARS) confirm, live, that the new
+-- view's plan is a plain Index Scan (or Index Only Scan) using
+-- idx_missive_message_intake_clear_id with no Sort/top-N-heapsort node —
+-- BEFORE Q wires the driver code to use it, and again after, at a real
+-- page-7+ cursor specifically, since that is the exact depth every failed
+-- attempt this week has died at.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DOES NOT DO
+-- ============================================================
+--   - Does not modify missive_message_intake_search_safe.
+--   - Does not modify missive_message_intake, archive_search_flagged_
+--     overrides, or archive_search_escalations in any way.
+--   - Does not change fetchDriverPage() or any other application code —
+--     that is Q's change, to be made on top of this migration, reviewed
+--     and approved the same way every build in this project is (CLAUDE.md
+--     Build Pipeline steps 3-6: Peter approves, Q builds, TARS tests with
+--     real data at real depth, Judge signs off) before tonight's real run
+--     starts. This migration only makes the fast path available to query.
+--   - Does not touch RLS. RLS posture mirrors missive_message_intake_
+--     search_safe exactly (security_barrier = true, same reasoning: this
+--     view still surfaces the same PII-bearing message content class the
+--     main view already gates).
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: the row counts and the page-7 failure are real,
+-- measured, live facts from tonight.
+-- HIGH confidence: the 50-page/25,000-row clean run against the base
+-- table with the identical filter is real, measured, live evidence that
+-- the existing partial index already serves this exact shape efficiently
+-- once no UNION ALL is involved.
+-- MEDIUM-HIGH confidence, not yet independently confirmed with a real
+-- EXPLAIN ANALYZE plan of THIS SPECIFIC new view: that a plain `CREATE
+-- VIEW` wrapping the identical filter (no UNION, no join) produces the
+-- identical plan the direct base-table query already proved fast — this
+-- is standard Postgres view-inlining behavior (a non-security-barrier-
+-- restricted, non-UNION view over a simple WHERE clause is normally
+-- inlined into the outer query exactly as if the base table were queried
+-- directly), but "should behave identically" is exactly the kind of
+-- unverified assumption this bug has already punished twice this week.
+-- Run the EXPLAIN below before trusting this without verification.
+--
+-- ============================================================
+-- EXPLAIN ANALYZE — copy-pasteable, read-only, safe to run BEFORE and
+-- AFTER applying this migration (BEFORE: relation doesn't exist yet, skip
+-- to after applying). Run in Supabase's SQL Editor.
+-- ============================================================
+--
+--   -- 1. First page (no cursor):
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe_clear_branch
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+--   -- 2. A page-7+ cursor — the exact depth every prior fix attempt this
+--   --    week has failed at. Replace the id below with a real id from
+--   --    your own page-6 result if you have one; otherwise run query 1
+--   --    six more times first, bumping the WHERE id > ... cursor each
+--   --    time from the previous page's last row, to reach a real page-7
+--   --    cursor, then run this:
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe_clear_branch
+--   WHERE id > '<a real id from your own page-6 cursor>'
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+-- What to look for: NO "Sort" node, NO "top-N heapsort", NO "Gather
+-- Merge" / "Parallel Append" combining two branches — just a plain "Index
+-- Scan using idx_missive_message_intake_clear_id" (or "Index Only Scan"),
+-- feeding the Limit directly. Execution Time should be close to the
+-- 177-239ms/page already measured live against the base table tonight,
+-- regardless of how deep the cursor is.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one new view —
+--       no row, column, constraint, or existing view is touched. The new
+--       view's WHERE clause is a verbatim copy of an already-live,
+--       already-governance-cleared branch of missive_message_intake_
+--       search_safe — it introduces no new interpretation of visibility.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, read-only, via a new view — same table
+--       missive_message_intake_search_safe already reads. No existing
+--       caller of missive_message_intake_search_safe is affected; that
+--       view is completely untouched by this migration. The one intended
+--       reader of the new view (significance-pass.js's fetchDriverPage())
+--       does not exist yet as of this migration — Q's change, not made
+--       here — so the practical risk today is zero, same reasoning
+--       20260912010000 gave when it added a view before any route read it.
+--   [x] Additive or destructive? Fully additive — one new view, nothing
+--       removed, restructured, or narrowed anywhere else.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here has carried. Mitigated by: CREATE VIEW is metadata-only
+--       (nothing to corrupt, no lock that blocks reads/writes); the new
+--       view's output is provably a subset of the existing, already-live
+--       view's output (see Correctness above); and the EXPLAIN protocol
+--       above lets Peter/TARS verify the real plan and real timing, live,
+--       at a real page-7+ cursor, before Q's driver-code change goes
+--       anywhere near tonight's real 84,408-conversation run.
+--   [x] Governance go-ahead needed? No, by the same standing reasoning
+--       every prior pure-performance migration on this view/table has
+--       given (20260912040000, 20260913000000, 20260914000000): this
+--       changes no row any person or AI agent can see through any
+--       existing route — missive_message_intake_search_safe itself is
+--       completely unchanged, and the new view returns strictly a subset
+--       of rows that view already exposes today, filtered by the exact
+--       same, already-cleared WHERE fragment. Not a new table storing
+--       personal data (GOVERNANCE.md Rule 4 does not apply — no new
+--       columns, no new data captured, purely a narrower read path over
+--       data already governed). Flagged for Peter's awareness anyway,
+--       not as a blocker: this is the first time significance-pass.js's
+--       bulk driver would read through a view OTHER than the one
+--       "ONLY view every archive-search route may query" comment names —
+--       worth a quick sanity nod from Asimov given CLAUDE.md's own "if
+--       unsure, treat as compliance build and ask" default, even though
+--       the row-for-row subset proof above is the same standard every
+--       prior change to this view has already met without one.
+-- ============================================================
+
+CREATE OR REPLACE VIEW missive_message_intake_search_safe_clear_branch
+WITH (security_barrier = true) AS
+SELECT m.*
+FROM missive_message_intake m
+WHERE m.screening_result = 'clear'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM archive_search_escalations e
+    WHERE e.missive_conversation_id = m.missive_conversation_id
+      AND e.mailbox_key             = m.mailbox_key
+      AND (
+        e.status = 'open'
+        OR (e.status = 'confirmed' AND e.reopened_at IS NULL)
+      )
+  );
+
+COMMENT ON VIEW missive_message_intake_search_safe_clear_branch IS
+  'Added 20260918000000 to fix a live statement-timeout in the archive-search significance-pass driver (significance-pass.js fetchDriverPage — id-ordered pagination timed out reliably at page 7 against missive_message_intake_search_safe: Postgres cannot do an incremental Merge Append across that view''s two UNION ALL branches, since the override branch has no id-ordered access path, so every page re-sorts the full remaining candidate set). This view is EXACTLY Branch 1 of missive_message_intake_search_safe (the screening_result = ''clear'' branch, with the identical escalation-exclusion clause), copied verbatim — not a new interpretation of visibility, a provable subset of what that view already returns. Intended for ONE caller: significance-pass.js''s bulk id-ordered driver pagination, which already benefits from idx_missive_message_intake_clear_id (20260914000000) once the UNION ALL is out of the query entirely. The override branch (archive_search_flagged_overrides, ~127 rows) is deliberately NOT part of this view — the driver fetches it separately, through the real, full, unmodified missive_message_intake_search_safe view (never the base table), and merges client-side. Every other caller of missive_message_intake_search_safe (search, message-fetch, escalation-report routes) is completely unaffected by this migration — that view is not modified. security_barrier = true, same reasoning as the view this is copied from: still gates the same PII-bearing, pre-screening-exception content class.';
+
+
+-- ============================================================
+-- ROLLBACK
+-- ============================================================
+-- DROP VIEW IF EXISTS missive_message_intake_search_safe_clear_branch;
+-- (Safe at any time — this view is read-only, derived, and no other
+-- database object or existing route depends on it. Before dropping, if
+-- Q's driver-code change has already shipped and this run is mid-flight,
+-- revert significance-pass.js's fetchDriverPage() to query
+-- missive_message_intake_search_safe directly first, or the batch will
+-- start failing on its next page fetch.)
+-- ============================================================

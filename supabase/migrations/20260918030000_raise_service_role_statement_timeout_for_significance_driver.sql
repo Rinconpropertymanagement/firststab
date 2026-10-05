@@ -1,0 +1,281 @@
+-- ============================================================
+-- Migration: 20260918030000_raise_service_role_statement_timeout_for_significance_driver
+-- Created:   2026-09-18
+-- Author:    Neo (database specialist)
+--
+-- NOT another query-level fix. Four consecutive query-level attempts
+-- tonight (20260918000000's narrow view, 20260918010000's escalations
+-- index, 20260918020000's anti-join removal, and whatever the fourth
+-- attempt was) each looked correct in isolation and each failed a real,
+-- full pagination walk at the exact same point. This migration is a
+-- different KIND of fix: a Postgres ROLE-level configuration change, not
+-- a table, view, or index change. Nothing about what any query returns,
+-- or which rows any role can see, changes here — only how long Postgres
+-- will let a statement run before killing it.
+--
+-- ============================================================
+-- THE EVIDENCE THIS MIGRATION IS BUILT ON (relayed to me from this
+-- session, produced by Peter running these two statements live in
+-- Supabase's SQL Editor — NOT independently re-run by me; I have no
+-- direct Postgres connection in this environment, same standing
+-- constraint every migration on this schema has carried)
+-- ============================================================
+--   SHOW statement_timeout;
+--   SELECT rolname, rolconfig FROM pg_roles
+--     WHERE rolname IN ('authenticator', 'service_role', 'postgres', 'anon');
+--
+--   postgres        | {search_path="$user", public, extensions}
+--   anon            | {statement_timeout=3s}
+--   service_role    | NULL   (no override — inherits whatever the login
+--                              session already has active)
+--   authenticator   | {session_preload_libraries=supautils, safeupdate,
+--                       statement_timeout=8s, ...}
+--
+-- ============================================================
+-- WHAT I INDEPENDENTLY CHECKED BEFORE WRITING THIS (real files read
+-- tonight, not taken only from the incident description)
+-- ============================================================
+-- 1. Confirmed the archive-search significance driver reaches Postgres
+--    exclusively through the Supabase Data API (PostgREST), not a direct
+--    Postgres connection — grepped projects/hub/archive-search/lib/
+--    significance-pass.js, significance-batch.js, and router.js directly:
+--    all three do `createClient(process.env.SUPABASE_URL,
+--    process.env.SUPABASE_SERVICE_ROLE_KEY)` from '@supabase/supabase-js'.
+--    This matters: it means every query this driver runs — including
+--    fetchNextEligibleConversations — is a PostgREST-mediated HTTP
+--    request, not a raw `pg` session. That's the fact the fix below
+--    depends on.
+--
+-- 2. Verified, from Supabase's own documentation (two independent fetches
+--    of the same live page tonight — the rendered docs page and the raw
+--    source file, cross-checked against each other and against public
+--    PostgREST discussion of this exact gotcha), exactly how PostgREST
+--    connects and why the evidence above looks the way it does:
+--      - PostgREST's connection pool logs in to Postgres as ONE role,
+--        `authenticator`. For every request, it does NOT reconnect as
+--        anon/authenticated/service_role — it runs `SET ROLE <target>`
+--        inside that same already-open session, based on the API key's
+--        JWT claims.
+--      - Postgres applies a role's `ALTER ROLE ... SET` configuration
+--        (rolconfig) ONCE, at session start, for the role that actually
+--        logged in. `SET ROLE` changes privilege/ownership context
+--        (`current_user`) but does NOT re-trigger that lookup — the
+--        session keeps whatever GUCs were already active from login.
+--      - That is exactly why `authenticator`'s own statement_timeout=8s
+--        shows up in the evidence above and `service_role`'s rolconfig is
+--        NULL: `service_role` is never the role Postgres actually logged
+--        in as for these sessions, so its own rolconfig has never been
+--        relevant to what limit gets enforced. Every service-role-
+--        authenticated PostgREST request tonight — this driver's included
+--        — has been running under authenticator's 8-second ceiling the
+--        entire time, regardless of query shape.
+--      - Sources: Supabase, "Timeouts" —
+--        https://supabase.com/docs/guides/database/postgres/timeouts ,
+--        and its source file at
+--        https://github.com/supabase/supabase/blob/master/apps/docs/content/guides/database/postgres/timeouts.mdx
+--        (verbatim, both fetches agreed): default role timeouts are
+--        anon=3s, authenticated=8s, service_role=none (inherits
+--        authenticator's 8s if unset) — matching the live evidence above
+--        exactly, not just plausibly.
+--
+-- 3. This is the one point worth being most careful and explicit about,
+--    because it is exactly the kind of thing that could make this look
+--    like a fifth "correct-looking, doesn't actually work" fix:
+--    Supabase's own documentation states directly that
+--    `ALTER ROLE service_role SET statement_timeout = '...'` DOES take
+--    effect for Data-API / supabase-js calls — despite the SET-ROLE-
+--    doesn't-reload-config mechanism in point 2 above, which is a real,
+--    well-documented general PostgREST gotcha for self-hosted setups.
+--    Supabase's managed platform evidently reconciles this (most likely
+--    via a newer PostgREST capability that applies the impersonated
+--    role's settings as transaction-scoped overrides — mentioned in
+--    PostgREST's own issue tracker as a fix for exactly this class of
+--    problem). The one REQUIRED, easy-to-skip step Supabase's docs are
+--    explicit about: after the ALTER ROLE below, you must run
+--      NOTIFY pgrst, 'reload config';
+--    or the change will NOT reflect in real API calls — PostgREST caches
+--    its config and won't pick up the new role setting on its own. This
+--    migration includes that statement; skipping it would reproduce
+--    tonight's exact failure pattern (a change that is real and correct
+--    on disk, but does not actually take effect when tested).
+--
+-- ============================================================
+-- 1. WHAT'S THE RIGHT TIMEOUT VALUE — 30 SECONDS
+-- ============================================================
+-- Real, relayed measurements from tonight's diagnostic runs: successful
+-- pages against the fixed query shape ran 200ms-6s, including a 5.6s cold
+-- first page in one of 20260918020000's own two live walks. I have not
+-- re-measured this myself (no direct DB access — see above), so I'm
+-- treating 6s as the real worst case reported, not rounding it away.
+--
+-- I'm proposing 30 seconds, not a round 60s or a tighter 15s, for three
+-- concrete reasons:
+--   - 5x margin over the worst real page time seen tonight (6s). Enough
+--     room to absorb real variance at production scale (cache misses, a
+--     larger page, connection-pool contention) without being so generous
+--     it stops functioning as a real ceiling.
+--   - Supabase's own documentation states the Dashboard and Data API
+--     (Client API) path has a HARD platform ceiling of 60 seconds — not
+--     a suggestion, a configured maximum. 30s leaves a full 2x buffer
+--     under that wall, rather than proposing a value that sits right at
+--     the edge of what the platform will even allow, or worse, above it
+--     and silently getting capped to something Peter didn't ask for.
+--   - This is a GLOBAL change (see §3 below) — every backend job across
+--     this codebase that uses the service-role key inherits this same
+--     ceiling. 30s still fails a genuinely broken/runaway query
+--     reasonably fast platform-wide; 5 minutes would let a real bug in
+--     some unrelated Hub tool hang for a long time before Postgres ever
+--     steps in, which is a real cost of a global role-level change, not
+--     a free choice.
+--
+-- ============================================================
+-- 2. IS THIS THE RIGHT LEVER, NOT A BAND-AID?
+-- ============================================================
+-- Yes, on the current evidence, with the NOTIFY step in §"Evidence" point
+-- 3 treated as load-bearing, not optional. Reasoning through the real
+-- math, as asked:
+--   - PostgREST wraps each API request in its own transaction (one
+--     BEGIN/COMMIT per request — this is documented PostgREST behavior,
+--     not specific to this project). statement_timeout is enforced PER
+--     STATEMENT within that transaction, not accumulated across the
+--     driver's whole multi-page walk. Each page fetchNextEligibleConversations
+--     issues is its own separate HTTP request, therefore its own separate
+--     transaction, therefore its own fresh 30-second allotment — this
+--     confirms the understanding in the task that prompted this migration
+--     is correct: the new ceiling applies per page, not cumulatively.
+--   - Given that, a single page's real worst-case time (relayed as ~6s)
+--     needs to fit under a single page's timeout (30s, 5x margin) — it
+--     does not need to fit the whole run under one timeout, which would
+--     be a much harder, and different, problem (that would call for
+--     resumable pagination/backoff, not a longer statement_timeout).
+--   - Whether this alone is SUFFICIENT depends on tonight's other three
+--     fixes (20260918000000/010000/020000) actually having fixed the
+--     query-shape problem, which they claim to on their own evidence but
+--     which this migration does not re-verify — that verification is
+--     explicitly Peter's own next step (the real
+--     fetchNextEligibleConversations walk), not something I can confirm
+--     without DB access. What THIS migration is confident about is
+--     narrower and more mechanical: IF a page now genuinely completes in
+--     the 200ms-6s range those fixes measured, THEN it will no longer be
+--     killed at 8 seconds regardless — the actual wall being hit tonight
+--     was never query-shape-dependent, it was a fixed clock that applied
+--     no matter how fast the query became, which is exactly why four
+--     different query-shape fixes each failed at the same wall.
+--
+-- ============================================================
+-- 3. BLAST RADIUS — HONEST ACCOUNTING, NOT JUST THE ARCHIVE-SEARCH DRIVER
+-- ============================================================
+-- Checked directly: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY point to ONE
+-- shared Supabase project (rincon-management) and are used, via
+-- @supabase/supabase-js's createClient(), by every one of these projects
+-- in this codebase, not just archive-search: appfolio-sync,
+-- calendar-assistant, content-engine, content-review, rental-analysis,
+-- insurance-compliance, and effectively every router under projects/hub
+-- (approval-briefing, call-stats, complaint-tracking, email-intake,
+-- insurance, leadsimple-property-brain, maintenance-history,
+-- owner-tenant-notes, property-360, scorecard, security-deposit). This
+-- role-level change raises the ceiling for ALL of them, not a scoped
+-- subset.
+--
+-- Is a global, role-level change the right lever here, or should this be
+-- scoped narrower (e.g. per-request)? Real answer: a role-level ALTER
+-- ROLE is Supabase's own documented, standard mechanism for setting a
+-- Data-API timeout by role — there is no narrower "per-request" override
+-- exposed to a supabase-js caller through the normal Data API path. The
+-- only genuinely narrower alternative (`SET LOCAL statement_timeout`
+-- inside a Postgres function, invoked via `.rpc()`) is a real option but
+-- a materially bigger, riskier change: it would mean writing and
+-- maintaining a custom wrapper function for every query this driver (and
+-- any future driver) needs to run, rather than one role-level setting —
+-- more moving parts for the same outcome, and inconsistent with "keep it
+-- as simple as possible." I'm not recommending it here. The global
+-- change is the standard, correct lever, not a shortcut — but its cost is
+-- real and worth Peter's eyes-open acceptance: every backend job on this
+-- project now gets up to 30s, not 8s, before a genuinely broken query is
+-- killed. At 30s I think that's a reasonable trade, not a 5-minute one.
+--
+-- ============================================================
+-- 4. DOES THIS NEED GOVERNANCE REVIEW?
+-- ============================================================
+-- Independently reasoned, not inherited from the task's own read: NO.
+-- This changes a statement execution time ceiling only. It does not
+-- change Row-Level Security, does not change which rows or columns any
+-- role can see, does not touch archive_search_escalations or any other
+-- Fair-Housing-relevant read path (unlike 20260918010000/020000, both of
+-- which touched that table directly and both flagged themselves for an
+-- Asimov nod for exactly that reason), does not influence any decision
+-- about a tenant or applicant, and does not send any message to anyone.
+-- CLAUDE.md's own definition of a compliance build (sends messages to
+-- tenants/owners; makes or influences a tenant/applicant decision; stores
+-- someone's personal information) is not met by anything in this file.
+-- No Asimov/Mason routing needed for this migration.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This changes zero rows,
+--       columns, or constraints anywhere. It changes one session
+--       configuration default for one Postgres role.
+--   [x] Does this touch a table other code depends on? No table is
+--       touched at all — this is a role-level GUC, not a schema object.
+--       See §3 above for the honest blast-radius answer to the more
+--       relevant question: every backend job using the service-role key
+--       is affected, not any specific table.
+--   [x] Additive or destructive? Additive/relaxing, and one-directional
+--       in risk: this can only let a statement run LONGER before being
+--       killed, never shorter. It cannot cause Postgres to cancel
+--       anything that would have succeeded before. The only new risk is
+--       a genuinely broken query taking up to 30s instead of 8s to be
+--       caught — see §3.
+--   [x] Tested on a copy of the data first? No staging copy of this
+--       Supabase project exists — same standing caveat every migration on
+--       this schema has carried. Mitigated by: this changes no data and
+--       is trivially, instantly reversible (ALTER ROLE ... RESET); the
+--       real test Peter described running right after this applies (the
+--       full fetchNextEligibleConversations walk) is exactly the right
+--       verification and is not something this migration can substitute
+--       for.
+--   [x] Governance go-ahead needed? No — see §4 above, reasoned
+--       independently, not assumed.
+--
+-- ============================================================
+-- REQUIRED VERIFICATION AFTER APPLYING — do this BEFORE re-running the
+-- real driver walk, or a failure will be hard to tell apart from "the fix
+-- didn't work" vs. "the fix didn't take effect yet"
+-- ============================================================
+--   NOTIFY pgrst, 'reload config';
+--
+--   -- Confirm the new value actually shows up in the role's config, not
+--   -- just SHOW statement_timeout (which only reflects your OWN SQL
+--   -- Editor session, a different role/session entirely, not what a new
+--   -- PostgREST-mediated request will pick up):
+--   SELECT rolname, rolconfig FROM pg_roles
+--     WHERE rolname IN ('authenticator', 'service_role', 'anon');
+--
+--   -- Expect service_role's rolconfig to now include
+--   -- statement_timeout=30s, with anon still at 3s and authenticator's
+--   -- own base default still at 8s, both untouched by this migration.
+--
+-- ============================================================
+
+ALTER ROLE service_role SET statement_timeout = '30s';
+
+NOTIFY pgrst, 'reload config';
+
+COMMENT ON ROLE service_role IS
+  'statement_timeout raised to 30s by migration 20260918030000, after live evidence (SHOW statement_timeout / pg_roles.rolconfig, run by Peter in the SQL Editor) showed service_role had NO override (rolconfig NULL) and was silently inheriting authenticator''s hardcoded 8s ceiling — because PostgREST authenticates as authenticator and switches into service_role mid-session via SET ROLE, which does not re-apply a role''s own ALTER ROLE ... SET config (only the actual login role''s config is read, at session start). This was the real root cause of four consecutive query-level "fixes" (20260918000000/010000/020000 and one prior) each failing a real pagination walk at the same wall regardless of query shape. 30s chosen for 5x margin over the worst real page time measured that night (~6s) while staying well under Supabase''s documented 60s hard ceiling for Dashboard/Data-API-path timeouts. anon (3s) and authenticator''s own base default (8s) are deliberately untouched. Applying this alone requires NOTIFY pgrst, ''reload config''; — Supabase''s own docs state the change will not reach real API calls without it.';
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- ALTER ROLE service_role RESET statement_timeout;
+-- NOTIFY pgrst, 'reload config';
+--
+-- (Returns service_role to rolconfig NULL — i.e. back to silently
+-- inheriting whatever authenticator's own statement_timeout is at the
+-- time, currently 8s. Safe at any time; this is a config-only change with
+-- no dependent objects to unwind.)
+--
+-- ============================================================

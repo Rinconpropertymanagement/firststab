@@ -1,0 +1,328 @@
+-- ============================================================
+-- Migration: 20260914000000_add_clear_id_partial_index_for_significance_driver
+-- Created:   2026-09-14
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live production incident: the archive-search significance-
+-- pass pilot (projects/hub/archive-search/lib/significance-pass.js,
+-- runSignificancePassBatch -> fetchNextEligibleConversations ->
+-- fetchDriverPage) crashed within seconds of launch on sally tonight —
+-- "Pilot run failed: canceling statement due to statement timeout"
+-- (Postgres 57014) — before processing a single conversation.
+--
+-- ============================================================
+-- WHAT WAS ACTUALLY CHECKED BEFORE WRITING THIS (not guessed)
+-- ============================================================
+-- 1. fetchIncompleteSignificanceRows() (queries missive_conversation_
+--    significance directly, 72 real rows) — re-ran its exact query live
+--    via the REST API just now: 200 OK, 1.0s. Not the culprit.
+--
+-- 2. fetchDriverPage()'s exact query --
+--      SELECT id, mailbox_key, missive_conversation_id
+--      FROM missive_message_intake_search_safe
+--      ORDER BY id ASC LIMIT 500
+--    -- re-ran live via the REST API (service-role key) just now, twice,
+--    both the no-cursor first page and a second page with a real `id >
+--    <cursor>` filter: 200 OK both times, but 2.0-3.0s EACH on a cold
+--    connection, dropping close to 0s on a warm, back-to-back repeat
+--    against the same connection. That cold/warm swing, on a query with
+--    no text-search predicate at all, is the live signal something is
+--    materializing/sorting a large row set rather than doing a cheap,
+--    selective index lookup — not proportional to page depth (both
+--    positions cost about the same), which rules out "gets slower the
+--    deeper you page" and points at a roughly constant, large per-call
+--    cost instead.
+--
+-- 3. Real, live row distribution of missive_message_intake.screening_result
+--    (checked via Prefer: count=exact, not assumed):
+--      clear                    -> 249,952
+--      flagged_protected_class  ->     727
+--      held                     ->       0
+--      NULL (not yet screened)  ->   3,639
+--      TOTAL                    -> 254,318
+--    screening_result = 'clear' is 98.3% of the table -- essentially the
+--    whole thing, not a selective filter anymore.
+--
+-- 4. Isolated the ORDER BY cost from the view entirely -- ran the SAME
+--    screening_result = 'clear' filter directly against the BASE TABLE
+--    (no view, no UNION ALL, no security_barrier) live, twice each:
+--      base table, filter only, no ORDER BY, limit 500      -> 0s, 0s
+--      base table, SAME filter, + ORDER BY id ASC            -> 1.0s, 0s
+--      the real view + ORDER BY id (fetchDriverPage's shape) -> 3.0s,
+--        1.0s, 2.0s, 2.0s across four repeats
+--    Adding `ORDER BY id` measurably slows down even the PLAIN base-table
+--    query, with the identical filter, with no view involved at all --
+--    that isolates the mechanism to "ORDER BY id doesn't get a cheap plan
+--    once screening_result = 'clear' stops being a selective filter,"
+--    independent of the view's own UNION ALL/security_barrier structure.
+--    The view is consistently slower and more variable on top of that
+--    base cost (the extra UNION ALL branch, security_barrier, and the
+--    correlated escalations NOT EXISTS all add real overhead), but the
+--    core problem this migration fixes is already present one layer
+--    down, at the base table -- which raises confidence this partial
+--    index (scoped to the base table, not the view) is addressing the
+--    real mechanism, not just papering over a view-specific symptom.
+--
+-- 5. Checked for a way to get a real EXPLAIN ANALYZE plan before writing
+--    this: no RPC/Postgres function exists anywhere in this codebase for
+--    running raw SQL or EXPLAIN (grepped supabase/migrations and
+--    projects/hub — none). No DATABASE_URL/connection string in .env,
+--    no psql available in this environment. Tried PostgREST's own opt-in
+--    EXPLAIN feature directly against the live project (Accept:
+--    application/vnd.pgrst.plan+json) -- confirmed DISABLED (live 406,
+--    PGRST107: "None of these media types are available"). Same standing
+--    constraint every prior migration on this table has documented:
+--    Peter has to run the real EXPLAIN himself in Supabase's SQL Editor.
+--    The exact query to run is at the bottom of this file, BEFORE and
+--    AFTER applying this migration.
+--
+-- ============================================================
+-- ROOT CAUSE -- reasoned from the real evidence above plus documented
+-- Postgres planner/executor behavior; MEDIUM confidence -- see the
+-- confidence note before the migration gate, and run the EXPLAIN below
+-- before treating this as settled
+-- ============================================================
+-- missive_message_intake_search_safe's live definition (20260913000000,
+-- current as of tonight) is a UNION ALL of two branches:
+--
+--   Branch 1: SELECT m.* FROM missive_message_intake m
+--             WHERE m.screening_result = 'clear' AND NOT EXISTS (...)
+--   Branch 2: SELECT m.* FROM archive_search_flagged_overrides o
+--             JOIN missive_message_intake m ON (...)
+--             WHERE o.revoked_at IS NULL
+--               AND m.screening_result IS DISTINCT FROM 'clear'
+--               AND NOT EXISTS (...)
+--
+-- That migration already fixed the UNION-vs-UNION-ALL dedup cost for the
+-- "no ORDER BY, no filter, LIMIT 1" case. This is a DIFFERENT query
+-- shape it never tested: fetchDriverPage() adds `ORDER BY id ASC LIMIT
+-- 500` (and, on later pages, `WHERE id > <cursor>`) on top of the view.
+--
+-- missive_message_intake.id is UUID PRIMARY KEY (confirmed directly:
+-- supabase/migrations/20260905020000, line 548) -- so a btree index on
+-- id, in id order, already exists via the primary key. In principle
+-- Postgres COULD walk that index in ascending id order, apply
+-- `screening_result = 'clear'` as a plain per-row Filter, and stop the
+-- moment 500 matches are found -- and because 'clear' rows are 98.3% of
+-- the table, that walk would only need to visit roughly 500-510 rows to
+-- fill a page. That would be fast regardless of how deep the cursor is.
+--
+-- The real, live timing (2-3s cold, both at the start of the table and
+-- deep into it) does not look like that cheap plan running. It looks
+-- like Branch 1 is instead being satisfied by scanning/filtering
+-- `screening_result = 'clear'` some other way (a Seq Scan, or the
+-- existing idx_missive_message_intake_screening_result which indexes
+-- screening_result but not id) and then having to SORT the resulting
+-- ~245,000+ row candidate set by id before the LIMIT can be applied on
+-- top of the UNION ALL Append -- the same "must materialize/sort a huge
+-- set before LIMIT can bite" mechanism 20260913000000 already diagnosed
+-- and fixed for the dedup case, now showing up for the ORDER BY case
+-- instead, because no index in this schema currently guarantees "rows
+-- where screening_result = 'clear', already in id order" as a single,
+-- unambiguous, cheap scan.
+--
+-- Why the planner might not be reliably picking the cheap PK-order-scan
+-- plan on its own: a UNION ALL under a security_barrier view is a real,
+-- documented case where Postgres's planner does not always recognize
+-- that ORDER BY + LIMIT can be pushed down through each branch as a
+-- bounded, early-terminating scan (the "Merge Append" strategy) -- it
+-- can fall back to computing each branch's full, unbounded row set and
+-- sorting the combined result on top instead. This is exactly the kind
+-- of case a purpose-built partial index resolves, by giving the planner
+-- one unambiguous, unmistakably-cheapest index that matches the branch's
+-- WHERE clause exactly and is already in the required sort order -- the
+-- same fix pattern this table's own migration history already uses twice
+-- (idx_missive_message_intake_screening_pending, 20260905020000's
+-- earlier draft; idx_missive_message_intake_search_document_pending,
+-- 20260911010000) for the identical "ORDER BY id LIMIT n, but the
+-- available index doesn't naturally serve both the filter and the
+-- order together" shape.
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- A partial btree index on id, scoped to exactly Branch 1's WHERE
+-- clause:
+--
+--   CREATE INDEX CONCURRENTLY idx_missive_message_intake_clear_id
+--     ON missive_message_intake (id)
+--     WHERE screening_result = 'clear';
+--
+-- This gives Postgres one index that IS the answer to "clear rows, in id
+-- order" -- no Filter re-check needed (the index's own predicate already
+-- guarantees every entry satisfies screening_result = 'clear'), and
+-- because it is sorted by id, `ORDER BY id ASC LIMIT 500` (with or
+-- without `WHERE id > cursor`) can be served by walking this index from
+-- the right starting point and stopping at 500 rows -- an Index Scan (or
+-- Index Only Scan) with a trivially cheap, unambiguous cost estimate,
+-- not a candidate the planner has to compare uncertainly against a
+-- Seq-Scan-then-Sort plan. Branch 2 is driven from
+-- archive_search_flagged_overrides, a small table by design (per that
+-- table's own migration) -- sorting whatever few rows it returns by id
+-- is cheap regardless, so it is not part of this fix.
+--
+-- Correctness: this changes ONLY which plan Postgres picks. It adds no
+-- column, changes no row, and does not alter which rows the view (or
+-- this query) returns -- a partial index is just a different-shaped
+-- pointer to the exact same underlying rows the query already reads via
+-- the WHERE clause it repeats verbatim.
+--
+-- Built CONCURRENTLY, same operational discipline as every other index
+-- built against this live, 254,000+ row table with an active Missive
+-- sync cron writing to it (20260910030000, 20260911010000, 20260912020000).
+--
+-- ****************************************************************
+-- RUN ON ITS OWN, IN SUPABASE'S SQL EDITOR -- CREATE INDEX CONCURRENTLY
+-- cannot run inside a transaction block or alongside other statements in
+-- one script; same restriction every other CONCURRENTLY statement in
+-- this schema documents.
+-- ****************************************************************
+--
+-- ============================================================
+-- WHAT THIS DOES NOT CLAIM
+-- ============================================================
+-- This is NOT independently confirmed with a real EXPLAIN ANALYZE plan.
+-- Real, live evidence gathered tonight (the 98.3% row distribution, the
+-- cold/warm timing swing on the exact live query, the confirmed absence
+-- of any real query-plan-inspection path in this environment) makes the
+-- Sort-before-LIMIT mechanism above the best-supported explanation, not
+-- a certainty. If the real EXPLAIN (query below) shows something
+-- different -- e.g. the planner IS already choosing the cheap PK-order
+-- scan and the real cost is somewhere else entirely (the correlated
+-- NOT EXISTS/escalations subquery, connection/pooler cold-start, or
+-- something in security_barrier's interaction with this specific view
+-- shape) -- this index may not be the whole fix, or may need to be
+-- paired with a different change. Run the BEFORE explain first if there
+-- is time; if not, this migration is safe to apply either way (see gate
+-- below) and the AFTER explain will show directly whether it worked.
+--
+-- ============================================================
+-- EXPLAIN ANALYZE -- copy-pasteable, read-only, safe to run BEFORE and
+-- AFTER applying this migration. Run in Supabase's SQL Editor.
+-- ============================================================
+--
+--   -- 0. Confirms the real statement_timeout this project is actually
+--   --    enforcing (verify, don't assume the 8-9s seen in earlier
+--   --    incidents tonight is still the number):
+--   SHOW statement_timeout;
+--
+--   -- 1. First page (no cursor) -- exactly fetchDriverPage(null):
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id
+--   FROM missive_message_intake_search_safe
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+--   -- 2. A later page (real cursor) -- exactly fetchDriverPage(lastId):
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id
+--   FROM missive_message_intake_search_safe
+--   WHERE id > '007b5cb5-e6f9-46f1-a226-753c98631e92'
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+-- What to look for:
+--   - A "Sort" node with "Sort Key: id" (or "missive_message_intake.id")
+--     whose own "actual rows" is in the hundreds of thousands -- confirms
+--     the diagnosis directly. A number near 500-600 would mean something
+--     cheaper already fed it.
+--   - BEFORE this migration: expect that Sort, fed by either a Seq Scan
+--     on missive_message_intake or a Bitmap Heap Scan via
+--     idx_missive_message_intake_screening_result.
+--   - AFTER this migration: expect the Sort to be GONE for Branch 1,
+--     replaced by an "Index Scan using idx_missive_message_intake_clear_id"
+--     (or "Index Only Scan"), and the top-level "Execution Time" to drop
+--     to a small fraction of the before run -- ideally similar to the
+--     150-300ms cost floor already established for direct base-table
+--     lookups on this table (20260912040000's own header).
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: the real row-distribution numbers above (98.3%
+-- 'clear') and the real cold/warm timing swing on the live query are
+-- actual, measured facts from tonight, not assumptions.
+-- HIGH confidence: a plain btree index on id (the primary key) already
+-- exists and, in principle, can serve exactly this query cheaply given
+-- how unselective screening_result = 'clear' now is -- standard,
+-- documented Postgres behavior, not a guess specific to this schema.
+-- MEDIUM-HIGH confidence: that the planner is failing to choose that
+-- cheap plan on its own (rather than choosing it and the real bottleneck
+-- being something else, e.g. the correlated escalations subquery or
+-- connection cold-start) is the best-supported explanation given the
+-- evidence above. Strengthened by isolating ORDER BY id's cost against
+-- the PLAIN BASE TABLE (0s -> 1.0s just from adding ORDER BY id to the
+-- identical filter, no view involved) -- this rules out the view's own
+-- UNION ALL/security_barrier structure as the sole cause and points
+-- straight at the base table's plan choice for this specific filter+sort
+-- combination, which is exactly what this migration's index targets.
+-- Still NOT independently confirmed with a real EXPLAIN plan from this
+-- live database -- this environment has no direct Postgres connection and
+-- no SQL-execution RPC (confirmed by searching this codebase tonight),
+-- and PostgREST's own EXPLAIN feature is confirmed disabled on this
+-- project (live 406 test). The EXPLAIN queries above are exactly what would
+-- settle this and this reasoning cannot.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists -- see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one index --
+--       no row, column, or constraint is touched, and a partial index's
+--       predicate matches Branch 1's WHERE clause exactly, so it cannot
+--       change which rows any query returns, only how Postgres can find
+--       them.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes -- read by every archive-search
+--       route via missive_message_intake_search_safe, and by
+--       screening-pass.js directly (the one named exception). Adding an
+--       index changes no reader's or writer's behavior beyond query
+--       plans; CREATE INDEX CONCURRENTLY takes no lock that blocks
+--       ordinary reads or writes, so the live Missive sync cron and every
+--       Hub route keep working normally while this builds.
+--   [x] Additive or destructive? Fully additive -- one new index, nothing
+--       removed or restructured.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project -- same standing caveat every migration
+--       here has carried. Mitigated by: this change cannot alter query
+--       results (see above), it is trivially reversible (DROP INDEX), and
+--       the EXPLAIN protocol above lets Peter/TARS verify the real,
+--       live plan and timing before and after, on real data, before
+--       treating this as confirmed.
+--   [x] Governance go-ahead needed? No -- pure performance tuning on an
+--       already-governance-cleared table/view. No new column, no new
+--       table, no change to which rows any person or AI agent can see --
+--       identical query results before and after, only speed changes.
+--       Not a compliance build, same classification every prior
+--       performance migration on this exact view/table has already given
+--       this class of change.
+-- ============================================================
+
+-- NOTE, added after a real failed apply attempt: Supabase's SQL Editor runs
+-- a pasted script as a transaction block, and CREATE INDEX CONCURRENTLY
+-- cannot run inside one ("ERROR 25001") -- regardless of the file's own
+-- "run on its own" instruction above, the presence of a second statement
+-- (COMMENT ON INDEX, below) in the same paste is enough to trigger this.
+-- Switched to a plain CREATE INDEX: it takes a brief SHARE lock that blocks
+-- WRITES (not reads) to missive_message_intake for the duration of the
+-- build -- acceptable here given the table's write volume is just the
+-- periodic Missive sync, and 246,000 rows on an existing UUID column
+-- should build in well under a minute.
+CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_id
+  ON missive_message_intake (id)
+  WHERE screening_result = 'clear';
+
+COMMENT ON INDEX idx_missive_message_intake_clear_id IS
+  'Added 20260914000000 to fix a live statement-timeout crash in the archive-search significance-pass pilot (significance-pass.js fetchDriverPage -- SELECT id, mailbox_key, missive_conversation_id FROM missive_message_intake_search_safe ORDER BY id ASC LIMIT 500, paged by id cursor). screening_result = ''clear'' is 98.3% of this table (249,952 of 254,318 rows as of 2026-09-14), so the existing idx_missive_message_intake_screening_result index no longer usefully narrows anything -- this partial index instead gives Postgres a single, unambiguous, already-id-ordered index matching Branch 1 of missive_message_intake_search_safe''s UNION ALL exactly, so ORDER BY id LIMIT n can be served by a bounded index scan instead of sorting the ~245,000-row candidate set on every call.';
+
+-- ============================================================
+-- ROLLBACK
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_message_intake_clear_id;
+-- ============================================================

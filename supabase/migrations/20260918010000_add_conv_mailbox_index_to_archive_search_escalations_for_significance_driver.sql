@@ -1,0 +1,266 @@
+-- ============================================================
+-- Migration: 20260918010000_add_conv_mailbox_index_to_archive_search_escalations_for_significance_driver
+-- Created:   2026-09-18
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live incident in tonight's diagnostic chain on the
+-- archive-search significance-pass pagination driver
+-- (projects/hub/archive-search/lib/significance-pass.js, fetchDriverPage,
+-- reading missive_message_intake_search_safe_clear_branch — added
+-- 20260918000000 for exactly this driver). This is the LAST fix in
+-- tonight's chain, per the incident summary relayed to me in this
+-- session, before the real 84,408-conversation batch backfill
+-- (supabase/migrations/20260917020000's own tracking schema) is allowed
+-- to run against real data.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION INHERITS FROM TONIGHT'S SESSION, RELAYED TO ME —
+-- NOT INDEPENDENTLY RE-DERIVED BY ME TONIGHT (see the next section for
+-- what I DID independently verify before writing this file)
+-- ============================================================
+-- Per this session's own account of tonight's chain: an initial "UNION
+-- ALL view theory" was incomplete; a follow-up test found a Hash Anti
+-- Join at the depth this driver pages to; "Query 4" then built a
+-- temporary index — idx_archive_search_escalations_conv_mailbox_test, on
+-- archive_search_escalations (missive_conversation_id, mailbox_key) WHERE
+-- status IN ('open', 'confirmed') — inside a self-rolling-back
+-- transaction, and Peter ran the real EXPLAIN (ANALYZE, BUFFERS) against
+-- it at a real ~15,000-row-deep cursor (Query 2's own OFFSET 15000
+-- depth), producing:
+--
+--   Limit (actual time=6.879..7.610 rows=...)
+--     -> Nested Loop Anti Join
+--          Join Filter: (e.missive_conversation_id = m.missive_conversation_id
+--                         AND e.mailbox_key = m.mailbox_key ...)
+--          -> Index Scan using idx_missive_message_intake_clear_id
+--               on missive_message_intake m
+--          -> Materialize
+--               -> Bitmap Heap Scan on archive_search_escalations e
+--                    Recheck Cond: (status = ANY ('{open,confirmed}'::text[]))
+--                    Filter: (status = 'open' OR (status = 'confirmed'
+--                             AND reopened_at IS NULL ...))
+--                    -> Bitmap Index Scan on
+--                         idx_archive_search_escalations_conv_mailbox_test
+--
+-- I have not independently reproduced Query 1-4 myself tonight — this
+-- environment has no direct Postgres connection (see below), so, same as
+-- every migration on this schema, real EXPLAIN evidence can only come
+-- from Peter's own SQL Editor session. I am treating the plan shape above
+-- as reported, not self-verified — but see the next section for what I
+-- COULD, and did, check directly against the real files on disk before
+-- writing this migration.
+--
+-- ============================================================
+-- WHAT I ACTUALLY CHECKED MYSELF BEFORE WRITING THIS (real files read
+-- tonight, not assumed or taken only from the incident summary)
+-- ============================================================
+-- 1. The Recheck Cond / Filter split in the EXPLAIN above is real
+--    evidence about what the TESTED index's predicate actually was, not
+--    just what the incident description said it was: a Bitmap Heap Scan's
+--    "Recheck Cond" reflects the condition the index itself encodes;
+--    "Filter" is evaluated per-tuple afterward, on conditions the index
+--    predicate does NOT cover. Recheck Cond here is `status = ANY
+--    ('{open,confirmed}')` — Postgres's normalized form of `status IN
+--    ('open','confirmed')` — with the full `reopened_at`-aware condition
+--    appearing only in Filter, not Recheck Cond. That means the index
+--    Query 4 actually built and validated used the plain two-value
+--    predicate, not the more precise `status = 'open' OR (status =
+--    'confirmed' AND reopened_at IS NULL)` condition the live view
+--    itself filters on (confirmed directly against
+--    supabase/migrations/20260912050000_reconcile_20260912040000_
+--    timestamp_collision.sql and 20260918000000, both read in full
+--    tonight — that reconciliation migration is the one that actually
+--    shipped live, per its own file; the two other files timestamped
+--    20260912040000 are marked SUPERSEDED at their own file tops and were
+--    never applied). This migration matches the predicate that was
+--    ACTUALLY TESTED (`status IN ('open','confirmed')`), not the
+--    theoretically tighter one — shipping something Query 4 didn't
+--    validate would reintroduce exactly the kind of unverified-assumption
+--    risk this table's own migration history has already been burned by
+--    twice this week. The cost: one extra per-row NULL check on
+--    'confirmed' rows via Filter, same "not benchmarked, not asserted as
+--    free, expected-negligible at this table's designed-to-stay-small
+--    scale" honesty every sibling migration on this table already uses.
+--
+-- 2. Confirmed directly (not assumed) that no existing index on
+--    archive_search_escalations already serves this shape:
+--      idx_archive_search_escalations_one_open_per_conversation — UNIQUE,
+--        same two columns, but WHERE status = 'open' ONLY (20260912030000)
+--        — does not cover 'confirmed' rows, so cannot serve this query.
+--      idx_archive_search_escalations_reported_at — reported_at DESC only,
+--        unrelated shape.
+--    Also confirmed: 20260912040000_add_reopen_to_archive_search_
+--    escalations.sql (superseded, never applied) explicitly decided
+--    AGAINST adding an index here at all — "This table's own header
+--    (20260912030000) already accepted the cost of an unindexed 'status
+--    IN (...)' narrowing... on the reasoning that this table is expected
+--    to stay small by design... so no new index is added here either." At
+--    the time, every caller of this NOT EXISTS check was a single-
+--    conversation lookup (report/resolve/reopen routes, one row at a
+--    time). That assumption breaks down for a different caller this
+--    project didn't have yet when that decision was made: the
+--    significance driver's bulk, id-ordered pagination
+--    (missive_message_intake_search_safe_clear_branch, 20260918000000),
+--    which re-runs this same NOT EXISTS check once per outer candidate
+--    row across an 84,000+-row scan, at real depth. This migration is a
+--    deliberate reversal of that earlier decision, not a blind repeat of
+--    the two sibling index migrations' reasoning — the table's row count
+--    (still 0 as of 20260918000000's own live count, confirmed in that
+--    file) hasn't changed; the QUERY PATTERN against it has.
+--
+-- 3. Checked the real write path to archive_search_escalations before
+--    assuming the same CONCURRENTLY tradeoff 20260914000000 and
+--    20260917010000 made for missive_message_intake applies here too —
+--    the task asked me to verify this rather than default either way.
+--    Grepped projects/hub/archive-search/router.js directly: every write
+--    to this table is one of three human-triggered, session-authenticated
+--    HTTP routes —
+--      POST /api/archive-search/escalate            (searcher/admin, report)
+--      POST /api/archive-search/escalations/:id/resolve  (admin)
+--      POST /api/archive-search/escalations/:id/reopen   (admin)
+--    — with no cron/scheduled writer anywhere in this file (confirmed by
+--    grepping for cron/setInterval/schedule: the only cron-secret-gated
+--    routes in this file are screening-pass/significance-pass triggers,
+--    which read this table via the search-safe view, never write to it).
+--    This is a materially SAFER write profile than missive_message_intake
+--    (254,000+ rows under a continuous Missive-sync cron): here, a plain
+--    CREATE INDEX's brief SHARE lock can only ever collide with an
+--    occasional human click, not a scheduled job, and the table itself
+--    was still at 0 rows as of today's own count (20260918000000) — an
+--    index build at that size is effectively instantaneous regardless of
+--    locking strategy.
+--
+-- ============================================================
+-- WHY PLAIN CREATE INDEX, NOT CONCURRENTLY
+-- ============================================================
+-- Same structural constraint every prior migration on this schema has
+-- hit: Supabase's SQL Editor wraps a pasted script in one implicit
+-- transaction, and CREATE INDEX CONCURRENTLY cannot run inside one
+-- ("ERROR 25001") — triggered by the mere presence of a second statement
+-- (e.g. COMMENT ON INDEX) in the same paste, regardless of a "run this
+-- alone" instruction in the file, per 20260914000000's own real failed-
+-- attempt note. That constraint is about the SQL Editor's execution
+-- model, not this table specifically, so it applies here too. Independent
+-- of that constraint, point 3 above gives an additional, table-specific
+-- reason a plain CREATE INDEX is fine here: no cron writer to block, and
+-- a nearly-empty table, so the brief write-lock this takes is both safer
+-- and faster than the equivalent build against missive_message_intake
+-- already accepted twice this week.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one index — no
+--       row, column, or constraint is touched, and an index cannot change
+--       which rows any query returns, only how Postgres finds them. The
+--       partial predicate (status IN ('open','confirmed')) is a strict
+--       subset condition of the table's own status CHECK constraint
+--       (status IN ('open','confirmed','false_alarm')) — it cannot
+--       exclude a row the query needs or include one it doesn't.
+--   [x] Does this touch a table other code depends on?
+--       archive_search_escalations, yes — the Fair-Housing escalation-
+--       exclusion table backing missive_message_intake_search_safe (both
+--       UNION branches) and missive_message_intake_search_safe_clear_branch
+--       (20260918000000). Adding an index changes no reader's or writer's
+--       behavior beyond query plans; it adds no column, changes no row,
+--       and narrows no constraint. All three writer routes (escalate,
+--       resolve, reopen) are unaffected — none of them reference this
+--       index by name, and none of their INSERT/UPDATE statements change
+--       shape.
+--   [x] Additive or destructive? Fully additive — one new index, nothing
+--       removed, restructured, or narrowed anywhere else. The existing
+--       idx_archive_search_escalations_one_open_per_conversation (UNIQUE,
+--       'open' only) and idx_archive_search_escalations_reported_at
+--       indexes are both left in place, unmodified, still serving their
+--       existing callers.
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here has carried. Mitigated by: this table is still at 0 rows as
+--       of today's own live count (20260918000000), so there is nothing
+--       for an index build to corrupt or meaningfully lock; the change
+--       cannot alter query results (see above); it is trivially reversible
+--       (DROP INDEX); and the EXPLAIN protocol at the bottom of this file
+--       lets Peter/TARS verify the real, live plan against the PERMANENT
+--       index, at real depth (30+ pages), before the real 84,408-
+--       conversation batch submission goes anywhere near it — per this
+--       session's own account, that independent re-verification is
+--       already planned as the next step after this file exists, using
+--       the same method used all night, not skipped.
+--   [x] Governance go-ahead needed? Narrower conclusion than the two
+--       sibling index migrations this week, and worth stating precisely
+--       rather than inherited wholesale: 20260914000000 and 20260917010000
+--       concluded "no governance review needed" for indexes on
+--       missive_message_intake, a table THEIR OWN headers describe as
+--       "an already-governance-cleared table/view." archive_search_
+--       escalations is NOT that — it is explicitly a GOVERNANCE.md
+--       compliance build in its own right, three times over
+--       (20260912030000's own header: "this IS a GOVERNANCE.md compliance
+--       build"; 20260912040000 and 20260912050000 repeat that
+--       classification for the reopen mechanism, the latter with a real
+--       Asimov/Mason Round 3 review on record). So I am not treating "the
+--       two prior index migrations didn't need governance review" as
+--       automatically the same reasoning here, the way this session's own
+--       incident description assumed.
+--       That said: a plain index provably cannot change which rows this
+--       view (or any query) returns — same argument every prior index
+--       migration in this schema has already made, and true regardless of
+--       which table it's built on. On that narrow technical question, I
+--       do not believe this blocks on a new Asimov/Mason review. But
+--       given how directly this touches the read path of the Fair-Housing
+--       exclusion mechanism itself, I'm applying the same discipline
+--       20260918000000 (the most recent, most comparable real migration
+--       against this exact area) already applied to its own new view over
+--       this same table: it also concluded "no governance blocker," and
+--       STILL flagged itself "for Peter's awareness... worth a quick
+--       sanity nod from Asimov given CLAUDE.md's own 'if unsure, treat as
+--       compliance build and ask' default." I'm recommending the same
+--       here — a quick Asimov nod before this ships, not a hard block,
+--       and not the blanket "no review needed" this session's own request
+--       assumed going in.
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_archive_search_escalations_conv_mailbox
+  ON archive_search_escalations (missive_conversation_id, mailbox_key)
+  WHERE status IN ('open', 'confirmed');
+
+COMMENT ON INDEX idx_archive_search_escalations_conv_mailbox IS
+  'Added 20260918010000 to fix a real statement-timeout risk in the archive-search significance-pass driver''s bulk pagination (significance-pass.js fetchDriverPage, reading missive_message_intake_search_safe_clear_branch -- 20260918000000), which re-runs archive_search_escalations''s NOT EXISTS(... status IN (''open'',''confirmed'') ...) exclusion check once per candidate row across an 84,000+-row scan, at real depth. No prior index covered this shape: idx_archive_search_escalations_one_open_per_conversation (20260912030000) is scoped WHERE status = ''open'' only. An earlier migration (20260912040000, superseded, never applied) explicitly decided not to index this table, reasoning it would stay small and only ever be queried one conversation at a time -- true for the report/resolve/reopen routes, not true for this bulk driver. Predicate matches exactly what was validated live tonight via a temporary index and a real EXPLAIN (ANALYZE, BUFFERS) at a ~15,000-row-deep cursor: Nested Loop Anti Join / Index Scan (missive_message_intake, via idx_missive_message_intake_clear_id) / Bitmap Heap Scan (this table, via this index) -- no Sort, no top-N heapsort, no Gather Merge, ~7.6ms. Deliberately matches the TESTED predicate (status IN (''open'',''confirmed'')) rather than the more precise status = ''open'' OR (status = ''confirmed'' AND reopened_at IS NULL) condition the live view (20260912050000) actually filters on -- the reopened_at portion is served by a Filter recheck on top of this index, not encoded in it, so as not to ship an untested predicate shape.';
+
+-- ============================================================
+-- EXPLAIN ANALYZE -- copy-pasteable, read-only, safe to run AFTER
+-- applying this migration, against the PERMANENT index, to confirm the
+-- plan matches what the temporary idx_archive_search_escalations_
+-- conv_mailbox_test index already proved. Run in Supabase's SQL Editor.
+-- Get a real page-30+ cursor id first by running the unfiltered query a
+-- few times bumping the WHERE id > ... cursor, or reuse a real id already
+-- known to be ~15,000+ rows deep from tonight's own Query 2/Query 4 runs.
+-- ============================================================
+--
+--   SHOW statement_timeout;
+--
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe_clear_branch
+--   WHERE id > '<a real id from a page-30+ / ~15,000+-row-deep cursor>'
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+-- What to look for: the same shape Query 4 already showed on the
+-- temporary index -- Nested Loop Anti Join, Index Scan using
+-- idx_missive_message_intake_clear_id on missive_message_intake, Bitmap
+-- Heap Scan on archive_search_escalations via THIS migration's
+-- idx_archive_search_escalations_conv_mailbox (name, not the old _test
+-- suffix) -- no Sort, no top-N heapsort, no Gather Merge, and Execution
+-- Time in the same low-single-digit-millisecond range Query 4 measured,
+-- now at 30+ pages deep rather than ~15,000 rows, per this session's own
+-- plan to re-verify independently before the real batch submission runs.
+--
+-- ============================================================
+-- ROLLBACK
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_archive_search_escalations_conv_mailbox;
+-- ============================================================

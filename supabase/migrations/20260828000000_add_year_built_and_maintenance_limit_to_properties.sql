@@ -1,0 +1,152 @@
+-- ============================================================
+-- Migration: 20260828000000_add_year_built_and_maintenance_limit_to_properties
+-- Created:   2026-08-28
+-- Author:    Neo (database specialist)
+--
+-- Adds two nullable columns to `properties` for the Approval Briefing
+-- feature (projects/hub/approval-briefing-SPEC.md, Section 4.1 "Year
+-- built" row and Section 4.2 "The maintenance limit itself" row). Both
+-- are CONFIRMED, live-verified, resolved open items (Open Item #1 in the
+-- spec's Open Items list, and the year_built row under Section 4.1) —
+-- not new research, not a schema guess. Purely additive: two nullable
+-- columns on an already-existing, already-RLS-enabled table. No row is
+-- deleted, moved, or overwritten; no existing column or constraint is
+-- touched.
+--
+-- Part of Approval Briefing's Phase 1 (spec Section 12: "Phase 1 —
+-- Schema. Additive only"), same governance clearance already covering
+-- 20260827000000_approval_briefing_phase1.sql — Asimov's spec-level
+-- pre-check (compliance/approval-briefing-spec-governance-precheck.md)
+-- named Phase 0 and Phase 1 as the two pieces cleared to start now:
+-- "the two most boring, lowest-risk pieces... Neither touches AI text or
+-- sends anything to anyone." Neither column added here is personal data
+-- about a person, tenant-facing communication, or a housing decision, so
+-- this migration does not need its own separate Asimov/Mason gate beyond
+-- the spec-level Phase 1 clearance already in place.
+--
+-- Q's separate sync.js change (spec Section 4.1/4.2 — mapping AppFolio's
+-- property_directory report into these two new columns) is NOT part of
+-- this migration. Both columns land NULL on every existing row until
+-- that sync change lands; this migration only makes the columns exist.
+--
+-- ============================================================
+-- Column 1: year_built
+-- ============================================================
+--
+-- Source: AppFolio's property_directory report — the same nightly
+-- report sync.js already calls (projects/appfolio-sync/sync.js,
+-- REPORT_CONFIG entry #1, POST /api/v2/reports/property_directory.json).
+-- Confirmed live per the spec: 92% of properties return this field; it's
+-- just never been mapped into Supabase (buildRow() for this report
+-- currently maps only name/address/city/state/zip/unit_count/
+-- appfolio_id — spec Section 4.1). No new AppFolio API surface, no new
+-- credential, no migration blocker — purely additive.
+--
+-- INTEGER, nullable. NULL means "AppFolio has no year-built value for
+-- this property" (the other ~8%) — a normal, expected outcome, not an
+-- error state. A loose sanity-range CHECK is included, matching this
+-- schema's own existing precedent for the identical concept
+-- (rental_analyses.subject_year_built, 20260812010000_rental_analysis_
+-- schema.sql): rejects obvious garbage (0, 99999) without rejecting any
+-- real AppFolio value.
+--
+-- ============================================================
+-- Column 2: maintenance_limit
+-- ============================================================
+--
+-- Source: the same property_directory report, field `maintenance_limit`
+-- — confirmed live on all 379 real properties (spec Section 4.2, Open
+-- Item #1, resolved 2026-08-27): values $100-$1,000, median/mode $500
+-- (301 properties), 35 properties genuinely at "0.00". Sits alongside
+-- `maintenance_notes` in the same response object. A one-line addition
+-- to sync.js's buildRow() for this report, not a new integration.
+--
+-- NUMERIC(10,2), nullable. NULL means "AppFolio has no maintenance-limit
+-- value configured for this property" (never set up) — a DIFFERENT, real
+-- outcome from a genuine $0.00 limit (this property's PM has zero
+-- authority to approve anything without the owner; confirmed on 35 of
+-- 379 real properties). These two states must stay distinguishable in
+-- every reader of this column, forever:
+--
+--   *** CRITICAL GOTCHA — DO NOT LOSE THIS DISTINCTION IN APPLICATION
+--   CODE, AND DO NOT LET A FUTURE EDIT REINTRODUCE IT ***
+--   AppFolio returns this field as a formatted string (e.g. "500.00" or
+--   "0.00"). The shorthand idiom used elsewhere in sync.js for other
+--   decimal fields — parseFloat(row.maintenance_limit) || null — will
+--   SILENTLY turn a genuine $0.00 limit into NULL, because 0 is falsy in
+--   JavaScript. That would erase a real, meaningful value (zero PM
+--   authority without the owner) and make it indistinguishable from
+--   "never configured." Q's sync.js change must use Number.isFinite()
+--   on the parsed value, or an explicit `row.maintenance_limit != null`
+--   check, instead — never the `|| null` shorthand for this specific
+--   field. Flagged here, at the schema level, so a future reader of this
+--   column doesn't reintroduce a bug that has already been found once
+--   (spec Section 4.2) and must not need finding twice.
+--
+-- A non-negative CHECK is included (a spending-authority limit cannot be
+-- negative). It deliberately does NOT exclude 0 — 0.00 is a valid, real
+-- value here, per the gotcha above; only negative values are rejected.
+--
+-- ============================================================
+-- Rule 4 (GOVERNANCE.md) — no new data inventory block needed
+-- ============================================================
+--
+-- Same precedent as 20260827010000 (documents.captured_at) and
+-- 20260819000000 (security_deposit_cases prepaid_rent columns): these
+-- are additive nullable columns on an already-existing, already-governed
+-- table, not a new table — Rule 4's registration requirement is for new
+-- tables storing personal data. Neither column is personal data about a
+-- person: year_built is a fact about a building, and maintenance_limit
+-- is an operational spending-authority figure set by the property's
+-- owner/PM relationship, not anyone's PII.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist, run before any
+-- migration is handed off for Peter to apply)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. ADD COLUMN IF NOT EXISTS
+--       on two brand-new, nullable columns with no default — every
+--       existing row gets NULL in both; nothing is read, moved, or
+--       overwritten.
+--   [x] Does this touch a table other code depends on? Yes —
+--       `properties` is the most-referenced table in this schema (FK
+--       target from units, maintenance_requests, approval_briefings,
+--       leases, and more). That is exactly why this migration adds
+--       nothing but two nullable columns with no default and touches no
+--       existing column or constraint — nothing already reading or
+--       writing `properties` changes behavior. An existing `SELECT *`
+--       caller gains two new NULL-valued columns; nothing breaks by
+--       getting an extra column back.
+--   [x] Additive or destructive? Purely additive. No column dropped, no
+--       type changed, no existing constraint tightened, no default that
+--       could alter existing INSERT/UPDATE behavior. RLS is untouched —
+--       already enabled on `properties` (20260626000000), no policy
+--       added, changed, or removed here.
+--   [x] Tested on a copy of the data first? Not yet — standard practice
+--       before applying to the real database, same as every migration
+--       in this repo. Peter (or whoever applies this) should run it
+--       against a Supabase branch/copy first, same as always.
+-- ============================================================
+
+ALTER TABLE properties
+  ADD COLUMN IF NOT EXISTS year_built INTEGER
+    CHECK (year_built IS NULL OR (year_built >= 1800 AND year_built <= 2100)),
+  ADD COLUMN IF NOT EXISTS maintenance_limit NUMERIC(10,2)
+    CHECK (maintenance_limit IS NULL OR maintenance_limit >= 0);
+
+COMMENT ON COLUMN properties.year_built IS
+  'Year the property was built. Source: AppFolio''s property_directory report (the same nightly report sync.js already calls) — confirmed live on ~92% of properties (approval-briefing-SPEC.md Section 4.1). NULL means AppFolio has no value for this property, a normal, expected outcome. Not yet populated as of this migration — Q''s sync.js change (buildRow() for the property_directory report) is a separate step, not part of this migration.';
+
+COMMENT ON COLUMN properties.maintenance_limit IS
+  'Dollar amount a property manager can approve for a maintenance repair without owner sign-off before the job requires the owner''s explicit approval. Source: AppFolio''s property_directory report, field maintenance_limit (a formatted decimal string, e.g. "500.00") — confirmed live on all 379 real properties as of 2026-08-27 (approval-briefing-SPEC.md Section 4.2): values $100-$1,000, median/mode $500, and 35 properties genuinely at "0.00". CRITICAL: 0.00 is a REAL, meaningful value (this property''s PM has zero authority to approve anything without the owner) — it is NOT the same as NULL, which means AppFolio has no maintenance-limit value configured for this property at all. Any code parsing AppFolio''s formatted-string value into this column MUST use Number.isFinite() on the parsed result, or an explicit null-check, and must NOT use the parseFloat(x) || null idiom used elsewhere in sync.js — that idiom silently collapses a genuine $0.00 limit into NULL, because 0 is falsy in JavaScript. Not yet populated as of this migration — Q''s sync.js change is a separate step, not part of this migration.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements to undo this migration)
+-- ============================================================
+--
+-- ALTER TABLE properties DROP COLUMN IF EXISTS year_built;
+-- ALTER TABLE properties DROP COLUMN IF EXISTS maintenance_limit;
+--
+-- ============================================================

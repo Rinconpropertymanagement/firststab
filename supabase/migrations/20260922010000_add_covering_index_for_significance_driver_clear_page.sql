@@ -1,0 +1,408 @@
+-- ============================================================
+-- Migration: 20260922010000_add_covering_index_for_significance_driver_clear_page
+-- Created:   2026-09-22
+-- Author:    Neo (database specialist)
+--
+-- A THIRD, separate performance bug in the same pipeline, found today. NOT
+-- the same bug as 20260921020000 (security_barrier forcing a full parallel
+-- seq scan — that is fixed and stays fixed) and NOT the same bug as
+-- 20260922000000 (missive_conversation_significance's unindexed trailing-
+-- column filter in filterAlreadyProcessed() — different table, different
+-- function, untouched by this migration). This one is about
+-- fetchDriverPage()'s RPC itself, archive_search_significance_driver_
+-- next_clear_page() (20260921020000), which DOES now use the fast plan
+-- (Index Scan on idx_missive_message_intake_clear_id) but still times out,
+-- once the query moves off the one specific range of `id` every prior test
+-- today happened to hit.
+--
+-- ============================================================
+-- WHAT WAS ACTUALLY CHECKED BEFORE WRITING THIS (not guessed)
+-- ============================================================
+--
+-- 1. THE INDEX'S REAL DEFINITION — read directly from 20260914000000, not
+--    assumed from the incident description that prompted this migration
+--    (which described it as "on screening_result, id" — that is NOT what
+--    is on disk):
+--
+--      CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_id
+--        ON missive_message_intake (id)
+--        WHERE screening_result = 'clear';
+--
+--    This is a single-column partial index on `id` alone — screening_result
+--    is a WHERE predicate on the index, not an indexed column, and there is
+--    no INCLUDE clause. It answers "give me clear rows' ids in order"
+--    cheaply, but it cannot answer the RPC's real SELECT list
+--    (mailbox_key, missive_conversation_id, delivered_at) without visiting
+--    the heap for every matching row. 20260921020000's own live EXPLAIN
+--    evidence confirms this directly, in its own words: "Plan: Index Scan
+--    using idx_missive_message_intake_clear_id" — an Index Scan, explicitly
+--    not an Index Only Scan — with "Buffers: shared hit=372 read=131" for
+--    500 rows, i.e. real heap block reads happening on that call, not zero.
+--    That run measured 76.3ms because it was page 1 (no cursor) against a
+--    region that has been read over and over today — see point 3 below for
+--    why that made it look deceptively cheap.
+--
+-- 2. missive_message_intake.id'S CORRELATION — could not query pg_stats
+--    directly (see point 4 below for why), but this does not need to be
+--    taken on faith: the column's own definition, read directly from
+--    20260905020000, line 548, is
+--      id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+--    gen_random_uuid() produces UUID version 4 values — cryptographically
+--    random, by construction, with no relationship to insertion order or
+--    physical storage position. This isn't a schema-specific inference,
+--    it's what "random" means for this generator; pg_stats.correlation for
+--    this column should read at or extremely near 0 for exactly that
+--    reason. The copy-pasteable query to confirm the live number is in the
+--    verification block at the bottom of this file — worth running for the
+--    record, but the DDL alone already supports the "scattered across the
+--    whole table, not clustered" conclusion this migration depends on.
+--
+-- 3. LIVE, INDEPENDENT REPRODUCTION TODAY (2026-09-22, this session, real
+--    RPC calls against the real production database with the real
+--    service-role key already in .env — not relayed, not assumed, run
+--    fresh just now):
+--
+--      page 1 (cursor=null)                          1136ms, then 174ms
+--                                                      on an immediate
+--                                                      repeat (84% faster —
+--                                                      real caching benefit)
+--      page 2 (cursor = page 1's last id)              472ms
+--      the exact reported cursor (8777a631-...)      30153ms -> TIMEOUT
+--        immediate repeat of the SAME cursor         29785ms (barely under)
+--        a THIRD hit, moments later                  30167ms -> TIMEOUT
+--        a FOURTH hit, immediately after the third    30166ms -> TIMEOUT
+--      a never-touched cursor ~50% through id space  29648ms
+--      a never-touched cursor ~75% through id space  30126ms -> TIMEOUT
+--
+--    Two real findings out of this, both load-bearing for the fix below:
+--
+--    a) The problem is NOT specific to the one reported cursor, or to a
+--       single "cold region." It reproduces at ~50% and ~75% through the
+--       id space too — anywhere outside the narrow low-id slice that has
+--       been repeatedly hit by every test run today (that slice being fast
+--       is itself the artifact — it is the one region that stays resident
+--       in cache because it keeps getting re-read, not because it's
+--       structurally different). Practically, this means the ORIGINAL
+--       incident's "16s, 20s, 23s... 30.1s" climb was very likely never a
+--       true gradual per-region degradation mechanism — it was a walk
+--       moving from the one artificially hot slice into a vast area that
+--       was ALREADY at the ~30s ceiling the whole time, with the specific
+--       numbers along the way reflecting ordinary timing variance around
+--       that already-bad baseline, not a clock that ticks up with runtime.
+--
+--    b) Repetition does not reliably fix it. If this were simple "cold
+--       shared_buffers, warms up once read," the back-to-back repeat hits
+--       on the identical cursor should have shown the same dramatic
+--       improvement page 1 did (1136ms -> 174ms). They did not — 30153ms,
+--       29785ms, 30167ms, 30166ms, essentially flat at the ceiling across
+--       four consecutive hits, some now timing out where the previous
+--       identical call had not. That rules out "just let it warm up" as a
+--       fix and points at something actively working against cache
+--       retention for this query shape, not merely absent caching. The
+--       most evidence-consistent explanation, given what's independently
+--       confirmed elsewhere in this schema: this project's single Supabase
+--       Postgres instance is shared, concurrently, by every tool in this
+--       codebase (20260918030000's own "blast radius" section names
+--       appfolio-sync, calendar-assistant, content-engine, rental-analysis,
+--       insurance-compliance, and effectively every Hub router as sharing
+--       this same database), plus a confirmed real writer against this
+--       exact table on an automated hourly cron (screening-pass.js's own
+--       header comment, line ~226: "the hourly cron wrapper now calling
+--       it" — markConversationScreened() there UPDATEs screening_result on
+--       every row of a scanned conversation, moving it from NULL to
+--       'clear'/etc.). A shared, actively-written instance contending for
+--       a limited shared_buffers pool across many concurrent workloads is
+--       consistent with heap pages not staying resident even seconds
+--       apart, in a way a single-tenant, read-mostly database would not
+--       show. This is the best-supported explanation available, not an
+--       independently re-confirmed certainty — flagged plainly, same
+--       confidence discipline as every prior migration on this table.
+--
+--    Ordinary Postgres MVCC readers are never blocked by concurrent
+--    UPDATEs (no shared/exclusive row-lock wait applies to a plain SELECT
+--    against rows someone else is writing) — considered and set aside for
+--    that reason; lock contention in the literal blocking sense does not
+--    fit a plain Index Scan the way I/O/buffer contention does.
+--
+-- 4. WHY THIS COULDN'T BE SETTLED WITH A LIVE EXPLAIN OR PG_STATS QUERY
+--    INSTEAD: checked directly, same standing constraint every migration
+--    on this table has documented. supabase/config.toml (`schemas =
+--    ["public", "graphql_public"]`) confirms PostgREST only exposes the
+--    public and graphql_public schemas — pg_catalog, where pg_stats and
+--    pg_stat_user_tables live, is not reachable through the Data API this
+--    codebase's service-role key uses, and grepping this entire repo turns
+--    up no exec-SQL/EXPLAIN RPC anywhere. The live RPC timing in point 3
+--    is real, independently gathered evidence gathered WITHOUT that
+--    access, not a substitute offered in its place — it answers "is this
+--    reproducible, right now, broadly or narrowly" directly, even though
+--    it can't show the plan node by node. The EXPLAIN and pg_stats queries
+--    that WOULD settle the remaining open questions are in the
+--    verification block at the bottom of this file, for Peter to run.
+--
+-- 5. TABLE BLOAT (dead tuples) — considered, not dismissed, but reasoned to
+--    be a poor fit for the SPECIFIC hot-vs-cold pattern observed, even
+--    though it may still be real and worth checking. screening-pass.js's
+--    markConversationScreened() UPDATEs every row of a conversation exactly
+--    once, shortly after that conversation is first screened — and because
+--    id is a random UUID (point 2), there's no reason that UPDATE activity
+--    would cluster in any particular id range more than another; it should
+--    land roughly UNIFORMLY across the whole id keyspace over time. Uneven
+--    dead-tuple bloat concentrated in the specific regions that timed out
+--    today, while the specific region that stayed fast (the low end)
+--    stayed clean, is not what that write pattern would produce — it
+--    predicts roughly even bloat everywhere, which would show up as
+--    uniformly-somewhat-slower-everywhere, not as "fast in one narrow slice,
+--    ~30s everywhere else." That asymmetry is much better explained by
+--    cache residency (point 3) than by bloat. Real bloat could still be
+--    ADDING to the cost on top of that, though, and is cheap to rule in or
+--    out — the pg_stat_user_tables query for this exact question is in the
+--    verification block below.
+--
+-- ============================================================
+-- THE FIX — MAKE THE QUERY NEVER NEED THE HEAP AT ALL
+-- ============================================================
+-- Postgres has no ALTER INDEX ... ADD INCLUDE — an existing index's column
+-- list (key or INCLUDE) cannot be changed in place; the only way to add
+-- INCLUDE columns is to create a (new) index with them. This migration
+-- creates a new, wider partial index, on the identical leading column and
+-- identical predicate as idx_missive_message_intake_clear_id, but carrying
+-- the three columns fetchDriverPage() actually needs as INCLUDE columns:
+--
+--   CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_id_covering
+--     ON missive_message_intake (id)
+--     INCLUDE (mailbox_key, missive_conversation_id, delivered_at)
+--     WHERE screening_result = 'clear';
+--
+-- With every column the RPC's SELECT list needs now living in the index
+-- itself, Postgres can answer the whole query — filter, order, and
+-- projection — as an Index Only Scan, for any all-visible page, without
+-- ever touching missive_message_intake's own (wide, body_html/body_text/
+-- JSONB-bearing) heap. That directly removes the dependency point 3 above
+-- shows is NOT being reliably satisfied by cache residency today — an
+-- Index Only Scan over a small, mostly-scalar-column index doesn't need
+-- shared_buffers to be holding the RIGHT heap pages at the RIGHT moment,
+-- because it isn't visiting heap pages for the columns this query needs at
+-- all (only, occasionally, for an as-yet-unvacuumed page's visibility
+-- check — see the VACUUM step below for closing that gap immediately
+-- rather than waiting on the next autovacuum).
+--
+-- The OLD index (idx_missive_message_intake_clear_id) is left in place, not
+-- dropped, by this migration. It is not used by anything else in this
+-- codebase — grepped every migration and every .js file in this repo for
+-- its name; the only references are this feature's own migration history
+-- (20260914000000, 20260917010000, 20260918000000, 20260918010000,
+-- 20260918020000, 20260920010000, 20260921020000) — so it is very likely
+-- fully redundant once this migration's index exists, and safe to drop
+-- later. Not dropped here, on purpose: same standing convention this
+-- file's own history already uses twice (20260917010000's own composite
+-- index, and this driver's earlier delivered_at-based attempt) — "whether
+-- to drop it is Neo's call, not made here." Bundling a DROP into the same
+-- migration as the fix under real time pressure is exactly the kind of
+-- extra surface area worth avoiding when the additive half alone already
+-- solves the reported problem; the two old, narrow entries cost a small,
+-- bounded amount of extra index-maintenance work on every future
+-- screening_result UPDATE, not a correctness risk.
+--
+-- Sized for real, honest expectations: at ~250,000-260,000+ 'clear' rows
+-- (148,586+ as of 20260921020000's own count, growing), each entry now
+-- carries id (16 bytes) + mailbox_key (short text) + missive_conversation_id
+-- (a UUID-shaped text string, ~36 bytes) + delivered_at (8 bytes) instead of
+-- just id — roughly several times larger per entry than the existing
+-- narrow index, but still a small, easily-cacheable structure (low tens of
+-- MB, not a meaningful fraction of the full table). Built the same way
+-- every other index on this table has been built this month — see "RUN ON
+-- ITS OWN" note below for why CONCURRENTLY is deliberately not used here.
+--
+-- ****************************************************************
+-- Not CONCURRENTLY — same documented reason 20260914000000 already
+-- established for this exact table: Supabase's SQL Editor runs a pasted
+-- script as one transaction block, and CREATE INDEX CONCURRENTLY cannot run
+-- inside one (ERROR 25001) the moment a second statement (the COMMENT,
+-- the VACUUM) is in the same paste. A plain CREATE INDEX takes a brief
+-- SHARE lock (blocks WRITES to missive_message_intake, not reads) for the
+-- build's duration — acceptable here, same reasoning already accepted for
+-- this table's other same-shape index this month, and this index is a
+-- small fraction of the table's own column set, not a full-table rewrite.
+-- ****************************************************************
+
+CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_id_covering
+  ON missive_message_intake (id)
+  INCLUDE (mailbox_key, missive_conversation_id, delivered_at)
+  WHERE screening_result = 'clear';
+
+COMMENT ON INDEX idx_missive_message_intake_clear_id_covering IS
+  'Added 20260922010000, after live production evidence (this session, 2026-09-22: fresh RPC calls at ~50% and ~75% through the id keyspace, and repeated calls against the exact cursor mid-flight when a real run hit statement_timeout, all landing at ~29.6-30.2s, essentially independent of repetition) showed archive_search_significance_driver_next_clear_page (20260921020000) was a plain Index Scan against idx_missive_message_intake_clear_id (id only, no INCLUDE columns) requiring a real heap fetch for mailbox_key/missive_conversation_id/delivered_at on every matching row, for any region of the table outside the one narrow, repeatedly-retested low-id slice. This index adds those three columns as INCLUDE columns on the same (id) key / same screening_result=''clear'' predicate, so the identical query can be served as an Index Only Scan and stop depending on missive_message_intake''s own heap pages staying cache-resident. The old idx_missive_message_intake_clear_id is left in place (not used elsewhere in this codebase, very likely now redundant, but dropping it is a separate, deliberately deferred decision — see this migration''s own header).';
+
+-- ============================================================
+-- CORRECTION, applied 2026-09-22 after a real failed apply attempt: VACUUM
+-- has the EXACT SAME restriction already documented above for CREATE INDEX
+-- CONCURRENTLY — it cannot run inside a transaction block either (ERROR
+-- 25001: "VACUUM cannot run inside a transaction block"), and Supabase's
+-- SQL Editor wraps an entire pasted script in one. The original version of
+-- this file paired CREATE INDEX + COMMENT + VACUUM in a single paste; when
+-- Peter ran it, VACUUM's failure rolled back the WHOLE transaction —
+-- including the CREATE INDEX, which had already succeeded — confirmed
+-- directly: a live RPC call against the known-slow cursor immediately
+-- afterward still took 30.7s and still timed out, proving nothing had
+-- actually been applied. VACUUM is pulled out below as its own
+-- separately-run statement — same "run on its own" treatment this file
+-- already gives CONCURRENTLY, just applied consistently this time.
+-- ============================================================
+
+-- ★ RUN THE ABOVE (CREATE INDEX + COMMENT) AS ITS OWN PASTE/EXECUTION FIRST.
+-- ★ THEN, SEPARATELY — clear the editor, paste ONLY the line below, and run
+--   it on its own:
+--
+--   VACUUM (ANALYZE) missive_message_intake;
+--
+-- Immediately marks the table's visibility map up to date, so the new
+-- index can serve genuine Index Only Scans (no heap visit at all, not even
+-- for a visibility check) right away rather than waiting on the next
+-- autovacuum cycle to catch up. Takes only a SHARE UPDATE EXCLUSIVE lock —
+-- does not block ordinary reads or writes. Safe to run again later if
+-- skipped now; autovacuum will eventually catch up on its own regardless,
+-- just not immediately.
+
+-- ============================================================
+-- WHAT THIS DOES NOT CLAIM
+-- ============================================================
+-- This does not independently confirm, with a real EXPLAIN, that the new
+-- index is actually chosen and actually reaches Index Only Scan (as opposed
+-- to, say, "Index Only Scan" with a high "Heap Fetches" count because large
+-- swaths of the table aren't yet marked all-visible even after the VACUUM
+-- above, if a lot of concurrent write activity is happening at the exact
+-- moment this runs). The verification block below is exactly how to check
+-- that for real, on the live database, the same discipline every prior
+-- migration on this table has followed given no direct EXPLAIN access from
+-- this environment.
+--
+-- This also does not resolve the open question in point 3(b) above with
+-- certainty — WHY repeated hits don't retain cache today. The fix works
+-- regardless of which specific cause that turns out to be (shared-instance
+-- contention, autovacuum/backfill write volume, or something not yet
+-- considered) because it removes the query's dependence on heap-page cache
+-- residency entirely, rather than trying to guarantee that residency. If,
+-- after applying this and the VACUUM, a real EXPLAIN still shows meaningful
+-- "Heap Fetches" on a previously-slow cursor, that is the concrete signal
+-- autovacuum needs to be revisited for this table (more aggressive
+-- thresholds), not that this index was the wrong fix.
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: idx_missive_message_intake_clear_id has no INCLUDE
+-- columns today (read directly from 20260914000000's own CREATE INDEX
+-- statement) and 20260921020000's own live EXPLAIN text says "Index Scan,"
+-- not "Index Only Scan" — this is a real gap between what the index
+-- provides and what the query's SELECT list needs, not an inference.
+-- HIGH confidence: id has ~0 real correlation to physical row order —
+-- gen_random_uuid() is uniformly random by construction, confirmed from the
+-- column's own DDL, independent of any single day's pg_stats snapshot.
+-- HIGH confidence, freshly and independently gathered today: the timeout is
+-- real, current, and broad — reproduced live just now at three unrelated
+-- points in the id keyspace, not just the one originally reported cursor.
+-- MEDIUM confidence: the specific reason repeated hits don't warm the
+-- cache (shared-instance buffer contention, most likely, per point 3
+-- above) — real, cited, supporting evidence exists elsewhere in this
+-- schema's own migration history, but this is not pg_stat_activity-
+-- confirmed live concurrent-session evidence, which this environment
+-- cannot gather. Does not change what this migration does either way (see
+-- "WHAT THIS DOES NOT CLAIM" above).
+-- LOWER confidence, explicitly flagged rather than silently assumed: that
+-- table bloat is NOT a meaningful contributor. Reasoned as a poor fit for
+-- the specific hot/cold pattern (point 5), not independently ruled out with
+-- a real pg_stat_user_tables read — the query for that is below.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one new index and
+--       runs VACUUM (ANALYZE) — no row, column, or constraint is touched,
+--       changed, or removed. A partial index's predicate and an INCLUDE
+--       column list cannot change which rows or values any query returns,
+--       only how Postgres can find and read them.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes — same table, same read-only exposure
+--       every prior migration in this lineage has already accepted (see
+--       20260914000000, 20260921020000). No writer's behavior changes:
+--       CREATE INDEX (non-concurrent) takes a SHARE lock that blocks
+--       WRITES only for the build's duration (small — this index, while
+--       wider per-entry than the existing one, is still built over a
+--       small fraction of this table's own columns); VACUUM (non-FULL)
+--       blocks neither reads nor writes.
+--   [x] Additive or destructive? Fully additive. One new index, one
+--       VACUUM (a routine maintenance operation, not a schema change).
+--       Nothing dropped, nothing altered in structure.
+--   [ ] Tested on a copy of the data first? No staging copy of this
+--       Supabase project exists — same standing caveat every migration on
+--       this schema has carried. Mitigated by: this cannot alter query
+--       results (see above); it is trivially reversible (DROP INDEX); and
+--       the live RPC timing this migration is built on was independently
+--       reproduced against the real, live, production database just now
+--       (point 3), not assumed from a stale report — the verification
+--       block below lets Peter confirm the AFTER state the same way.
+--   [x] Governance go-ahead needed? No — pure performance tuning (an index
+--       and a VACUUM) on an already-governance-cleared table/RPC. No new
+--       column, no new table, no change to which rows or columns any role
+--       can see, no change to what any query returns — only speed. Not a
+--       compliance build under CLAUDE.md's definition, same classification
+--       already given to every prior performance migration on this table
+--       (20260913010000, 20260914000000, 20260921020000).
+-- ============================================================
+
+-- ============================================================
+-- REQUIRED VERIFICATION AFTER APPLYING — copy-pasteable, read-only, safe to
+-- run in Supabase's SQL Editor. Same reasoning as every prior migration on
+-- this table: this environment has no direct Postgres connection and
+-- PostgREST's EXPLAIN feature is confirmed disabled on this project, so
+-- these have to be run by hand.
+-- ============================================================
+--
+--   -- 1. Confirm the new index is actually chosen, and actually reaches
+--   --    Index Only Scan with zero (or near-zero) Heap Fetches, against
+--   --    the EXACT cursor that was timing out before this migration:
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake
+--   WHERE screening_result = 'clear'
+--     AND id > '8777a631-a18d-4bb5-8ea4-2535c87fc016'
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--   -- Look for "Index Only Scan using idx_missive_message_intake_clear_id_
+--   -- covering" and a low "Heap Fetches" count (ideally 0, or small and
+--   -- shrinking on a repeat call as the visibility map catches up) — and a
+--   -- top-level Execution Time in the tens of milliseconds, not seconds.
+--
+--   -- 2. id's real correlation (confirms/refutes point 2's DDL-based
+--   --    reasoning with the live number):
+--   SELECT attname, correlation
+--   FROM pg_stats
+--   WHERE tablename = 'missive_message_intake' AND attname = 'id';
+--
+--   -- 3. Real bloat/dead-tuple check (point 5) — rules the bloat
+--   --    hypothesis further in or out with real numbers, not reasoning
+--   --    alone:
+--   SELECT relname, n_live_tup, n_dead_tup,
+--          round(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 1) AS dead_pct,
+--          last_autovacuum, last_vacuum, last_autoanalyze
+--   FROM pg_stat_user_tables
+--   WHERE relname = 'missive_message_intake';
+--
+--   -- 4. Any concurrent activity against this table AT THE MOMENT you run
+--   --    this (point 3(b)'s open question — real evidence either way):
+--   SELECT pid, state, wait_event_type, wait_event, query_start,
+--          left(query, 120) AS query_snippet
+--   FROM pg_stat_activity
+--   WHERE query ILIKE '%missive_message_intake%' AND pid <> pg_backend_pid();
+--
+-- ============================================================
+-- ROLLBACK (run this statement to undo this migration)
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_message_intake_clear_id_covering;
+-- (The VACUUM step is a routine maintenance operation, not a structural
+-- change — there is nothing to roll back for it.)
+-- ============================================================

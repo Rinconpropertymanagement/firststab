@@ -1,0 +1,327 @@
+-- ============================================================
+-- Migration: 20260913010000_increase_search_document_statistics_target
+-- Created:   2026-09-13
+-- Author:    Neo (database specialist)
+--
+-- Responds to TARS's second, real, DIFFERENT performance finding on
+-- Archive Search (the first was 20260913000000, the UNION->UNION ALL
+-- dedup fix — that one is confirmed applied and working; this is not a
+-- regression of it, it's a new bug that fix could not have caught, same
+-- as the relationship between 20260912040000 and 20260913000000).
+--
+-- TARS ran the real GET /api/archive-search/search route end-to-end
+-- (router.js's .textSearch('search_document', q, {type:'websearch'})
+-- against missive_message_intake_search_safe, .order('delivered_at',
+-- {ascending:false}), .range() for pagination) against three real terms:
+--   "thermostat" (1,170 of 249,952 rows, ~0.5%)  -> 150-435ms, every time.
+--   "maintenance" (~59,062 rows, ~24%)           -> 4.9-8.0s, EVERY one
+--                                                    of 6 repeated calls,
+--                                                    never fast.
+--   "rent" (~51,777 rows, ~21%)                  -> 300ms to 7.9s across
+--                                                    repeats of the SAME
+--                                                    call; one call hit
+--                                                    the real statement
+--                                                    timeout and returned
+--                                                    a live 500.
+--
+-- ============================================================
+-- ROOT CAUSE (reasoned from documented Postgres planner/executor
+-- behavior; see the confidence note before the MIGRATION GATE section
+-- before treating this as certain without a live EXPLAIN)
+-- ============================================================
+-- idx_missive_message_intake_search_document (GIN, on search_document,
+-- added 20260910030000) and idx_missive_message_intake_delivered_at
+-- (plain B-tree, on delivered_at, also added 20260910030000) are TWO
+-- SEPARATE indexes — confirmed directly by reading that migration.
+-- Postgres has no single index that can answer "which rows match this
+-- tsquery" AND "give me those rows already in delivered_at order" at the
+-- same time: a GIN index on a tsvector has no concept of sort order over
+-- an unrelated column, so it can only ever hand back a match set in
+-- some GIN-internal (effectively unordered, w.r.t. delivered_at) order.
+--
+-- That leaves Postgres exactly two real strategies for
+-- "... WHERE search_document @@ tsquery ORDER BY delivered_at DESC
+-- LIMIT n", and it must commit to ONE per query:
+--   Strategy A: use idx_missive_message_intake_search_document to find
+--     every row matching the tsquery (a Bitmap Heap Scan), THEN Sort
+--     that entire match set by delivered_at, THEN take the top n. Cost
+--     is proportional to HOW MANY ROWS MATCH THE TERM, not to n or to
+--     how deep the page is — because a Sort is a blocking operator: it
+--     cannot emit row 1 until it has seen every row it was given.
+--   Strategy B: use idx_missive_message_intake_delivered_at to walk rows
+--     newest-first, checking "does this row match the tsquery" as a
+--     plain Filter on each one, stopping the moment n matches are found.
+--     Cost is proportional to (how deep the page is) / (how common the
+--     term is) — for a term matching even 20-25% of rows, finding the
+--     first 50-100 matches this way should need only a few hundred row
+--     checks, not tens of thousands.
+--
+-- Every symptom TARS measured is consistent with Postgres choosing
+-- Strategy A for "maintenance" and "rent," and something closer to
+-- Strategy B (or a fast Strategy-A pass over a genuinely small match
+-- set) for "thermostat":
+--   - "thermostat" (0.5% of rows): whichever strategy runs, the match
+--     set is tiny (~1,170 rows) — cheap to sort in full even under
+--     Strategy A. Fast and CONSISTENT, matching the base-table timing
+--     (150-300ms) already established as this table's normal cost floor.
+--   - "maintenance" (24% of rows, 59,062 matches): if Postgres is
+--     running Strategy A, EVERY call pays the same real cost — fetching
+--     and sorting ~59,000 wide rows (this table carries body_html,
+--     body_text, and three JSONB address columns per row; the outer
+--     query alone asks for body_text on every returned row, and Postgres
+--     cannot drop that column before the Sort runs, since it's part of
+--     the projection the Sort has to carry through). That is a real,
+--     substantial, and — critically — DETERMINISTIC cost: the same query
+--     text produces the same plan and touches the same ~59,000 rows every
+--     time, which is exactly "4.9-8.0s, never fast, on every one of 6
+--     repeated calls." Strategy B would be far cheaper here if chosen
+--     (per the arithmetic above), so this pattern points at Postgres NOT
+--     choosing it for this term.
+--   - "rent" (21% of rows, 51,777 matches, WILDLY inconsistent, one real
+--     timeout): this selectivity sits close enough to whatever threshold
+--     the planner's cost model uses to choose between Strategy A and
+--     Strategy B that small, real differences between planning attempts
+--     — slightly different row-count estimates, autovacuum/ANALYZE
+--     timing, a Supabase connection-pooled (PgBouncer) backend replanning
+--     from scratch on a fresh connection rather than reusing one cached
+--     plan — can tip the choice either way. That produces exactly what
+--     was measured: sometimes a fast Strategy-B-like run (300ms, in the
+--     same range as "thermostat"), sometimes a slow Strategy-A-like run
+--     (up to 7.9s), and once, a plan/run bad enough to blow through
+--     statement_timeout entirely. Inconsistency this wide on an IDENTICAL
+--     repeated query, at a selectivity between the other two terms, is
+--     itself evidence of a genuine cost-model coin-flip, not random noise.
+--
+-- WHY the planner might misjudge this at all: Postgres's selectivity
+-- estimate for a tsvector `@@` tsquery condition comes from per-column
+-- statistics (a most-common-lexemes sample, refreshed by ANALYZE, sized
+-- by that column's statistics target — default_statistics_target,
+-- typically 100, applies to search_document since no per-column override
+-- has ever been set on it). A tsvector column with a large, varied
+-- vocabulary is a well-documented case where the default sample size
+-- produces materially inaccurate lexeme-frequency estimates — which
+-- feeds directly into how many raw rows Postgres THINKS Strategy B would
+-- need to scan to fill a page. An underestimate there makes Strategy B
+-- look artificially expensive next to Strategy A, tipping the choice
+-- toward the one that turns out to actually be slow at this row count.
+--
+-- ============================================================
+-- THE FIX, WHAT IT DOES AND DOES NOT CLAIM
+-- ============================================================
+-- Raise search_document's own statistics target from the default (-1,
+-- meaning "use default_statistics_target") to 1000 — the commonly-cited,
+-- well-precedented ceiling for exactly this class of problem (a large-
+-- vocabulary text-search column feeding planner selectivity estimates),
+-- short of the hard maximum (10000), which would multiply ANALYZE cost on
+-- this column for materially diminishing accuracy gains past this point.
+-- Then ANALYZE the table so the new, larger sample is actually collected
+-- (ALTER ... SET STATISTICS only changes how big a sample the NEXT
+-- ANALYZE takes — it does not, by itself, recompute anything).
+--
+-- What this DOES claim, with real confidence: it gives the planner a
+-- materially better-informed estimate of how selective a given tsquery
+-- is against this column, which is the single biggest lever available at
+-- the schema level for a cost-model choice going the wrong way. This
+-- should make the "wildly inconsistent" case ("rent" — sitting right at
+-- the decision boundary) genuinely more consistent, in whichever
+-- direction the now-more-accurate estimate actually supports.
+--
+-- What this does NOT claim, honestly: it does not change the fact that
+-- NO index in this schema lets Postgres get tsquery-matching rows
+-- already sorted by delivered_at. If a term's match set is so large that
+-- even a perfectly-informed planner correctly concludes "Strategy A
+-- really is cheaper here" (plausible for "maintenance," a very common
+-- word, since scanning even a well-informed 24%-selectivity Strategy B
+-- path still touches a lot of rows once you count in screening_result/
+-- escalation filtering) — this migration does not make that Strategy-A
+-- run any faster. Better statistics can only route the query onto the
+-- CHEAPER of the two existing strategies more reliably; it cannot create
+-- a strategy that doesn't exist. See "WHAT TARS AND PETER SHOULD CHECK
+-- NEXT" below — this migration is the safe, real, additive thing to try
+-- and measure first, not a claimed complete fix.
+--
+-- ============================================================
+-- THE THIRD THING LIKELY TO BITE — flagged honestly, not buried
+-- ============================================================
+-- Three real risks, none of them fixed by this migration or by anything
+-- schema-level available here, all worth Peter/TARS knowing about now
+-- rather than after they cause the next live incident:
+--
+--   1. This gets WORSE over time, not just with the word chosen. 'clear'
+--      is the DEFAULT screening outcome for a non-held conversation (per
+--      screening-pass.js, confirmed in 20260913000000's own header) and
+--      new mail keeps arriving. The searchable population only grows,
+--      so ANY term's absolute match count — and the Sort cost if
+--      Strategy A is chosen for it — trends up over time even if that
+--      term's SHARE of the table stays flat. A term that is comfortably
+--      fast today is not guaranteed to stay fast next year on the same
+--      schema with no further change.
+--
+--   2. An OR query is a real, currently-reachable way to get an even
+--      larger match set than any single common word. websearch_to_
+--      tsquery (what .textSearch(..., {type:'websearch'}) generates)
+--      supports explicit "OR" — a search for "rent OR maintenance" unions
+--      two already-large match sets (51,777 + 59,062 rows, before
+--      de-duplication) into one, worse-than-either-alone candidate set
+--      for whichever strategy Postgres picks. Nothing in router.js
+--      restricts the query string a user can type into ?q=.
+--
+--   3. "maintenance" and "rent" are not necessarily this table's worst
+--      case — they are just the two terms TARS happened to test. Given
+--      this is a property-management correspondence archive, plausible
+--      everyday words like "tenant," "lease," or "unit" could easily
+--      match an equal or larger share of rows, and a real user WILL type
+--      one of them eventually. This migration does not verify, and
+--      cannot guarantee, that every common word in this vocabulary is
+--      now fast — only that the planner has better information to work
+--      with when deciding how to run whichever one someone searches.
+--
+-- If, after this migration and a real EXPLAIN (see below), Strategy A is
+-- still being chosen for genuinely common terms and is still slow, the
+-- real structural fix is a QUERY-SHAPE change, not another index: bound
+-- each search to a chronological window (e.g., "most recent N months,
+-- widen only if that page comes up short") so Postgres is asked to sort
+-- a small, bounded slice at a time instead of the entire match set in
+-- one shot. That is a change to router.js's query, and possibly a small
+-- Postgres-side helper function to do the widening loop in one round
+-- trip — application-query-shape work, Q's build, not something this
+-- migration does on its own. Flagging it now, not deferring it silently.
+--
+-- ============================================================
+-- WHAT TARS AND PETER SHOULD CHECK NEXT — live EXPLAIN, before treating
+-- this as settled
+-- ============================================================
+-- This environment has no direct Postgres connection (standing
+-- constraint, same as every prior migration on this table). Two
+-- read-only, copy-pasteable, side-by-side queries for Peter to run in
+-- Supabase's SQL Editor — BEFORE applying this migration (to see today's
+-- real plan) and AFTER (to see whether it changed):
+--
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, subject, from_address, delivered_at, body_text
+--   FROM missive_message_intake_search_safe
+--   WHERE search_document @@ websearch_to_tsquery('english', 'maintenance')
+--   ORDER BY delivered_at DESC
+--   LIMIT 51 OFFSET 0;
+--   ROLLBACK;
+--
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, subject, from_address, delivered_at, body_text
+--   FROM missive_message_intake_search_safe
+--   WHERE search_document @@ websearch_to_tsquery('english', 'thermostat')
+--   ORDER BY delivered_at DESC
+--   LIMIT 51 OFFSET 0;
+--   ROLLBACK;
+--
+-- What to look for:
+--   - A "Sort" node with "Sort Key: delivered_at" — if present, look at
+--     its own "actual rows": a number in the tens of thousands (roughly
+--     matching the term's known match count) confirms Strategy A and the
+--     "must sort everything before LIMIT" mechanism directly. A number
+--     near 50-100 would mean something cheaper already fed the Sort.
+--   - Under that Sort, either "Bitmap Heap Scan on missive_message_intake"
+--     with "Recheck Cond" mentioning search_document (Strategy A, driven
+--     by the GIN index) — or an "Index Scan Backward using idx_missive_
+--     message_intake_delivered_at" with a "Filter" mentioning search_
+--     document (Strategy B) sitting where the Sort would have been,
+--     usually with "Rows Removed by Filter" telling you how many
+--     candidate rows it had to check per match found.
+--   - "Sort Method": "external merge Disk" (spilling to disk — slow,
+--     I/O-variable, matches "rent"'s wide swing) vs "quicksort Memory".
+--   - Top-level "Execution Time" for "maintenance" before vs. after this
+--     migration — a real drop confirms the stats fix helped; no material
+--     change means the structural query-shape fix above is the next,
+--     necessary step, not a nice-to-have.
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: a GIN index on a tsvector column cannot itself supply
+-- rows in order by an unrelated column, so any query filtering on that
+-- tsvector AND ordering by a different column must either sort the full
+-- match set or use a different index and accept the match condition as a
+-- row-by-row Filter — standard, documented Postgres behavior, not a guess
+-- specific to this schema.
+-- HIGH confidence: idx_missive_message_intake_search_document (GIN) and
+-- idx_missive_message_intake_delivered_at (B-tree) are the only two
+-- indexes available for this query, confirmed directly by reading
+-- 20260910030000 — there is no third, hidden index that already solves
+-- this.
+-- MEDIUM confidence: that inaccurate tsvector selectivity statistics
+-- (rather than some other planner factor) are the specific reason
+-- Strategy A is being chosen for "maintenance"/"rent" — a well-documented
+-- general Postgres characteristic for large-vocabulary tsvector columns,
+-- and consistent with every symptom measured, but NOT independently
+-- confirmed with a real plan from this live database. This is exactly
+-- what the EXPLAIN queries above will confirm or rule out.
+-- NOT independently verified: whether raising the statistics target
+-- alone is SUFFICIENT to flip the plan for "maintenance" specifically, as
+-- opposed to only narrowing "rent"'s inconsistency. Said plainly in "WHAT
+-- THIS DOES NOT CLAIM" above — this migration is the safe, real,
+-- additive thing to try first, with a live before/after EXPLAIN as the
+-- actual verification, not an assumption.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. SET STATISTICS changes
+--       only how large a sample the next ANALYZE takes for this one
+--       column — no row, column value, constraint, or view is touched.
+--       ANALYZE itself only reads the table to refresh planner
+--       statistics; it writes nothing to missive_message_intake's own
+--       rows.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes — but this changes neither its
+--       structure nor its contents, only catalog metadata (pg_attribute.
+--       attstattarget) plus the planner statistics ANALYZE derives from
+--       it (pg_statistic). Every existing reader/writer (the Missive sync
+--       cron job, the screening pass, complaint-tracking's own pipeline)
+--       is completely unaffected: none of them depend on this column's
+--       statistics target, and query RESULTS are unchanged by definition
+--       — only which plan the planner picks for a query touching this
+--       column can change, never what that query returns.
+--   [x] Additive or destructive? Fully additive/tuning-only — no column,
+--       index, row, or constraint is added, removed, or altered in
+--       structure. The one caveat worth naming plainly: ANALYZE on a
+--       254,000+ row table with a wide tsvector column is not
+--       instantaneous — expect it to take on the order of seconds to at
+--       most a couple of minutes, during which it holds only a SHARE
+--       UPDATE EXCLUSIVE lock (blocks other ANALYZE/VACUUM/certain DDL on
+--       this same table, does NOT block ordinary reads or writes — the
+--       Missive sync cron job and every Hub route keep working normally
+--       while this runs).
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here has carried. Mitigated by: this change cannot alter query
+--       results (see above), is trivially reversible (rollback resets the
+--       target and re-ANALYZEs), and the EXPLAIN protocol above lets
+--       Peter/TARS verify the real, live effect on the real, live plan
+--       before treating this as more than "the safe thing to try first."
+--   [x] Governance go-ahead needed? No — pure performance tuning on an
+--       already-governance-cleared table/view. No new column, no new
+--       table, no change to what any person or AI agent can see or
+--       decide — search results returned for any given query are
+--       identical before and after this migration, only how fast
+--       Postgres computes them can change. Not a compliance build.
+-- ============================================================
+
+ALTER TABLE missive_message_intake
+  ALTER COLUMN search_document SET STATISTICS 1000;
+
+ANALYZE missive_message_intake;
+
+-- ============================================================
+-- ROLLBACK (resets search_document to the default statistics target and
+-- re-ANALYZEs so live planner stats actually reflect the reset — safe at
+-- any time; this migration changes no stored data, so there is nothing
+-- to restore beyond the statistics themselves)
+-- ============================================================
+-- ALTER TABLE missive_message_intake
+--   ALTER COLUMN search_document SET STATISTICS -1;
+-- ANALYZE missive_message_intake;
+-- ============================================================

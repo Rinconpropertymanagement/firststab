@@ -1,0 +1,370 @@
+-- ============================================================
+-- Migration: 20260917010000_add_clear_delivered_at_id_composite_index_for_significance_driver_sincedate
+-- Created:   2026-09-17
+-- Author:    Neo (database specialist)
+--
+-- Fixes a real, live statement-timeout bug Q hit tonight testing the new
+-- `sinceDate` staged-backfill parameter on the significance-pass driver
+-- query (projects/hub/archive-search/lib/significance-pass.js,
+-- fetchDriverPage / fetchNextEligibleConversations). This is a NEW query
+-- shape 20260914000000 (three days ago, in-story) never tested: that
+-- migration fixed `ORDER BY id ASC LIMIT 500` with NO delivered_at filter.
+-- Layering `WHERE delivered_at >= :cutoff` on top is a different shape
+-- with a different cheapest plan, and the id-only partial index from
+-- 20260914000000 cannot serve it.
+--
+-- ============================================================
+-- WHAT WAS ACTUALLY CHECKED BEFORE WRITING THIS (not guessed)
+-- ============================================================
+-- 1. Q's own live timing tonight (2026-09-17), reported directly, not
+--    assumed: baseline (no delivered_at filter, unchanged query) — page 1
+--    2.0s, page 2 384ms, confirming idx_missive_message_intake_clear_id is
+--    healthy for that shape. Adding `.gte('delivered_at', cutoff)` on top:
+--    page 1 4.44s, page 2 STATEMENT TIMEOUT (57014). Re-ordering by
+--    delivered_at instead of id, with a proper compound keyset cursor,
+--    ALSO times out on page 2 — ruling out "just sort by delivered_at
+--    instead" as a fix on its own.
+--
+-- 2. Independently re-verified tonight, live, via the REST API (service-
+--    role key, read-only, no writes/AI calls) rather than trusting Q's
+--    numbers unchecked:
+--      missive_message_intake total rows                    -> 254,800
+--      screening_result = 'clear'                            -> 249,952
+--      Prefer: count=exact, clear AND delivered_at >= 2025-09-17
+--        -> HTTP 500 (times out even for a bare exact COUNT with
+--           Range: 0-0 — an exact count must still visit every matching
+--           row regardless of LIMIT, so this failure is EXPECTED and
+--           orthogonal to the fix below; see "WHAT THIS DOES NOT CLAIM").
+--      Prefer: count=planned (planner row estimate, cheap, no execution),
+--      clear AND delivered_at >= 2025-09-17                  -> 84,547
+--      Prefer: count=planned, delivered_at >= 2025-09-17 alone (no
+--      screening_result filter)                              -> 86,202
+--    These two planner estimates being nearly identical confirms Q's own
+--    read: screening_result = 'clear' is basically the whole table now
+--    (98.3%), so it adds almost no extra selectivity on top of the date
+--    filter — the date filter alone (~33% of the table, 84,547/254,800)
+--    is the entire selectivity story here, matching Q's independently
+--    sampled ~33% (488/500 distinct conversations on a matching page).
+--    Grepped every migration touching missive_message_intake for existing
+--    indexes (20260905020000, 20260910030000, 20260911010000,
+--    20260912020000, 20260914000000) — confirmed no existing index has
+--    delivered_at and id together in one key, partial or otherwise.
+--
+-- ============================================================
+-- ROOT CAUSE — reasoned from the real evidence above plus documented
+-- Postgres planner/executor behavior; see confidence note before the gate
+-- ============================================================
+-- idx_missive_message_intake_clear_id (id) WHERE screening_result='clear'
+-- (20260914000000) is a single-column index. It answers "clear rows, in id
+-- order" cheaply — but id is a random UUID (gen_random_uuid(), confirmed:
+-- 20260905020000 line 548) with zero correlation to delivered_at. Once
+-- `delivered_at >= cutoff` is added, that index cannot apply the date
+-- filter itself — Postgres can only walk it in id order and, for EACH
+-- candidate id, fetch the heap tuple to check delivered_at (delivered_at
+-- is not a column of this index, so there is nothing to check without a
+-- heap visit). With ~33% of rows matching the date filter and the
+-- matching rows scattered uniformly across the id space (id has no time
+-- correlation), filling a 500-row page requires roughly 1,500 of these
+-- individual, effectively-random heap-page fetches — plausibly several
+-- seconds on a 250,000-row table, and worse (or a full timeout) on later
+-- pages if the id range being walked happens to have a lower local match
+-- density. This is consistent with Q's own live numbers: cost that
+-- balloons rather than staying flat, unlike the id-only case.
+--
+-- Re-ordering by delivered_at with the EXISTING plain
+-- idx_missive_message_intake_delivered_at index doesn't fix it either —
+-- confirmed by Q live — because that index has no screening_result
+-- predicate. It can serve the date range directly, but still needs a
+-- per-row heap check (and Filter re-check) for screening_result = 'clear'
+-- on every candidate, plus everything from the earlier UNION ALL/
+-- security_barrier interaction that 20260914000000 already documented for
+-- this same view (a plan that fails to recognize the bounded, early-
+-- terminating scan is available falls back to materializing a much larger
+-- candidate set before LIMIT can apply).
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- A composite partial btree index, scoped to exactly Branch 1's WHERE
+-- clause (screening_result = 'clear', the same predicate
+-- idx_missive_message_intake_clear_id already targets), but keyed
+-- (delivered_at, id) instead of (id) alone:
+--
+--   CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_delivered_at_id
+--     ON missive_message_intake (delivered_at, id)
+--     WHERE screening_result = 'clear';
+--
+-- This gives Postgres one index that already IS "clear rows, in
+-- delivered_at order, with id as a tiebreaker" — no per-candidate heap
+-- visit needed to evaluate either the date filter or the sort order,
+-- because both columns needed for WHERE + ORDER BY live in the index
+-- itself. A page for a given cutoff becomes a single contiguous range
+-- scan starting at the cutoff (or at the previous page's cursor position)
+-- and reading exactly 500 index entries forward — not 500-found-out-of-
+-- 1,500-random-checks. This directly mirrors 20260914000000's own fix
+-- pattern (one unambiguous, already-correctly-ordered partial index
+-- matching Branch 1's WHERE clause exactly) — extended to the additional
+-- delivered_at predicate/sort that migration didn't need to serve.
+--
+-- Why partial (WHERE screening_result = 'clear') rather than a plain
+-- index over all rows: it matches Branch 1's WHERE clause exactly, giving
+-- the planner one unambiguous index rather than a choice it has to cost-
+-- compare (the same reasoning 20260914000000 gives). Honestly noted: with
+-- screening_result = 'clear' now 98.3% of the table, the partial
+-- predicate saves very little index SIZE (it will still cover ~245,000 of
+-- 254,800 rows) — its real value here is a plan the planner cannot
+-- confuse with anything else, not size reduction.
+--
+-- Why NOT drop the existing idx_missive_message_intake_delivered_at (plain,
+-- all screening states): out of scope for this migration and not proven
+-- safe to remove — that index's own header (20260910030000) names other
+-- consumers (the search route's `ORDER BY delivered_at DESC`, the held-
+-- review-export's earliest-message aggregation) that query across ALL
+-- screening states, not just 'clear'. This migration is purely additive;
+-- retiring that index, if it ever becomes truly redundant, is a separate,
+-- later decision that needs its own usage audit — not bundled in here.
+--
+-- Correctness: this changes ONLY which plan Postgres picks. It adds no
+-- column, changes no row, and does not alter which rows the view (or this
+-- query) returns — a partial index is a different-shaped pointer to the
+-- exact same underlying rows the query already reads via the WHERE clause
+-- it repeats verbatim (same argument 20260914000000 made for its own
+-- index, unchanged here).
+--
+-- ****************************************************************
+-- Built as a PLAIN CREATE INDEX, not CONCURRENTLY — same operational call
+-- 20260914000000 made after a real failed CONCURRENTLY attempt in
+-- Supabase's SQL Editor (ERROR 25001: cannot run inside a transaction
+-- block, triggered by the mere presence of a second statement like
+-- COMMENT ON INDEX in the same paste, regardless of a "run this alone"
+-- instruction). A plain CREATE INDEX takes a brief SHARE lock that blocks
+-- WRITES (not reads) to missive_message_intake for the build's duration —
+-- acceptable given the table's write volume is just the periodic Missive
+-- sync, and ~245,000 rows on two already-existing, already-indexed
+-- columns (delivered_at, id) should build in well under a minute, the
+-- same order of magnitude as 20260914000000's own single-column build.
+-- ****************************************************************
+--
+-- ============================================================
+-- WHAT THIS DOES NOT CLAIM
+-- ============================================================
+-- This is NOT independently confirmed with a real EXPLAIN ANALYZE plan —
+-- same standing constraint every migration on this table has documented:
+-- no DATABASE_URL/psql in this environment, no SQL-execution RPC anywhere
+-- in this codebase (re-checked tonight), and PostgREST's own EXPLAIN
+-- feature confirmed disabled by 20260914000000's own live 406 test (not
+-- re-tested tonight since nothing about that project setting would have
+-- changed). Real, live evidence gathered tonight (the fresh row counts,
+-- the cheap planner-estimated counts confirming ~33% date selectivity,
+-- and the confirmed absence of any (delivered_at, id) composite index)
+-- makes the heap-fetch-per-candidate mechanism above the best-supported
+-- explanation, not a certainty.
+--
+-- This does NOT make `count=exact` cheap for this filter combination —
+-- confirmed live tonight, a bare COUNT with this WHERE clause still times
+-- out (HTTP 500), and no index can fix that: an exact count must visit
+-- every matching row (~84,500 of them) regardless of how efficiently they
+-- can be found, so it pays a cost proportional to the match count, not to
+-- the LIMIT. This migration only speeds up the bounded, LIMIT 500,
+-- ordered PAGE query fetchDriverPage() actually runs — Q flagged not
+-- being able to get an exact total count as something to report; that
+-- constraint is real and separate from this fix, not solved by it. If an
+-- exact total is ever needed, get it from `count=planned` (an estimate,
+-- cheap) or a one-time background count with a long timeout, not from the
+-- paginated driver path.
+--
+-- This does NOT independently confirm the planner will choose a Merge-
+-- Append-style bounded scan across the view's UNION ALL rather than
+-- materializing Branch 1's full ~84,500-row matching set before applying
+-- LIMIT (the exact failure mode 20260914000000's own header worried about
+-- for the id-only case, under security_barrier). Reasoned by direct
+-- analogy, not re-proven from scratch: Q's own baseline measurement
+-- tonight (2.0s page 1, 384ms page 2, unfiltered) shows the planner DOES
+-- choose the cheap bounded-scan plan for Branch 1 once a single
+-- unambiguous, already-correctly-ordered partial index exists matching
+-- its WHERE clause — this migration gives it the equivalent index for the
+-- delivered_at-filtered shape. If the real EXPLAIN below shows the
+-- planner still materializing and sorting instead, that would mean this
+-- specific view/security_barrier combination behaves differently once a
+-- second sort column is involved — a real possibility, not ruled out by
+-- reasoning alone, which is exactly why the EXPLAIN protocol below exists.
+--
+-- ============================================================
+-- EXPLAIN ANALYZE — copy-pasteable, read-only, safe to run BEFORE and
+-- AFTER applying this migration. Run in Supabase's SQL Editor.
+-- ============================================================
+--
+--   -- 0. Confirm the real statement_timeout still in force:
+--   SHOW statement_timeout;
+--
+--   -- 1. First page (no cursor) — exactly the new fetchDriverPage(null, cutoff):
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe
+--   WHERE delivered_at >= '2025-09-17'
+--   ORDER BY delivered_at ASC, id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+--   -- 2. A later page (real compound cursor) — replace the two literals
+--   --    with the last row's own delivered_at/id from a real page-1 run:
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe
+--   WHERE delivered_at >= '2025-09-17'
+--     AND (delivered_at, id) > ('2025-09-20T00:00:00+00:00'::timestamptz, '00000000-0000-0000-0000-000000000000'::uuid)
+--   ORDER BY delivered_at ASC, id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+-- What to look for:
+--   - BEFORE this migration: expect either a "Sort" node fed by a large
+--     "actual rows" count (the materialize-before-limit failure mode), or
+--     an Index Scan on idx_missive_message_intake_delivered_at (or the
+--     clear_id index) with a large "Rows Removed by Filter" count (the
+--     per-candidate heap-fetch-and-discard failure mode) — either
+--     confirms the diagnosis.
+--   - AFTER this migration: expect "Index Scan using
+--     idx_missive_message_intake_clear_delivered_at_id" (or "Index Only
+--     Scan"), "Rows Removed by Filter" near zero, and Execution Time a
+--     small fraction of the before run.
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: the real, freshly-verified row counts (254,800 total,
+-- 249,952 'clear', ~84,547/86,202 planner-estimated for the two variants
+-- of the date filter) and the confirmed absence of any existing
+-- (delivered_at, id) composite index are actual, measured facts from
+-- tonight, not assumptions.
+-- HIGH confidence: a btree index whose leading columns exactly match a
+-- query's WHERE range predicate and ORDER BY, scoped by a partial
+-- predicate matching the query's other WHERE clause exactly, is standard,
+-- documented Postgres behavior for serving exactly this "ranged, ordered,
+-- paginated" shape efficiently — not a guess specific to this schema.
+-- MEDIUM-HIGH confidence: that this resolves the SPECIFIC timeout Q hit,
+-- by direct analogy to the already-observed-live fact that an equivalent
+-- single-column index already lets this same view's UNION ALL serve a
+-- bounded scan cheaply for the unfiltered case. Not independently
+-- re-derived for the two-column case from a real EXPLAIN plan — this
+-- environment has no direct Postgres connection and no SQL-execution RPC
+-- (same standing constraint documented by every migration on this table).
+-- The EXPLAIN queries above are exactly what would settle this and this
+-- reasoning cannot.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists — see bottom of this file.
+--   [x] Does this break any existing data? No. This adds one index — no
+--       row, column, or constraint is touched, and the partial predicate
+--       matches Branch 1's existing WHERE clause exactly, so it cannot
+--       change which rows any query returns, only how Postgres finds them.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, yes — read by every archive-search route
+--       via missive_message_intake_search_safe, and by screening-pass.js
+--       directly (the one named exception). Adding an index changes no
+--       reader's or writer's behavior beyond query plans.
+--   [x] Additive or destructive? Fully additive — one new index, nothing
+--       removed, nothing restructured. The existing
+--       idx_missive_message_intake_clear_id and
+--       idx_missive_message_intake_delivered_at indexes are both left in
+--       place, unmodified, still serving their existing callers (the
+--       unfiltered driver path, and delivered_at-ordered queries across
+--       all screening states, respectively).
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project — same standing caveat every migration
+--       here has carried. Mitigated by: this change cannot alter query
+--       results (see above), it is trivially reversible (DROP INDEX), and
+--       the EXPLAIN protocol above lets Peter/TARS verify the real, live
+--       plan and timing before and after, on real data, before treating
+--       this as confirmed. Recommend TARS also re-run Q's exact repro
+--       (page 1 then page 2, real cutoff) against the live DB after this
+--       is applied and the query shape below is implemented, not just the
+--       EXPLAIN in isolation.
+--   [x] Governance go-ahead needed? No — pure performance tuning on an
+--       already-governance-cleared table/view (see 20260914000000's own
+--       identical conclusion). No new column, no new table, no change to
+--       which rows any person or AI agent can see — identical query
+--       results before and after, only speed changes. Not a compliance
+--       build.
+-- ============================================================
+--
+-- ============================================================
+-- QUERY SHAPE Q'S CODE MUST USE ONCE THIS INDEX EXISTS
+-- ============================================================
+-- This index only serves fetchDriverPage() when sinceDate IS set. The
+-- existing, unfiltered path (sinceDate null) is UNCHANGED — it should
+-- keep using `ORDER BY id ASC` with a plain `id > lastId` cursor, which
+-- idx_missive_message_intake_clear_id (20260914000000) already serves
+-- well (Q's own baseline measurement tonight confirms this is still
+-- fast). Do not switch the unfiltered path to delivered_at ordering.
+--
+-- When sinceDate IS set, fetchDriverPage's query must change shape to:
+--
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe
+--   WHERE delivered_at >= :sinceDate
+--     [AND (delivered_at, id) > (:lastDeliveredAt, :lastId)]   -- omit for page 1
+--   ORDER BY delivered_at ASC, id ASC
+--   LIMIT 500;
+--
+-- Two things this requires that are NOT true of the current code:
+--   1. `delivered_at` must be added to the SELECT list whenever sinceDate
+--      is set — it's needed to build the NEXT page's cursor, the same way
+--      `id` already is. (Not needed, and not necessary to add, when
+--      sinceDate is null — keep that path's SELECT list as-is.)
+--   2. The cursor becomes a COMPOUND value {delivered_at, id} in the
+--      sinceDate branch, not a bare id — the last row of page N must hand
+--      back BOTH fields for page N+1's WHERE clause. A bare `id > lastId`
+--      cursor is not enough once the sort key is (delivered_at, id): two
+--      different rows can share the same delivered_at, so id alone cannot
+--      resolve where in a same-timestamp run the previous page stopped.
+--
+-- Row-wise comparison via PostgREST/supabase-js: PostgREST's query
+-- builder cannot express `(delivered_at, id) > (x, y)` as a single
+-- native row-comparison, so build it as an OR of the two cases via
+-- `.or()` — same construction Q already proved parses/executes correctly
+-- tonight (it just lacked this index to be fast):
+--
+--   query = query
+--     .gte('delivered_at', sinceDate)
+--     .order('delivered_at', { ascending: true })
+--     .order('id', { ascending: true })
+--     .limit(DRIVER_PAGE_SIZE);
+--
+--   if (lastCursor) { // { delivered_at, id } — omitted on page 1
+--     query = query.or(
+--       `delivered_at.gt.${lastCursor.delivered_at},and(delivered_at.eq.${lastCursor.delivered_at},id.gt.${lastCursor.id})`
+--     );
+--   }
+--
+-- Keeping the plain `.gte('delivered_at', sinceDate)` alongside the
+-- cursor OR-clause on every page (not just page 1) is intentional, not
+-- redundant-and-harmless-only: it is also the leading condition this new
+-- index range-scans on, and it is a defensive guard against a cursor-
+-- construction bug ever letting a row below the cutoff leak through.
+--
+-- fetchNextEligibleConversations() needs the equivalent small change: its
+-- `lastId` local variable becomes `lastCursor`, set after each page to
+-- `sinceDate ? { delivered_at: page[page.length-1].delivered_at, id: page[page.length-1].id } : page[page.length-1].id`,
+-- and passed into fetchDriverPage(lastCursor, sinceDate) accordingly. This
+-- file does not make that change — Q owns lib/significance-pass.js.
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_missive_message_intake_clear_delivered_at_id
+  ON missive_message_intake (delivered_at, id)
+  WHERE screening_result = 'clear';
+
+COMMENT ON INDEX idx_missive_message_intake_clear_delivered_at_id IS
+  'Added 20260917010000 to fix a live statement-timeout in the archive-search significance-pass driver''s new sinceDate-filtered path (significance-pass.js fetchDriverPage -- SELECT id, mailbox_key, missive_conversation_id, delivered_at FROM missive_message_intake_search_safe WHERE delivered_at >= :cutoff ORDER BY delivered_at ASC, id ASC LIMIT 500, paged by a compound (delivered_at, id) keyset cursor). Complements, does not replace, idx_missive_message_intake_clear_id (20260914000000), which stays the right index for the unfiltered/no-sinceDate driver path (ORDER BY id ASC alone). screening_result = ''clear'' is 249,952 of 254,800 rows as of 2026-09-17 (98.3%) -- the partial predicate here matches Branch 1 of missive_message_intake_search_safe''s UNION ALL exactly (see 20260913000000) so the planner has one unambiguous, already-(delivered_at,id)-ordered index to use, rather than having to fetch a heap tuple for every id-ordered candidate just to check delivered_at (id is a random gen_random_uuid() with no time correlation -- confirmed 20260905020000).';
+
+-- ============================================================
+-- ROLLBACK
+-- ============================================================
+-- DROP INDEX IF EXISTS idx_missive_message_intake_clear_delivered_at_id;
+-- ============================================================

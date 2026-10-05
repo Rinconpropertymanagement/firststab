@@ -1,0 +1,385 @@
+-- ============================================================
+-- Migration: 20260918020000_simplify_search_safe_clear_branch_view_remove_escalation_antijoin
+-- Created:   2026-09-18
+-- Author:    Neo (database specialist)
+--
+-- STRATEGY CHANGE, not another index. Two consecutive targeted fixes
+-- tonight (20260918000000's narrow view; 20260918010000's escalations
+-- index) each looked correct on an isolated EXPLAIN/short test and did NOT
+-- hold up under a real, full, sequential pagination walk from cursor=null
+-- — exactly the failure mode the task that produced this migration asked
+-- me to stop repeating. I did not write a third index. I independently
+-- reproduced the failure myself tonight, found something the incident
+-- report itself hadn't yet shown (the failure is NOT stable/deterministic
+-- across repeated identical runs — see below), and concluded the anti-join
+-- construct itself, not any missing index, is the thing to remove.
+--
+-- ============================================================
+-- WHAT I INDEPENDENTLY VERIFIED MYSELF TONIGHT, LIVE, VIA THE REAL
+-- POSTGREST API (service-role key, read-only, no writes) — BEFORE writing
+-- this file, not relayed from anyone else's session
+-- ============================================================
+-- 1. Re-confirmed live counts: missive_message_intake 254,822 total,
+--    249,952 screening_result='clear'; archive_search_escalations 0 rows
+--    (both total and status IN ('open','confirmed')); archive_search_
+--    flagged_overrides 127 active (revoked_at IS NULL).
+--
+-- 2. Walked missive_message_intake_search_safe_clear_branch (20260918000000
+--    — screening_result='clear' AND NOT EXISTS escalations, security_
+--    barrier=true) sequentially from cursor=null, TWICE, minutes apart:
+--      Run 1: 9 real pages, 4,500 rows, all succeeded (1.8-1.9s/page after
+--        a 5.6s cold first page) — did NOT fail at page 7.
+--      Run 2 (same view, same query, same starting cursor=null): page 4
+--        jumped to 6.9s, PAGE 5 FAILED after 8,159ms: "canceling statement
+--        due to statement timeout" (57014).
+--    Same query, same data, run minutes apart -- different outcomes. This
+--    is the important finding beyond re-confirming the reported bug: this
+--    view's plan is not a stable function of cursor depth alone. A single
+--    EXPLAIN, or a single short walk that happens to succeed, is not
+--    reliable evidence this shape is safe -- which is exactly why three
+--    fixes in a row have each looked right in isolation and then failed
+--    for real. (I also re-touched the original, still-deployed broad view,
+--    missive_message_intake_search_safe -- 2 pages, both succeeded, one
+--    fast, one not -- consistent with the same instability, not a
+--    contradiction of the incident report's own page-1 failure.)
+--
+-- 3. Walked the BASE TABLE directly (read-only diagnostic via the
+--    service-role key, same access every prior migration on this schema
+--    has used for exactly this kind of verification -- see 20260914000000,
+--    20260917010000, 20260918000000's own "WHAT WAS ACTUALLY CHECKED"
+--    sections) with ONLY `screening_result=eq.clear`, ORDER BY id, no
+--    subquery, no security_barrier, no view at all -- 55 real, consecutive
+--    pages, 27,500 real rows, ONE continuous run, zero failures, flat
+--    196-330ms every single page with no growth or variance as depth
+--    increased (exceeds the task's own 40-50-page bar). This is the exact
+--    same shape idx_missive_message_intake_clear_id (20260914000000) was
+--    built for, and it holds -- the instability above only shows up once
+--    the escalations NOT EXISTS clause is added under security_barrier.
+--
+-- 4. Verified the exact query the fix below requires Q's driver to run
+--    once per call (never per page) to fetch the current escalation-
+--    exclusion set: `archive_search_escalations?select=mailbox_key,
+--    missive_conversation_id&or=(status.eq.open,and(status.eq.confirmed,
+--    reopened_at.is.null))` -- matches the live view's own exclusion
+--    condition (20260912050000) exactly, not the looser status IN (...)
+--    shape the temporary test index checked. Live: 200 OK, 833ms, correctly
+--    returns zero rows (the table is empty). This is the same "fetch the
+--    small exception set once, merge client-side" pattern already shipped
+--    and already proven fast for the override branch tonight (127 rows,
+--    508+189ms, 20260918000000's own measurement) -- not a new pattern,
+--    the same one, applied to the other side.
+--
+-- ============================================================
+-- ROOT CAUSE, reasoned from the evidence above
+-- ============================================================
+-- A security_barrier view containing a correlated NOT EXISTS subquery
+-- (over ANY table, including one with zero matching rows right now -- the
+-- escalations table is empty tonight, so this is not about row content) is
+-- a well-documented Postgres case where the planner has more than one
+-- viable plan shape to choose between (typically Nested Loop Anti Join vs.
+-- a Hash-based alternative), and security_barrier further restricts which
+-- transformations are legal across the barrier. Point 2 above shows this
+-- choice is not stable across repeated, identical requests -- consistent
+-- with a cost estimate close enough between two plans that something
+-- request-to-request (connection-pool assignment, cache warmth, ANALYZE
+-- statistics drift) tips it one way or the other. The base-table test
+-- (point 3) proves the underlying index and the plain filter are not the
+-- problem -- they are flat and reliable on their own, to 55 pages. The one
+-- variable removed between the failing view and the reliable base-table
+-- query is the anti-join/subquery construct itself (and, only as a
+-- secondary factor, security_barrier's interaction with it) -- so that is
+-- what this migration removes, rather than adding a fourth index to try to
+-- out-cost-estimate a choice that has already been shown not to hold
+-- steady across repeated runs.
+--
+-- ============================================================
+-- WHY NOT THE PRECOMPUTE-SNAPSHOT-TABLE APPROACH (the task asked me to
+-- evaluate this seriously, and said explicitly to make the case if I
+-- concluded something else was better -- this is that case)
+-- ============================================================
+-- A one-time materialized table of eligible (mailbox_key, missive_
+-- conversation_id) pairs would also fix the pagination reliability problem
+-- -- a flat table scan is trivially safe regardless of cursor value. I am
+-- not recommending it tonight, for three concrete reasons:
+--
+--   1. It doesn't fix anything the smaller change below doesn't already
+--      fix. Point 3's live evidence shows the actual bottleneck construct
+--      is the anti-join, not "any view/pagination at all." Removing the
+--      anti-join and keeping the driver on a live, always-current view
+--      gets the same reliability a snapshot table would, without building
+--      a second, separate mechanism.
+--   2. It introduces a REAL compliance-relevant tradeoff the smaller fix
+--      does not: a snapshot is a point-in-time copy. A conversation
+--      escalated (Fair-Housing concern reported) AFTER the snapshot is
+--      taken but BEFORE the batch actually reaches it would not be
+--      excluded -- the exact kind of timing gap CLAUDE.md's Governance
+--      section says to flag and get an Asimov gut-check on, not decide
+--      unilaterally. The fix below has NO version of this problem: the
+--      escalation-exclusion set is fetched fresh, live, once per driver
+--      run, every run -- identical freshness guarantee to what the
+--      current (broken) view already provides today, never weakened.
+--   3. It is real, additional, ongoing complexity CLAUDE.md's "keep it as
+--      simple as possible" already argues against building unless
+--      something simpler provably can't work: a new table, a one-time
+--      population step that itself has to be designed and run carefully
+--      (chunked, long-timeout, patient), and an open decision about
+--      whether/how to refresh it -- none of which this schema needs once
+--      the anti-join is gone, because the live view is fast on its own.
+--
+-- Not dismissed as impossible -- if a future, genuinely different query
+-- shape on this table turns out to need this treatment (e.g. a filter that
+-- really can't be served by any index, unlike this one), the same
+-- reasoning this migration used to rule it out today would need to be
+-- re-run against that shape specifically, not assumed to still apply.
+--
+-- ============================================================
+-- THE FIX
+-- ============================================================
+-- CREATE OR REPLACE the SAME view 20260918000000 created
+-- (missive_message_intake_search_safe_clear_branch), removing the
+-- escalations NOT EXISTS clause entirely. What's left is a single,
+-- leakproof, plain-column WHERE clause -- provably the same shape as the
+-- base-table query just walked clean for 55 real pages, because it now IS
+-- that query, under a security_barrier view with nothing else in it.
+--
+-- This view still has ZERO real callers in the codebase as of tonight --
+-- confirmed directly by reading projects/hub/archive-search/lib/
+-- significance-pass.js just now: fetchDriverPage() (line ~872) still
+-- queries missive_message_intake_search_safe (the ORIGINAL, still-broken,
+-- broad view), not this one. Neither 20260918000000 nor 20260918010000's
+-- own "Q's change, on top of this migration, not made here" ever actually
+-- landed. So, same as both of those migrations' own reasoning, changing
+-- this view's definition again carries zero risk to any currently-live
+-- code path today.
+--
+-- ============================================================
+-- WHAT Q'S DRIVER CODE MUST DO ON TOP OF THIS MIGRATION (not built here --
+-- Neo owns schema, not application code; this is the precise handoff, same
+-- convention 20260917010000's own "QUERY SHAPE Q'S CODE MUST USE" section
+-- already set)
+-- ============================================================
+--   1. fetchDriverPage() must be pointed at
+--      missive_message_intake_search_safe_clear_branch (it currently
+--      queries the broad view -- this is the actual fix landing, not just
+--      the schema existing). Query shape is UNCHANGED otherwise: ORDER BY
+--      id ASC, bare id > cursor, LIMIT 500.
+--   2. fetchNextEligibleConversations() must fetch the escalation-
+--      exclusion set ONCE per call (never per page -- it is cheap at this
+--      table's designed-to-stay-small scale, but there is no reason to
+--      re-fetch it 170+ times over an 84,408-conversation run either):
+--        archive_search_escalations?select=mailbox_key,missive_conversation_id
+--          &or=(status.eq.open,and(status.eq.confirmed,reopened_at.is.null))
+--      -- the exact condition verified live above, matching the live main
+--      view's own exclusion logic (20260912050000) precisely, not the
+--      looser status IN (...) shape.
+--   3. Every page's rows must be filtered against that exclusion set
+--      BEFORE dedupeNewPairs() runs on them -- same "advance the cursor
+--      from the RAW page regardless" discipline already used for
+--      passesSinceDate() (significance-pass.js line ~962): exclusion
+--      narrows which pairs are ELIGIBLE, it must never narrow which rows
+--      advance the pagination cursor.
+--   4. The override branch (archive_search_flagged_overrides, ~127 active
+--      rows) is UNCHANGED by this migration -- 20260918000000's own design
+--      for it (fetch the small active-override set, then ask the real,
+--      full, unmodified missive_message_intake_search_safe view for
+--      exactly those conversations) is still correct and still not yet
+--      implemented in significance-pass.js. One easy-to-miss correctness
+--      requirement worth stating plainly here because it is not obvious
+--      from either view in isolation: the SAME escalation-exclusion set
+--      from step 2 must ALSO be applied to whatever rows the override
+--      fetch returns. An overridden conversation with a later, open Fair-
+--      Housing escalation must still be excluded -- exactly what the
+--      original combined view did (NOT EXISTS applied to the UNION ALL of
+--      both branches, not to Branch 1 alone), and exactly what would
+--      silently break if escalation-exclusion is wired to the clear_branch
+--      page loop only and forgotten on the override-merge path.
+--
+-- ============================================================
+-- CORRECTNESS
+-- ============================================================
+-- This changes what missive_message_intake_search_safe_clear_branch itself
+-- returns (previously: clear AND not-escalated; now: clear only) -- unlike
+-- every prior migration in this chain, this is NOT a provable no-op
+-- subset/superset change on its own. It is only correct once combined with
+-- Q's client-side exclusion step above, same as the override branch has
+-- ALWAYS depended on application code to complete the full eligibility
+-- picture (this view was never, by itself, "the entire set of eligible
+-- conversations" -- it was always Branch 1 only). No existing caller reads
+-- this view for a final answer without that assembly step, and none exists
+-- yet at all. missive_message_intake_search_safe (the real, full, governance-
+-- named view every other archive-search route must use) is completely
+-- untouched by this migration -- its own escalation-exclusion and override-
+-- inclusion logic stays exactly as it is today for search, message-fetch,
+-- and escalation-report routes.
+--
+-- ============================================================
+-- WHAT THIS MIGRATION DOES NOT CLAIM
+-- ============================================================
+-- I could not create a throwaway test view to walk the ACTUAL new view
+-- object live before writing this file -- no SQL-execution RPC exists in
+-- this schema (same standing constraint every migration here has
+-- documented) and Peter applies every migration himself. What I verified
+-- (point 3 above) is the identical query shape this view will produce
+-- (single leakproof equality predicate, no subquery, no join), run
+-- directly against the base table, for 55 real consecutive pages. A
+-- security_barrier view wrapping ONE plain equality predicate with no
+-- subquery is standard, well-documented Postgres behavior for clean qual
+-- pushdown/inlining (unlike the UNION ALL and anti-join cases this exact
+-- table's migration history has already been burned by) -- but "should
+-- behave identically" is exactly the assumption this bug has punished
+-- twice already. Run the EXPLAIN below, and a fresh real sequential walk
+-- of 40-50+ pages against the ACTUAL DEPLOYED VIEW (not the base table),
+-- after this migration is applied and BEFORE Q's driver change goes
+-- anywhere near the real 84,408-conversation run -- this is not optional
+-- given this table's own recent history, and is not satisfied by this
+-- file's own base-table evidence alone, however strong.
+--
+-- ============================================================
+-- EXPLAIN ANALYZE / REAL WALK PROTOCOL -- run in Supabase's SQL Editor
+-- and/or via the REST API, AFTER applying this migration
+-- ============================================================
+--
+--   -- 1. EXPLAIN, first page:
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe_clear_branch
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+--   -- 2. EXPLAIN, a deep real cursor (id from your own page-6+ result):
+--   BEGIN;
+--   SET LOCAL statement_timeout = '30s';
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, mailbox_key, missive_conversation_id, delivered_at
+--   FROM missive_message_intake_search_safe_clear_branch
+--   WHERE id > '<a real id from your own deep page>'
+--   ORDER BY id ASC
+--   LIMIT 500;
+--   ROLLBACK;
+--
+-- What to look for: a plain "Index Scan using idx_missive_message_intake_
+-- clear_id" (or "Index Only Scan"), NO Nested Loop / Anti Join / Hash Anti
+-- Join node of any kind, NO Sort. Then run a REAL sequential walk (40-50+
+-- pages, cursor=null start, same shape as this file's own point 2/3 tests)
+-- against this actual view via the REST API and confirm it stays flat --
+-- do not accept a single successful short run as proof, per this
+-- migration's own point 2 finding that this class of query has already
+-- shown run-to-run variance.
+--
+-- ============================================================
+-- CONFIDENCE LEVEL
+-- ============================================================
+-- HIGH confidence: every number and timing above is real, live, measured
+-- by me tonight, including the run-to-run instability finding (not
+-- assumed, not relayed).
+-- HIGH confidence: the base-table shape this new view now matches exactly
+-- is reliable -- 55/55 real consecutive pages, flat timing, zero failures,
+-- exceeding the task's own 40-50-page verification bar.
+-- MEDIUM-HIGH confidence, not certain: that a security_barrier view
+-- wrapping this exact predicate, with no subquery, reproduces the base-
+-- table timing exactly once deployed as a real view object -- standard
+-- Postgres behavior, not this schema's own prior failure pattern (UNION
+-- ALL, anti-join), but not independently re-proven against the literal
+-- deployed view, for the reason stated above. The EXPLAIN + real-walk
+-- protocol above is what would settle this, and this reasoning cannot.
+--
+-- ============================================================
+-- MIGRATION GATE SELF-CHECK (Neo's standing checklist)
+-- ============================================================
+--   [x] Rollback exists -- see bottom of this file.
+--   [x] Does this break any existing data? No. This replaces a view
+--       definition -- no row, column, table, or constraint is touched.
+--       Postgres CREATE OR REPLACE VIEW is metadata-only.
+--   [x] Does this touch a table other code depends on?
+--       missive_message_intake, read-only, via this one narrow view --
+--       same table missive_message_intake_search_safe already reads.
+--       Confirmed directly (see "THE FIX" above): this view has ZERO real
+--       callers in the current codebase as of tonight, so no currently-
+--       live code path changes behavior the moment this ships.
+--       missive_message_intake_search_safe itself -- untouched, not
+--       referenced by this migration at all.
+--   [x] Additive or destructive? Structurally additive (CREATE OR REPLACE
+--       on an object with no real caller yet) but a real behavior change
+--       to what this specific view WOULD return once something reads it
+--       (previously: clear AND not-escalated; now: clear only, escalation-
+--       exclusion moved to required application-code assembly -- see
+--       "CORRECTNESS" above for why this is by design and matches how the
+--       override branch has always worked, not an oversight).
+--   [ ] Tested on a copy of the data first? No staging copy of Supabase
+--       exists in this project -- same standing caveat every migration
+--       here has carried. Mitigated by: CREATE OR REPLACE VIEW cannot
+--       corrupt anything (metadata-only, zero real callers today); this
+--       file's own point 3 evidence (55 real pages against the identical
+--       query shape) is the strongest pre-application verification any
+--       migration in this chain has had; and the EXPLAIN + real-walk
+--       protocol above is required, not optional, before Q's driver change
+--       goes near the real batch run.
+--   [x] Governance go-ahead needed? Same narrow, non-inherited conclusion
+--       20260918010000 already gave for this exact area, and I'm not
+--       loosening it: this view sits directly in the read path of the
+--       Fair-Housing escalation-exclusion mechanism (archive_search_
+--       escalations, itself a three-times-over GOVERNANCE.md compliance
+--       build per 20260912030000/040000/050000's own headers). On the
+--       narrow technical question -- can a view definition change, by
+--       itself, alter which rows a person or AI agent can see -- the
+--       answer today is no (zero real callers), so I don't believe this
+--       blocks on a new Asimov/Mason review to SHIP THE SCHEMA. But this
+--       migration only completes its intended effect once Q's driver code
+--       change lands (see "WHAT Q'S DRIVER CODE MUST DO" above), and THAT
+--       change is exactly the kind CLAUDE.md's Governance section names --
+--       it changes how escalation-exclusion is enforced for a real,
+--       84,408-conversation run touching Fair-Housing-relevant content.
+--       Recommending the same quick Asimov nod 20260918000000 and
+--       20260918010000 already recommended for this same area, before Q's
+--       driver change (not just this schema file) ships -- worth stating
+--       plainly: unlike the rejected precompute-table option, THIS design
+--       introduces no staleness/timing gap versus what's live today (see
+--       "WHY NOT THE PRECOMPUTE-SNAPSHOT-TABLE APPROACH" point 2), so I
+--       expect this to be a fast nod, not a real re-review -- but it is
+--       Asimov's call to make that judgment, not mine to skip.
+-- ============================================================
+
+CREATE OR REPLACE VIEW missive_message_intake_search_safe_clear_branch
+WITH (security_barrier = true) AS
+SELECT m.*
+FROM missive_message_intake m
+WHERE m.screening_result = 'clear';
+
+COMMENT ON VIEW missive_message_intake_search_safe_clear_branch IS
+  'Added 20260918000000, simplified 20260918020000 after two consecutive fixes (the original UNION ALL removal, then an escalations index) each passed an isolated test and failed a real, full sequential pagination walk. Live evidence (20260918020000): the escalations NOT EXISTS/anti-join, under security_barrier, produced a plan whose success/failure was NOT stable across repeated identical requests (one run: 9 clean pages; another, minutes apart: failed at page 5) -- even against an EMPTY escalations table, so this was never about row content. Removing the anti-join entirely leaves a single leakproof equality predicate (screening_result = ''clear''), the exact shape independently walked live for 55 consecutive real pages / 27,500 rows with flat ~200-330ms timing and zero failures. This view is Branch 1 ONLY -- same as it always was -- and is not, by itself, the full eligible set: the caller (significance-pass.js fetchNextEligibleConversations, per its own required handoff, see this migration''s own header) must fetch archive_search_escalations''s current open/confirmed-and-not-reopened set ONCE per call and exclude those keys from BOTH this view''s page rows and the separately-fetched override-branch rows (archive_search_flagged_overrides, via the full missive_message_intake_search_safe view, unchanged design from 20260918000000) before either contributes to the eligible set. This keeps escalation-exclusion exactly as fresh as it is today (fetched live, every run) -- deliberately NOT a point-in-time snapshot, unlike a precompute-table alternative this migration''s own header explains why it rejected. Intended for ONE caller: significance-pass.js''s bulk id-ordered driver pagination. security_barrier = true, unchanged: still gates the same PII-bearing, pre-screening-exception content class as missive_message_intake_search_safe itself.';
+
+
+-- ============================================================
+-- ROLLBACK (run these statements in order to undo this migration)
+-- ============================================================
+--
+-- -- Reverts missive_message_intake_search_safe_clear_branch to its PRIOR
+-- -- definition (20260918000000 -- includes the escalations anti-join).
+-- -- Safe at any time -- this view has no real caller as of this
+-- -- migration's own writing; confirm that is still true (grep
+-- -- significance-pass.js for missive_message_intake_search_safe_clear_
+-- -- branch) before rolling back if Q's driver change has since shipped --
+-- -- rolling back without also reverting the driver code would put the
+-- -- driver back onto the less-reliable anti-join shape this migration
+-- -- exists to retire.
+--
+-- CREATE OR REPLACE VIEW missive_message_intake_search_safe_clear_branch
+-- WITH (security_barrier = true) AS
+-- SELECT m.*
+-- FROM missive_message_intake m
+-- WHERE m.screening_result = 'clear'
+--   AND NOT EXISTS (
+--     SELECT 1
+--     FROM archive_search_escalations e
+--     WHERE e.missive_conversation_id = m.missive_conversation_id
+--       AND e.mailbox_key             = m.mailbox_key
+--       AND (
+--         e.status = 'open'
+--         OR (e.status = 'confirmed' AND e.reopened_at IS NULL)
+--       )
+--   );
+--
+-- ============================================================

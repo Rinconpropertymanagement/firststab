@@ -41,11 +41,13 @@ REMOTE_DIR="/var/www/appfolio-sync"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> Copying appfolio-sync code to Sally..."
-# --delete removes files on Sally that no longer exist locally; .env is
+# This only adds and updates files on Sally; it never deletes anything on the
+# server (there is deliberately no --delete flag). A file removed locally
+# stays on Sally until someone removes it by hand. .env is
 # excluded even though this project doesn't have one, purely as a
 # never-accidentally-touch-a-credential-file backstop, matching every other
 # deploy script in this repo.
-rsync -az --delete \
+rsync -az \
   --exclude 'node_modules' \
   --exclude '.env' \
   --exclude '.env.*' \

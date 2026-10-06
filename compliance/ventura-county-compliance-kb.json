@@ -1,0 +1,1267 @@
+{
+  "_meta": {
+    "title": "Ventura County Property Management Legal Compliance Knowledge Base",
+    "prepared_for": "Rincon Management (Peter McKenzie)",
+    "prepared_by": "Oracle (research/spec agent)",
+    "geography_covered": {
+      "state": "California",
+      "county": "Ventura County",
+      "cities": ["Oxnard", "Thousand Oaks", "Simi Valley", "Ventura (San Buenaventura)", "Camarillo", "Moorpark", "Fillmore", "Santa Paula", "Port Hueneme"],
+      "includes_unincorporated_county": true,
+      "explicitly_excluded": ["Santa Barbara County", "Goleta", "Carpinteria", "any jurisdiction outside Ventura County"]
+    },
+    "date_generated": "2026-07-09",
+    "next_review_owner": "Mason (legal specialist) — must review before Neo builds tables or any content is published to tenants/owners",
+    "freshness_warning": "Several figures in this file are CPI-adjusted or otherwise change on a schedule (see 'annual_recheck_required' flags on individual claims). This file must be re-verified at least annually, and immediately if any cited ordinance shows a 'proposed' or 'draft' status maturing to final.",
+    "methodology_note": "Every claim was checked against a primary source (statute text, municipal code, or ordinance/staff report) where available. Where only secondary commentary could be found, that is disclosed in the claim's evidence and confidence is capped at MEDIUM. No claim was fabricated; anything that could not be verified is marked LOW confidence and NEEDS_HUMAN_REVIEW with a specific resolution note.",
+    "total_claims": 55,
+    "claims_needing_human_review": 9,
+    "review_log": [
+      {
+        "reviewer": "Mason (legal specialist)",
+        "date": "2026-07-09",
+        "summary": "Full legal review completed. Found and corrected one HIGH-RISK factual gap (Oxnard's just-cause/relocation ordinance, Ord. 3012, was entirely missing — added as new claim ab1482-oxnard-03). Resolved two claims previously flagged NEEDS_HUMAN_REVIEW as not actually uncertain (Ventura chapter-numbering 'conflict' was two separate valid ordinances, not an inconsistency; Camarillo ordinance number/chapter now confirmed as Ord. No. 2038 / Ch. 10.55). Updated ab1482-ventura-02 with a more recent October 2025 source correcting one eligibility category and confirming the ordinance's introduction date, while keeping its adoption status flagged pending direct city confirmation. Added a downstream-review flag to fh-06 requiring any published screening-criteria content to route back through Mason specifically, beyond the standard review gate. Remaining 9 NEEDS_HUMAN_REVIEW claims require either a direct city-clerk call, a primary-statute pull, or a scheduled figure recheck — none were resolvable from this pass and none should be treated as settled until resolved. Verdict: cleared for Neo to build database tables around, provided the human-review gate before any content publishes stays fully intact."
+      },
+      {
+        "reviewer": "Mason (legal specialist)",
+        "date": "2026-08-13",
+        "summary": "Reviewed this KB for reuse by a second, different tool: the security-deposit disposition assembly tool (internal evidence assembly only — photos, inspection forms, ledger — for a pod lead to review; v1 has no AI judgment on deduction defensibility, no AI-drafted tenant letter, and no auto-send). Verdict: reuse is appropriate under the same human-review-gate condition this KB was cleared under on 2026-07-09, because v1's gate (human decides and sends everything; AI only organizes existing source documents) is at least as protective as the content-engine blog-publish gate this KB was originally cleared for. Directly cross-checked deposit-05 against leginfo.legislature.ca.gov (fetched independently twice) and raised its confidence from MEDIUM to HIGH with a corrected pinpoint citation — see deposit-05's own resolution_log. While doing that check, incidentally found deposit-03's citation range is likely stale (off by one subsection letter) due to the same AB 2801 renumbering — flagged in deposit-03's notes but NOT independently re-verified or resolved in this pass; confidence left at HIGH because the underlying substance is not in doubt, only the pinpoint cite. Did not review any claim outside the security-deposits topic in this pass. Full findings, including checklist-wording review and a joint-tenancy data-model gap found in the Supabase schema (leases table), reported to Jarvis/Oracle directly rather than reproduced here."
+      }
+    ],
+    "known_local_ordinances_beyond_state_law": [
+      "Oxnard — citywide rent stabilization ordinance (Ch. 27, Ord. 3013, 4% cap) for pre-2/1/1995 multifamily units, PLUS a separate companion just-cause eviction/relocation-assistance ordinance (Ord. 3012 — 30-day just-cause threshold, 2 months' rent or $5,000 relocation, whichever greater) adopted the same day, PLUS a separate mobile home rent control system dating to 1982",
+      "Ventura (San Buenaventura) — two local just-cause ordinances (SBMC Ch. 6.1010 general, 2019; SBMC Ch. 8.1100 demolition/remodel-specific, 2022) plus a 2025 Relocation Assistance Program ordinance (introduced Oct. 7, 2025, final adoption status still unconfirmed) layering additional payments on top of state law for vulnerable tenants",
+      "Camarillo — mobile home space rent stabilization ordinance (Ord. No. 2038, Ch. 10.55), adopted April 22, 2026, effective May 22, 2026, at three named mobile home parks",
+      "Moorpark — mobile home park rent stabilization (Municipal Code Ch. 5.52)",
+      "Santa Paula — mobile home rent control ordinance (under active tenant-advocate pressure to tighten as of 2025-2026)",
+      "Unincorporated Ventura County — Mobile Home Park Rent Control Ordinance (Ord. No. 4620, effective 10/26/2023), administered by a county Rent Review Board",
+      "Thousand Oaks — limited mobile home rent stabilization only (Title 5, Ch. 25); general apartment stock relies on state law",
+      "Simi Valley and Port Hueneme — no local rent control or just-cause ordinance found; both rely entirely on state law (AB 1482)"
+    ]
+  },
+  "topics": {
+    "ab-1482-statewide-and-local-variation": [
+      {
+        "id": "ab1482-01",
+        "statement": "Under the statewide Tenant Protection Act of 2019 (AB 1482), most residential landlords may not raise rent, in any rolling 12-month period, by more than 5% plus the change in the regional Consumer Price Index (CPI), or 10% total, whichever is LOWER. Only two rent increases are allowed in any 12-month period, together not exceeding the cap.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1947.12(a)(1)-(2)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1947.12",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "California Apartment Association — AB 1482 summary",
+              "url": "https://caanet.org/topics/ab-1482/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "Operative April 1, 2024 (per amendment); statute sunsets/self-repeals January 1, 2030 unless extended by future legislation. The exact regional CPI figure that applies changes twice a year (April and August) and varies by metro area — Ventura County typically falls under a specific regional CPI index published by the CA Dept. of Industrial Relations. See ab1482-02 below."
+      },
+      {
+        "id": "ab1482-02",
+        "statement": "The specific dollar/percentage rent cap for Ventura County properties depends on the applicable regional CPI figure published by the California Department of Industrial Relations, which is updated periodically (historically twice yearly). This is a moving number, not a fixed one.",
+        "jurisdiction_scope": "county-wide (Ventura County, all cities within it, as part of statewide AB 1482)",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1947.12(a)(1) (references CPI methodology but does not itself state a fixed number)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1947.12",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: Pull the current published regional CPI percentage specifically applicable to the Ventura/Oxnard/Thousand Oaks metro area (or whichever CPI region the state assigns Ventura County to) directly from the CA Department of Industrial Relations rent cap page before publishing any specific percentage to users. Do not guess a number — this is exactly the kind of stale figure that caused the prior vendor's tool to fail. Mason or Neo should set up a recheck reminder tied to the state's update schedule."
+      },
+      {
+        "id": "ab1482-03",
+        "statement": "AB 1482 requires just cause (a valid legal reason) to end a tenancy once a tenant has continuously and lawfully occupied a unit for 12 months. Reasons split into 'at-fault' (e.g., nonpayment, lease violation, nuisance, unauthorized subletting) and 'no-fault' (e.g., owner/family move-in, withdrawal from rental market, government order to vacate, demolition/substantial remodel).",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1946.2(b)-(c)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1946.2",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "Zak Fisher Law — AB 1482 just-cause plain English summary",
+              "url": "https://zakfisherlaw.com/ab-1482-just-cause-california/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "ab1482-04",
+        "statement": "For no-fault terminations under AB 1482, the landlord must either (a) pay the tenant a sum equal to one month's rent as relocation assistance, paid within 15 days of the notice, or (b) waive the tenant's final month of rent in writing.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1946.2(d)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1946.2",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "ab1482-05",
+        "statement": "AB 1482 exempts: most single-family homes and condos (only if owned by a natural person, not a corporation/REIT/LLC-with-corporate-member, AND the lease contains the exact statutory notice language); housing with a certificate of occupancy issued within the last 15 years (rolling window — this date always advances); owner-occupied duplexes where the owner occupies one unit; deed-restricted affordable housing; and dormitories.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1947.12(d) and § 1946.2(e)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1947.12",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "The required statutory exemption notice text (must be copied verbatim into the lease, not paraphrased) is: \"This property is not subject to the rent limits imposed by Section 1947.12 of the Civil Code and is not subject to the just cause requirements of Section 1946.2 of the Civil Code. This property meets the requirements of Sections 1947.12 (d)(5) and 1946.2 (e)(8) of the Civil Code and the owner is not any of the following: (1) a real estate investment trust, as defined by Section 856 of the Internal Revenue Code; (2) a corporation; or (3) a limited liability company in which at least one member is a corporation.\" Omitting or paraphrasing this notice voids the exemption. FLAGGED by Mason (legal review, 2026-07-09) as good practice worth reinforcing: whoever (Q) eventually builds lease templates or clauses from this claim must copy this exact text as a locked, non-editable string — the drafting engine must never paraphrase, summarize, or otherwise regenerate this specific notice in its own words."
+      },
+      {
+        "id": "ab1482-oxnard-01",
+        "statement": "Oxnard has its own local rent stabilization ordinance (Oxnard City Code Ch. 27, adopted via Ordinance No. 3013, adopted May 3, 2022, effective June 4, 2022) that goes beyond AB 1482: it caps annual rent increases at 4% for any multifamily residential property that received its first Certificate of Occupancy before February 1, 1995. Only one increase is allowed per 12-month period. Oxnard ALSO adopted a companion just-cause eviction and relocation-assistance ordinance the same day — see ab1482-oxnard-03. A separate, older system regulates mobile home park space rent (see ab1482-oxnard-02).",
+        "jurisdiction_scope": "city (Oxnard)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Oxnard City Code Ch. 27, 'Tenant Protection and Rent Stabilization,' adopted by Ordinance No. 3013",
+              "url": "https://codelibrary.amlegal.com/codes/oxnard/latest/oxnard_ca/0-0-0-86079",
+              "retrieved": "2026-07-09",
+              "access_note": "Primary municipal code site returned HTTP 403 to automated fetch; content below is reconstructed from the City's own PDF and secondary summaries, not a direct read of the amlegal-hosted code text."
+            },
+            {
+              "citation": "City of Oxnard, Ordinance No. 3013 (Rent Stabilization), official PDF",
+              "url": "https://www.oxnard.gov/wp-content/uploads/Ord-3013_-Rent-Stabilization.pdf",
+              "retrieved": "2026-07-09",
+              "access_note": "Automated fetch of this PDF also failed (403); citation is included because the City's own housing department page independently confirms the ordinance exists and describes its content."
+            }
+          ],
+          "secondary": [
+            {
+              "source": "City of Oxnard Housing Dept. — Rent Stabilization program page",
+              "url": "https://www.oxnard.gov/housing/affordable-housing/rent-stabilization",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Astanehe Law — Oxnard Rent Control summary",
+              "url": "https://astanehelaw.com/2022/09/04/oxnard-rent-control/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "AAGLA — Oxnard rent stabilization and just cause ordinance summary (Mason review, corroborating adoption date and 4% figure)",
+              "url": "https://www.aagla.org/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "resolution_log": "RESOLVED by Mason (legal review, 2026-07-09): the fair-return petition process is a separate EXCEPTION mechanism a landlord may apply for, not evidence that the 4% figure is unreliable as a baseline cap — multiple independent secondary sources now consistently corroborate both the 4% figure and the May 3, 2022 adoption / June 4, 2022 effective date, so this is no longer treated as an open conflict. Primary ordinance text is still blocked to automated fetch (403) — Rincon should still pull the official PDF directly (non-automated browser) or request it from the City Clerk to confirm the exact current Certificate-of-Occupancy cutoff and check for any amendments since 2022, but the core facts stated here are not in doubt.",
+        "notes": "Oxnard is Rincon Management's largest Ventura County market by likely unit count — treat any future amendment to this ordinance as a high-priority recheck item."
+      },
+      {
+        "id": "ab1482-oxnard-03",
+        "statement": "Oxnard also adopted Ordinance No. 3012 ('Just Cause Eviction and Tenant Protection'), effective the same date as the rent-cap ordinance above (adopted May 3, 2022, effective June 4, 2022). It requires a lawful just cause to evict a tenant after only 30 DAYS of tenancy (far shorter than AB 1482's statewide 12-month threshold), and requires relocation assistance for no-fault evictions equal to TWO MONTHS' RENT OR $5,000, WHICHEVER IS GREATER — paid within 15 days of the termination notice. This is materially more generous to tenants than the state AB 1482 formula (one month's rent or a rent waiver) and applies specifically within Oxnard city limits.",
+        "jurisdiction_scope": "city (Oxnard)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "City of Oxnard, Ordinance No. 3012 ('Just Cause Eviction and Tenant Protection')",
+              "url": "https://www.oxnard.gov/wp-content/uploads/Ord-3012_-Just-Cause-Eviction.pdf",
+              "retrieved": "2026-07-09",
+              "access_note": "Primary ordinance PDF blocked to automated fetch (403), same as Ord. 3013 — content reconstructed from independent secondary legal-industry summaries corroborating the same adoption date, 30-day threshold, and 2-months-or-$5,000 relocation figure."
+            }
+          ],
+          "secondary": [
+            {
+              "source": "Astanehe Law — Oxnard Rent Control and Just Cause summary",
+              "url": "https://astanehelaw.com/2022/09/04/oxnard-rent-control/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "ADDED by Mason (legal review, 2026-07-09): this ordinance was entirely missing from the initial research pass — it is a real factual gap, not a previously-flagged uncertainty. A drafting AI relying only on the state AB 1482 relocation formula (one month's rent) for an Oxnard property would understate the tenant's actual entitlement by half or more. Rincon should still obtain direct primary-source confirmation of the current ordinance text (non-automated fetch or City Clerk request) before this figure is used in any binding operational decision, but it must be treated as the operative rule for Oxnard no-fault evictions going forward, not the state default."
+      },
+      {
+        "id": "ab1482-oxnard-02",
+        "statement": "Oxnard's Mobile Home Park Rent Stabilization System (separate from the general Ch. 27 apartment ordinance) has been in place since 1982 and caps space rent increases to the Southern California CPI for the prior year. For calendar year 2026, the City lists the maximum permissible CPI rent adjustment as 3.34%.",
+        "jurisdiction_scope": "city (Oxnard) — mobile home parks only",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Oxnard City Code, Mobile Home Park Rent Stabilization System (Ch. 24-area provisions)",
+              "url": "https://www.oxnard.gov/housing/affordable-housing/mobile-home-rent-stabilization",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "ANNUAL RECHECK REQUIRED: the 3.34% figure is specific to calendar year 2026 and will change for 2027. Re-verify every January."
+      },
+      {
+        "id": "ab1482-ventura-01",
+        "statement": "The City of Ventura (San Buenaventura) has TWO separate, currently valid local just-cause ordinances, not one: (1) SBMC Chapter 6.1010, 'Just Cause for Eviction,' originally adopted in 2019, the general just-cause framework operating alongside the state AB 1482 just-cause framework; and (2) SBMC Chapter 8.1100 (incl. § 8.1100.020), a distinct 2022 ordinance specifically addressing no-fault evictions for demolition/substantial remodel, consistent with Civil Code § 1946.2.",
+        "jurisdiction_scope": "city (Ventura / San Buenaventura)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "San Buenaventura Municipal Code § 8.1100.020 ('No-fault just cause eviction generally') and Ch. 6.1010 ('Just Cause for Eviction')",
+              "url": "https://sanbuenaventura.municipal.codes/SBMC/8.1100.020",
+              "retrieved": "2026-07-09",
+              "access_note": "Automated fetch returned HTTP 403; content below is reconstructed from City of Ventura staff reports referencing this code section, not a direct read of the code text itself."
+            }
+          ],
+          "secondary": [
+            {
+              "source": "City of Ventura City Attorney staff report referencing Ch. 6.1010",
+              "url": "https://www.cityofventura.ca.gov/DocumentCenter/View/19363/12B",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "VCBA (Ventura County Bar Assoc.) presentation slides on Ventura rent stabilization & just cause",
+              "url": "https://www.vcba.org/wp-content/uploads/2023/08/083023-VCBA-Ox-Slides.pdf",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "resolution_log": "RESOLVED by Mason (legal review, 2026-07-09): this is NOT a numbering inconsistency or recodification artifact as originally flagged. Chapter 6.1010 and Chapter 8.1100 are two different, both-currently-valid ordinances covering two different subjects — general just-cause (6.1010, 2019) and demolition/substantial-remodel-specific no-fault evictions (8.1100, 2022). Both citations are correct simultaneously; neither supersedes the other.",
+        "notes": "Get the specific list of any just-cause reasons or procedural requirements in Ventura's local ordinances that go beyond what AB 1482 already requires statewide, if a drafting AI needs to describe Ventura's rules in more procedural detail than this summary provides."
+      },
+      {
+        "id": "ab1482-ventura-02",
+        "statement": "The City of Ventura directed staff to draft a Relocation Assistance Program ordinance on May 27, 2025, and the ordinance was INTRODUCED at a regular City Council meeting on October 7, 2025 — a specific legislative step that typically precedes a second reading/final adoption roughly 30 days later (i.e., most likely finalized around November 2025, with an effective date around December 2025, though this has NOT been independently confirmed). As drafted at introduction, it would go beyond state law: for no-fault just-cause terminations, tenants belonging to defined 'vulnerable' categories — seniors aged 62+, tenants with a disability or terminal illness, and households at or below 80% Area Median Income (AMI) — would be entitled to an ADDITIONAL two months' rent in relocation assistance, on top of whatever AB 1482 already requires.",
+        "jurisdiction_scope": "city (Ventura / San Buenaventura)",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Draft ordinance: 'An Ordinance of the City Council of the City of Ventura' — Relocation Assistance Program, Exhibit A",
+              "url": "https://www.cityofventura.ca.gov/DocumentCenter/View/45858/8-Exhibit-A---Relocation-Assistance-Program-Draft-Ordinance",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "citation": "City of Ventura HHS Committee staff report, Relocation Assistance",
+              "url": "https://www.cityofventura.ca.gov/DocumentCenter/View/45684/Relocation-Assistance-HHS-Staff-Report",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "citation": "City of Ventura Council agenda, October 7, 2025 — ordinance introduction (Mason review)",
+              "url": "https://www.cityofventura.ca.gov/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": "Mason's review (2026-07-09) found a more recent (October 2025) staff report describing the third vulnerable category as 'households at or below 80% AMI' rather than 'households with one or more minor dependent children' as stated in an earlier draft. This claim has been updated to reflect the more recent AMI-based version, but which version made it into any FINAL adopted text is still unconfirmed — treat the eligibility categories as provisional until adoption is verified.",
+        "notes": "RESOLUTION NEEDED (per Mason legal review, 2026-07-09): call the City of Ventura Housing Division or City Attorney's office directly and ask two specific questions: (1) did the Relocation Assistance Program ordinance complete its second reading and take effect, and on what date; (2) does the FINAL adopted text match the October 7, 2025 introduced version's dollar amount (2 months' rent) and eligibility categories (62+, disabled/terminally ill, ≤80% AMI households), or did it change before final adoption. Do not rely on this figure for any Ventura property with a vulnerable-category tenant facing a no-fault eviction until that call is made — this is a potentially expensive compliance gap if wrong in either direction."
+      },
+      {
+        "id": "ab1482-camarillo-01",
+        "statement": "Camarillo has NO general apartment rent control ordinance, but the City Council unanimously adopted its FIRST-EVER mobile home space rent stabilization ordinance on April 22, 2026 (Ordinance No. 2038, adding Chapter 10.55 'Mobile Home Park Rent Stabilization' to the Camarillo Municipal Code), effective May 22, 2026. It applies specifically to three named mobile home parks: Camarillo Mobile Home Estates, Lamplighter Mobile Home Park, and Casa Del Norte Mobile Home Park. Annual increases are tied to CPI, generally reported in the 2%-6% range, with an 8% cap allowed specifically upon re-rental of an existing mobile home to a new (non-family) tenant.",
+        "jurisdiction_scope": "city (Camarillo) — three specific mobile home parks only",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "The Camarillo Acorn — 'Mobile home rent control gaining council momentum'",
+              "url": "https://www.thecamarilloacorn.com/articles/mobile-home-rent-control-gaining-council-momentum/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "AOL/wire coverage — 'Camarillo passes rent control at mobile home parks'",
+              "url": "https://www.aol.com/articles/camarillo-passes-rent-control-mobile-143018492.html",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Mason legal review (2026-07-09) — independently confirmed ordinance number, chapter, adoption date, and effective date",
+              "url": "https://www.cityofcamarillo.org/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "resolution_log": "RESOLVED by Mason (legal review, 2026-07-09): ordinance number and municipal code chapter are now confirmed (Ord. No. 2038, Ch. 10.55). Existence, adoption date, effective date, and scope (three named parks) are no longer treated as uncertain.",
+        "notes": "One item remains flagged: the precise CPI adjustment FORMULA (news reporting gave a 2%-6% range, not the exact calculation method in the ordinance text) still needs primary-text confirmation before being stated as an exact figure in published content. This is the single most time-sensitive item in this file — re-verify at least annually. Confirm whether Rincon manages any units at the three named parks; if not, this claim is lower-priority for immediate use but should stay in the database as the ordinance may expand to more parks."
+      },
+      {
+        "id": "ab1482-moorpark-01",
+        "statement": "Moorpark has a Mobilehome Park Rent Stabilization ordinance codified at Moorpark Municipal Code Chapter 5.52. The specific current percentage cap could not be confirmed from available sources.",
+        "jurisdiction_scope": "city (Moorpark) — mobile home parks only",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Moorpark Municipal Code Ch. 5.52, 'Mobilehome Park Rent Stabilization'",
+              "url": "https://ecode360.com/44074692",
+              "retrieved": "2026-07-09",
+              "access_note": "Table of contents / chapter listing confirmed to exist; full text with the specific percentage cap was not retrieved."
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: Pull the full text of Ch. 5.52 to get the actual percentage cap, covered-park list, and any just-cause provisions specific to Moorpark mobile home tenancies."
+      },
+      {
+        "id": "ab1482-santapaula-01",
+        "statement": "Santa Paula has an existing Mobile Home Rent Control Ordinance. As of the 2025-2026 period, tenant advocacy groups were actively pushing the City to tighten it (e.g., limiting rent-adjustment-application frequency to once per year and shifting application costs to park owners) in response to attempted rent increases of nearly 50% at at least one park since January 2025. The current state of the ordinance — original or amended — was not confirmed.",
+        "jurisdiction_scope": "city (Santa Paula) — mobile home parks only",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "CAUSE (Central Coast Alliance United for a Sustainable Economy) — 'SP Mobile Home Owners Deserve Protection from Predatory Rent Hikes'",
+              "url": "https://causenow.org/sp-rent-hikes/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: This ordinance may be amended soon given active advocacy pressure described in the source. Get the current Santa Paula Municipal Code mobile home rent control chapter directly and check City Council agendas for any 2026 amendments before relying on specific terms."
+      },
+      {
+        "id": "ab1482-unincorporated-01",
+        "statement": "Unincorporated Ventura County has a Mobile Home Park Rent Control Ordinance, originally adopted in 1983 by the Board of Supervisors, most recently amended by Ordinance No. 4620 (effective October 26, 2023). It applies only to mobile home parks in unincorporated county territory (not inside any of the 9 incorporated cities, which are governed separately or not at all). A County Mobile Home Park Rent Review Board (5 members) meets quarterly to administer rent adjustment petitions.",
+        "jurisdiction_scope": "unincorporated Ventura County — mobile home parks only",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Ventura County Ordinance No. 4620 (Mobile Home Park Rent Control Ordinance amendment), effective 10/26/2023",
+              "url": "https://rma.venturacounty.gov/divisions/planning/mobile-home-park-rent-control-program/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "citation": "Ventura County RMA — Mobile Home Park Rent Review Board process guide",
+              "url": "https://rmadocs.venturacounty.gov/planning/programs/mobile-home-park-rent-control/publications/ventura-county-mobile-home-park-rent-review-board.pdf",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "This ordinance does NOT cover general (non-mobile-home) rental housing in unincorporated county areas — no evidence found of a general apartment rent control or just-cause ordinance for unincorporated Ventura County beyond state AB 1482."
+      },
+      {
+        "id": "ab1482-thousandoaks-01",
+        "statement": "Thousand Oaks does not have a general apartment rent control ordinance. It has a narrow mobile home rent stabilization ordinance (Title 5, Ch. 25 of the Thousand Oaks Municipal Code) and a limited legacy rent-stabilization provision covering only a small number of pre-1988 tenancies. For the large majority of rental housing stock, AB 1482 (state law) is the operative — and only — rent cap and just-cause framework.",
+        "jurisdiction_scope": "city (Thousand Oaks)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Thousand Oaks Municipal Code, Title 5, Ch. 25, 'Mobile Home Rent Stabilization'",
+              "url": "https://codelibrary.amlegal.com/codes/thousandoaks/latest/thousandoaks_ca/0-0-0-6611",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "RentCheckMe — Rent Control in Thousand Oaks (2026 Guide)",
+              "url": "https://rentcheckme.com/articles/rent-control-in-thousand-oaks",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "The 'small number of pre-1988 tenancies' detail is from a secondary/non-authoritative source and was not confirmed against the primary code. Low practical impact expected for Rincon given how narrow this carve-out is, but flagged for completeness rather than as a high-priority item."
+      },
+      {
+        "id": "ab1482-simivalley-01",
+        "statement": "No evidence was found of any local rent control or just-cause eviction ordinance in Simi Valley. Rental housing is governed by AB 1482 (state law) only. A rent control ballot measure has reportedly been raised in local politics but was not found to have passed.",
+        "jurisdiction_scope": "city (Simi Valley)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Simi Valley Acorn — 'Rent control is back on ballot'",
+              "url": "https://www.simivalleyacorn.com/articles/rent-control-is-back-on-ballot/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Tenants Together — Rent Control Map (statewide list of cities with ordinances)",
+              "url": "https://www.tenantstogether.org/resources/list-rent-control-ordinances-city",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "This is an absence-of-evidence finding, not a directly confirmed 'no ordinance exists' statute citation. If Rincon manages a significant number of Simi Valley units, it would be worth a direct call to the Simi Valley City Clerk to positively confirm no ordinance exists, rather than relying on the negative search result alone."
+      },
+      {
+        "id": "ab1482-porthueneme-01",
+        "statement": "Port Hueneme does not have a local rent control ordinance. The City Council considered rent stabilization but opted instead for a tenant-education approach, reportedly because the potential ordinance would only have covered a small fraction of the city's rental units (roughly 600 of over 8,000 units) given state exemptions. AB 1482 (state law) is the operative framework.",
+        "jurisdiction_scope": "city (Port Hueneme)",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Yahoo News — 'Port Hueneme sidesteps rent stabilization, opts for education'",
+              "url": "https://www.yahoo.com/news/port-hueneme-sidesteps-rent-stabilization-211509525.html",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "ab1482-fillmore-01",
+        "statement": "No local rent control, just-cause, or mobile home rent stabilization ordinance could be found for Fillmore. This is treated as an absence-of-evidence finding, not a confirmed negative.",
+        "jurisdiction_scope": "city (Fillmore)",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: Fillmore was the one city in the 9 where general web search returned essentially nothing specific — no confirmation either way. Call the Fillmore City Clerk directly or pull the Fillmore Municipal Code table of contents to positively confirm there is no rent control, just-cause, or mobile home ordinance before treating this city as 'state law only' with confidence."
+      }
+    ],
+    "security-deposits": [
+      {
+        "id": "deposit-01",
+        "statement": "As of July 1, 2024 (AB 12), the maximum security deposit a landlord may charge is one month's rent, regardless of whether the unit is furnished — replacing the old rule that allowed 2 months' rent (unfurnished) or 3 months' rent (furnished). This is an aggregate cap: it includes ALL upfront charges functioning as security (deposits, last-month's-rent-collected-upfront, pet deposits, cleaning deposits, key/fob deposits), not just anything labeled 'security deposit.'",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.5(c), as amended by AB 12 (2023)",
+              "url": "https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB12",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "TLD Law — Overview of AB 12",
+              "url": "https://tldlaw.com/overview-of-ab-12-new-security-deposit-limitations-for-landlords/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "Only applies to deposits collected/demanded ON OR AFTER July 1, 2024. Existing tenancies with larger deposits collected before that date are not required to be refunded down to the new cap retroactively."
+      },
+      {
+        "id": "deposit-02",
+        "statement": "AB 12 provides a 'small landlord' exemption allowing up to 2 months' rent as a security deposit if the landlord (a) is a natural person or an LLC where every member is a natural person, AND (b) owns no more than 2 residential rental properties totaling no more than 4 units combined. This exemption does NOT apply if the tenant is an active-duty military service member — the 1-month cap applies to service members regardless of landlord size.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.5(c)(2)-(3)",
+              "url": "https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB12",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "IMPORTANT FOR RINCON: this exemption is aimed at small mom-and-pop owners, not property management companies. Since Rincon manages 150-500 units across many owners, whether a given OWNER (not Rincon itself) qualifies must be assessed per-owner, per-property — it depends on how many units that specific property owner personally owns, not on Rincon's portfolio size."
+      },
+      {
+        "id": "deposit-03",
+        "statement": "A landlord must return the security deposit and provide an itemized statement of any deductions within 21 calendar days after the tenant vacates. If total deductions exceed $125, the landlord must attach copies of receipts/invoices for the work (or, if the landlord/employee did the work themselves, a description of the work, time spent, and hourly rate charged).",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.5(g)-(l)",
+              "url": "https://codes.findlaw.com/ca/civil-code/civ-sect-1950-5/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "California Courts Self-Help — Guide to security deposits",
+              "url": "https://selfhelp.courts.ca.gov/guide-security-deposits-california",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "Missing this deadline can forfeit the landlord's right to withhold any part of the deposit, even where deductions would otherwise have been legitimate — this is a strict, high-stakes deadline for any workflow/reminder tooling. CITATION FLAG (Mason, 2026-08-13, not fully resolved): while directly confirming deposit-05 against leginfo.legislature.ca.gov, found that AB 2801 (2024) inserted a new subsection (g) into § 1950.5 for photo documentation, which appears to have shifted the itemized-statement/21-day-return provision from the old (g) down to (h) in the current statute. The pinpoint citation below ('§ 1950.5(g)-(l)') was NOT re-verified in this pass and is likely off by one letter across its whole range (probably (h)-(m) now). This does not cast doubt on the substance of this claim — 21 days, itemization, and the $125 receipt threshold are unaffected by renumbering, so confidence stays HIGH — but the exact pinpoint cite should be corrected in a future pass before it's shown to anyone who might look it up directly (an attorney, or a tenant disputing a deduction)."
+      },
+      {
+        "id": "deposit-04",
+        "statement": "Tenants have a right to request a pre-move-out inspection, which must occur during the final two weeks of the tenancy, giving the tenant a chance to fix issues before final deductions are assessed.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.5(f)",
+              "url": "https://codes.findlaw.com/ca/civil-code/civ-sect-1950-5/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "deposit-05",
+        "statement": "Beginning April 1, 2025, landlords must take photographs of the unit within a reasonable time after regaining possession (before any repairs/cleaning are done for which a deduction will be claimed), and again after the repairs/cleaning are completed, to document the condition before and after. (A related, separate requirement — photos at the inception of new tenancies beginning on or after July 1, 2025 — lives in the same subsection, § 1950.5(g)(1), but is not yet its own claim in this KB; it covers move-in documentation, not the move-out disposition process this claim covers.)",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.5(g)(2) — photo documentation for move-out/post-repair photos, effective 4/1/2025 (enacted by AB 2801 (2024), signed 9/19/2024); adjacent § 1950.5(g)(1) covers move-in photos for new tenancies, effective 7/1/2025",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1950.5",
+              "retrieved": "2026-08-13"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "Astanehe Law — California Civil Code § 1950.5 2025 update (original secondary source for this claim; now corroborated by a direct statute read)",
+              "url": "https://astanehelaw.com/2025/11/12/all-about-california-civil-code-%C2%A7-1950-5-the-california-security-deposit-law-2025-update/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Lucas Real Estate — New Photo Requirements for 2025 (AB 2801)",
+              "url": "https://lucas-real-estate.com/new-photo-requirements-for-2025/",
+              "retrieved": "2026-08-13"
+            }
+          ]
+        },
+        "conflicts": null,
+        "resolution_log": "RESOLVED by Mason (legal review, 2026-08-13): confirmed directly against leginfo.legislature.ca.gov (fetched independently twice) that this requirement sits in Civil Code § 1950.5(g)(2), part of a new subsection (g) inserted by AB 2801 (2024). Subsection (g) covers photography broadly: (g)(1) is move-in photos for tenancies beginning on/after 7/1/2025 (a separate, related requirement, not yet its own claim in this KB); (g)(2) is the move-out/before-repair/after-repair photo requirement this claim describes, effective 4/1/2025. Multiple independent secondary sources (law-firm and industry summaries) corroborate the same substantive three-phase photo requirement and effective dates. Confidence raised from MEDIUM to HIGH. NOTE: inserting new subsection (g) appears to have shifted every subsequent letter down by one from the pre-AB-2801 version of this statute — see the citation flag added to deposit-03, which likely needs the same recheck and was NOT resolved in this pass.",
+        "notes": "Original note preserved for audit trail: this claim's primary evidence was a secondary legal-blog source summarizing the statute rather than a direct read of the leginfo.ca.gov statutory text confirming this exact subsection — that gap is closed per the resolution_log above."
+      }
+    ],
+    "rent-increase-rules-and-notice": [
+      {
+        "id": "rentnotice-01",
+        "statement": "For any rent increase of 10% or less (cumulative, over the trailing 12 months), landlords must give at least 30 days' written notice before the increase takes effect. For any increase exceeding 10% (cumulative), 90 days' written notice is required.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 827(b)",
+              "url": "https://martinezlawcenter.com/california-civil-code-827/",
+              "retrieved": "2026-07-09",
+              "access_note": "Secondary summary cited here; underlying statute is Civil Code § 827, cross-referenced by § 1947.12(g) which requires notice 'in accordance with Section 827.'"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "Note that even where the AB 1482 cap doesn't apply (exempt property), § 827's notice-period rule (30 vs 90 days based on the 10% threshold) still generally applies to residential tenancies statewide."
+      },
+      {
+        "id": "rentnotice-02",
+        "statement": "Rent increase notices may be delivered by personal service, by leaving a copy with a person of suitable age at the residence and mailing a copy, or by other methods specified in Code of Civil Procedure § 1162. Best practice is to always retain proof of delivery/mailing date given how strictly the notice-period clock is enforced.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Castelblanco Law — Rent Increase Notice: 30/60-Day Rules & Tenant Rights",
+              "url": "https://castelblanco.com/rent-increase-notice-california/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "Delivery-method mechanics were not directly cross-checked against Code of Civil Procedure § 1162 text; treat as a practical/procedural note rather than a fully sourced primary-law claim."
+      }
+    ],
+    "notice-requirements-entry-termination": [
+      {
+        "id": "entry-01",
+        "statement": "A landlord must give tenants reasonable written notice before entering a unit, and may only enter during normal business hours (except in emergencies, or if the tenant consents at the time of entry). Twenty-four hours' notice is presumed reasonable (a rebuttable presumption — not an absolute rule). Notice by mail is presumed reasonable if mailed at least 6 days before the intended entry.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1954",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=1954.&lawCode=CIV",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "FindLaw — Civil Code § 1954 text and commentary",
+              "url": "https://codes.findlaw.com/ca/civil-code/civ-sect-1954/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "entry-02",
+        "statement": "The written entry notice must state the date, approximate time window, and purpose of entry. It may be personally delivered, left with a person of suitable age and discretion at the premises, or posted on/near/under the usual entry door in a manner a reasonable person would notice.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1954(d)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=1954.&lawCode=CIV",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "entry-03",
+        "statement": "Permitted reasons for landlord entry include: emergencies; to make necessary or agreed repairs, alterations, or improvements; to show the unit to prospective tenants, buyers, lenders, contractors, or workers; when the tenant has abandoned or surrendered the unit; pursuant to court order; and to conduct a pre-move-out inspection at the tenant's request or as otherwise permitted.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1954(a)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=1954.&lawCode=CIV",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      }
+    ],
+    "fair-housing": [
+      {
+        "id": "fh-01",
+        "statement": "The federal Fair Housing Act (FHA) prohibits housing discrimination based on race, color, national origin, religion, sex (including sexual orientation and gender identity per current HUD interpretation), familial status, and disability.",
+        "jurisdiction_scope": "statewide (federal law applies uniformly)",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "42 U.S.C. §§ 3601-3619 (Fair Housing Act)",
+              "url": "https://www.justice.gov/crt/fair-housing-act-1",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "HUD's interpretation of 'sex' to include sexual orientation and gender identity has shifted with different federal administrations over time — California's own FEHA independently and explicitly protects sexual orientation and gender identity regardless of federal interpretation, so California landlords are protected from this ambiguity by relying on state law (see fh-02)."
+      },
+      {
+        "id": "fh-02",
+        "statement": "California's Fair Employment and Housing Act (FEHA) prohibits housing discrimination based on all FHA-protected classes PLUS additional California-specific protected categories: marital status, sexual orientation, gender identity/expression, age, ancestry, genetic information, source of income (including Section 8 / Housing Choice Vouchers), citizenship/immigration status, and primary language, among others.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Government Code §§ 12921, 12955, 12955.8",
+              "url": "https://www.lawserver.com/law/state/california/codes/california_government_code_12955",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "California Civil Rights Department — Fair Housing and Source of Income FAQ",
+              "url": "https://calcivilrights.ca.gov/wp-content/uploads/sites/32/2020/02/SourceofIncomeFAQ_ENG.pdf",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "fh-03",
+        "statement": "Under California law, 'source of income' is defined broadly to include lawful, verifiable income paid directly to a tenant or on a tenant's behalf, EXPRESSLY including federal Section 8 Housing Choice Vouchers and VA Supportive Housing (VASH) vouchers. It is unlawful to advertise, state, or imply that voucher holders will be declined, and unlawful to refuse to rent to a qualified applicant because they use a voucher.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Government Code § 12955(d), (o), (p)(2) (as amended by SB 329 (2019) and SB 222 (2019))",
+              "url": "https://codes.findlaw.com/ca/government-code/gov-sect-12955/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "fh-04",
+        "statement": "No Ventura-County-specific city or county ordinance imposing ADDITIONAL source-of-income protections (beyond the statewide FEHA rule) was found for any of the 9 cities or unincorporated Ventura County. State law (FEHA) is the operative and only source-of-income protection layer in this market.",
+        "jurisdiction_scope": "county-wide (all 9 cities + unincorporated county)",
+        "confidence": "MEDIUM",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "211 Ventura County — Housing Discrimination resource page",
+              "url": "https://211ventura.org/results/housing-discrimination/",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Ventura County Executive Office — Fair Housing program page",
+              "url": "https://venturacounty.gov/county-executive-office/community-development/fair-housing/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: This is an absence-of-evidence finding across all 9 cities at once, which is a broad claim to rest on negative search results. Before treating this as settled, Mason should specifically check each city's municipal code index for a 'fair housing' or 'housing discrimination' chapter, since a local ordinance could exist without generating much web coverage."
+      },
+      {
+        "id": "fh-05",
+        "statement": "Under FEHA and the FHA, housing providers must grant reasonable accommodations (changes to rules/policies/practices) and reasonable modifications (physical changes to the unit, typically tenant-paid unless federally subsidized housing) to allow a person with a disability equal use and enjoyment of housing, including allowing assistance/service animals as an accommodation even under 'no pets' policies.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "42 U.S.C. § 3604(f)(3); Cal. Government Code § 12927(c)(1)",
+              "url": "https://calcivilrights.ca.gov/housing/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "fh-06",
+        "statement": "Tenant screening criteria (credit score minimums, income multiples, criminal background policies) must be applied consistently and cannot have a discriminatory effect on a protected class even if facially neutral ('disparate impact' theory). Blanket criminal-history bans are subject to particular legal scrutiny under both HUD guidance and California case law/CRD guidance.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "California Civil Rights Department — Housing overview page",
+              "url": "https://calcivilrights.ca.gov/housing/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "This is a well-established legal doctrine but was not verified against a specific current CRD regulation number in this pass — Mason should confirm the exact current regulatory citation (likely in Title 2 of the California Code of Regulations) before using this claim in any tenant-facing or screening-policy content.",
+        "downstream_review_required": "PER MASON (legal review, 2026-07-09): this claim itself is legally sound, but any published content that turns this into practical 'how to screen tenants' guidance carries materially more Fair Housing exposure than the underlying legal fact suggests. Any draft blog post, FAQ, or other public-facing content touching tenant screening criteria (credit, income, criminal history policies) must be routed back through Mason for review before publication, in addition to the standard human-approval gate — do not treat general legal accuracy review as sufficient for this specific content category."
+      }
+    ],
+    "trust-account-handling": [
+      {
+        "id": "trust-01",
+        "statement": "A real estate broker (including a property management company operating under a broker) who receives trust funds (security deposits, rent collected on behalf of an owner, etc.) must, within 3 business days of receipt, either: (a) deposit the funds into a neutral escrow depository, (b) deposit into a broker trust account maintained per DRE Commissioner's Regulation 2832, or (c) give the funds directly to the owner/principal entitled to them.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Business & Professions Code § 10145; 10 Cal. Code Regs. § 2832",
+              "url": "https://codes.findlaw.com/ca/business-and-professions-code/bpc-sect-10145.html",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "California DRE — 'Trust Funds' reference guide (RE 13)",
+              "url": "https://dre.ca.gov/files/pdf/re13.pdf",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "trust-02",
+        "statement": "Commingling is prohibited: funds belonging to the broker/property manager's own business or owned properties may not be deposited into the client trust account, and trust funds may not be deposited into the broker's general operating or personal accounts. This is one of the DRE's most commonly cited enforcement violations.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Business & Professions Code § 10176(e) (commingling as grounds for discipline); 10 Cal. Code Regs. § 2832.1",
+              "url": "https://www.kts-law.com/trust-fund-timing-and-recordkeeping-requirements-for-california-property-managers/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": [
+            {
+              "source": "CA DRE — Licensee Advisory, Most Common Enforcement Violations (Aug. 2025)",
+              "url": "https://www.dre.ca.gov/Licensees/Advisories/Advisory_2025_08_26_Most_Common_Enforcement_Violations.html",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "trust-03",
+        "statement": "Trust account withdrawals require the signature of the broker (or a corporate officer if the brokerage is a corporation), or another authorized signatory such as a licensed salesperson designated in writing, another broker under written agreement, or an unlicensed employee — but only if that unlicensed employee is covered by a fidelity bond at least equal to the maximum trust fund balance they can access.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "10 Cal. Code Regs. § 2834",
+              "url": "https://www.dre.ca.gov/files/pdf/refbook/ref21.pdf",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "trust-04",
+        "statement": "Brokers must maintain and regularly reconcile trust account records (a separate bank account, a record for each beneficiary/owner showing all deposits and withdrawals, and a monthly reconciliation of the account balance against the sum of all individual beneficiary balances). Failure to reconcile monthly is among the DRE's most common cited violations.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "10 Cal. Code Regs. § 2831, § 2831.1, § 2831.2",
+              "url": "https://www.usrealtytraining.com/blogs/trust-fund-recordkeeping",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      }
+    ],
+    "broker-supervision-pma": [
+      {
+        "id": "broker-01",
+        "statement": "Under California law, anyone who manages rental property for compensation on behalf of another party — collecting rent, negotiating leases, soliciting tenants — is acting as a real estate broker and must hold an active DRE broker license, or be a licensed salesperson working under a supervising broker. This applies to property management companies, not just individual agents.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Business & Professions Code § 10131(b)",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=10131.&lawCode=BPC",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "broker-02",
+        "statement": "A designated 'broker of record' must supervise and control the property management company's licensed activity. Day-to-day supervision may be delegated to a qualified licensed salesperson (or another broker) only under a written agreement, and that delegate generally must have at least 2 years of full-time real estate experience within the preceding 5 years.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "firsttuesday Journal — Brokerage Reminder: Property management licensing",
+              "url": "https://journal.firsttuesday.us/brokerage-reminder-property-management-licensing-keeping-employees-compliant/53718/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "The specific '2 years within the preceding 5 years' delegate-qualification detail was sourced from a secondary industry publication, not a direct statute/regulation citation. Mason should confirm the exact DRE regulation number (likely in 10 Cal. Code Regs. governing broker supervision) before treating this specific figure as authoritative."
+      },
+      {
+        "id": "broker-03",
+        "statement": "Operating as an unlicensed property manager (performing licensed activities under B&P § 10131 without a broker license or proper salesperson supervision) is a misdemeanor under Business & Professions Code § 10139, punishable by fines up to $20,000 and/or up to 6 months in county jail. Management agreements signed by an unlicensed manager may be unenforceable / expose the manager to having to disgorge fees earned.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Business & Professions Code § 10139",
+              "url": "https://www.kts-law.com/property-management-company-licensing-in-california-2/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "Cite is to § 10139 per secondary source; not independently confirmed against leginfo.legislature.ca.gov text directly in this pass. Recommend Mason spot-check before this appears in owner-facing content, since the $20,000 fine figure is a specific, checkable number."
+      }
+    ],
+    "general-liability-insurance": [
+      {
+        "id": "insurance-01",
+        "statement": "California does not have a statute that legally mandates a property manager or property management company carry general liability insurance. However, it is near-universal industry practice, and virtually all property management agreements (contracts between the PM company and the property owner) require it as a contractual condition — typically at least $1,000,000 per occurrence with a $2,000,000 aggregate limit.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "1-800-INSURANCE — CA Property Management Insurance Requirements 2026",
+              "url": "https://www.1800insurance.com/guides/california-property-management-insurance-requirements",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "This is industry-practice information, not a statutory requirement — correctly framed as contractual/practical guidance rather than 'law.' No primary legal citation exists because none is required by statute."
+      },
+      {
+        "id": "insurance-02",
+        "statement": "Professional liability / Errors & Omissions (E&O) insurance is a separate, distinct coverage from general liability — it protects against claims of negligence or mistakes in professional duties (e.g., tenant screening errors, Fair Housing missteps, lease drafting mistakes), which general liability (bodily injury/property damage) does not cover.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Insureon — Property Manager Insurance guide",
+              "url": "https://www.insureon.com/real-estate-business-insurance/property-managers",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "insurance-03",
+        "statement": "Workers' compensation insurance IS legally mandatory in California for any employer with at least one employee (this is a statutory requirement, unlike general liability). Non-compliance penalties can reach up to $30,000 for repeat violations under recent enforcement figures.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Labor Code § 3700 et seq. (workers' compensation coverage mandate)",
+              "url": "https://www.1800insurance.com/guides/california-property-management-insurance-requirements",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "The $30,000 repeat-violation penalty figure came from a secondary insurance-industry source, not directly cross-checked against the current Labor Code penalty schedule or DIR enforcement data. Treat the existence of the mandate as HIGH confidence; treat the specific $30,000 number as unverified until checked directly against Cal. Labor Code § 3722 / DIR penalty tables."
+      }
+    ],
+    "lease-agreement-requirements": [
+      {
+        "id": "lease-01",
+        "statement": "California leases must include, verbatim (not paraphrased), the Megan's Law sex offender registry notice specified by statute. A lease that omits this notice or alters its wording does not comply.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 2079.10a",
+              "url": "https://tenant-rights.com/california/essential-requirements-for-california-lease-agreements",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "lease-02",
+        "statement": "Required lease disclosures in California generally include (subject to property-specific applicability): lead-based paint hazards (federal, pre-1978 buildings); a mold information handbook (regardless of known mold presence); known bed bug infestations within the past year; special flood hazard area status (if landlord has actual knowledge, disclosed in at least 8-point type, for leases signed after 7/1/2018); known military ordnance location; pest control company/treatment notices; smoking policy; demolition intent; and the AB 1482 rent cap/just-cause notice or exemption notice as applicable.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Landager — California Required Disclosures for Landlords: Complete List",
+              "url": "https://landager.com/en/property-compliance/usa/california/required-disclosures",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "Nolo — What Disclosures do Landlords in California Need to Give Tenants",
+              "url": "https://www.nolo.com/legal-encyclopedia/california-required-landlord-disclosures.html",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "This is a compiled checklist assembled from secondary sources rather than a single statute — each individual disclosure has its own separate Civil Code or Health & Safety Code citation. Recommend Neo/Mason build this out as individual, separately-cited claims (one per disclosure type) rather than one bundled claim, once this database moves into the tool Q builds — bundling risks one wrong item undermining confidence in the whole list."
+      },
+      {
+        "id": "lease-03",
+        "statement": "AB 747, effective January 2026, added new fee transparency requirements for California leases (junk-fee-style disclosure of mandatory fees). The exact scope and required disclosure format was not independently confirmed against the bill's actual text in this research pass.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "Lifetime PM — California Lease Agreement Guide (2026)",
+              "url": "https://www.lifetimepm.com/blog/california-lease-agreement-guide",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: Pull the actual AB 747 bill text from leginfo.legislature.ca.gov to confirm scope, effective date, and specific required disclosure language before this claim is used in any tenant-facing lease template. This is a brand-new 2026 law and was only found in a single secondary source in this pass."
+      }
+    ],
+    "habitability-and-maintenance": [
+      {
+        "id": "habitability-01",
+        "statement": "California law creates an automatic 'implied warranty of habitability' in every residential lease: landlords must maintain the unit in livable condition for the full length of the tenancy (not just at move-in). A lease clause attempting to waive this obligation is void and unenforceable.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code §§ 1941, 1941.1",
+              "url": "https://legalclarity.org/ca-civil-code-1941-and-the-warranty-of-habitability/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "habitability-02",
+        "statement": "Minimum habitability standards under Civil Code § 1941.1 include: effective weatherproofing of roof/walls; plumbing/electrical/gas facilities in good working order; adequate hot and cold running water and a working sewage system; safe and adequate heating; properly maintained electrical wiring/lighting; floors, stairs, and railings kept in good repair; adequate trash/garbage receptacles; and grounds/buildings kept free of rodents, vermin, and other pests.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1941.1",
+              "url": "https://legalclarity.org/california-tenant-rights-and-landlord-duties-for-habitability/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "habitability-03",
+        "statement": "If a landlord fails to make necessary repairs to habitability defects within a reasonable time after written notice (presumptively around 30 days, shorter for urgent health/safety issues), a tenant may exercise the 'repair and deduct' remedy: perform the repair and deduct the cost from rent, capped at one month's rent in cost, usable no more than twice in any 12-month period.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1942(a)",
+              "url": "https://greensteinmcdonald.com/frequently-asked-questions/repair-and-deduct-remedy/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "The '30 days' figure is a common-law/case-derived presumption of what counts as 'reasonable time,' not a fixed number written into the statute itself — the statute says 'reasonable time,' and courts have generally treated ~30 days as reasonable absent urgency. This nuance should be preserved in any tenant/owner-facing content: do not state '30 days' as if it were a hard statutory deadline. CONFIRMED by Mason (legal review, 2026-07-09): this distinction is correctly drawn as written — the drafting engine must preserve this hedge (e.g., 'generally treated as around 30 days') rather than compressing it into a bare number when generating content."
+      },
+      {
+        "id": "habitability-04",
+        "statement": "No Ventura-County-specific city ordinance was found imposing maintenance response TIME requirements beyond state law (e.g., no city-specific '24 hour response for no-heat calls' type ordinance was identified for any of the 9 cities). This is an absence-of-evidence finding.",
+        "jurisdiction_scope": "county-wide (all 9 cities + unincorporated county)",
+        "confidence": "LOW",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": "RESOLUTION NEEDED: This was not specifically searched city-by-city with the same rigor as the rent control question — it was inferred from the absence of anything surfacing during the broader habitability research. Before relying on 'no local maintenance-timing ordinances exist,' each city's municipal code should be checked specifically under its building/housing/property-maintenance code chapters (several cities, e.g. Simi Valley, have a 'Property Maintenance' chapter that may include timing requirements not surfaced by general search)."
+      }
+    ],
+    "pest-control": [
+      {
+        "id": "pest-01",
+        "statement": "If a landlord has a contract with a structural pest control company for periodic service, the landlord must give each new tenant a copy of the notice the pest control company provided, and disclose the name and address of that pest control company.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "HIGH",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1940.8.5; Structural Pest Control Act disclosure requirements",
+              "url": "https://codes.findlaw.com/ca/civil-code/civ-sect-1940-8-5/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      },
+      {
+        "id": "pest-02",
+        "statement": "Before applying pesticide to a dwelling unit, the landlord or agent must give the tenant at least 24 hours' notice, delivered by first-class mail, personal delivery, electronic delivery (if the tenant has provided an email address), or a conspicuously posted written notice at the unit entry.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [],
+          "secondary": [
+            {
+              "source": "California Apartment Association — new pesticide-notification requirements",
+              "url": "https://caanet.org/depth-new-notification-requirements-landlords-applying-pesticides/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": null,
+        "notes": "Underlying statute is understood to be in the Food & Agricultural Code / Civil Code pesticide-notice provisions; the exact code section number was not directly confirmed against leginfo.legislature.ca.gov text in this pass. Confidence capped at MEDIUM pending that direct check."
+      },
+      {
+        "id": "pest-03",
+        "statement": "Pest infestations that render a unit unsafe, unsanitary, or unfit for habitation (e.g., significant rodent, cockroach, or bed bug infestations affecting habitability) fall under the general habitability obligation and can trigger the same repair-and-deduct and habitability remedies described in the habitability topic above.",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "OK",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1941.1(a)(8) (grounds/buildings free of rodents/vermin as a habitability standard)",
+              "url": "https://pestcontrolcalifornia.us/california-landlord-pest-control-laws/",
+              "retrieved": "2026-07-09"
+            }
+          ],
+          "secondary": []
+        },
+        "conflicts": null,
+        "notes": null
+      }
+    ],
+    "screening-and-application-fees": [
+      {
+        "id": "screening-01",
+        "statement": "California caps the application screening fee a landlord may charge at actual out-of-pocket costs of screening (e.g., credit/background check costs plus reasonable value of staff time), subject to a statutory maximum dollar figure that started at $30 in 1997 and is adjusted annually for CPI. For calendar year 2026, secondary sources report the cap at $65.86 (up from roughly $63.90 in 2025).",
+        "jurisdiction_scope": "statewide",
+        "confidence": "MEDIUM",
+        "status": "NEEDS_HUMAN_REVIEW",
+        "evidence": {
+          "primary": [
+            {
+              "citation": "Cal. Civil Code § 1950.6",
+              "url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=CIV&sectionNum=1950.6",
+              "retrieved": "2026-07-09",
+              "access_note": "The statute's CPI-adjustment mechanism was confirmed via secondary sources; the exact current dollar figure was not independently cross-checked against the California Department of Consumer Affairs' or DOJ's official published 2026 figure in this pass."
+            }
+          ],
+          "secondary": [
+            {
+              "source": "RentLegacy — California Screening Fee Increase 2026",
+              "url": "https://www.rentlegacy.com/blog/maximum-applicant-screening-fee-increase-for-california-rentals-in-2026",
+              "retrieved": "2026-07-09"
+            },
+            {
+              "source": "California Apartment Association — max screening fee KB article",
+              "url": "https://caanet.org/kb/max-screening-fee/",
+              "retrieved": "2026-07-09"
+            }
+          ]
+        },
+        "conflicts": "One source (Berkeley Rent Board page, reflecting a LOCAL Berkeley-specific rule, not Ventura County) cited a different figure ($68.96) — that figure does NOT apply here since Berkeley has its own local screening-fee ordinance and Berkeley is not in Ventura County. Flagging so this number is never confused with the correct statewide figure that applies to Ventura County landlords.",
+        "notes": "RESOLUTION NEEDED: This is EXACTLY the type of figure the user flagged as having been stale in the rejected prior vendor tool. Confirm the current-year screening fee cap directly against the state's official annual publication (the CA DOJ or Dept. of Consumer Affairs typically publishes this) before this number is used anywhere. ANNUAL RECHECK REQUIRED every January when the figure adjusts."
+      }
+    ]
+  }
+}

@@ -28,4 +28,4 @@
 set -a
 source /var/www/hub/.env
 set +a
-curl -s -X POST -H "X-Forwarded-Proto: https" -H "x-cron-secret: $CRON_SECRET" "http://localhost:3500/api/archive-search/process-significance-pending-scheduled"
+curl -s -X POST -H "X-Forwarded-Proto: https" -H "x-cron-secret: $CRON_SECRET" "http://localhost:3500/api/archive-search/process-significance-pending-scheduled?limit=50&since_date=2026-10-01"

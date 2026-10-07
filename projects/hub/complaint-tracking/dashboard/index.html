@@ -94,6 +94,15 @@
     .view-tab .count-pill { background: rgba(0,0,0,0.08); margin-left: 6px; }
     .view-tab.active .count-pill { background: rgba(255,255,255,0.22); color: #fff; }
 
+    /* ── Sort control (chronological build, 2026-10-07) — sits directly
+       under the view tabs, above whichever list is showing. A plain
+       <select> on purpose: works on every phone/browser, and three long
+       plain-English labels don't fit as pills at phone width. ── */
+    .sort-bar { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin: 0 0 14px; }
+    .sort-bar label { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    .sort-bar select { font-size: 13px; font-family: inherit; color: #111827; background: #fff; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 10px; min-height: 34px; }
+    .sort-hint { font-size: 11.5px; color: #6b7280; line-height: 1.4; flex: 1 1 260px; }
+
     /* ── Bulk selection (Phase 1 item 2) ── */
     .select-all-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #6b7280; margin-bottom: 8px; padding-left: 2px; }
     .bulk-bar { position: sticky; top: 8px; z-index: 20; background: #1f2937; color: #fff; border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
@@ -154,7 +163,13 @@
 
     .c-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
     .c-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-    .c-date { font-size: 11.5px; color: #9ca3af; white-space: nowrap; }
+    /* Card date block (chronological build, 2026-10-07) — the EMAIL date is
+       now the primary date (darker, slightly bolder); when the logged date
+       is also shown it is the smaller line underneath. A card with no
+       source email shows only "Logged: ..." as its one line. */
+    .c-date { font-size: 11.5px; color: #9ca3af; text-align: right; }
+    .c-date-main { font-size: 12px; font-weight: 600; color: #374151; white-space: nowrap; }
+    .c-date-sub { font-size: 11px; color: #6b7280; margin-top: 1px; white-space: nowrap; }
 
     .badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; white-space: nowrap; letter-spacing: 0.02em; }
     .badge-solid-blue    { background: #1d4ed8; color: #fff; }
@@ -261,7 +276,7 @@
     .owner-update-row.oi-flag .oi-dot { background: #d97706; }
     .owner-update-row .oi-label { font-weight: 700; color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; flex: none; }
     .owner-update-row .oi-text { color: #374151; flex: 1; min-width: 160px; }
-    .owner-update-row .oi-date { color: #9ca3af; font-size: 11px; flex: none; }
+    .owner-update-row .oi-date { color: #6b7280; font-size: 11px; flex: none; white-space: nowrap; }
 
     /* Manage panel — reuses details.subsection pattern already
        established across this Hub's dashboards. */
@@ -317,6 +332,12 @@
       .manage-row > * { min-width: 0; }
       .view-tabs { flex-direction: column; align-items: stretch; }
       .bulk-bar { flex-direction: column; align-items: flex-start; }
+      /* 16px on the sort <select> stops iPhone Safari from zooming the
+         page in when it is tapped. */
+      .sort-bar select { font-size: 16px; width: 100%; }
+      .sort-bar label { flex: 1 1 100%; }
+      .c-date { text-align: left; }
+      .owner-update-row { flex-wrap: wrap; }
     }
   </style>
 </head>
@@ -615,6 +636,138 @@
     var UNDO_REOPEN_NOTE = 'Reverted via Undo (reopened after being marked Not an Issue).';
 
     // ────────────────────────────────────────────────────────────────
+    // Chronological ordering (2026-10-07). DISPLAY ONLY — this never
+    // changes which tab / section / group a card is in, any count, filter,
+    // bulk action, undo, or safety behavior; it only decides the order of
+    // the cards inside each existing group.
+    //
+    // Why: the list used to come back newest-LOGGED first, and the ~970
+    // backlog items were all logged on Sept 29/30 while their emails span
+    // 2022-2026, so "newest first" said nothing about when things actually
+    // happened. The server now adds two read-only fields to each complaint:
+    //   source_email_first_at / source_email_last_at  (ISO, or null when the
+    // complaint has no source email — e.g. a manual "Report an Issue").
+    // A card with neither field falls back to created_at and is labeled
+    // "Logged:" so nobody mistakes a logged date for an email date.
+    //
+    // Sort key follows the label literally: "Oldest email first" goes by the
+    // thread's FIRST message, "Newest email first" by its LATEST message.
+    // So a long thread (say Dec 2022 to Jan 2026) turns up near the top of
+    // both lists, and for single-message emails the two are the same date.
+    // (Because of that, Newest is not an exact mirror of Oldest for
+    // multi-message threads.) To use one key for both, edit sortTime().
+    // ────────────────────────────────────────────────────────────────
+    var SORT_MODES = [
+      { key: 'oldest', label: 'Oldest email first' },
+      { key: 'newest', label: 'Newest email first' },
+      { key: 'logged', label: 'Order logged' },
+    ];
+    var SORT_HINTS = {
+      oldest: 'By the day each email thread started. Items with no email use the date they were logged.',
+      newest: 'By the date of each email thread’s latest message. Items with no email use the date they were logged.',
+      logged: 'By when each item was logged in this system, most recently logged first.',
+    };
+    var SORT_STORAGE_KEY = 'complaintTracking.sortMode';
+    function isSortMode(v) {
+      return SORT_MODES.some(function (m) { return m.key === v; });
+    }
+    // sessionStorage can throw (private mode, blocked site data) — the page
+    // must work without it, so every touch is wrapped and falls back to the
+    // default ("oldest").
+    function loadSortMode() {
+      try {
+        var v = window.sessionStorage.getItem(SORT_STORAGE_KEY);
+        if (isSortMode(v)) return v;
+      } catch (e) { /* storage unavailable — use the default */ }
+      return 'oldest';
+    }
+    function saveSortMode(v) {
+      try { window.sessionStorage.setItem(SORT_STORAGE_KEY, v); } catch (e) { /* storage unavailable — choice just isn't remembered */ }
+    }
+    var sortMode = loadSortMode();
+
+    // Milliseconds since 1970, or NaN. Also tolerates the Postgres-style
+    // "2025-03-03 17:22:11+00" text (space instead of T, 2-digit offset),
+    // which Safari will not parse on its own — a silent NaN there would
+    // throw every item into the "unknown date" pile.
+    function parseTime(v) {
+      if (!v) return NaN;
+      var s = String(v);
+      if (/^\d{4}-\d\d-\d\d \d/.test(s)) s = s.replace(' ', 'T');
+      s = s.replace(/(T[\d:.]+)([+-]\d\d)$/, '$1$2:00');
+      return new Date(s).getTime();
+    }
+    // { first, last } in ms when the complaint has a usable source-email
+    // date, otherwise null. One missing end borrows the other; a swapped
+    // pair is put right rather than shown as a backwards range.
+    function emailTimes(c) {
+      var first = parseTime(c.source_email_first_at);
+      var last = parseTime(c.source_email_last_at);
+      if (isNaN(first) && isNaN(last)) return null;
+      if (isNaN(first)) first = last;
+      if (isNaN(last)) last = first;
+      if (last < first) { var t = first; first = last; last = t; }
+      return { first: first, last: last };
+    }
+    function sortTime(c) {
+      if (sortMode === 'logged') return parseTime(c.created_at);
+      var e = emailTimes(c);
+      if (!e) return parseTime(c.created_at);
+      return sortMode === 'newest' ? e.last : e.first;
+    }
+    // Stable on purpose (Array.sort is only guaranteed stable on newer
+    // browsers, and a phone in the field may be old): every row carries its
+    // original position and ties — equal dates — keep the order they arrived
+    // in. Rows with no usable date at all go last in every mode. Returns a
+    // new array; the input is never reordered.
+    function sortComplaints(items) {
+      if (items.length < 2) return items.slice();
+      var dir = sortMode === 'oldest' ? 1 : -1;
+      var rows = items.map(function (c, i) { return { c: c, i: i, t: sortTime(c) }; });
+      rows.sort(function (a, b) {
+        var aBad = isNaN(a.t), bBad = isNaN(b.t);
+        if (aBad || bBad) return aBad && bBad ? a.i - b.i : (aBad ? 1 : -1);
+        if (a.t !== b.t) return (a.t - b.t) * dir;
+        return a.i - b.i;
+      });
+      return rows.map(function (r) { return r.c; });
+    }
+
+    function dayText(ms, withYear) {
+      var opts = withYear ? { month: 'short', day: 'numeric', year: 'numeric' } : { month: 'short', day: 'numeric' };
+      return new Date(ms).toLocaleDateString('en-US', opts);
+    }
+    // "Mar 3, 2025" for a single day; "Mar 3 – Apr 9, 2025" for a thread
+    // that stayed inside one year; full dates on both ends if it crossed a
+    // year. Output is built only from toLocaleDateString, never from data.
+    function emailSpanText(e) {
+      var a = dayText(e.first, true), b = dayText(e.last, true);
+      if (a === b) return a;
+      if (new Date(e.first).getFullYear() === new Date(e.last).getFullYear()) return dayText(e.first, false) + ' &ndash; ' + b;
+      return a + ' &ndash; ' + b;
+    }
+    // The date block at the top right of a card: "Email: ..." with a small
+    // "Logged: ..." under it, or just "Logged: ..." when there is no email.
+    function cardDateHtml(c) {
+      var e = emailTimes(c);
+      if (!e) return '<div class="c-date"><div class="c-date-main">Logged: ' + formatDate(c.created_at) + '</div></div>';
+      return '<div class="c-date"><div class="c-date-main">Email: ' + emailSpanText(e) + '</div>' +
+        '<div class="c-date-sub">Logged: ' + formatDate(c.created_at) + '</div></div>';
+    }
+    function rowDateText(c) {
+      var e = emailTimes(c);
+      return e ? ('Email: ' + emailSpanText(e)) : ('Logged: ' + formatDate(c.created_at));
+    }
+    function renderSortBar() {
+      var options = SORT_MODES.map(function (m) {
+        return '<option value="' + m.key + '"' + (sortMode === m.key ? ' selected' : '') + '>' + m.label + '</option>';
+      }).join('');
+      return '<div class="sort-bar"><label for="sortSelect">Sort by</label>' +
+        '<select id="sortSelect">' + options + '</select>' +
+        '<span class="sort-hint">' + SORT_HINTS[sortMode] + '</span></div>';
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Card rendering
     // ────────────────────────────────────────────────────────────────
     function propertyLine(c) {
@@ -826,7 +979,12 @@
 
       var html = '<div class="c-card ' + subjCls + (isHeld ? ' is-held' : '') + '" data-card-id="' + c.id + '">';
       html += renderQuickActions(c);
-      html += '<div class="c-top"><div class="c-badges">' + (isHeld ? '' : indicatorHtml(c)) + statusBadge(c.status) + subjectChip(c) + '</div><div class="c-date">' + formatDate(c.created_at) + '</div></div>';
+      // Held cards keep their original single logged-date line, unchanged
+      // (they are a deliberately content-free safety placeholder and are
+      // not part of the chronological build); every other card gets the
+      // email-date block.
+      var dateBlock = isHeld ? '<div class="c-date">' + formatDate(c.created_at) + '</div>' : cardDateHtml(c);
+      html += '<div class="c-top"><div class="c-badges">' + (isHeld ? '' : indicatorHtml(c)) + statusBadge(c.status) + subjectChip(c) + '</div>' + dateBlock + '</div>';
       html += body;
       html += emailLinkLine(c);
       html += lastTouchedLine(c);
@@ -853,7 +1011,7 @@
         '<span class="oi-dot"></span>' +
         '<span class="oi-label">Owner update</span>' +
         '<span class="oi-text">' + escapeHtml(who) + ': ' + escapeHtml(text) + (flagged ? ' &mdash; <strong>worth a second look</strong>' : '') + '</span>' +
-        '<span class="oi-date">' + formatDate(c.created_at) + '</span>' +
+        '<span class="oi-date">' + rowDateText(c) + '</span>' +
         '</div>';
     }
 
@@ -871,21 +1029,24 @@
       });
       return groups;
     }
+    // The group order (Owner-Tied, Tenant-Tied, Other) and each group's
+    // membership and count are exactly as before; sortComplaints() only
+    // orders the cards INSIDE each group (chronological build, 2026-10-07).
     function renderSubjectGroups(items) {
       if (!items.length) return '';
       var groups = groupBySubject(items);
       var html = '';
       if (groups.owner.length) {
         html += '<div class="subject-group"><div class="subject-group-heading sg-owner"><span class="dot"></span>Owner-Tied (' + groups.owner.length + ')</div>' +
-          groups.owner.map(renderCard).join('') + '</div>';
+          sortComplaints(groups.owner).map(renderCard).join('') + '</div>';
       }
       if (groups.tenant.length) {
         html += '<div class="subject-group"><div class="subject-group-heading sg-tenant"><span class="dot"></span>Tenant-Tied (' + groups.tenant.length + ')</div>' +
-          groups.tenant.map(renderCard).join('') + '</div>';
+          sortComplaints(groups.tenant).map(renderCard).join('') + '</div>';
       }
       if (groups.other.length) {
         html += '<div class="subject-group"><div class="subject-group-heading sg-other"><span class="dot"></span>Other &mdash; Team Member, Property, or Unmatched (' + groups.other.length + ')</div>' +
-          groups.other.map(renderCard).join('') + '</div>';
+          sortComplaints(groups.other).map(renderCard).join('') + '</div>';
       }
       return html;
     }
@@ -1056,6 +1217,7 @@
 
       var html = renderTiles(allComplaints) + renderFilters();
       html += renderViewTabs(callItems.length + flaggedItems.length, logAll.length, resolvedItems.length);
+      html += renderSortBar();
 
       html += '<div id="tabContent">';
       if (filters.view === 'log') {
@@ -1063,7 +1225,7 @@
         html += '<div class="section-block">';
         if (ownerUpdateItems.length) {
           html += '<div class="quiet-section-title">Owner Updates (' + ownerUpdateItems.length + ')</div>';
-          html += '<div class="owner-update-list">' + ownerUpdateItems.map(renderOwnerUpdateRow).join('') + '</div>';
+          html += '<div class="owner-update-list">' + sortComplaints(ownerUpdateItems).map(renderOwnerUpdateRow).join('') + '</div>';
         }
         html += '<div class="quiet-section-title">Log (' + logItems.length + ')</div>';
         html += logItems.length ? renderSubjectGroups(logItems) : '<div class="empty">Nothing in the log matches these filters.</div>';
@@ -1202,6 +1364,19 @@
           filters.view = el.getAttribute('data-view');
           render();
         });
+      });
+      // Sort control (chronological build) — display order only. render()
+      // already starts every redraw with a clean bulk selection, so a re-sort
+      // can never leave a stale "N selected" bar pointing at cards that moved.
+      var sortSelect = document.getElementById('sortSelect');
+      if (sortSelect) sortSelect.addEventListener('change', function () {
+        var v = sortSelect.value;
+        if (!isSortMode(v)) return;
+        sortMode = v;
+        saveSortMode(v);
+        render();
+        var again = document.getElementById('sortSelect');
+        if (again) again.focus();
       });
       // Filter pills
       document.querySelectorAll('.filter-btn').forEach(function (el) {

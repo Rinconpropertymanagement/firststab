@@ -2776,10 +2776,7 @@ router.get('/api/security-deposit/cases/:id/photo-folder-search', requireSecurit
 // see the new photo-matches/:id/resolve route below for the one place
 // this role is explicitly excluded.
 const VALID_ROLES = ['admin', 'pod_lead', 'director_of_operations', 'inspection_coordinator'];
-// quickturnmaintenance.com added 2026-09-09 — Peter confirmed it's a sister
-// company he owns (not an unaffiliated outside vendor), same trust level as
-// rinconmanagement.com for Hub access purposes.
-const ALLOWED_DOMAINS = ['rinconmanagement.com', 'quickturnmaintenance.com'];
+const ALLOWED_DOMAIN = 'rinconmanagement.com';
 
 router.get('/api/security-deposit/users', requireSecurityDepositRole('admin'), async (req, res) => {
   const { data, error } = await supabase
@@ -2805,8 +2802,8 @@ router.post('/api/security-deposit/users', requireSecurityDepositRole('admin'), 
   if (!email || !role) return res.status(400).json({ error: 'email and role are required.' });
 
   const normalizedEmail = String(email).toLowerCase().trim();
-  if (!ALLOWED_DOMAINS.some(d => normalizedEmail.endsWith('@' + d))) {
-    return res.status(400).json({ error: 'Only ' + ALLOWED_DOMAINS.map(d => '@' + d).join(' or ') + ' accounts allowed.' });
+  if (!normalizedEmail.endsWith('@' + ALLOWED_DOMAIN)) {
+    return res.status(400).json({ error: 'Only @' + ALLOWED_DOMAIN + ' accounts allowed.' });
   }
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role.' });
 

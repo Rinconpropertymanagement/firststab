@@ -75,6 +75,7 @@ const { checkClaim, TIER_B_CLASSIFIER_VERSION } = require('../maintenance-histor
 // duplicated, so the two tables' category lists can never drift apart.
 const { TOPIC_CATEGORIES: CATEGORIES } = require('../archive-search/lib/significance-pass');
 const { findPossibleDuplicate } = require('./lib/duplicate-check');
+const { createSourceEmailDates } = require('./lib/source-email-dates');
 const { lookupSingleDirectorOfOperations } = require('./lib/process-pending-messages');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 // Triage redesign build (2026-10): "View original email" link. Reusing
@@ -107,6 +108,12 @@ if (missing.length > 0) {
 // that logic moved to archive-search/lib/significance-pass.js.
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+// Read-only helper for the two list endpoints below: adds the date of the
+// first and last email in each complaint's source thread, so the dashboard
+// can order items by when the email arrived rather than when it was logged.
+// Fails soft (dates come back null) and keeps a short in-memory cache.
+const sourceEmailDates = createSourceEmailDates({ supabase });
 
 function isValidUuid(str) {
   return typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
@@ -790,7 +797,9 @@ router.get('/api/complaint-tracking', requireComplaintTrackingAccess, async (req
     allRows = allRows.concat(data || []);
     if (!data || data.length < PAGE_SIZE) break;
   }
-  res.json({ complaints: await attachDisplayInfo(allRows) });
+  // Independent lookups that touch different keys on each row, so they run side by side.
+  await Promise.all([attachDisplayInfo(allRows), sourceEmailDates.attach(allRows)]);
+  res.json({ complaints: allRows });
 });
 
 // ─── GET /api/complaint-tracking/home-count — the Hub home-page tile
@@ -846,7 +855,9 @@ router.get('/api/complaint-tracking/property/:property_id', requireComplaintTrac
   const { data, error } = await supabase
     .from('complaints_needing_attention').select('*').eq('property_id', req.params.property_id).order('created_at', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ complaints: await attachDisplayInfo(data || []) });
+  const rows = data || [];
+  await Promise.all([attachDisplayInfo(rows), sourceEmailDates.attach(rows)]);
+  res.json({ complaints: rows });
 });
 
 // ─── POST /api/complaint-tracking/:id/stage — lifecycle transitions

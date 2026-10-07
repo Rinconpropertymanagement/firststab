@@ -507,6 +507,11 @@ asyncTest('router — POST .../name-match/reject: 409 when there is no pending s
   assert.strictEqual(result.statusCode, 409);
 });
 
+// Email-date ordering support (lib/source-email-dates.js + the two list
+// endpoints) — its tests live in their own file and register into this
+// same runner so they count in the totals below.
+require('./source-email-dates-tests').register({ test, asyncTest, callRouterHandler });
+
 // ─── Report ──────────────────────────────────────────────────────────────
 async function main() {
   const resolvedAsync = await Promise.all(asyncResults);

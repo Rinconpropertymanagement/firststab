@@ -656,10 +656,15 @@
     // both lists, and for single-message emails the two are the same date.
     // (Because of that, Newest is not an exact mirror of Oldest for
     // multi-message threads.) To use one key for both, edit sortTime().
+    //
+    // Default is "Newest email first" (Peter asked for the most recent issues
+    // at the top). A choice made in the dropdown is remembered for the tab.
+    // With no email dates at all (e.g. server not updated yet), Newest falls
+    // back to the logged date, newest first, which is the old live order.
     // ────────────────────────────────────────────────────────────────
     var SORT_MODES = [
-      { key: 'oldest', label: 'Oldest email first' },
       { key: 'newest', label: 'Newest email first' },
+      { key: 'oldest', label: 'Oldest email first' },
       { key: 'logged', label: 'Order logged' },
     ];
     var SORT_HINTS = {
@@ -673,13 +678,14 @@
     }
     // sessionStorage can throw (private mode, blocked site data) — the page
     // must work without it, so every touch is wrapped and falls back to the
-    // default ("oldest").
+    // default ("newest"). A stored value that isn't one of the three known
+    // choices is ignored and also gets the default.
     function loadSortMode() {
       try {
         var v = window.sessionStorage.getItem(SORT_STORAGE_KEY);
         if (isSortMode(v)) return v;
       } catch (e) { /* storage unavailable — use the default */ }
-      return 'oldest';
+      return 'newest';
     }
     function saveSortMode(v) {
       try { window.sessionStorage.setItem(SORT_STORAGE_KEY, v); } catch (e) { /* storage unavailable — choice just isn't remembered */ }

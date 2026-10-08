@@ -310,8 +310,9 @@ async function fetchByIds(table, columns, idList) {
 // chunks of 100 ids, a few at a time, pages each chunk newest-first past
 // PostgREST's 1000-row cap, and leaves a complaint without the info (rather
 // than ever showing an older "last touched") if its chunk can't be read
-// completely. Same "log, don't throw, show the row anyway" discipline as
-// attachDisplayInfo's own enrichment lookups.
+// completely or in time (the whole lookup has a ~10 second limit, so a
+// stuck database request can't hang the list). Same "log, don't throw, show
+// the row anyway" discipline as attachDisplayInfo's own enrichment lookups.
 async function attachLastTouchedInfo(rows) {
   if (!rows || !rows.length) return rows;
   const latestByEntity = await findLatestAuditRows(supabase, rows.map((r) => r.id));
@@ -459,10 +460,11 @@ async function attachDisplayInfo(rows) {
     };
   }
   // Phase 3 item 11 ("Last touched X ago by [name]") — a second, separate
-  // batched pass (its own audit_log query, not foldable into the
-  // Promise.all above since it depends on knowing every row's id, not a
-  // fixed set of foreign-key ids) — see attachLastTouchedInfo's own header
-  // for why this is one batched query rather than one per row.
+  // pass (its own audit_log queries, not foldable into the Promise.all
+  // above since it depends on knowing every row's id, not a fixed set of
+  // foreign-key ids) — see attachLastTouchedInfo's own header for why this
+  // asks in batches of ids, with a time limit, rather than once per row or
+  // all at once.
   await attachLastTouchedInfo(rows);
   return rows;
 }

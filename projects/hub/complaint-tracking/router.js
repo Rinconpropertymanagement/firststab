@@ -76,6 +76,7 @@ const { checkClaim, TIER_B_CLASSIFIER_VERSION } = require('../maintenance-histor
 const { TOPIC_CATEGORIES: CATEGORIES } = require('../archive-search/lib/significance-pass');
 const { findPossibleDuplicate } = require('./lib/duplicate-check');
 const { createSourceEmailDates } = require('./lib/source-email-dates');
+const { findLatestAuditRows } = require('./lib/last-touched');
 const { lookupSingleDirectorOfOperations } = require('./lib/process-pending-messages');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 // Triage redesign build (2026-10): "View original email" link. Reusing
@@ -301,47 +302,20 @@ async function fetchByIds(table, columns, idList) {
 // audit_log, and there's no per-row "last_updated_by" column (a real
 // schema change, which this additive-reads-only phase was told not to
 // make). Getting that cheaply for ~1,000+ visible rows in one list load
-// means a single batched, paginated query — same "page through in bounded
-// 1000-row chunks" pattern this file's own GET /api/complaint-tracking
-// route already uses for the same PostgREST row-cap reason (see that
-// route's own comment) — rather than one query per card (an N+1 that
-// would mean a thousand+ requests on every dashboard load).
-// Capped at MAX_PAGES purely as a safety valve against paging through
-// this tool's entire audit history for one list load if some id is
-// somehow never covered; in practice every complaint gets a
-// 'complaint_tracking.created' row at insert (both the manual-report path
-// above and significance-pass.js's own complaint-creation path write one),
-// so ordering newest-first and stopping once every id has at least one
-// hit converges fast. Any id left uncovered when the cap is hit just gets
-// no last_touched info — same "log, don't throw, show the row anyway"
-// discipline as attachDisplayInfo's own enrichment lookups.
+// means a few batched queries — not one per card (an N+1 that would mean a
+// thousand+ requests on every dashboard load), and not ONE query holding
+// every id either: with ~1,000 ids the request address is ~37 KB, the
+// gateway answers "Bad Request", and the whole list silently lost its
+// last-touched info (seen live 2026-10-07). lib/last-touched.js asks in
+// chunks of 100 ids, a few at a time, pages each chunk newest-first past
+// PostgREST's 1000-row cap, and leaves a complaint without the info (rather
+// than ever showing an older "last touched") if its chunk can't be read
+// completely or in time (the whole lookup has a ~10 second limit, so a
+// stuck database request can't hang the list). Same "log, don't throw, show
+// the row anyway" discipline as attachDisplayInfo's own enrichment lookups.
 async function attachLastTouchedInfo(rows) {
   if (!rows || !rows.length) return rows;
-  const ids = rows.map((r) => r.id);
-  const PAGE_SIZE = 1000;
-  const MAX_PAGES = 10;
-  const latestByEntity = new Map();
-
-  try {
-    for (let page = 0; page < MAX_PAGES && latestByEntity.size < ids.length; page += 1) {
-      const from = page * PAGE_SIZE;
-      const { data, error } = await supabase
-        .from('audit_log')
-        .select('entity_id, actor_type, actor_id, created_at')
-        .eq('entity_type', 'complaint')
-        .in('entity_id', ids)
-        .order('created_at', { ascending: false })
-        .range(from, from + PAGE_SIZE - 1);
-      if (error) throw error;
-      for (const row of data || []) {
-        if (!latestByEntity.has(row.entity_id)) latestByEntity.set(row.entity_id, row);
-      }
-      if (!data || data.length < PAGE_SIZE) break;
-    }
-  } catch (err) {
-    console.error('[complaint-tracking] last-touched lookup failed (showing rows without it):', err.message);
-    return rows;
-  }
+  const latestByEntity = await findLatestAuditRows(supabase, rows.map((r) => r.id));
 
   // actor_id holds the acting human's email for a 'human' action (see
   // writeAuditLog's own actor_id fallback: actor_id || actor_email) — look
@@ -486,10 +460,11 @@ async function attachDisplayInfo(rows) {
     };
   }
   // Phase 3 item 11 ("Last touched X ago by [name]") — a second, separate
-  // batched pass (its own audit_log query, not foldable into the
-  // Promise.all above since it depends on knowing every row's id, not a
-  // fixed set of foreign-key ids) — see attachLastTouchedInfo's own header
-  // for why this is one batched query rather than one per row.
+  // pass (its own audit_log queries, not foldable into the Promise.all
+  // above since it depends on knowing every row's id, not a fixed set of
+  // foreign-key ids) — see attachLastTouchedInfo's own header for why this
+  // asks in batches of ids, with a time limit, rather than once per row or
+  // all at once.
   await attachLastTouchedInfo(rows);
   return rows;
 }

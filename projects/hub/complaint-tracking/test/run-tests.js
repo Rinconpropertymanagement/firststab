@@ -507,10 +507,24 @@ asyncTest('router — POST .../name-match/reject: 409 when there is no pending s
   assert.strictEqual(result.statusCode, 409);
 });
 
+// The test files below swap console.error and the module cache, so their
+// async tests run one after another (and after the tests above), not all at
+// once like the runner's default.
+let serialQueue = Promise.all(asyncResults);
+const serialAsyncTest = (name, fn) => asyncTest(name, () => {
+  const run = serialQueue.then(fn);
+  serialQueue = run.catch(() => {});
+  return run;
+});
+
 // Email-date ordering support (lib/source-email-dates.js + the two list
 // endpoints) — its tests live in their own file and register into this
 // same runner so they count in the totals below.
-require('./source-email-dates-tests').register({ test, asyncTest, callRouterHandler });
+require('./source-email-dates-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
+
+// "Last touched X ago by [name]" (lib/last-touched.js + the same two list
+// endpoints) — same arrangement.
+require('./last-touched-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
 
 // ─── Report ──────────────────────────────────────────────────────────────
 async function main() {

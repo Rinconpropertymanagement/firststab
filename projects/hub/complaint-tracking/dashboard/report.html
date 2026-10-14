@@ -58,9 +58,6 @@
       background: none; border: none; color: #1d4ed8; font-size: 15px; cursor: pointer; line-height: 1; padding: 0;
     }
 
-    .row-2 { display: flex; gap: 10px; }
-    .row-2 > * { flex: 1; min-width: 0; }
-
     button[type="submit"] {
       margin-top: 22px; width: 100%; padding: 13px; background: #1d4ed8; color: #fff; border: none;
       border-radius: 8px; font-size: 15.5px; font-weight: 700; cursor: pointer; font-family: inherit;
@@ -87,7 +84,6 @@
 
     @media (max-width: 480px) {
       .page { padding: 16px 12px 48px; }
-      .row-2 { flex-direction: column; }
     }
   </style>
 </head>
@@ -108,42 +104,6 @@
           <div class="autocomplete-list" id="propertyResults" hidden></div>
         </div>
         <div id="propertyChipWrap"></div>
-
-        <div class="row-2">
-          <div>
-            <label for="category">Category <span class="optional">(optional)</span></label>
-            <select id="category" name="category">
-              <option value="">Not sure / let the DO decide</option>
-              <option value="legal_compliance">Legal / compliance exposure</option>
-              <option value="blocked_resolution">Blocked resolution (refusal or no response)</option>
-              <option value="churn_risk">Owner or tenant relationship / churn risk</option>
-              <option value="escalation_recurrence">Same issue happening again</option>
-              <option value="major_money_property_risk">Major money / property risk</option>
-              <option value="owner_instruction_one_off">One-off owner instruction</option>
-            </select>
-          </div>
-        </div>
-
-        <div id="blockedFields" hidden>
-          <div class="row-2">
-            <div>
-              <label for="blocked_party">Who&rsquo;s not responding / refusing?</label>
-              <select id="blocked_party" name="blocked_party">
-                <option value="">Select&hellip;</option>
-                <option value="owner">Owner</option>
-                <option value="tenant">Tenant</option>
-              </select>
-            </div>
-            <div>
-              <label for="blocked_reason">Why is this blocked?</label>
-              <select id="blocked_reason" name="blocked_reason">
-                <option value="">Select&hellip;</option>
-                <option value="explicit_refusal">They said no outright</option>
-                <option value="inferred_from_silence">2+ days of silence, no response</option>
-              </select>
-            </div>
-          </div>
-        </div>
 
         <button type="submit" id="submitBtn">Submit Report</button>
         <div id="formMessage"></div>
@@ -221,13 +181,6 @@
       if (!e.target.closest('.autocomplete')) resultsBox.hidden = true;
     });
 
-    // ── Category -> conditional blocked_resolution fields ──────────────
-    var categorySelect = document.getElementById('category');
-    var blockedFields = document.getElementById('blockedFields');
-    categorySelect.addEventListener('change', function () {
-      blockedFields.hidden = categorySelect.value !== 'blocked_resolution';
-    });
-
     // ── Submit ───────────────────────────────────────────────────────
     document.getElementById('reportForm').addEventListener('submit', function (e) {
       e.preventDefault();
@@ -239,20 +192,12 @@
         msgEl.innerHTML = '<div class="message error">Describe what happened before submitting.</div>';
         return;
       }
-      var category = categorySelect.value || null;
+      // No category from the reporter — the Director of Operations categorizes every report.
       var payload = {
         description: description,
         property_id: selectedProperty ? selectedProperty.id : null,
-        category: category,
+        category: null,
       };
-      if (category === 'blocked_resolution') {
-        payload.blocked_party = document.getElementById('blocked_party').value || null;
-        payload.blocked_reason = document.getElementById('blocked_reason').value || null;
-        if (!payload.blocked_party || !payload.blocked_reason) {
-          msgEl.innerHTML = '<div class="message error">For a blocked-resolution report, say who isn&rsquo;t responding and why.</div>';
-          return;
-        }
-      }
 
       var btn = document.getElementById('submitBtn');
       btn.disabled = true;
@@ -297,7 +242,6 @@
       selectedProperty = null;
       renderChip();
       searchInput.hidden = false;
-      blockedFields.hidden = true;
       clearTimeout(searchDebounce);
       resultsBox.hidden = true;
       resultsBox.innerHTML = '';

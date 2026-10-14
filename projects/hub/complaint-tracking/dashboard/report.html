@@ -256,7 +256,7 @@
 
       var btn = document.getElementById('submitBtn');
       btn.disabled = true;
-      btn.textContent = 'Submitting&hellip;';
+      btn.textContent = 'Submitting\u2026';
 
       fetch('/api/complaint-tracking/report', {
         method: 'POST', credentials: 'include',
@@ -280,6 +280,9 @@
           document.getElementById('formCard').hidden = true;
           document.getElementById('successRef').textContent = 'Reference: ' + result.body.id;
           document.getElementById('successScreen').hidden = false;
+          // Put the button back so the form is ready the next time it is shown.
+          btn.disabled = false;
+          btn.textContent = 'Submit Report';
         })
         .catch(function () {
           msgEl.innerHTML = '<div class="message error">Network error &mdash; nothing was submitted. Please try again.</div>';
@@ -295,9 +298,16 @@
       renderChip();
       searchInput.hidden = false;
       blockedFields.hidden = true;
+      clearTimeout(searchDebounce);
+      resultsBox.hidden = true;
+      resultsBox.innerHTML = '';
       document.getElementById('formMessage').innerHTML = '';
+      var btn = document.getElementById('submitBtn');
+      btn.disabled = false;
+      btn.textContent = 'Submit Report';
       document.getElementById('successScreen').hidden = true;
       document.getElementById('formCard').hidden = false;
+      document.getElementById('description').focus();
     });
   </script>
 </body>

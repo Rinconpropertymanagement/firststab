@@ -627,7 +627,13 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
     subject_id: resolvedSubjectId,
     needs_matching,
     category: category || null,
-    needs_human_call: false, // "needs a human call" is specifically the AI's own uncertainty flag — doesn't apply to a human-authored report
+    // Set on purpose, by rule, for every staff-typed report (Peter, 2026-10-14):
+    // a person who takes the trouble to type a complaint in wants it seen, so
+    // it belongs in the Needs a Call lane until a human works it. This is NOT
+    // the AI's uncertainty flag — no AI is involved in this route. Setting it
+    // also means the database can never let a severity rating hide the row
+    // as "no_issue" (complaints_no_issue_excludes_protected_signals).
+    needs_human_call: true,
     held_legal_fair_housing: false, // manual reports never use the held/placeholder path — a human already typed this, there is nothing for the hold check to shield
     description: description.trim(),
     blocked_reason: category === 'blocked_resolution' ? blocked_reason : null,
@@ -659,21 +665,45 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
     duplicate_status: duplicate ? 'suggested' : 'none',
   };
 
-  // Design Decision 12 — a big-deal complaint's owner is the DO. A manual
-  // report becomes "big deal" only if the reporting staff member picked a
-  // category outright (needs_human_call is never true for a manual report).
-  if (insertRow.category) {
+  // Design Decision 12 — a big-deal complaint's owner is the DO, and every
+  // staff-typed report is now big-deal by rule (needs_human_call above), so
+  // the DO lookup always runs. Same lookup the email path uses. If it finds
+  // zero or more than one active DO, or fails or throws, the report is still
+  // saved with no owner (still visible in Needs a Call) — a lookup problem
+  // must never make a staff member's submit fail. The log line below carries
+  // no complaint text and no ids.
+  let autoAssigned = false;
+  try {
     const doLookup = await lookupSingleDirectorOfOperations();
-    if (doLookup.ok) insertRow.owner_team_member_id = doLookup.teamMemberId;
+    if (doLookup.ok) {
+      insertRow.owner_team_member_id = doLookup.teamMemberId;
+      autoAssigned = true;
+    } else {
+      console.error('[complaint-tracking] manual report saved without an owner: no single active Director of Operations found.');
+    }
+  } catch (err) {
+    console.error('[complaint-tracking] manual report saved without an owner: Director of Operations lookup threw:', err.message);
   }
 
   const { data: inserted, error: insertErr } = await supabase.from('complaints').insert(insertRow).select().single();
   if (insertErr) return res.status(500).json({ error: insertErr.message });
 
+  // One audit row (no separate "system" row), so "Last touched by [reporter]"
+  // stays accurate. The History panel shows details.reason as the note.
   await writeAuditLog({
     action: 'complaint_tracking.created', entity_type: 'complaint', entity_id: inserted.id,
     actor_email: req.user.email, property_id: inserted.property_id, risk_level: 'low', privacy_category: 'collection',
-    details: { category: inserted.category, reported_by_team_member_id: req.teamMemberId },
+    details: {
+      category: inserted.category,
+      reported_by_team_member_id: req.teamMemberId,
+      owner_team_member_id: autoAssigned ? insertRow.owner_team_member_id : null,
+      auto_assigned_to_director_of_operations: autoAssigned,
+      assignment_rule: 'staff_report_always_to_director_of_operations',
+      needs_human_call_set_by_rule: true,
+      reason: autoAssigned
+        ? 'Automatically assigned to the Director of Operations and placed in Needs a Call because a staff member typed this report in. No AI involved.'
+        : 'Could not assign automatically (no single active Director of Operations found); left unassigned but still in Needs a Call. A staff member typed this report in. No AI involved.',
+    },
   });
 
   if (contentCheck.flagged_protected_class) {

@@ -23,6 +23,13 @@
     .page { max-width: 560px; margin: 0 auto; padding: 20px 16px 56px; }
     a.back { font-size: 13px; color: #374151; text-decoration: none; }
     a.back:hover { text-decoration: underline; }
+    /* Top bar: the Hub link is always there; the "Complaint Tracking" link
+       sits beside it and is only un-hidden for people who can open the list
+       (see the access check at the bottom of the script). */
+    .topbar a.back + a.back { margin-left: 18px; }
+    /* A class that sets display (like .btn-again) would otherwise beat the
+       hidden attribute, so make "hidden" win for these links. */
+    a[hidden] { display: none !important; }
     h1 { font-size: 20px; font-weight: 700; margin: 10px 0 4px; }
     p.sub { color: #6b7280; margin-bottom: 20px; font-size: 13.5px; line-height: 1.5; }
 
@@ -81,6 +88,12 @@
       margin-top: 22px; display: inline-block; padding: 9px 18px; border: 1px solid #d1d5db; border-radius: 8px;
       color: #374151; text-decoration: none; font-size: 13.5px; font-weight: 600;
     }
+    /* Holds "Back to Complaint Tracking" (only for people who can open the
+       list) beside "Report another issue"; wraps onto two lines on a phone. */
+    .success-screen .success-actions {
+      margin-top: 22px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;
+    }
+    .success-screen .success-actions .btn-again { margin-top: 0; }
 
     @media (max-width: 480px) {
       .page { padding: 16px 12px 48px; }
@@ -89,7 +102,10 @@
 </head>
 <body>
   <div class="page">
-    <a class="back" href="/">&larr; Rincon Hub</a>
+    <div class="topbar">
+      <a class="back" href="/">&larr; Rincon Hub</a>
+      <a class="back" href="/complaint-tracking" id="topListLink" hidden>&larr; Complaint Tracking</a>
+    </div>
     <h1>Report an Issue</h1>
     <p class="sub">Tell us what happened. This goes straight to the Director of Operations — you won&rsquo;t see it in a tracker, and there&rsquo;s no status to check back on, but it&rsquo;s recorded with your name attached in case anyone needs more detail from you.</p>
 
@@ -116,7 +132,10 @@
       <p>Thanks &mdash; this is now recorded and visible to the Director of Operations.</p>
       <p>There&rsquo;s nothing more for you to do here.</p>
       <div class="success-ref" id="successRef"></div>
-      <a class="btn-again" href="#" id="reportAnotherBtn">Report another issue</a>
+      <div class="success-actions">
+        <a class="btn-again" href="/complaint-tracking" id="backToListBtn" hidden>Back to Complaint Tracking</a>
+        <a class="btn-again" href="#" id="reportAnotherBtn">Report another issue</a>
+      </div>
     </div>
   </div>
 
@@ -253,6 +272,29 @@
       document.getElementById('formCard').hidden = false;
       document.getElementById('description').focus();
     });
+
+    // ── Way back to the Complaint Tracking list ──────────────────────
+    // Anyone with a Hub login can use this page, but the list itself is
+    // only for the admin and Director of Operations roles. So the two
+    // "Complaint Tracking" links start hidden and are only shown once the
+    // role-gated GET /api/complaint-tracking/auth/me says 200 — the same
+    // check the Hub home tile and the list page itself use. Anything else
+    // (403, any error, no network, a login redirect, an answer that never
+    // arrives) leaves them hidden, and a slow answer just means they stay
+    // hidden until it arrives. This runs on its own in the background and
+    // never touches the form: the form is usable before it answers.
+    (function () {
+      try {
+        fetch('/api/complaint-tracking/auth/me', { credentials: 'include' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (me) {
+            if (!me || !me.role) return;
+            document.getElementById('topListLink').hidden = false;
+            document.getElementById('backToListBtn').hidden = false;
+          })
+          .catch(function () { /* stay hidden */ });
+      } catch (e) { /* stay hidden */ }
+    })();
   </script>
 </body>
 </html>

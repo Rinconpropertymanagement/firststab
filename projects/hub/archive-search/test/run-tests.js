@@ -7193,10 +7193,17 @@ function loadDashboardScript() {
   // references, and that init() is the only one of them actually INVOKED
   // at top level (everything else is only ever called from inside an
   // event handler or a fetch callback, never reached by this stub).
+  // One more pair of calls runs at top level: the "refresh a stale page"
+  // block (2026-10-15) registers two listeners as the script loads,
+  // document.addEventListener('visibilitychange', ...) and
+  // window.addEventListener('pageshow', ...), and reads document.hidden
+  // (undefined in this stub, which reads as "visible"). So the stub needs a
+  // no-op addEventListener on BOTH document and window, or the script dies at
+  // load with "window.addEventListener is not a function".
   const fakeElement = { addEventListener() {}, classList: { add() {}, remove() {}, toggle() {} }, style: {}, set innerHTML(_) {}, get innerHTML() { return ''; } };
   const sandbox = {
     document: { getElementById: () => fakeElement, addEventListener() {}, querySelector: () => fakeElement, querySelectorAll: () => [] },
-    window: {},
+    window: { addEventListener() {} },
     fetch: () => Promise.reject(new Error('no network in tests')), // init()'s own .catch(...) swallows this harmlessly.
     setTimeout: () => 0,
     clearTimeout() {},

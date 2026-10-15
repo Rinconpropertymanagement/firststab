@@ -547,7 +547,23 @@
     // escalation_signal logic this function has always used, byte-for-byte
     // unchanged, per the build task's explicit "an unassessed row must
     // never disappear or misbehave" requirement.
+    //
+    // EXCEPTION (2026-10-14, Peter's "option b"): a report a person typed
+    // into the "Report an issue" form (source = 'manual_staff') is saved
+    // with needs_human_call = true BY RULE on the server (no AI involved),
+    // and is assigned to the Director of Operations. Someone who took the
+    // trouble to type a complaint in wants it seen, so it sits in Needs a
+    // Call and stays there until a person works it (Resolved / Not an
+    // Issue), even if a later severity rating gives it a lower tier. This
+    // line is first, ahead of the severity_tier branch, and lives here
+    // (not only in laneOf) so the card label, the Needs Attention tile and
+    // the Stalled check, which all call this function directly, agree with
+    // the lane the card is actually in. It is keyed on needs_human_call as
+    // well as source, so older hand-entered reports (saved before this
+    // rule, needs_human_call = false) are untouched. Email-driven rows are
+    // never source = 'manual_staff', so they are unaffected.
     function triagePriority(c) {
+      if (c.source === 'manual_staff' && c.needs_human_call) return 'call';
       if (c.severity_tier != null) {
         if (c.severity_tier === 'urgent') return 'call';
         if (c.severity_tier === 'worth_a_look') return 'flagged';

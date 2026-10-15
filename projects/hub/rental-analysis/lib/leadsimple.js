@@ -54,7 +54,7 @@
 
 const { select } = require('./supabase');
 const { extractZip, haversineMiles } = require('./crmls');
-const { WIDE_SEARCH_RADIUS_MILES } = require('./constants');
+const { WIDE_SEARCH_RADIUS_MILES, positiveOrNull } = require('./constants');
 
 // "The last year or two at the most," per Peter's own words (spec, "What Q
 // Needs to Build This") — scopes which of Rincon's own confirmed-current
@@ -96,8 +96,21 @@ function buildAddress(row) {
   return [row.address, cityStateZip].filter(Boolean).join(', ');
 }
 
+// leadsimple_new_leases.rent is NUMERIC(10,2) NOT NULL CHECK (rent >= 0), so
+// the table itself allows a rent of 0, and a saved comp from this source
+// (3491 Kings Canyon Dr, Oxnard) did come through at $0. Read-only filter
+// here — nothing in Supabase is changed. A rent of 0 means "rent unknown",
+// never "free"; a $0 leased comp counts 3x and would drag the range's low end
+// to $0. Returns a number > 0, else null. A numeric string is still accepted
+// (as before); null, '', 0, negatives and NaN are not.
+function positiveRentOrNull(rent) {
+  return positiveOrNull(typeof rent === 'string' && rent.trim() !== '' ? Number(rent) : rent);
+}
+
 /**
- * Maps one leadsimple_new_leases row into a partial rental_comps row.
+ * Maps one leadsimple_new_leases row into a partial rental_comps row, or
+ * returns null when the row has no rent > 0 (see positiveRentOrNull() —
+ * pullLeadSimpleComps() drops the nulls).
  * Exported (like every other source's mapComparable) so the test suite can
  * exercise it directly without a real Supabase table.
  *
@@ -111,6 +124,8 @@ function buildAddress(row) {
  *   as lib/crmls.js's own mapComparable().
  */
 function mapComparable(row, distanceMiles = null) {
+  const monthlyRent = positiveRentOrNull(row.rent);
+  if (monthlyRent === null) return null;
   const hasCoords = typeof row.latitude === 'number' && typeof row.longitude === 'number';
   return {
     address: buildAddress(row),
@@ -125,7 +140,7 @@ function mapComparable(row, distanceMiles = null) {
     distance_miles: typeof distanceMiles === 'number' ? distanceMiles : null,
     latitude: hasCoords ? row.latitude : null,
     longitude: hasCoords ? row.longitude : null,
-    monthly_rent: typeof row.rent === 'number' ? row.rent : Number(row.rent),
+    monthly_rent: monthlyRent,
     // Always false — see file header. leadsimple_new_leases carries no
     // is_estimated_price column at all; hardcoded here, same pattern
     // lib/crmls.js uses for its own certain-price (Closed) case.
@@ -206,9 +221,9 @@ async function pullLeadSimpleComps(subject) {
     // with no distance (not yet geocoded/backfilled) is kept as-is, same
     // "no basis to compute or drop it" rule lib/crmls.js uses.
     const bounded = withDistance.filter(({ distanceMiles }) => distanceMiles === null || distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
-    comps = bounded.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles));
+    comps = bounded.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles)).filter(Boolean);
   } else {
-    comps = (rows || []).map(row => mapComparable(row));
+    comps = (rows || []).map(row => mapComparable(row)).filter(Boolean);
   }
 
   return {
@@ -225,6 +240,7 @@ async function pullLeadSimpleComps(subject) {
 module.exports = {
   pullLeadSimpleComps,
   mapComparable,
+  positiveRentOrNull,
   buildAddress,
   toDateOnly,
   FROM_LEADSIMPLE_PROPERTY_TYPE,

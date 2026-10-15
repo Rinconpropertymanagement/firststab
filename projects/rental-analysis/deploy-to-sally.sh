@@ -47,7 +47,10 @@ ssh "$SALLY" "mkdir -p $REMOTE_DIR"
 
 echo ""
 echo "==> Copying rental-analysis code to Sally..."
-rsync -az --delete \
+# This only adds and updates files on Sally; it never deletes anything on the
+# server (there is deliberately no --delete flag). A file removed locally
+# stays on Sally until someone removes it by hand.
+rsync -az \
   --exclude 'node_modules' \
   --exclude '.env' \
   --exclude '.env.*' \

@@ -137,6 +137,13 @@
     .sg-tenant .dot        { background: #0284c7; }
     .sg-other .dot         { background: #6b7280; }
     .sg-unmatched .dot     { background: #d97706; }
+    /* "Reported by staff" group (2026-10-15) — reports a person typed into
+       the "Report an issue" form, shown first inside Needs a Call so a
+       just-entered report is never buried at the bottom of a long list.
+       Indigo on purpose: it is the one colour in this file not already
+       used by a subject chip (owner purple, tenant blue, team teal,
+       other gray) or a warning badge (amber, red). */
+    .sg-staff .dot         { background: #4f46e5; }
 
     /* ── Complaint card ── */
     .c-card { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db; border-radius: 8px; padding: 13px 15px; margin-bottom: 10px; }
@@ -184,6 +191,7 @@
     .badge-soft-blue     { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
     .badge-soft-teal     { background: #f0fdfa; color: #0f766e; border: 1px solid #99f6e4; }
     .badge-soft-gray     { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+    .badge-soft-indigo   { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
     .badge-subject { font-weight: 700; }
 
     /* Single colored triage indicator (Phase 2 item 7) — replaces the old
@@ -527,6 +535,14 @@
       return '<span class="badge ' + cls + ' badge-subject">' + escapeHtml(label) + name + '</span>';
     }
 
+    // "Reported by staff" (2026-10-15) — a small label on any card whose
+    // source is 'manual_staff', i.e. a report a person typed into the
+    // "Report an issue" form. Shown in every tab so a hand-entered report is
+    // recognisable wherever it lands. Email-driven cards get '' (no change).
+    function staffReportBadge(c) {
+      return c.source === 'manual_staff' ? '<span class="badge badge-soft-indigo">Reported by staff</span>' : '';
+    }
+
     // ────────────────────────────────────────────────────────────────
     // Triage classification (Phase 2 item 5/7, Phase 3 item 12) — the
     // real-signal replacement for the old is_big_deal split. is_big_deal
@@ -649,6 +665,12 @@
     // (updateBulkBar()), not a full re-render, so checking several boxes
     // in a row stays snappy even with a long list on screen.
     var selectedIds = {};
+    // Stale-page refresh bookkeeping (2026-10-15) — see "Refresh a stale
+    // page" near the bottom of this script. dataVersion goes up every time
+    // allComplaints changes (a save patched a row, or a list was loaded);
+    // writesInFlight is how many saves are on their way to the server.
+    var dataVersion = 0;
+    var writesInFlight = 0;
     var CANNED_NOT_ISSUE_NOTE = 'Reviewed — not actionable';
     var UNDO_REOPEN_NOTE = 'Reverted via Undo (reopened after being marked Not an Issue).';
 
@@ -1007,7 +1029,7 @@
       // not part of the chronological build); every other card gets the
       // email-date block.
       var dateBlock = isHeld ? '<div class="c-date">' + formatDate(c.created_at) + '</div>' : cardDateHtml(c);
-      html += '<div class="c-top"><div class="c-badges">' + (isHeld ? '' : indicatorHtml(c)) + statusBadge(c.status) + subjectChip(c) + '</div>' + dateBlock + '</div>';
+      html += '<div class="c-top"><div class="c-badges">' + (isHeld ? '' : indicatorHtml(c)) + statusBadge(c.status) + subjectChip(c) + staffReportBadge(c) + '</div>' + dateBlock + '</div>';
       html += body;
       html += emailLinkLine(c);
       html += lastTouchedLine(c);
@@ -1072,6 +1094,30 @@
           sortComplaints(groups.other).map(renderCard).join('') + '</div>';
       }
       return html;
+    }
+    // Needs a Call section only (2026-10-15). A report a person typed into
+    // the "Report an issue" form (source = 'manual_staff') used to land in
+    // whichever Owner / Tenant / Other group its subject put it in, which on
+    // a long list is dozens of screens down. Those rows now get their own
+    // "Reported by staff" group at the very top, ordered by the current Sort
+    // by choice exactly like every other group (they have no source email, so
+    // sortTime() uses their logged date). They are taken OUT of the three
+    // subject groups below, so no card appears twice. DISPLAY ONLY: `items` is
+    // the same callItems array render() always passed, so the section's total
+    // count, the tab count and the tiles are untouched. The remaining rows go
+    // through renderSubjectGroups() exactly as before, in their original
+    // relative order, so email-driven groups and ordering do not change.
+    // No staff-typed rows -> the group is simply not drawn.
+    function renderCallGroups(items) {
+      if (!items.length) return '';
+      var staff = [], rest = [];
+      items.forEach(function (c) { (c.source === 'manual_staff' ? staff : rest).push(c); });
+      var html = '';
+      if (staff.length) {
+        html += '<div class="subject-group"><div class="subject-group-heading sg-staff"><span class="dot"></span>Reported by staff (' + staff.length + ')</div>' +
+          sortComplaints(staff).map(renderCard).join('') + '</div>';
+      }
+      return html + renderSubjectGroups(rest);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -1269,7 +1315,7 @@
         html += renderBulkControls(callItems.concat(flaggedItems));
         html += '<div class="section-block">';
         html += '<div class="section-heading">Needs a Call <span class="count-pill">' + callItems.length + '</span></div>';
-        html += callItems.length ? renderSubjectGroups(callItems) : '<div class="empty">Nothing needs a call right now.</div>';
+        html += callItems.length ? renderCallGroups(callItems) : '<div class="empty">Nothing needs a call right now.</div>';
         html += '</div>';
         html += '<div class="section-block">';
         html += '<div class="section-heading">Flagged for Review <span class="count-pill">' + flaggedItems.length + '</span></div>';
@@ -1305,6 +1351,7 @@
         // won't carry (only the two GET routes call attachDisplayInfo) —
         // merge onto the existing row rather than overwrite it outright.
         allComplaints[idx] = Object.assign({}, allComplaints[idx], updated);
+        dataVersion++;
       }
     }
     function replaceComplaintInPlace(updated) {
@@ -1313,12 +1360,23 @@
     }
 
     function post(url, body) {
+      // writesInFlight only feeds the stale-page refresh check (never
+      // redraw the list while a save is still on its way). Behaviour of the
+      // returned promise is unchanged: same value on success, same error on
+      // failure.
+      writesInFlight++;
       return fetch(url, {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body || {}),
       }).then(function (res) {
         return res.json().then(function (json) { return { ok: res.ok, status: res.status, body: json }; });
+      }).then(function (r) {
+        writesInFlight--;
+        return r;
+      }, function (err) {
+        writesInFlight--;
+        throw err;
       });
     }
 
@@ -1823,14 +1881,26 @@
       document.getElementById('app').innerHTML = '<div class="error-page"><h2>Couldn&rsquo;t load this</h2><p>' + escapeHtml(message) + '</p></div>';
     }
 
-    function loadComplaints() {
+    // loadComplaints() = fetchComplaintList() + applyComplaintList(). It is
+    // split in two (2026-10-15) only so the quiet refresh further down can
+    // fetch first and decide, with the answer in hand, whether it is still
+    // safe to swap the list in. loadComplaints() itself behaves exactly as
+    // before for the first page load and the Refresh button.
+    function fetchComplaintList() {
       return fetch('/api/complaint-tracking', { credentials: 'include' })
         .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
         .then(function (r) {
           if (!r.ok) throw new Error(r.body.error || 'Could not load complaints.');
-          allComplaints = r.body.complaints || [];
-          document.getElementById('lastUpdatedStamp') && (document.getElementById('lastUpdatedStamp').textContent = 'Updated ' + formatDateTime(new Date().toISOString()));
+          return r.body.complaints || [];
         });
+    }
+    function applyComplaintList(list) {
+      allComplaints = list;
+      dataVersion++;
+      document.getElementById('lastUpdatedStamp') && (document.getElementById('lastUpdatedStamp').textContent = 'Updated ' + formatDateTime(new Date().toISOString()));
+    }
+    function loadComplaints() {
+      return fetchComplaintList().then(applyComplaintList);
     }
     function loadTeamMembers() {
       return fetch('/api/complaint-tracking/team-members', { credentials: 'include' })
@@ -1875,6 +1945,138 @@
         })
         .catch(function (err) { showLoadError(err.message || 'Something went wrong.'); });
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Refresh a stale page (2026-10-15)
+    //
+    // Why: this page only loaded its list once, so after a report was typed
+    // in on the "Report an issue" page and the person came Back, or came
+    // back to a tab left open for a while, they saw the old list until they
+    // pressed Refresh themselves. Two situations now re-fetch the list and
+    // redraw it with the existing render():
+    //   1. the page is shown again from the browser's back/forward cache
+    //      (pageshow with event.persisted), and
+    //   2. the tab becomes visible again after being hidden for more than
+    //      REFRESH_AFTER_HIDDEN_MS (about a minute).
+    // No timers poll the server and no new endpoint is used; it is the same
+    // GET /api/complaint-tracking the page already calls.
+    //
+    // It must never get in the person's way, so it is quiet and cautious:
+    //   - it keeps the current tab, filters, search text, sort choice and
+    //     scroll position (all live in variables render() already reads;
+    //     scroll is put back by hand after the redraw);
+    //   - it SKIPS (silently, no message) whenever a redraw would throw away
+    //     something the person is in the middle of; see
+    //     refreshWouldInterrupt() just below. The test is run before the
+    //     fetch AND again when the answer arrives, because a slow answer can
+    //     land after the person has started typing;
+    //   - at most one automatic refresh per REFRESH_MIN_GAP_MS. Only these
+    //     automatic refreshes count toward that limit, so filing a report
+    //     and pressing Back within half a minute of loading the page still
+    //     refreshes it;
+    //   - a failed, slow (REFRESH_TIMEOUT_MS) or unreadable answer changes
+    //     nothing: the old list stays on screen with no message.
+    // ────────────────────────────────────────────────────────────────
+    var REFRESH_MIN_GAP_MS = 30000;
+    var REFRESH_AFTER_HIDDEN_MS = 60000;
+    var REFRESH_TIMEOUT_MS = 20000;
+    var lastAutoRefreshAt = null;
+    var refreshInFlight = false;
+    var hiddenSince = document.hidden ? Date.now() : null;
+
+    // A <select> counts as "changed" when it is not on the option it was
+    // drawn with (the first option when none was marked selected).
+    function selectIsChanged(sel) {
+      var initial = 0;
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].defaultSelected) { initial = i; break; }
+      }
+      return sel.selectedIndex !== initial;
+    }
+    // True when redrawing the list right now would destroy something the
+    // person is doing. Deliberately cautious: a false "yes" only means this
+    // one refresh is skipped (the Refresh button still works); a false "no"
+    // would throw away someone's typing.
+    function refreshWouldInterrupt() {
+      var app = document.getElementById('app');
+      if (!app) return true;
+      // The first load, or the Refresh button's own reload, is under way.
+      if (app.querySelector('.spinner-wrap')) return true;
+      // A save is still travelling to the server.
+      if (writesInFlight > 0) return true;
+      // Ticked bulk-select boxes ("N selected" bar).
+      if (Object.keys(selectedIds).length) return true;
+      if (app.querySelector('.card-select:checked, #selectAllVisible:checked')) return true;
+      // An open quick-resolve note box, or an open Manage panel (its loaded
+      // activity history, its drafts and its dropdowns are all lost on redraw).
+      if (app.querySelector('.quick-note-box:not([hidden])')) return true;
+      if (app.querySelector('details.manage[open]')) return true;
+      // Any text typed into a note box or text field that is not saved.
+      // The main search box is the one exception while it matches the
+      // search the page is already using (the redraw re-creates it with
+      // that same text); text that has not been applied yet still counts.
+      var fields = app.querySelectorAll('textarea, input[type="text"], input:not([type])');
+      for (var i = 0; i < fields.length; i++) {
+        var f = fields[i];
+        if (!f.value) continue;
+        if (f.id === 'searchInput' && f.value === filters.q) continue;
+        return true;
+      }
+      // A dropdown inside a card (stage, delegate, match) moved off its default.
+      var selects = app.querySelectorAll('.c-card select');
+      for (var j = 0; j < selects.length; j++) {
+        if (selectIsChanged(selects[j])) return true;
+      }
+      return false;
+    }
+
+    function refreshComplaintsQuietly() {
+      if (!me || refreshInFlight) return;
+      var now = Date.now();
+      if (lastAutoRefreshAt !== null && now - lastAutoRefreshAt < REFRESH_MIN_GAP_MS) return;
+      if (refreshWouldInterrupt()) return;
+      lastAutoRefreshAt = now;
+      refreshInFlight = true;
+      var versionAtStart = dataVersion;
+      var settled = false;
+      function settle() {
+        if (settled) return false;
+        settled = true;
+        refreshInFlight = false;
+        clearTimeout(giveUpTimer);
+        return true;
+      }
+      // One-shot per-request timeout (not a polling timer): a hung request
+      // must not block every later refresh. Its answer is ignored if it
+      // ever does arrive.
+      var giveUpTimer = setTimeout(settle, REFRESH_TIMEOUT_MS);
+      fetchComplaintList()
+        .then(function (list) {
+          if (!settle()) return;
+          // Something saved on this page while the list was on its way: the
+          // list may predate that save, so keep what is on screen.
+          if (dataVersion !== versionAtStart) return;
+          // The person may have started typing while it was loading.
+          if (refreshWouldInterrupt()) return;
+          var scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+          applyComplaintList(list);
+          render();
+          window.scrollTo(0, scrollY);
+        })
+        .catch(function () { settle(); /* stay quiet: the old list stays on screen */ });
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { hiddenSince = Date.now(); return; }
+      var awayMs = hiddenSince === null ? 0 : Date.now() - hiddenSince;
+      hiddenSince = null;
+      if (awayMs > REFRESH_AFTER_HIDDEN_MS) refreshComplaintsQuietly();
+    });
+    window.addEventListener('pageshow', function (event) {
+      if (!event.persisted) return;
+      hiddenSince = null;
+      refreshComplaintsQuietly();
+    });
 
     init();
   </script>

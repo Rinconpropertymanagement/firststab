@@ -22,6 +22,9 @@
 const { pullRentCastComps } = require('./rentcast');
 const { pullCrmlsComps } = require('./crmls');
 const { pullLeadSimpleComps } = require('./leadsimple');
+const { RADIUS_LADDER_MILES, MIN_COMPS_FOR_NARROW_RADIUS, MIN_LEASED_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+const { exclusionReason } = require('./weighting');
+const { dedupeComps } = require('./property-matching');
 
 const SOURCE_HANDLERS = {
   RentCast: pullRentCastComps,
@@ -35,6 +38,105 @@ const SOURCE_HANDLERS = {
   'LeadSimple Move-Ins': pullLeadSimpleComps,
   // Zillow: no handler, and none planned — see NOTE above.
 };
+
+/**
+ * Picks how far out the comp search should reach — the radius ladder. Walks
+ * RADIUS_LADDER_MILES (0.5, 1, 1.5, then WIDE_SEARCH_RADIUS_MILES) in
+ * ascending order over the full merged list every active source returned and
+ * stops at the first rung with enough solid evidence: at least
+ * MIN_COMPS_FOR_NARROW_RADIUS genuine comps AND at least
+ * MIN_LEASED_COMPS_FOR_NARROW_RADIUS of them confirmed leases. If no rung
+ * qualifies it returns the last rung (the 2-mile ceiling).
+ *
+ * At each rung r, the candidates are the comps that are:
+ *   - a genuine match on their own merits (exclusionReason() === null, the
+ *     same check lib/weighting.js uses to zero-weight a comp), and
+ *   - have a real numeric distance_miles <= r (exactly r counts).
+ * Those candidates are then run through dedupeComps(), so the count is of
+ * distinct addresses, not rows. That matters: the RentCast listings search
+ * overlaps CRMLS and RentCast's own similar-rentals list heavily, and without
+ * it one property seen by two sources would count twice. When two copies of
+ * one address collide, dedupeComps() keeps the higher-weight one, so a CRMLS
+ * or LeadSimple 'leased' copy beats a RentCast 'off_market' copy and the
+ * address counts once, as leased. Comps with no address are never merged.
+ * "Leased" means a CRMLS Closed or LeadSimple Move-Ins comp — RentCast can
+ * never produce one (its Inactive is never mapped to 'leased').
+ *
+ * (is_rincon_managed is never set yet at this point in the pipeline —
+ * server.js/router.js only set it after runActiveSources() returns — so that
+ * branch of exclusionReason() can't fire here. Rincon-managed comps are
+ * therefore still counted by the ladder and only excluded later from the
+ * range math. A known, documented limitation, not a gap.)
+ *
+ * @param {object[]} comps - the full merged list every active source returned
+ * @param {object} subject - {..., bedrooms, propertyType} — same subject runActiveSources() receives
+ * @returns {{rung: number, genuineCount: number, leasedCount: number}} the counts are those at the returned rung
+ */
+function chooseRadiusRung(comps, subject) {
+  let genuineCount = 0;
+  let leasedCount = 0;
+  for (const rung of RADIUS_LADDER_MILES) {
+    const candidates = comps.filter(c =>
+      exclusionReason(c, subject.bedrooms, subject.propertyType) === null &&
+      typeof c.distance_miles === 'number' &&
+      c.distance_miles <= rung
+    );
+    const unique = dedupeComps(candidates, subject.bedrooms, subject.propertyType);
+    genuineCount = unique.length;
+    leasedCount = unique.filter(c => c.listing_status === 'leased').length;
+    if (genuineCount >= MIN_COMPS_FOR_NARROW_RADIUS && leasedCount >= MIN_LEASED_COMPS_FOR_NARROW_RADIUS) {
+      return { rung, genuineCount, leasedCount };
+    }
+  }
+  return { rung: RADIUS_LADDER_MILES[RADIUS_LADDER_MILES.length - 1], genuineCount, leasedCount };
+}
+
+/**
+ * Applies the radius ladder (see chooseRadiusRung() above) once, after every
+ * active source has already reported back — see CROSS-SOURCE-RADIUS-SPEC.md
+ * for why this is a single combined decision rather than one per source, and
+ * COMP-COVERAGE-SPEC.md for the ladder itself. Every source always returns
+ * everything it found out to WIDE_SEARCH_RADIUS_MILES (no source's network
+ * call changes); this function then keeps only what falls inside the rung
+ * chosen.
+ *
+ * A comp is kept when:
+ *   - it has a numeric distance_miles <= the chosen rung, whether or not it
+ *     is a genuine match (a non-genuine comp inside the rung stays visible
+ *     and shows as "not used", same as before); or
+ *   - it has no numeric distance AND the chosen rung is the ceiling (the
+ *     last rung) — nothing was verified closer, and sources already bound
+ *     everything to the ceiling. A comp with no distance is dropped whenever
+ *     a narrower rung is chosen, since it cannot be shown to be inside it.
+ * Everything else — genuine or not — beyond the chosen rung is dropped. When
+ * there are no numeric distances at all (RentCast failed, CRMLS on its zip
+ * fallback) no rung qualifies, the ceiling is chosen, and every comp is kept.
+ *
+ * REVISION (2026-10-14, COMP-COVERAGE-SPEC.md): this deliberately replaces
+ * the 2026-09-20 rule that a genuine match is never cut for distance. That
+ * rule existed because the earlier plain 1-mile cut deleted 5537 Rainier
+ * Street's two best leases (1148 Colina Vista, 1.10mi; 7275 Coolidge Street,
+ * 1.47mi) when the area had no confirmed leases inside 1 mile. The ladder
+ * cannot stop at a rung unless that rung already holds at least
+ * MIN_COMPS_FOR_NARROW_RADIUS genuine comps with at least
+ * MIN_LEASED_COMPS_FOR_NARROW_RADIUS confirmed leases, so a far genuine comp
+ * is only dropped when real lease evidence already sits closer. Where that
+ * evidence isn't there, the ladder widens (Rainier stops at 1.5mi and keeps
+ * both) or falls back to the full 2 miles.
+ *
+ * @param {object[]} comps - the full merged list every active source returned
+ * @param {object} subject - {..., bedrooms, propertyType} — same subject runActiveSources() receives
+ * @returns {object[]}
+ */
+function applyCombinedRadiusTiering(comps, subject) {
+  const { rung, genuineCount, leasedCount } = chooseRadiusRung(comps, subject);
+  const isCeiling = rung === RADIUS_LADDER_MILES[RADIUS_LADDER_MILES.length - 1];
+  const kept = comps.filter(c =>
+    typeof c.distance_miles === 'number' ? c.distance_miles <= rung : isCeiling
+  );
+  console.log(`[rental-analysis] Radius ladder: stopped at ${rung} mi (genuine=${genuineCount}, leased=${leasedCount}); kept ${kept.length} of ${comps.length} comps.`);
+  return kept;
+}
 
 /**
  * Runs every active source's handler against the subject property and
@@ -120,7 +222,7 @@ async function runActiveSources(activeSources, subject) {
     }
   }
 
-  return { comps: allComps, subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors };
+  return { comps: applyCombinedRadiusTiering(allComps, subject), subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors };
 }
 
-module.exports = { SOURCE_HANDLERS, runActiveSources };
+module.exports = { SOURCE_HANDLERS, chooseRadiusRung, applyCombinedRadiusTiering, runActiveSources };

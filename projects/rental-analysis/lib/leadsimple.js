@@ -36,22 +36,25 @@
  *     by lib/sources.js's runActiveSources(), from the rental_comp_sources
  *     row's own name) — that exact string is what the exemption keys off.
  *
- * COORDINATES / RADIUS TIERING (added for the distance-based comp tiering
- * build — see lib/constants.js): leadsimple_new_leases now carries a
+ * COORDINATES / RADIUS (added for the distance-based comp tiering build —
+ * see lib/constants.js): leadsimple_new_leases now carries a
  * latitude/longitude column pair (migration 20260919000000), geocoded by
  * sync-move-in-leases.js via LocationIQ — NOT read from LeadSimple itself,
  * which has no coordinates anywhere in its own data (confirmed live). A row
  * geocoded before this build, or one whose geocode failed, simply has null
  * coordinates — pullLeadSimpleComps() below degrades to exactly the
  * previous zip-only behavior for those, never throws. The query itself
- * stays zip-scoped either way (no DB-side radius query exists here); the
- * narrow/wide tiering only decides which of the already zip-fetched rows to
- * keep.
+ * stays zip-scoped either way (no DB-side radius query exists here); this
+ * file computes real distance_miles and bounds each row to
+ * WIDE_SEARCH_RADIUS_MILES, but no longer decides narrow vs. wide for
+ * itself — that decision is now made once, across all three comp sources
+ * together, by applyCombinedRadiusTiering() in lib/sources.js, after every
+ * active source has reported back.
  */
 
 const { select } = require('./supabase');
 const { extractZip, haversineMiles } = require('./crmls');
-const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+const { WIDE_SEARCH_RADIUS_MILES, positiveOrNull } = require('./constants');
 
 // "The last year or two at the most," per Peter's own words (spec, "What Q
 // Needs to Build This") — scopes which of Rincon's own confirmed-current
@@ -93,8 +96,21 @@ function buildAddress(row) {
   return [row.address, cityStateZip].filter(Boolean).join(', ');
 }
 
+// leadsimple_new_leases.rent is NUMERIC(10,2) NOT NULL CHECK (rent >= 0), so
+// the table itself allows a rent of 0, and a saved comp from this source
+// (3491 Kings Canyon Dr, Oxnard) did come through at $0. Read-only filter
+// here — nothing in Supabase is changed. A rent of 0 means "rent unknown",
+// never "free"; a $0 leased comp counts 3x and would drag the range's low end
+// to $0. Returns a number > 0, else null. A numeric string is still accepted
+// (as before); null, '', 0, negatives and NaN are not.
+function positiveRentOrNull(rent) {
+  return positiveOrNull(typeof rent === 'string' && rent.trim() !== '' ? Number(rent) : rent);
+}
+
 /**
- * Maps one leadsimple_new_leases row into a partial rental_comps row.
+ * Maps one leadsimple_new_leases row into a partial rental_comps row, or
+ * returns null when the row has no rent > 0 (see positiveRentOrNull() —
+ * pullLeadSimpleComps() drops the nulls).
  * Exported (like every other source's mapComparable) so the test suite can
  * exercise it directly without a real Supabase table.
  *
@@ -108,6 +124,8 @@ function buildAddress(row) {
  *   as lib/crmls.js's own mapComparable().
  */
 function mapComparable(row, distanceMiles = null) {
+  const monthlyRent = positiveRentOrNull(row.rent);
+  if (monthlyRent === null) return null;
   const hasCoords = typeof row.latitude === 'number' && typeof row.longitude === 'number';
   return {
     address: buildAddress(row),
@@ -122,7 +140,7 @@ function mapComparable(row, distanceMiles = null) {
     distance_miles: typeof distanceMiles === 'number' ? distanceMiles : null,
     latitude: hasCoords ? row.latitude : null,
     longitude: hasCoords ? row.longitude : null,
-    monthly_rent: typeof row.rent === 'number' ? row.rent : Number(row.rent),
+    monthly_rent: monthlyRent,
     // Always false — see file header. leadsimple_new_leases carries no
     // is_estimated_price column at all; hardcoded here, same pattern
     // lib/crmls.js uses for its own certain-price (Closed) case.
@@ -178,13 +196,15 @@ async function pullLeadSimpleComps(subject) {
   const query = `select=*&zip_code=eq.${encodeURIComponent(zip)}&closed_at=gte.${cutoffDate}`;
   const rows = await select('leadsimple_new_leases', query);
 
-  // Radius tiering — same policy as lib/rentcast.js/lib/crmls.js (see
+  // Distance/radius bound — same policy as lib/rentcast.js/lib/crmls.js (see
   // lib/constants.js), applied on top of the zip-scoped rows already
   // fetched above rather than a second query (no DB-side radius query
   // exists for this table). Only runs when the subject itself has real
   // coordinates (fed forward by lib/sources.js from RentCast, when active);
   // otherwise every row is mapped as-is, distance_miles null throughout —
-  // exactly today's zip-only behavior, never a throw.
+  // exactly today's zip-only behavior, never a throw. The narrow/wide
+  // decision itself no longer happens here — see applyCombinedRadiusTiering()
+  // in lib/sources.js.
   const hasSubjectCoords = typeof subject.latitude === 'number' && typeof subject.longitude === 'number';
   let comps;
   if (hasSubjectCoords) {
@@ -201,11 +221,9 @@ async function pullLeadSimpleComps(subject) {
     // with no distance (not yet geocoded/backfilled) is kept as-is, same
     // "no basis to compute or drop it" rule lib/crmls.js uses.
     const bounded = withDistance.filter(({ distanceMiles }) => distanceMiles === null || distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
-    const narrow = bounded.filter(({ distanceMiles }) => typeof distanceMiles === 'number' && distanceMiles <= NARROW_SEARCH_RADIUS_MILES);
-    const tiered = narrow.length >= MIN_COMPS_FOR_NARROW_RADIUS ? narrow : bounded;
-    comps = tiered.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles));
+    comps = bounded.map(({ row, distanceMiles }) => mapComparable(row, distanceMiles)).filter(Boolean);
   } else {
-    comps = (rows || []).map(row => mapComparable(row));
+    comps = (rows || []).map(row => mapComparable(row)).filter(Boolean);
   }
 
   return {
@@ -222,6 +240,7 @@ async function pullLeadSimpleComps(subject) {
 module.exports = {
   pullLeadSimpleComps,
   mapComparable,
+  positiveRentOrNull,
   buildAddress,
   toDateOnly,
   FROM_LEADSIMPLE_PROPERTY_TYPE,

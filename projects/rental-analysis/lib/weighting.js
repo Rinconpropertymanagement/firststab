@@ -164,6 +164,52 @@ function excludeRinconManaged(comps) {
   return (comps || []).filter(c => !isExcludedRinconManaged(c));
 }
 
+// Single shared "why doesn't this comp count" answer — computed once here
+// and reused everywhere else that needs it (lib/narrative.js's
+// describeComp()/buildPrompt(), server.js/router.js's API response for the
+// dashboard, lib/property-matching.js's dedupeComps()). Before this
+// function existed, narrative.js had no way to know a comp had been
+// zero-weighted by computeRecommendedRange()/computeRawRange() below, and
+// confidently cited excluded comps as supporting evidence (confirmed live,
+// 2026-09-20: a duplex analysis's rationale cited two single-family comps
+// and a townhouse as "supporting the upper end"/"a real current floor" —
+// all zero-weighted). One source of truth means narrative.js and the
+// dashboard can never independently drift on what counts as excluded.
+//
+// Returns null when the comp contributes any weight to the range (an exact
+// match, or a partial-credit 1-bedroom-off match) — i.e. nothing to report.
+// Returns a short machine-readable reason string when the comp is fully
+// zero-weighted (contributes nothing, in either computeRecommendedRange()
+// or computeRawRange()) for one of the three reasons this file already
+// checks independently.
+//
+// A comp can fail more than one check at once (e.g. Rincon-managed AND a
+// different property type). Only one reason is ever reported, in this
+// priority order:
+//   1. rincon_managed — this isn't a market-data mismatch at all, it's a
+//      different KIND of problem (the comp isn't really outside/independent
+//      data), so it's checked and reported first regardless of whether it
+//      would also fail the type/size checks below.
+//   2. property_type_mismatch — checked before size_mismatch because
+//      property type has no partial-credit tier (propertyTypeMultiplier is
+//      either 1 or 0 — see its own comment on why a townhouse "isn't
+//      somewhat comparable" to a single-family house), so a type mismatch
+//      is the more fundamental reason the comp doesn't belong in this
+//      analysis, whether or not its bedroom count also happens to be off.
+//   3. size_mismatch — checked last since sizeSimilarityMultiplier has a
+//      partial-credit tier (1 bedroom off still counts at half weight), so
+//      it only zeroes out a comp for a genuinely severe (2+ bedroom) gap.
+// This ordering only affects which single reason string gets reported for
+// display — it has no effect on whether a comp counts (that's still decided
+// independently, and identically, by computeRecommendedRange()/
+// computeRawRange() below multiplying all three checks together).
+function exclusionReason(comp, subjectBedrooms, subjectPropertyType) {
+  if (isExcludedRinconManaged(comp)) return 'rincon_managed';
+  if (propertyTypeMultiplier(comp.property_type, subjectPropertyType) === 0) return 'property_type_mismatch';
+  if (sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) === 0) return 'size_mismatch';
+  return null;
+}
+
 /**
  * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed, bedrooms, property_type}
  * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
@@ -216,6 +262,7 @@ module.exports = {
   percentile,
   isExcludedRinconManaged,
   excludeRinconManaged,
+  exclusionReason,
   computeRecommendedRange,
   computeRawRange,
 };

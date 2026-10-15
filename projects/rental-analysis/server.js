@@ -23,10 +23,12 @@
  * Also needed to actually pull comps (checked per-request, not at startup,
  * since more sources will be added later — see lib/sources.js):
  *   RENTCAST_API_KEY   — developers.rentcast.io, free tier: 50 requests/month.
- *                         NOTE: a lookup-then-run analysis now spends TWO of
- *                         those 50 requests, not one — property-lookup below
- *                         is a separate RentCast call from the comps pull
- *                         inside POST /run. See lib/rentcast.js for detail.
+ *                         NOTE: POST /run itself spends TWO RentCast requests
+ *                         (the rent-estimate call plus the full listings
+ *                         search), and a lookup-then-run analysis spends
+ *                         THREE of those 50 — property-lookup below is a
+ *                         separate RentCast call from the comps pull inside
+ *                         POST /run. See lib/rentcast.js for detail.
  *
  * Also needed for live address-suggest (checked per-request, not at startup
  * — degrades to "no suggestions" rather than affecting anything else, see
@@ -85,7 +87,7 @@ GET /api/rental-analysis/property-lookup?address=...
   instead of typing from scratch. Read-only — creates no records, runs no
   analysis. Returns 404 (not a server error) if RentCast has no record for
   the address — that's normal; just fall back to typing it in by hand.
-  Spends a second RentCast request beyond the one POST /run already uses.
+  Spends one more RentCast request beyond the two POST /run already uses.
 
 GET /api/rental-analysis/address-suggest?q=...
   Live address autocomplete as you type, via Google Places Autocomplete
@@ -281,13 +283,13 @@ app.get('/api/rental-analysis/users', async (req, res) => {
 // analysis; the frontend just uses the response to pre-fill its POST /run
 // request body, which is otherwise unchanged.
 //
-// BUDGET NOTE: this spends a SECOND RentCast request per analysis when the
+// BUDGET NOTE: this spends an EXTRA RentCast request per analysis when the
 // frontend calls it ahead of the real run — one request here (property
-// lookup), one more inside POST /run (pullRentCastComps, the actual comps
-// pull). RentCast's free tier is 50 requests/month total, so a
-// lookup-then-run analysis now costs 2 of those 50, not 1. See the
-// RENTCAST_API_KEY note at the top of this file and lib/rentcast.js's
-// lookupPropertyDetails() doc comment.
+// lookup), plus two inside POST /run (pullRentCastComps: the rent-estimate
+// call and the full listings search). RentCast's free tier is 50
+// requests/month total, so a lookup-then-run analysis now costs 3 of those
+// 50, not 2. See the RENTCAST_API_KEY note at the top of this file and
+// lib/rentcast.js's lookupPropertyDetails() doc comment.
 app.get('/api/rental-analysis/property-lookup', async (req, res) => {
   const ts = new Date().toISOString();
   const address = typeof req.query.address === 'string' ? req.query.address.trim() : '';

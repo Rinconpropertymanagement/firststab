@@ -18,28 +18,45 @@
  *
  * Needs RECORE_SERVER_TOKEN (server-to-server; NOT RECORE_BROWSER_TOKEN).
  * Rate limit: 5,000/hr — generous, no RentCast-style request budgeting
- * needed (contrast lib/rentcast.js's DEFAULT_COMP_COUNT comment).
+ * needed (contrast lib/rentcast.js, which bills per request).
+ *
+ * Relevance filtering (COMP-COVERAGE-SPEC.md): Recore has no distance sort,
+ * so the old "take the 10 newest in the box, then filter" approach let
+ * condos, duplexes and townhouses crowd a near-perfect single-family lease
+ * out of the 10 slots. Each query now asks the MLS only for records that
+ * could actually be comparable — a compatible PropertySubType and a
+ * compatible BedroomsTotal, both written so an UNKNOWN (null) value still
+ * passes (an unknown type or bedroom count is not a mismatch) — up to
+ * MAX_RECORDS_PER_STATUS (Recore's maximum page), and closed leases only from
+ * the last CRMLS_CLOSED_LOOKBACK_MONTHS months. See buildFilter().
  */
 
-const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS } = require('./constants');
+const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS, positiveOrNull, nonNegativeOrNull, inRangeOrNull } = require('./constants');
+const { BEDROOM_MISMATCH_THRESHOLD } = require('./weighting');
 
 const CRMLS_BASE_URL = 'https://api.marketplace.recore.net/api/v2/OData/crmls/Property';
 
-// Per status, mirrors RentCast's DEFAULT_COMP_COUNT order of magnitude (10).
-// Two statuses queried per analysis (Closed + Active), so up to 20 CRMLS
-// comps total, before weighting.
-const COMPS_PER_STATUS = 10;
+// Per status. 200 is Recore's maximum $top (a larger value is a 400 error).
+// Two statuses queried per analysis (Closed + Active). With the relevance
+// filter and date floor in buildFilter() this is far more than a typical
+// area returns; if a status ever comes back with exactly this many rows we
+// log a possible-truncation warning rather than paginate.
+const MAX_RECORDS_PER_STATUS = 200;
+
+// How far back to look for closed (leased) records. Active listings get no
+// date floor. A deliberate window, not "the 10 newest" (see header): 6 months
+// keeps the lease market current without pulling in last winter's outliers.
+const CRMLS_CLOSED_LOOKBACK_MONTHS = 6;
 
 // How far out to search when the subject's coordinates are known (see
 // pullCrmlsComps()) — a bounding box is queried at this radius (unchanged:
 // still ONE network call), then post-filtered to a true circle (see
 // haversineMiles()/buildBoundingBox() below). This file always returns
 // everything that survives the circle filter, out to WIDE_SEARCH_RADIUS_MILES
-// — it no longer decides narrow vs. wide for itself. That decision is now
-// made once, across all three comp sources together, by
+// — it does not decide how far out to actually use. That is the radius
+// ladder, applied once across all comp sources together by
 // applyCombinedRadiusTiering() in lib/sources.js, after every active source
-// has reported back. See lib/constants.js for the shared
-// NARROW_SEARCH_RADIUS_MILES/MIN_COMPS_FOR_NARROW_RADIUS numbers.
+// has reported back. See lib/constants.js for the ladder numbers.
 
 const SELECT_FIELDS = [
   'ListingKey', 'ListingId', 'StandardStatus', 'PropertySubType',
@@ -53,20 +70,45 @@ const SELECT_FIELDS = [
 
 // CRMLS's PropertySubType -> our CHECK-constraint list (rental_comps.property_type,
 // identical list to lib/rentcast.js's FROM_RENTCAST_PROPERTY_TYPE target).
-// Live-sampled 200 real 'Residential Lease' records this session:
-// Single Family Residence, Condominium, Townhouse, Apartment,
-// Manufactured On Land, and one Stock Cooperative. Only the clean 1:1
-// matches are mapped; Stock Cooperative has no safe bucket in our list
-// (not a real match for 'condo' or 'other' either) so it's left unmapped ->
-// null, same "leave null rather than guess" reasoning as RentCast's
-// FROM_RENTCAST_PROPERTY_TYPE (see that file) for its own unmapped values.
+// Values seen on PropertyType 'Residential Lease' in live read-only samples
+// (a 2-mile Ventura box, 414 rows, and a 12-mile Ventura-area box, 2,172
+// rows): Single Family Residence, Condominium, Townhouse, Duplex, Triplex,
+// Quadruplex, Apartment, Studio, Loft, Rooms for Rent, Commercial/Residential,
+// Manufactured On Land, null, and (in an earlier sample) Stock Cooperative.
+// Duplex/Triplex/Quadruplex map 1:1 to our duplex/triplex/fourplex (they used
+// to be unmapped, which counted a duplex as a match for a single-family
+// subject — "unknown type" is never a mismatch). Studio is an apartment unit;
+// Rooms for Rent and Commercial/Residential are real but not any bucket we
+// compare against, so they map to 'other'. Deliberately left UNMAPPED -> null
+// (leave null rather than guess, same reasoning as RentCast's
+// FROM_RENTCAST_PROPERTY_TYPE): Loft (ambiguous), Stock Cooperative, and
+// anything new CRMLS adds later.
 const FROM_CRMLS_PROPERTY_TYPE = {
   'Single Family Residence': 'single_family',
   'Condominium': 'condo',
   'Townhouse': 'townhouse',
   'Apartment': 'apartment',
   'Manufactured On Land': 'manufactured',
+  'Duplex': 'duplex',
+  'Triplex': 'triplex',
+  'Quadruplex': 'fourplex',
+  'Studio': 'apartment',
+  'Rooms for Rent': 'other',
+  'Commercial/Residential': 'other',
 };
+
+// Reverse of the map above, derived from it so the two can never drift:
+// our property type -> every CRMLS PropertySubType that maps to it, used by
+// buildFilter() to ask the MLS only for compatible records. 'other' is left
+// out on purpose — we have no idea which CRMLS subtype a subject of type
+// 'other' would match, so no subtype clause is added for it (same reasoning
+// as lib/rentcast.js omitting propertyType for 'other').
+const TO_CRMLS_PROPERTY_SUBTYPES = {};
+for (const [subtype, ourType] of Object.entries(FROM_CRMLS_PROPERTY_TYPE)) {
+  if (ourType === 'other') continue;
+  if (!TO_CRMLS_PROPERTY_SUBTYPES[ourType]) TO_CRMLS_PROPERTY_SUBTYPES[ourType] = [];
+  TO_CRMLS_PROPERTY_SUBTYPES[ourType].push(subtype);
+}
 
 function assertConfigured() {
   if (!process.env.RECORE_SERVER_TOKEN) {
@@ -96,6 +138,15 @@ function extractZip(address) {
 function toDateOnly(dateString) {
   if (!dateString || typeof dateString !== 'string') return null;
   return dateString.slice(0, 10); // CRMLS dates already come as 'YYYY-MM-DD'; slice is a safe no-op if ever fuller
+}
+
+// 'YYYY-MM-DD' for the start of the closed-lease lookback window — same
+// month-subtraction pattern as lib/leadsimple.js's MOVE_IN_LOOKBACK_MONTHS
+// cutoff. `now` is injectable only so a test can pin the date.
+function closedSinceDate(now = new Date()) {
+  const cutoff = new Date(now);
+  cutoff.setMonth(cutoff.getMonth() - CRMLS_CLOSED_LOOKBACK_MONTHS);
+  return cutoff.toISOString().slice(0, 10);
 }
 
 // Standard Haversine great-circle distance, in miles (Earth radius 3958.8 mi).
@@ -145,9 +196,10 @@ function buildAddress(record) {
 
 /**
  * Maps one CRMLS Property record into a partial rental_comps row. Returns
- * null when no usable rent figure exists (monthly_rent is NOT NULL on
- * rental_comps — see the migration) rather than inserting a broken row;
- * pullCrmlsComps() filters these out.
+ * null when no usable rent figure exists — monthly_rent must be a number > 0;
+ * missing, 0, negative or non-numeric all mean "rent unknown" (monthly_rent is
+ * NOT NULL on rental_comps — see the migration) rather than inserting a
+ * broken or $0 row; pullCrmlsComps() filters these out.
  *
  * @param {object} record
  * @param {number|null} [distanceMiles] - real Haversine distance from the
@@ -159,42 +211,51 @@ function mapComparable(record, distanceMiles = null) {
   const isClosed = record.StandardStatus === 'Closed';
   // Closed (leased) records: ClosePrice is the actual amount it leased for
   // — the real transaction figure, and what makes this comp worth 3x in
-  // lib/weighting.js. Fall back to ListPrice only if ClosePrice is somehow
-  // absent (shouldn't happen on a real Closed record per the spec, but
-  // don't drop a comp over it). Active records have no ClosePrice at all
-  // (null on every Active record tested) — ListPrice is the only real
-  // asking price available, same as RentCast's active comps.
-  const monthlyRent = isClosed && typeof record.ClosePrice === 'number'
-    ? record.ClosePrice
-    : record.ListPrice;
-  if (typeof monthlyRent !== 'number' || !(monthlyRent >= 0)) return null;
+  // lib/weighting.js. Fall back to ListPrice if ClosePrice is not a real
+  // positive number (absent, or the MLS's 0 placeholder for "not entered" —
+  // two real Closed records, 1121 Pittsfield Ln and 1300 Saratoga Ave, carry
+  // ClosePrice 0 beside a normal ListPrice; on 400 real Closed records
+  // ClosePrice equals ListPrice 84% of the time and is within 5% on 95%).
+  // Active records have no ClosePrice at all (null on every Active record
+  // tested) — ListPrice is the only real asking price available, same as
+  // RentCast's active comps. A rent of 0 means "unknown", never "free": if
+  // neither figure is a positive number there is no comp, and a $0 rent
+  // must never reach lib/weighting.js (a leased comp counts 3x, so a single
+  // $0 drags the whole range's low end to $0).
+  const closePrice = positiveOrNull(record.ClosePrice);
+  const monthlyRent = isClosed && closePrice !== null
+    ? closePrice
+    : positiveOrNull(record.ListPrice);
+  if (monthlyRent === null) return null;
 
   return {
     address: buildAddress(record),
     property_type: FROM_CRMLS_PROPERTY_TYPE[record.PropertySubType] || null,
-    bedrooms: typeof record.BedroomsTotal === 'number' ? record.BedroomsTotal : null,
-    bathrooms: typeof record.BathroomsTotalDecimal === 'number' ? record.BathroomsTotalDecimal : null,
-    sqft: typeof record.LivingArea === 'number' ? record.LivingArea : null,
+    bedrooms: nonNegativeOrNull(record.BedroomsTotal),
+    bathrooms: nonNegativeOrNull(record.BathroomsTotalDecimal),
+    // A live CRMLS record reports LivingArea 0 for "unknown"; rental_comps.sqft
+    // is CHECK (sqft > 0), so 0 must become null or the batch insert fails.
+    sqft: positiveOrNull(record.LivingArea),
     // Real computed Haversine distance when pullCrmlsComps() ran a box-based
     // search and this record has coordinates; null for the zip-fallback path
     // or a record with no lat/long — nullable on rental_comps for exactly
     // this ("comps come from external APIs that don't always classify type
     // cleanly" — same reasoning as property_type). Never invented.
-    distance_miles: typeof distanceMiles === 'number' ? distanceMiles : null,
-    latitude: typeof record.Latitude === 'number' ? record.Latitude : null,
-    longitude: typeof record.Longitude === 'number' ? record.Longitude : null,
+    distance_miles: nonNegativeOrNull(distanceMiles),
+    latitude: inRangeOrNull(record.Latitude, -90, 90),
+    longitude: inRangeOrNull(record.Longitude, -180, 180),
     monthly_rent: monthlyRent,
     // ListPrice/ClosePrice are real MLS-observed figures, never algorithmic
     // — same reasoning as RentCast's `price` field (see lib/rentcast.js).
     is_estimated_price: false,
-    original_price: typeof record.OriginalListPrice === 'number' ? record.OriginalListPrice : null,
+    original_price: nonNegativeOrNull(record.OriginalListPrice),
     had_price_cut: typeof record.OriginalListPrice === 'number' && typeof record.ListPrice === 'number'
       ? record.ListPrice < record.OriginalListPrice
       : false,
     // The whole point of this source: a real confirmed transaction maps to
     // 'leased', not an inferred status — see lib/weighting.js.
     listing_status: isClosed ? 'leased' : 'active',
-    days_on_market: typeof record.DaysOnMarket === 'number' ? record.DaysOnMarket : null,
+    days_on_market: nonNegativeOrNull(record.DaysOnMarket),
     listed_date: toDateOnly(record.OnMarketDate) || toDateOnly(record.ListingContractDate),
     // "when it went off market / lease began" per the schema's dual-purpose
     // comment on this column — CloseDate is a real confirmed lease date
@@ -207,22 +268,52 @@ function mapComparable(record, distanceMiles = null) {
 // scope is either {type: 'zip', zip} (today's exact behavior) or
 // {type: 'box', minLat, maxLat, minLon, maxLon} (the new radius search) —
 // see pullCrmlsComps().
-function buildFilter(status, scope) {
+//
+// relevance is optional. Omitted (or {}), the output is exactly the
+// scope-only filter. Otherwise these clauses are appended, in this order:
+//   - subtype: only if relevance.propertyType has CRMLS subtypes
+//     (TO_CRMLS_PROPERTY_SUBTYPES) — a matching PropertySubType OR null
+//   - bedrooms: only if relevance.bedrooms is a number — within
+//     BEDROOM_MISMATCH_THRESHOLD - 1 of it (same range lib/rentcast.js asks
+//     RentCast for) OR null
+//   - date floor: only for status 'Closed' with relevance.closedSince set —
+//     CloseDate on or after that 'YYYY-MM-DD'
+// The `eq null` branches keep the house rule that an unknown type or unknown
+// bedroom count is not a mismatch. A record whose subtype IS known to CRMLS
+// but unmapped (Loft, Stock Cooperative) is deliberately not fetched for a
+// typed subject: CRMLS told us what it is, so that is not missing data.
+function buildFilter(status, scope, relevance = {}) {
   const base = `StandardStatus eq '${status}' and PropertyType eq 'Residential Lease'`;
-  if (scope.type === 'box') {
-    return `${base} and Latitude ge ${scope.minLat} and Latitude le ${scope.maxLat} and Longitude ge ${scope.minLon} and Longitude le ${scope.maxLon}`;
+  let filter = scope.type === 'box'
+    ? `${base} and Latitude ge ${scope.minLat} and Latitude le ${scope.maxLat} and Longitude ge ${scope.minLon} and Longitude le ${scope.maxLon}`
+    : `${base} and PostalCode eq '${scope.zip}'`;
+
+  const rel = relevance || {};
+  const subtypes = TO_CRMLS_PROPERTY_SUBTYPES[rel.propertyType];
+  if (Array.isArray(subtypes) && subtypes.length) {
+    const clauses = [...subtypes.map(subtype => `PropertySubType eq '${subtype}'`), 'PropertySubType eq null'];
+    filter += ` and (${clauses.join(' or ')})`;
   }
-  return `${base} and PostalCode eq '${scope.zip}'`;
+  if (typeof rel.bedrooms === 'number') {
+    const spread = BEDROOM_MISMATCH_THRESHOLD - 1;
+    const lo = Math.max(0, rel.bedrooms - spread);
+    const hi = rel.bedrooms + spread;
+    filter += ` and ((BedroomsTotal ge ${lo} and BedroomsTotal le ${hi}) or BedroomsTotal eq null)`;
+  }
+  if (status === 'Closed' && rel.closedSince) {
+    filter += ` and CloseDate ge ${rel.closedSince}`;
+  }
+  return filter;
 }
 
-async function fetchByStatus(scope, status, orderBy) {
-  const filter = buildFilter(status, scope);
+async function fetchByStatus(scope, status, orderBy, relevance) {
+  const filter = buildFilter(status, scope, relevance);
   const params = new URLSearchParams({
     access_token: process.env.RECORE_SERVER_TOKEN,
     '$filter': filter,
     '$select': SELECT_FIELDS,
     '$orderby': orderBy,
-    '$top': String(COMPS_PER_STATUS),
+    '$top': String(MAX_RECORDS_PER_STATUS),
   });
   const res = await fetch(`${CRMLS_BASE_URL}?${params.toString()}`);
   if (!res.ok) {
@@ -230,12 +321,19 @@ async function fetchByStatus(scope, status, orderBy) {
     throw new Error(`CRMLS API request failed (${res.status}): ${body || res.statusText}`);
   }
   const data = await res.json();
-  return Array.isArray(data.value) ? data.value : [];
+  const records = Array.isArray(data.value) ? data.value : [];
+  if (records.length >= MAX_RECORDS_PER_STATUS) {
+    console.warn(`[rental-analysis] CRMLS: ${status} query returned ${records.length} records, the maximum page size — results may be truncated (not paginated).`);
+  }
+  return records;
 }
 
 /**
- * Pulls CRMLS comps for one analysis: recently leased (Closed) records plus
- * current listings (Active). Scoped to a true radius search (a lat/long
+ * Pulls CRMLS comps for one analysis: recently leased (Closed, last
+ * CRMLS_CLOSED_LOOKBACK_MONTHS months) records plus current listings
+ * (Active), each limited server-side to a compatible property subtype and
+ * bedroom count when the subject carries them (see buildFilter()), up to
+ * MAX_RECORDS_PER_STATUS per status. Scoped to a true radius search (a lat/long
  * bounding box, post-filtered to a circle — see below) whenever
  * subject.latitude/subject.longitude are real numbers — this is the normal
  * path now, since lib/sources.js's runActiveSources() runs RentCast first
@@ -254,7 +352,7 @@ async function fetchByStatus(scope, status, orderBy) {
  * a credentials/access lapse) instead of silently looking like "zero
  * comps for this address."
  *
- * @param {{address: string, latitude?: number, longitude?: number}} subject
+ * @param {{address: string, latitude?: number, longitude?: number, propertyType?: string, bedrooms?: number}} subject
  * @returns {Promise<{comps: object[], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: string|null}>}
  */
 async function pullCrmlsComps(subject) {
@@ -276,9 +374,13 @@ async function pullCrmlsComps(subject) {
     return { comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null };
   }
 
+  // runActiveSources() hands every handler the whole subject, so propertyType
+  // and bedrooms are normally present; when they aren't (older tests, a
+  // direct call) buildFilter() simply adds no type/bedroom clauses.
+  const relevance = { propertyType: subject.propertyType, bedrooms: subject.bedrooms, closedSince: closedSinceDate() };
   const [closedResult, activeResult] = await Promise.allSettled([
-    fetchByStatus(scope, 'Closed', 'CloseDate desc'),
-    fetchByStatus(scope, 'Active', 'OnMarketDate desc'),
+    fetchByStatus(scope, 'Closed', 'CloseDate desc', relevance),
+    fetchByStatus(scope, 'Active', 'OnMarketDate desc', relevance),
   ]);
 
   if (closedResult.status === 'rejected' && activeResult.status === 'rejected') {
@@ -342,7 +444,11 @@ module.exports = {
   haversineMiles,
   buildBoundingBox,
   buildFilter,
+  closedSinceDate,
   FROM_CRMLS_PROPERTY_TYPE,
+  TO_CRMLS_PROPERTY_SUBTYPES,
+  MAX_RECORDS_PER_STATUS,
+  CRMLS_CLOSED_LOOKBACK_MONTHS,
   CRMLS_BASE_URL,
   NARROW_SEARCH_RADIUS_MILES,
   WIDE_SEARCH_RADIUS_MILES,

@@ -1886,10 +1886,21 @@
     // fetch first and decide, with the answer in hand, whether it is still
     // safe to swap the list in. loadComplaints() itself behaves exactly as
     // before for the first page load and the Refresh button.
-    function fetchComplaintList() {
+    //
+    // fetchComplaintList(true) is the STRICT version, used only by the quiet
+    // refresh: it accepts nothing except a good answer that carries a real
+    // list (an array, even an empty one). A server answer that is not ok, not
+    // readable as JSON, or has no "complaints" list (for example {} or a
+    // login page) is rejected so the quiet refresh keeps the list already on
+    // screen instead of treating it as "there are no reports".
+    function fetchComplaintList(strict) {
       return fetch('/api/complaint-tracking', { credentials: 'include' })
         .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
         .then(function (r) {
+          if (strict) {
+            if (!r.ok || !r.body || !Array.isArray(r.body.complaints)) throw new Error('Unusable answer from the server.');
+            return r.body.complaints;
+          }
           if (!r.ok) throw new Error(r.body.error || 'Could not load complaints.');
           return r.body.complaints || [];
         });
@@ -1974,7 +1985,8 @@
     //     automatic refreshes count toward that limit, so filing a report
     //     and pressing Back within half a minute of loading the page still
     //     refreshes it;
-    //   - a failed, slow (REFRESH_TIMEOUT_MS) or unreadable answer changes
+    //   - a failed, slow (REFRESH_TIMEOUT_MS), unreadable or empty-handed
+    //     answer (not ok, not JSON, or no "complaints" list in it) changes
     //     nothing: the old list stays on screen with no message.
     // ────────────────────────────────────────────────────────────────
     var REFRESH_MIN_GAP_MS = 30000;
@@ -2050,7 +2062,7 @@
       // must not block every later refresh. Its answer is ignored if it
       // ever does arrive.
       var giveUpTimer = setTimeout(settle, REFRESH_TIMEOUT_MS);
-      fetchComplaintList()
+      fetchComplaintList(true)
         .then(function (list) {
           if (!settle()) return;
           // Something saved on this page while the list was on its way: the

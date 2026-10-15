@@ -349,6 +349,12 @@ async function callRouterHandler({ fakeClient, method, routePath, req }) {
   const originalArchiveSearchRouterModule = require.cache[archiveSearchRouterPath];
   const hadSignificancePassCache = Object.prototype.hasOwnProperty.call(require.cache, significancePassPath);
   const originalSignificancePassModule = require.cache[significancePassPath];
+  // lib/process-pending-messages.js caches its own Supabase client in a
+  // module-level variable the first time lookupSingleDirectorOfOperations()
+  // runs, so a later test would otherwise reuse a stale fake.
+  const processPendingPath = require.resolve('../lib/process-pending-messages.js');
+  const hadProcessPendingCache = Object.prototype.hasOwnProperty.call(require.cache, processPendingPath);
+  const originalProcessPendingModule = require.cache[processPendingPath];
 
   require.cache[supabasePath] = {
     id: supabasePath, filename: supabasePath, loaded: true, exports: { createClient: () => fakeClient },
@@ -356,6 +362,7 @@ async function callRouterHandler({ fakeClient, method, routePath, req }) {
   delete require.cache[targetPath];
   delete require.cache[archiveSearchRouterPath];
   delete require.cache[significancePassPath];
+  delete require.cache[processPendingPath];
 
   try {
     const { router } = require(targetPath);
@@ -376,6 +383,7 @@ async function callRouterHandler({ fakeClient, method, routePath, req }) {
     if (hadTargetCache) require.cache[targetPath] = originalTargetModule; else delete require.cache[targetPath];
     if (hadArchiveSearchRouterCache) require.cache[archiveSearchRouterPath] = originalArchiveSearchRouterModule; else delete require.cache[archiveSearchRouterPath];
     if (hadSignificancePassCache) require.cache[significancePassPath] = originalSignificancePassModule; else delete require.cache[significancePassPath];
+    if (hadProcessPendingCache) require.cache[processPendingPath] = originalProcessPendingModule; else delete require.cache[processPendingPath];
   }
 }
 
@@ -525,6 +533,11 @@ require('./source-email-dates-tests').register({ test, asyncTest: serialAsyncTes
 // "Last touched X ago by [name]" (lib/last-touched.js + the same two list
 // endpoints) — same arrangement.
 require('./last-touched-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
+
+// Hand-entered "Report an issue" reports go to the Director of Operations
+// and into Needs a Call (POST /api/complaint-tracking/report) — same
+// arrangement.
+require('./manual-report-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
 
 // ─── Report ──────────────────────────────────────────────────────────────
 async function main() {

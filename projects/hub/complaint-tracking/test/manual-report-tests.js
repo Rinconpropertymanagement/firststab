@@ -186,7 +186,7 @@ function register({ asyncTest, callRouterHandler }) {
     assert.strictEqual(audit.details.needs_human_call_set_by_rule, true);
     assert.strictEqual(audit.details.reported_by_team_member_id, REPORTER_ID);
     assert.strictEqual(audit.details.category, null);
-    assert.match(audit.details.reason, /^Automatically assigned to the Director of Operations and placed in Needs a Call because a staff member typed this report in\. No AI involved\.$/);
+    assert.match(audit.details.reason, /^Automatically assigned to the Director of Operations and placed in Needs a Call because a staff member typed this report in\. No AI made this assignment\.$/);
     assert.ok(!audit.details.reason.includes(PLAIN_TEXT), 'the audit note never repeats the complaint text');
   });
 

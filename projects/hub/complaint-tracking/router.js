@@ -630,7 +630,8 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
     // Set on purpose, by rule, for every staff-typed report (Peter, 2026-10-14):
     // a person who takes the trouble to type a complaint in wants it seen, so
     // it belongs in the Needs a Call lane until a human works it. This is NOT
-    // the AI's uncertainty flag — no AI is involved in this route. Setting it
+    // the AI's uncertainty flag — no AI makes this assignment or lane choice
+    // (the content check on the text can still call a classifier). Setting it
     // also means the database can never let a severity rating hide the row
     // as "no_issue" (complaints_no_issue_excludes_protected_signals).
     needs_human_call: true,
@@ -701,8 +702,8 @@ router.post('/api/complaint-tracking/report', requireActiveTeamMember, async (re
       assignment_rule: 'staff_report_always_to_director_of_operations',
       needs_human_call_set_by_rule: true,
       reason: autoAssigned
-        ? 'Automatically assigned to the Director of Operations and placed in Needs a Call because a staff member typed this report in. No AI involved.'
-        : 'Could not assign automatically (no single active Director of Operations found); left unassigned but still in Needs a Call. A staff member typed this report in. No AI involved.',
+        ? 'Automatically assigned to the Director of Operations and placed in Needs a Call because a staff member typed this report in. No AI made this assignment.'
+        : 'Could not assign automatically (no single active Director of Operations found); left unassigned but still in Needs a Call. A staff member typed this report in. No AI made this assignment.',
     },
   });
 

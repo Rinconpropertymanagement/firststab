@@ -52,6 +52,16 @@
  * existing reconcile route, because that route's own Latchel query
  * (state 27 only) is structurally different from this feature's
  * (updated-since a rolling window).
+ *
+ * That feature can also add an optional "What the work order is" block
+ * quoting the job's own title and description (work-order-notes-alert-
+ * SPEC.md Section 6A). It is OFF unless WORK_ORDER_ALERT_DESCRIPTION_MODE
+ * is 'shadow' or 'on', it only ever reads job.name / job.description /
+ * is_emergency / is_urgent from the job this handler already passes in,
+ * and it sits behind a required LOCAL word-list screen (no AI, nothing sent
+ * anywhere). This file does nothing
+ * differently for it: the job object goes to handleWorkOrderJob() exactly
+ * as before.
  */
 
 const express = require('express');
@@ -362,7 +372,8 @@ internalRouter.post('/api/approval-briefing/internal/reconcile', async (req, res
  * (listJobsNeedingApproval, state 27 only); this pulls
  * listJobsUpdatedSince() over a rolling lookback window and runs every
  * returned job through lib/work-order-notes-alert.js's resolve -> dedup
- * -> content-check -> send pipeline. Same checkCronSecret()/CRON_SECRET
+ * -> send pipeline (the notes content check was removed by Peter; see that
+ * file's header). Same checkCronSecret()/CRON_SECRET
  * auth as /internal/reconcile, reused exactly, not reinvented. Safe to
  * run repeatedly or on overlapping windows — the dedup/retry logic in
  * lib/work-order-notes-alert.js makes re-scanning a job already sent (or

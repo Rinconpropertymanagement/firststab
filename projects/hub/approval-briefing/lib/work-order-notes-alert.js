@@ -6,11 +6,45 @@
  * maintenance note on file (properties.maintenance_notes), this sends a
  * fixed-template email to that property's pod inbox (Faria/Solimar) so the
  * note reaches the right people immediately instead of waiting for
- * someone to go look. No AI-generated content anywhere in the email
- * itself — a template filled with already-synced fields plus this one
- * property-level text field, quoted verbatim.
+ * someone to go look. No AI-written text anywhere in the email itself —
+ * a template filled with already-synced fields plus this one
+ * property-level text field, quoted verbatim, plus (only when
+ * WORK_ORDER_ALERT_DESCRIPTION_MODE is 'on', and the ingestion interlock
+ * below is satisfied) the optional "What the work order is" block described
+ * under DESCRIPTION BLOCK below.
  *
- * CONTENT CHECK — REMOVED BY PETER'S EXPLICIT, DOCUMENTED OVERRIDE, READ
+ * DESCRIPTION BLOCK (optional, off by default): the email can also say
+ * what the work order is, by quoting the job's own title (job.name) and
+ * description (job.description) after cleaning and a REQUIRED local screen
+ * (a word-list scan that runs on this server; any hit or any error withholds
+ * the whole block and substitutes one fixed sentence). THERE IS NO AI IN THIS
+ * PATH: no model is called, nothing from the job text is sent to Anthropic or
+ * anywhere else, in off, shadow or on mode (Peter's decision of 2026-10-16;
+ * the tests prove it). That screen is Asimov's binding ruling for this
+ * addition and is separate from, and not affected by, Peter's removal of
+ * the check from the NOTES path below. Everything lives in
+ * lib/work-order-summary.js, lib/work-order-text-clean.js and
+ * lib/work-order-text-screen.js (+ -terms.js); this file only wires it in.
+ * WORK_ORDER_ALERT_DESCRIPTION_MODE is 'off' | 'shadow' | 'on' (unset or
+ * anything else = 'off', and the email is then byte-identical to before this
+ * block existed). 'shadow' runs the whole local pipeline and writes the
+ * counts-only audit event but leaves the block out of the email. 'on' takes
+ * effect only when WORK_ORDER_ALERT_INGESTION_EXCLUSION_VERIFIED is exactly
+ * 'yes' (set by Jarvis or Scotty after the Missive-intake exclusion is live and
+ * verified and Peter has said yes); otherwise it behaves as 'shadow' and the
+ * audit event records on_downgraded. The title and description are never
+ * stored (not in work_order_note_alerts, not in audit_log, not in logs, not in
+ * the failure email); the sent email is the only copy. A problem building the
+ * block never stops the alert: it is sent without it.
+ *
+ * RULE 9 (GOVERNANCE.md): THE TEXT, THE HOLD RESULT AND THE CATEGORY ONLY
+ * DECIDE WHAT IS DISPLAYED. They never reach resolveRecipients(), the dedup
+ * lookup, the subject, the task write, the work_order_note_alerts row, the
+ * priority line or any other action about a tenant or a unit. Keep it that way:
+ * the block is prepared AFTER recipients are resolved and is only ever passed
+ * to buildEmailContent() as display lines.
+ *
+ * CONTENT CHECK ON THE NOTES — REMOVED BY PETER'S EXPLICIT, DOCUMENTED OVERRIDE, READ
  * THIS BEFORE RE-ADDING ANYTHING HERE: Asimov's original governance review
  * (compliance/work-order-note-alerts-governance-review.md) approved this
  * build CONDITIONED on a two-layer content check (keyword scan + AI
@@ -92,6 +126,9 @@ const crypto = require('crypto');
 
 const latchel = require('../../maintenance-history/lib/latchel-connector');
 const { getSharedInbox, sendMail } = require('../../lib/notify');
+const {
+  prepareWorkOrderSummary, descriptionMode, descriptionModeInfo, SCREEN_VERSION,
+} = require('./work-order-summary');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -185,7 +222,7 @@ function isoDaysAgo(days) {
 // null, which satisfies Rule 1's literal "event_data must include
 // trace: {...}" requirement without inventing tracing infrastructure
 // this build has no other reason to add.
-async function writeAuditLog({ action, entity_type, entity_id, actor_id, privacy_category, risk_level, details, traceId }) {
+async function writeAuditLog({ action, entity_type, entity_id, actor_id, privacy_category, risk_level, details, traceId, quietErrors = false }) {
   const { error } = await supabase.from('audit_log').insert({
     action,
     entity_type,
@@ -200,7 +237,10 @@ async function writeAuditLog({ action, entity_type, entity_id, actor_id, privacy
     },
   });
   if (error) {
-    console.error(`[work-order-notes-alert] audit_log insert failed for ${action}:`, error.message);
+    // quietErrors: the description-block event never echoes a database error
+    // message (constant line only), so nothing near the job text can be logged.
+    if (quietErrors) console.error(`[work-order-notes-alert] audit_log insert failed for ${action}.`);
+    else console.error(`[work-order-notes-alert] audit_log insert failed for ${action}:`, error.message);
   }
 }
 
@@ -303,11 +343,27 @@ async function resolveRecipients(property, traceId) {
 }
 
 // ─── Email content (spec Section 6) ────────────────────────────────────
-function buildEmailContent({ property, pod, job, notesText }) {
+// `descriptionLines` is the optional "What the work order is" block from
+// lib/work-order-summary.js. When it is null/empty the output is exactly
+// what this function produced before the block existed; when present it
+// is inserted as ONE contiguous segment (a blank line, then the block)
+// right after the "Created:" line. The subject never changes.
+function buildEmailContent({ property, pod, job, notesText, descriptionLines }) {
   const podLabel = pod === 'unassigned_both' ? 'unassigned' : pod;
   const propertyLabel = property.name || property.address || `Property ${property.id}`;
   const link = `${HUB_BASE_URL}/property-360?property_id=${encodeURIComponent(property.id)}`;
   const createdAt = job.created_at || job.updated_at || null;
+
+  let block = [];
+  if (Array.isArray(descriptionLines) && descriptionLines.length) {
+    // Defense in depth: the cleaner already removes every newline, so a
+    // line that still contains one means a bug. Refuse it rather than let
+    // text forge extra lines in the email.
+    if (descriptionLines.some((l) => typeof l !== 'string' || /[\r\n]/.test(l))) {
+      throw new Error('description block line is not a single plain-text line');
+    }
+    block = ['', ...descriptionLines];
+  }
 
   const subject = `Work Order Alert — ${propertyLabel} has special handling notes`;
   const text = [
@@ -318,6 +374,7 @@ function buildEmailContent({ property, pod, job, notesText }) {
     '',
     `Work order: Ticket #${job.order_number != null ? job.order_number : '—'} (Latchel job ${job.job_id != null ? job.job_id : job.id})`,
     `Created: ${createdAt || '—'}`,
+    ...block,
     '',
     `View this property: ${link}`,
     '',
@@ -325,6 +382,99 @@ function buildEmailContent({ property, pod, job, notesText }) {
   ].join('\n');
 
   return { subject, text };
+}
+
+// ─── Optional "What the work order is" block ────────────────────────────
+// Runs only when WORK_ORDER_ALERT_DESCRIPTION_MODE is 'shadow' or 'on'
+// (see this file's header). Returns the lines to put in the email, or null
+// for "send the alert exactly as before". Never throws: whatever goes
+// wrong, the alert still goes out without the block. Logs are constant
+// lines; the title and description are never logged, stored or put in the
+// audit event (counts-only details, Asimov's ruling). NO AI: the screen is a
+// local word list, and the only outbound call possible here is the injected
+// read-only Latchel lookup.
+//
+// Rule 9: this runs AFTER resolveRecipients(); its result is display lines
+// and an audit row, nothing else. It must never be passed to, or change, the
+// recipients, the dedup lookup, the subject, the tasks write or the
+// work_order_note_alerts row.
+
+const DESCRIPTION_AUDIT_ACTION = 'work_order_note_alert.description_checked';
+
+async function writeDescriptionAudit({ property, latchelJobId, triggerSource, mode, downgraded, summary, traceId }) {
+  const m = summary.meta;
+  // Medium for an unavailable lookup and for every hold except the unassigned
+  // pod. A scanner error (check_error), unsettled text (unsettled_text), a hold
+  // the cleaner asked for by itself (link_shape) and a summary error are always
+  // holds, so they are medium too; shown and none are low.
+  const medium = summary.status === 'unavailable'
+    || (summary.status === 'held' && m.cause !== 'pod_unassigned');
+  await writeAuditLog({
+    action: DESCRIPTION_AUDIT_ACTION,
+    entity_type: 'property',
+    entity_id: property.id,
+    actor_id: 'work-order-notes-alert',
+    privacy_category: 'processing',
+    risk_level: medium ? 'medium' : 'low',
+    // Counts only: the keys below are the whole list. No text, term, length,
+    // hash, excerpt, per-term count or CATEGORY NAME (a category name next to a
+    // job id and a property is a sensitive inference about a household, and
+    // Peter's rule is no protected-class data in any table). These describe the
+    // job's own text, so they must never be copied into
+    // work_order_note_alerts.flagged_protected_class / flagged_category (those
+    // columns describe the maintenance notes).
+    details: {
+      latchel_job_id: latchelJobId,
+      trigger_source: triggerSource,
+      mode,
+      result: summary.status,
+      cause: m.cause,
+      common_word_only: m.common_word_only,
+      screen_version: m.screen_version,
+      truncated: m.truncated,
+      fallback_getjob_used: m.fallback_getjob_used,
+      pod_unassigned: m.pod_unassigned,
+      on_downgraded: downgraded,
+    },
+    traceId,
+    quietErrors: true,
+  });
+}
+
+async function prepareDescriptionBlock({ job, latchelJobId, property, pod, triggerSource, traceId }) {
+  const { mode, downgraded } = descriptionModeInfo();
+  if (mode === 'off') return null;
+  if (downgraded) {
+    console.warn('[work-order-notes-alert] Description mode is "on" but the ingestion interlock is not set - running as "shadow".');
+  }
+
+  try {
+    const summary = await prepareWorkOrderSummary(job, {
+      podUnassigned: pod === 'unassigned_both',
+      jobId: latchelJobId,
+      fetchJob: (id) => latchel.getJob(id),
+    });
+    await writeDescriptionAudit({ property, latchelJobId, triggerSource, mode, downgraded, summary, traceId });
+
+    // 'shadow' measures everything but changes nothing in the email.
+    return mode === 'on' ? summary.lines : null;
+  } catch (_err) {
+    // Constant text only: the error may carry text from the job or the database.
+    console.error(`[work-order-notes-alert] job ${latchelJobId}: could not prepare the description block - sending the alert without it.`);
+    try {
+      await writeDescriptionAudit({
+        property, latchelJobId, triggerSource, mode, downgraded, traceId,
+        summary: {
+          status: 'held',
+          meta: {
+            cause: 'summary_error', common_word_only: false,
+            screen_version: SCREEN_VERSION, truncated: false, fallback_getjob_used: false, pod_unassigned: pod === 'unassigned_both',
+          },
+        },
+      });
+    } catch (_err2) { /* best effort only */ }
+    return null;
+  }
 }
 
 // ─── Direct failure notification (Judge finding) ───────────────────────
@@ -391,6 +541,14 @@ function notifyPeterOfSendFailure({ property, job, latchelJobId, pod, recipients
 }
 
 // ─── Core pipeline ──────────────────────────────────────────────────────
+const KNOWN_SEND_ERRORS = new Set([
+  'no_recipient', 'mailer_not_configured', 'invalid_grant', 'invalid_client', 'unauthorized_client',
+]);
+
+function safeSendError(error) {
+  return typeof error === 'string' && KNOWN_SEND_ERRORS.has(error) ? error : 'send_failed';
+}
+
 async function processJob(job, triggerSource) {
   const traceId = crypto.randomUUID();
   const latchelJobId = job.job_id != null ? String(job.job_id) : (job.id != null ? String(job.id) : null);
@@ -440,8 +598,30 @@ async function processJob(job, triggerSource) {
   // just above — goes into the email exactly as-is.
   const { pod, recipients } = await resolveRecipients(property, traceId);
 
-  const { subject, text } = buildEmailContent({ property, pod, job, notesText: notes });
-  const sendResult = await sendMail({ to: recipients, subject, text });
+  // With nobody to send to, the send cannot succeed, so the block (and its
+  // Latchel lookup and audit row) is not built: a job whose send keeps failing
+  // for want of an inbox is then not re-scanned and re-counted on every pass.
+  const descriptionLines = recipients.length
+    ? await prepareDescriptionBlock({ job, latchelJobId, property, pod, triggerSource, traceId })
+    : null;
+
+  let email;
+  try {
+    email = buildEmailContent({ property, pod, job, notesText: notes, descriptionLines });
+  } catch (_err) {
+    // The optional block must never be the reason an alert is not sent.
+    console.error(`[work-order-notes-alert] job ${latchelJobId}: could not add the description block to the email — sending the alert without it.`);
+    email = buildEmailContent({ property, pod, job, notesText: notes });
+  }
+  const { subject, text } = email;
+  let sendResult = await sendMail({ to: recipients, subject, text });
+  if (!sendResult.ok && descriptionMode() === 'on') {
+    // Only while the description is really IN the email (mode 'on') can the
+    // body carry job text, and a mail error could echo a body. Keep only a
+    // short known code; the mail module already logs its own detail. (Modes
+    // off and shadow: the original error text is kept, as before.)
+    sendResult = { ...sendResult, error: safeSendError(sendResult.error) };
+  }
 
   const now = new Date().toISOString();
   const rowFields = {
@@ -542,13 +722,75 @@ async function processJob(job, triggerSource) {
 // Exported entrypoint — never throws, so a bug here can never crash the
 // webhook handler or abort a reconcile loop partway through. Both call
 // sites in ../router.js rely on this.
+//
+// Same-job concurrency guard, ONLY while the description block is active
+// (mode 'shadow' or 'on'; in 'off' nothing here changes). Latchel often
+// delivers a Job/created and a Job/updated for the same job seconds apart,
+// and the block adds a moment between the "already sent?" look-up and the
+// send (a possible Latchel lookup). That would widen the small, documented
+// window in which two deliveries both pass the dedup check and both send (see
+// the ATOMICITY note in this file's header). A job already being handled in
+// this process is skipped instead; if that attempt fails, the row is
+// 'failed' and the next delivery or backstop pass retries it as usual.
+//
+// EXPIRY: an entry older than IN_FLIGHT_MAX_AGE_MS is ignored and
+// overwritten, so one hung send can never block later deliveries of that job
+// for good. Each entry carries a token, and the finally block removes the
+// entry only if its token is still the one it wrote, so a stale run that
+// finally returns cannot delete a newer run's entry. Expired entries are
+// pruned on every guarded call, which keeps the map bounded.
+const IN_FLIGHT_MAX_AGE_MS = 5 * 60 * 1000;
+const inFlightJobs = new Map();   // jobId -> { token, startedAtMs }
+// A monotonic clock (milliseconds since an arbitrary start), NOT the wall
+// clock: if the system clock is stepped back, a stuck entry must still expire
+// after 5 real minutes.
+const monotonicNowMs = () => Number(process.hrtime.bigint()) / 1e6;
+let nowMs = monotonicNowMs;
+let flightCounter = 0;
+
+function pruneInFlight(t) {
+  for (const [k, v] of inFlightJobs) {
+    if (t - v.startedAtMs > IN_FLIGHT_MAX_AGE_MS) inFlightJobs.delete(k);
+  }
+}
+
 async function handleWorkOrderJob(job, triggerSource) {
+  const jobId = job && (job.job_id != null ? job.job_id : job.id);
+  const active = descriptionMode() !== 'off';
+  const guardKey = (active && jobId != null) ? String(jobId) : null;
+  let token = null;
+  if (guardKey) {
+    const t = nowMs();
+    const existing = inFlightJobs.get(guardKey);
+    if (existing) {
+      if (t - existing.startedAtMs <= IN_FLIGHT_MAX_AGE_MS) {
+        console.log(`[work-order-notes-alert] job ${guardKey}: another delivery is already being handled, skipping (${triggerSource}).`);
+        return { action: 'already_sent', in_flight: true };
+      }
+      console.warn('[work-order-notes-alert] An old in-flight entry was ignored (older than 5 minutes).');
+    }
+    pruneInFlight(t);
+    flightCounter += 1;
+    token = flightCounter;
+    inFlightJobs.set(guardKey, { token, startedAtMs: t });
+  }
   try {
     return await processJob(job, triggerSource);
   } catch (err) {
-    const jobId = job && (job.job_id != null ? job.job_id : job.id);
-    console.error(`[work-order-notes-alert] unexpected error handling job ${jobId}:`, err.message);
-    return { action: 'error', error: err.message };
+    if (!active) {
+      console.error(`[work-order-notes-alert] unexpected error handling job ${jobId}:`, err.message);
+      return { action: 'error', error: err.message };
+    }
+    // While the description block is active an error message could carry job
+    // text, so only the error's class name (not its message) is recorded.
+    const kind = (err && typeof err.name === 'string' && /^[A-Za-z]{1,40}$/.test(err.name)) ? err.name : 'Error';
+    console.error(`[work-order-notes-alert] unexpected error handling job ${jobId} (${kind}); details withheld.`);
+    return { action: 'error', error: 'unexpected_error' };
+  } finally {
+    if (guardKey) {
+      const cur = inFlightJobs.get(guardKey);
+      if (cur && cur.token === token) inFlightJobs.delete(guardKey);
+    }
   }
 }
 
@@ -575,4 +817,10 @@ async function reconcileWorkOrderNotes() {
   return summary;
 }
 
-module.exports = { handleWorkOrderJob, reconcileWorkOrderNotes };
+module.exports = {
+  handleWorkOrderJob,
+  reconcileWorkOrderNotes,
+  // test seam: a fake clock for the in-flight expiry tests
+  _setClockForTesting(fn) { nowMs = typeof fn === 'function' ? fn : monotonicNowMs; },
+  _inFlightSizeForTesting() { return inFlightJobs.size; },
+};

@@ -1,0 +1,107 @@
+[
+  {
+    "name": "normal-solimar",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7001 (Latchel job 5001)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "normal-faria",
+    "to": [
+      "faria-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 9 Sample Road has special handling notes",
+    "text": "A new work order was just created for 9 Sample Road (pod: Faria).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7002 (Latchel job 5002)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0002\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "notes-with-quotes-newlines-unicode",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Owner said: \"call first\".\nSecond line with café — 你好 🛠️ and a tab\there.\"\n\nWork order: Ticket #7003 (Latchel job 5003)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "missing-order-number",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #— (Latchel job 5004)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "order-number-null",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #— (Latchel job 5005)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "id-only-job",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7006 (Latchel job 5006)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "missing-created-at-uses-updated-at",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7001 (Latchel job 5007)\nCreated: 2026-10-01T15:31:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "missing-both-timestamps",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7001 (Latchel job 5008)\nCreated: —\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "unassigned-pod-two-recipients",
+    "to": [
+      "faria-pod@example.test",
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: unassigned).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7009 (Latchel job 5009)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0003\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "long-notes",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one. Long note sentence number one.\"\n\nWork order: Ticket #7010 (Latchel job 5010)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "property-address-only",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street has special handling notes",
+    "text": "A new work order was just created for 123 Test Street (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7011 (Latchel job 5011)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "property-no-name-no-address",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — Property prop-0001 has special handling notes",
+    "text": "A new work order was just created for Property prop-0001 (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7012 (Latchel job 5012)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  },
+  {
+    "name": "job-without-free-text-fields",
+    "to": [
+      "solimar-pod@example.test"
+    ],
+    "subject": "Work Order Alert — 123 Test Street Unit A has special handling notes",
+    "text": "A new work order was just created for 123 Test Street Unit A (pod: Solimar).\n\nThis property has maintenance notes on file:\n\"Call the owner before any work over $500.\"\n\nWork order: Ticket #7001 (Latchel job 5013)\nCreated: 2026-10-01T15:30:00Z\n\nView this property: https://hub.test.invalid/property-360?property_id=prop-0001\n\nThis inbox is not monitored — see Property 360 above for anything that needs follow-up."
+  }
+]

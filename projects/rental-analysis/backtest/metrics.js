@@ -24,7 +24,7 @@
  * that does not exist yet, so reference copies live here; when lib/weighting.js
  * computeHeadlineRange / lib/confidence.js ship, switch these to the real ones.
  */
-const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH, LA_BORDER_CITIES, REGION_LABELS } = require('./constants');
+const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH, LA_BORDER_CITIES, REGION_LABELS, COUNTY_LABELS } = require('./constants');
 
 // ── basic statistics ─────────────────────────────────────────────────────────
 function median(values) {
@@ -240,7 +240,49 @@ function summarizeBy(rows, keyFn, minN = 0) {
 const LA_BORDER_SET = new Set(LA_BORDER_CITIES.map(c => c.toLowerCase()));
 function isLaBorder(city) { return !!city && LA_BORDER_SET.has(String(city).trim().toLowerCase()); }
 
+// The MLS county field -> 'ventura' | 'other' | null (unknown). Tolerant of case, spaces and a trailing
+// "County" ("Ventura", "ventura county", " VENTURA "). An empty value or a placeholder is unknown, never a
+// county of its own: "Other County" is what CRMLS records when the county is not in its pick-list (3 closed
+// Woodland Hills / Malibu leases in the 2026-10-17 pull), so it tells us nothing and the city list decides.
+const COUNTY_PLACEHOLDERS = new Set(['', 'unknown', 'n/a', 'na', 'none', 'null', '-', 'other county', 'other']);
+function countyOf(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase().replace(/\s+county$/, '').trim();
+  if (COUNTY_PLACEHOLDERS.has(v)) return null;
+  return v === 'ventura' ? 'ventura' : 'other';
+}
+
+// The two published county groups. A lease with a known county goes by the county; one with no county falls
+// back to the old city list (an LA-border city counts as "other counties"). Null only when there is neither.
+function countyGroupOf(row) {
+  const c = countyOf(row.county);
+  if (c) return c === 'ventura' ? COUNTY_LABELS.ventura : COUNTY_LABELS.other;
+  if (!row.city) return null;
+  return isLaBorder(row.city) ? COUNTY_LABELS.other : COUNTY_LABELS.ventura;
+}
+function hasKnownCounty(row) { return countyOf(row.county) !== null; }
+
+// How many records carry a usable county, and which values the feed uses (counts only; for the report and the run log).
+function countyFill(records, field = 'CountyOrParish') {
+  const values = new Map();
+  let known = 0;
+  for (const r of records) {
+    const raw = r[field];
+    if (countyOf(raw) !== null) known++;
+    const key = typeof raw === 'string' && raw.trim() ? raw.trim() : '(blank)';
+    values.set(key, (values.get(key) || 0) + 1);
+  }
+  return {
+    records: records.length,
+    known,
+    unknown: records.length - known,
+    knownShare: records.length ? known / records.length : null,
+    values: [...values.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 12).map(([value, count]) => ({ value, count })),
+  };
+}
+
 const GROUPINGS = {
+  countyGroup: countyGroupOf,
   region: r => (r.city ? (isLaBorder(r.city) ? REGION_LABELS.laBorder : REGION_LABELS.venturaOnly) : null),
   area: r => (r.area === 'core' ? 'Ventura core' : r.area ? 'Ventura-area outside the core' : null),
   city: r => (r.city ? r.city.trim() : null),
@@ -264,4 +306,5 @@ module.exports = {
   median, mean, wilson, roundToStep, headlineRange, bandHit, bandHitHalfUp, CONF,
   spreadBucket, confidenceSimple, confidenceLabel, rentBand, compCountBand, sourceMixLabel,
   summarizeView, summarize, groupBy, summarizeBy, summarizeAllGroupings, GROUPINGS, isLaBorder,
+  countyOf, countyGroupOf, hasKnownCounty, countyFill,
 };

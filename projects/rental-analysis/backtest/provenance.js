@@ -30,6 +30,7 @@ const TRACKED_FILES = [
   'lib/property-matching.js',
   'lib/analyze.js',
   'lib/constants.js',
+  'backtest/recore.js',     // what the pull selects (the county field is part of it)
   'backtest/asof-sources.js',
   'backtest/candidates.js', // pool settings (lookbacks, asking price rule) live here
   'backtest/engine.js',     // how one lease is run through the tool

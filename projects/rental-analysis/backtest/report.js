@@ -16,7 +16,7 @@
  */
 const { G } = require('./appendix-g');
 const M = require('./metrics');
-const { MIN_GROUP_N, TRACK_RECORD_MIN_LEASES, RENTCAST_SHARE_PERCENT, LA_BORDER_CITIES, REGION_LABELS, MAX_DATA_AGE_DAYS } = require('./constants');
+const { MIN_GROUP_N, TRACK_RECORD_MIN_LEASES, RENTCAST_SHARE_PERCENT, LA_BORDER_CITIES, REGION_LABELS, COUNTY_FIELD, COUNTY_LABELS, COUNTY_UNKNOWN_LIMIT_PERCENT, MAX_DATA_AGE_DAYS } = require('./constants');
 const { fidelityValidity } = require('./provenance');
 const { LIVE_MLS_MONTHS, LIVE_RINCON_MONTHS, POOLS } = require('./candidates');
 const { verdictLine } = require('./judging');
@@ -133,6 +133,36 @@ function regionBlocks(rows) {
   return { laBorder: side(la), venturaOnly: side(rest) };
 }
 
+// The same two sides, but by the MLS's own county (CountyOrParish). A lease with no county was placed by the
+// city list and is counted in leasesFromCityRule. Each side is published only with MIN_GROUP_N or more leases,
+// and carries its own confidence-label blocks (also 20+ each) so the staff sentences can quote the Ventura side
+// side on its own.
+function countyBlocks(rows) {
+  const side = label => {
+    const rs = rows.filter(x => M.countyGroupOf(x) === label);
+    if (rs.length < MIN_GROUP_N) return null;
+    const confidence = {};
+    for (const [k, s] of Object.entries(M.summarizeBy(rs, M.GROUPINGS.confidence, MIN_GROUP_N))) confidence[k] = viewBlock(s);
+    return { label, ...viewBlock(M.summarize(rs)), medianRent: Math.round(M.median(rs.map(x => x.rent))), leasesFromCityRule: rs.filter(x => !M.hasKnownCounty(x)).length, confidence };
+  };
+  return { venturaCounty: side(COUNTY_LABELS.ventura), otherCounties: side(COUNTY_LABELS.other) };
+}
+
+// Westlake Village straddles the county line. How many of its tested leases fall in each county group, by the
+// MLS county. A count under MIN_GROUP_N is not published (null), like every other small group.
+function westlakeVillageSplit(rows) {
+  const wv = rows.filter(x => x.city && String(x.city).trim().toLowerCase() === 'westlake village');
+  const known = label => wv.filter(x => M.hasKnownCounty(x) && M.countyGroupOf(x) === label).length;
+  const pub = n => (n >= MIN_GROUP_N ? n : null);
+  return {
+    note: `Westlake Village leases tested, split by the MLS county; a count under ${MIN_GROUP_N} is not published (null)`,
+    leases: pub(wv.length),
+    venturaCounty: pub(known(COUNTY_LABELS.ventura)),
+    otherCounties: pub(known(COUNTY_LABELS.other)),
+    countyUnknown: pub(wv.filter(x => !M.hasKnownCounty(x)).length),
+  };
+}
+
 function daysBetweenDates(a, b) {
   return Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
 }
@@ -164,6 +194,10 @@ function buildScorecard(r) {
   else if (r.network.rentcastRequests > 0 || r.network.anthropicRequests > 0 || r.network.otherHostRequests > 0) trustReasons.push('the run attempted a RentCast, Anthropic or other outside request');
 
   const laShare = base.length ? base.filter(x => M.isLaBorder(x.city)).length / base.length : 0;
+  const unknownCounty = base.filter(x => !M.hasKnownCounty(x)).length;
+  const unknownShare = base.length ? unknownCounty / base.length : 0;
+  const otherCountyShare = base.length ? base.filter(x => M.countyGroupOf(x) === COUNTY_LABELS.other).length / base.length : 0;
+  const fill = r.countyFill || null;
   const sc = {
     schema: 1,
     generatedAt: r.generatedAt,
@@ -176,7 +210,7 @@ function buildScorecard(r) {
     methodVersion: 'current-tool-2026-10',
     methodNote: 'baseline = the production comp-matching code as it runs today (bedrooms and property type only); size25_item2 = the same code with the proposed Phase B rules simulated',
     scope: {
-      county: `the Ventura-area service box (Ventura, Oxnard, Camarillo, Simi Valley, Thousand Oaks and the Conejo Valley border); about ${wholePercent(laShare)}% of the leases are in the Calabasas / Agoura Hills / Westlake Village / West Hills border area (also reported separately as "${REGION_LABELS.laBorder}")`,
+      county: `the Ventura-area service box (Ventura, Oxnard, Camarillo, Simi Valley, Thousand Oaks and the Conejo Valley border); about ${wholePercent(laShare)}% of the leases are in the Calabasas / Agoura Hills / Westlake Village / West Hills border area (by the old city list; also reported separately as "${REGION_LABELS.laBorder}"); by the MLS county field about ${wholePercent(otherCountyShare)}% are in counties other than Ventura (reported as "${COUNTY_LABELS.other}")`,
       core: 'the Ventura core box',
     },
     pool: {
@@ -212,6 +246,22 @@ function buildScorecard(r) {
       shareOfLeasesPct: pct1(laShare),
       baseline: regionBlocks(base),
       size25_item2: regionBlocks(bundle),
+    },
+    counties: {
+      field: COUNTY_FIELD,
+      definition: `"${COUNTY_LABELS.ventura}" and "${COUNTY_LABELS.other}" are grouped by the county the MLS records for each lease (${COUNTY_FIELD}), so Westlake Village homes on the Ventura side count as ${COUNTY_LABELS.ventura}; a lease whose record has no county is placed by the old city list (${LA_BORDER_CITIES.join(', ')} count as other counties) and is counted under unknown. Grouping only: no comp rule and no headline number uses the county.`,
+      shareOfLeasesPct: pct1(otherCountyShare),
+      unknown: {
+        leases: unknownCounty,
+        sharePct: pct1(unknownShare),
+        limitPct: COUNTY_UNKNOWN_LIMIT_PERCENT,
+        overLimit: unknownShare * 100 > COUNTY_UNKNOWN_LIMIT_PERCENT,
+        closedRecordsWithCountyPct: fill && nz(fill.closed.knownShare) ? pct1(fill.closed.knownShare) : null,
+        activeRecordsWithCountyPct: fill && nz(fill.active.knownShare) ? pct1(fill.active.knownShare) : null,
+      },
+      baseline: countyBlocks(base),
+      size25_item2: countyBlocks(bundle),
+      westlakeVillage: westlakeVillageSplit(base),
     },
     rincon: r.rincon && r.rincon.headline && {
       targets: r.rincon.headline.baseline.targets,
@@ -271,9 +321,26 @@ const AREA_LABELS = { county: 'Ventura-area', core: 'Ventura core' };
 const leaseWord = n => (n === 1 ? 'lease' : 'leases');
 const dataDatePhrase = scorecard => (scorecard.dataPulledOn ? `data pulled ${scorecard.dataPulledOn}` : 'data date unknown');
 
+// The Ventura side of the county blocks, when it can carry a staff sentence: at least TRACK_RECORD_MIN_LEASES
+// leases with a range behind it, and the county really known for the leases (fewer than COUNTY_UNKNOWN_LIMIT_PERCENT
+// without one), because that county label is only true when it comes from the MLS county. Otherwise null,
+// and the caller uses the whole-box figures and the "Ventura-area" wording.
+function countySide(scorecard, method) {
+  const c = scorecard && scorecard.counties;
+  if (!c) return null;
+  // Fails closed: the scorecard's own exact-share flag (overLimit) must say "not over", and the rounded percent must agree.
+  // A missing or malformed unknown block means we cannot show the county is known, so the whole box is quoted.
+  if (!c.unknown || c.unknown.overLimit !== false || typeof c.unknown.sharePct !== 'number' || !Number.isFinite(c.unknown.sharePct) || c.unknown.sharePct > COUNTY_UNKNOWN_LIMIT_PERCENT) return null;
+  const side = c[method] && c[method].venturaCounty;
+  if (!side || !side.ranged || side.ranged.n < TRACK_RECORD_MIN_LEASES) return null;
+  return side;
+}
+const LA_BORDER_NOTE = 'Figures for homes in the LA-border area (other counties) are reported separately.';
+
 function accuracyLine(scorecard, { method = 'baseline', area = 'county', areaLabel } = {}) {
-  const label = areaLabel || AREA_LABELS[area] || AREA_LABELS.county;
-  const block = scorecard.overall[method][area];
+  const side = !areaLabel && area === 'county' ? countySide(scorecard, method) : null;
+  const label = side ? COUNTY_LABELS.ventura : (areaLabel || AREA_LABELS[area] || AREA_LABELS.county);
+  const block = side || scorecard.overall[method][area];
   if (!block || !block.ranged) return null;
   const rg = block.ranged;
   const note = rentcastNote(scorecard);
@@ -282,15 +349,17 @@ function accuracyLine(scorecard, { method = 'baseline', area = 'county', areaLab
   const hit = timesInTen(rg.within300OfSuggestedCount, rg.n, rg.within300OfSuggestedCiPct);
   // Coverage next to accuracy: some homes get no range at all, and the sentence must not hide that. Rounded down.
   const coverage = block.coveragePct === null || block.coveragePct === undefined ? '' : `; a recommended range could be shown for ${Math.floor(block.coveragePct + 1e-9)}% of the homes tried`;
-  return `Blind-tested on ${rg.n} past ${label} ${leaseWord(rg.n)}: typical miss about $${miss.toLocaleString('en-US')}; the suggested price landed within $300 of the signed rent ${hit}${coverage} (${dataDatePhrase(scorecard)}).${note ? ` ${note}` : ''}`;
+  return `Blind-tested on ${rg.n} past ${label} ${leaseWord(rg.n)}: typical miss about $${miss.toLocaleString('en-US')}; the suggested price landed within $300 of the signed rent ${hit}${coverage} (${dataDatePhrase(scorecard)}).${side ? ` ${LA_BORDER_NOTE}` : ''}${note ? ` ${note}` : ''}`;
 }
 
-function labelHitRates(scorecard, label, { method = 'size25_item2', area = 'county' } = {}) {
-  const g = scorecard.groups[method] && scorecard.groups[method][area] && scorecard.groups[method][area].confidence;
+function labelHitRates(scorecard, label, { method = 'size25_item2', area = 'county', areaLabel } = {}) {
+  const side = !areaLabel && area === 'county' ? countySide(scorecard, method) : null;
+  const g = side ? side.confidence : (scorecard.groups[method] && scorecard.groups[method][area] && scorecard.groups[method][area].confidence);
   const b = g && g[label];
-  if (!b || !b.ranged) return { n: 0, enough: false };
+  if (!b || !b.ranged) return { n: 0, enough: false, county: !!side };
   const rg = b.ranged;
   return {
+    county: !!side,
     n: rg.n, enough: rg.n >= TRACK_RECORD_MIN_LEASES,
     rangeHitCount: rg.rangeHit200Count, rangeHitCiPct: rg.rangeHit200CiPct,
     within300Count: rg.within300OfSuggestedCount, within300CiPct: rg.within300OfSuggestedCiPct,
@@ -300,9 +369,9 @@ function labelHitRates(scorecard, label, { method = 'size25_item2', area = 'coun
 function trackRecordSentence(scorecard, label, opts = {}) {
   const h = labelHitRates(scorecard, label, opts);
   if (!h.enough) return `${label} confidence: too few tests to say yet.`;
-  const where = opts.areaLabel || AREA_LABELS[opts.area || 'county'] || AREA_LABELS.county;
+  const where = h.county ? COUNTY_LABELS.ventura : (opts.areaLabel || AREA_LABELS[opts.area || 'county'] || AREA_LABELS.county);
   const note = rentcastNote(scorecard);
-  return `${label} confidence. In blind tests on ${h.n} past ${where} ${leaseWord(h.n)}, reports like this held the signed rent inside the recommended range ${timesInTen(h.rangeHitCount, h.n, h.rangeHitCiPct)} and landed within $300 of the suggested price ${timesInTen(h.within300Count, h.n, h.within300CiPct)}.${note ? ` ${note}` : ''}`;
+  return `${label} confidence. In blind tests on ${h.n} past ${where} ${leaseWord(h.n)}, reports like this held the signed rent inside the recommended range ${timesInTen(h.rangeHitCount, h.n, h.rangeHitCiPct)} and landed within $300 of the suggested price ${timesInTen(h.within300Count, h.n, h.within300CiPct)}.${h.county ? ` ${LA_BORDER_NOTE}` : ''}${note ? ` ${note}` : ''}`;
 }
 
 // ── detail files (local only) ────────────────────────────────────────────────
@@ -313,11 +382,11 @@ function csvCell(v) {
 }
 
 function detailCsv(entries) {
-  const head = ['pool', 'method', 'kind', 'key', 'date', 'address', 'city', 'type', 'area', 'beds', 'sqft', 'signed_rent', 'estimate', 'signed_minus_estimate', 'counted_comps', 'leased_comps', 'spread', 'confidence_label'];
+  const head = ['pool', 'method', 'kind', 'key', 'date', 'address', 'city', 'type', 'area', 'beds', 'sqft', 'signed_rent', 'estimate', 'signed_minus_estimate', 'counted_comps', 'leased_comps', 'spread', 'confidence_label', 'county', 'county_group'];
   const lines = [head.join(',')];
   for (const { pool, method, rows } of entries) {
     for (const r of rows) {
-      lines.push([pool, method, r.kind, r.key, r.date, r.address, r.city, r.type, r.area, r.beds, r.sqft, r.rent, r.est, r.est === null ? '' : r.rent - r.est, r.n, r.leased, r.spread, M.confidenceLabel(r) || ''].map(csvCell).join(','));
+      lines.push([pool, method, r.kind, r.key, r.date, r.address, r.city, r.type, r.area, r.beds, r.sqft, r.rent, r.est, r.est === null ? '' : r.rent - r.est, r.n, r.leased, r.spread, M.confidenceLabel(r) || '', r.county || '', r.kind === 'mls' ? (M.countyGroupOf(r) || '') : ''].map(csvCell).join(','));
     }
   }
   return lines.join('\n') + '\n';
@@ -435,7 +504,7 @@ function renderReport(r, previousScorecard, scorecard) {
   L.push('- **Coverage**: the share of all homes tried that get a recommended range at all.');
   L.push('- **Tune and hold-out**: older leases (used to choose a rule) and the newest three months (kept aside and judged once).');
   L.push('- **baseline** is today\'s tool; **size25_item2** is the same tool with the proposed size and MLS rules simulated.');
-  L.push('- **LA-border cities** (Westlake Village, Agoura Hills, Calabasas, West Hills and a few others) are inside the test area but are Los Angeles County; they are reported separately below.');
+  L.push(`- **${COUNTY_LABELS.ventura}** and **${COUNTY_LABELS.other}**: the test area also takes in the Los Angeles side of the Conejo Valley border (Calabasas, Agoura Hills, most of West Hills and others), and the town of Westlake Village straddles the county line. Each lease is grouped by the county the MLS records for that home, so Westlake Village homes on the Ventura side count as ${COUNTY_LABELS.ventura}. The two groups are reported separately below, and the staff sentences quote ${COUNTY_LABELS.ventura} when that group is big enough.`);
   L.push('');
   if (scorecard) {
     L.push('## What staff would see (the exact sentences, generated from this run\'s scorecard)');
@@ -443,12 +512,16 @@ function renderReport(r, previousScorecard, scorecard) {
     const preview = [accuracyLine(scorecard), ...['High', 'Medium', 'Low'].map(lab => trackRecordSentence(scorecard, lab))].filter(Boolean);
     for (const line of preview) L.push(`- ${line}`);
     L.push('');
-    L.push(`Scorecard trusted: ${scorecard.trusted ? 'yes' : 'NO'}${scorecard.trusted ? '' : ` (${scorecard.trustReasons.join('; ')})`}. The first line is for today\'s tool; the label sentences use the proposed rules, which is what the labels will be calibrated on.`);
+    L.push(`Scorecard trusted: ${scorecard.trusted ? 'yes' : 'NO'}${scorecard.trusted ? '' : ` (${scorecard.trustReasons.join('; ')})`}. The first line is for today\'s tool; the label sentences use the proposed rules, which is what the labels will be calibrated on. The staff sentences quote the ${COUNTY_LABELS.ventura} figures when that group has ${TRACK_RECORD_MIN_LEASES} or more leases with a range and no more than ${COUNTY_UNKNOWN_LIMIT_PERCENT}% of the leases lack a county; otherwise they quote the whole Ventura-area box. In this run the first line quotes ${countySide(scorecard, 'baseline') ? COUNTY_LABELS.ventura : 'the whole Ventura-area box'} and the label sentences quote ${countySide(scorecard, 'size25_item2') ? COUNTY_LABELS.ventura : 'the whole Ventura-area box'}.`);
     L.push('');
   }
   L.push(`- Data: CRMLS closed leases from Recore pulled ${r.cachePulledAt} (${r.counts.closedRecords} records), Rincon's own leases and saved reports from Supabase (read-only). Newest target: ${r.dataThrough}.`);
   L.push(`- Targets: ${r.counts.countyTargets} MLS leases in the Ventura-area box (${r.counts.coreTargets} in the Ventura core), closed ${r.config.targetFrom} or later, like-for-like; ${r.counts.rinconTargets} Rincon single-home leases.`);
   L.push(`- Walk-forward split: tune = before ${r.config.holdoutStart} (${r.counts.tune} MLS targets), hold-out = ${r.config.holdoutStart} onward (${r.counts.holdout}).`);
+  if (r.countyFill && r.countyFill.closed) {
+    const cf = r.countyFill, valuesText = f => f.values.map(v => `${v.value} ${v.count}`).join(', ');
+    L.push(`- County field (${COUNTY_FIELD}): present on ${cf.closed.known} of ${cf.closed.records} closed records (${pct(cf.closed.knownShare, 1)}) and ${cf.active.known} of ${cf.active.records} active records (${pct(cf.active.knownShare, 1)}). Values in the closed records: ${valuesText(cf.closed)}. It is used only to group the results.`);
+  }
   const net = r.network;
   L.push(net && net.measured
     ? `- Network use, measured by a guard that blocks anything but Recore and Supabase: Recore requests this session ${net.recoreRequests}, Supabase ${net.supabaseRequests}; RentCast requests ${net.rentcastRequests}; Anthropic calls ${net.anthropicRequests}; other hosts ${net.otherHostRequests}; requests of any kind during the replay itself ${net.requestsDuringReplay}. Run time ${r.elapsedSeconds}s.`
@@ -523,11 +596,80 @@ function renderReport(r, previousScorecard, scorecard) {
   L.push('The rule lifts accuracy and costs coverage in this MLS-only pool; the live pool also has RentCast, Rincon leases and listings, so the real coverage drop is smaller (see the pool table below).');
   L.push('');
 
-  // Ventura-area vs LA-border
+  // The two county groups side by side, grouped by the MLS county
+  {
+    const V = COUNTY_LABELS.ventura, O = COUNTY_LABELS.other;
+    const inGroup = label => x => M.countyGroupOf(x) === label;
+    const total = base.length || 1;
+    const nV = base.filter(inGroup(V)).length, nO = base.filter(inGroup(O)).length;
+    const unknown = base.filter(x => !M.hasKnownCounty(x)).length;
+    const valueCounts = new Map();
+    for (const x of base) { const k = M.hasKnownCounty(x) ? String(x.county).trim() : '(no usable county)'; valueCounts.set(k, (valueCounts.get(k) || 0) + 1); }
+    L.push(`## ${V} vs the LA-border area (grouped by the MLS county)`);
+    L.push('');
+    L.push(`Every lease is grouped by the county the MLS records for it (field ${COUNTY_FIELD}), not by city, because the town of Westlake Village straddles the county line: its Ventura-side homes count as ${V} and its Los Angeles-side homes as ${O}. Of the ${base.length} tested leases, ${nV} (${pct(nV / total, 1)}) are ${V} and ${nO} (${pct(nO / total, 1)}) are ${O}. County values among the tested leases: ${[...valueCounts.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')}. This is grouping only: no comp rule and no headline number uses the county, and the comp box is unchanged.`);
+    L.push('');
+    L.push(unknown
+      ? `County unknown for ${unknown} of ${base.length} tested leases (${pct(unknown / total, 1)}); those are placed by the old city list (${LA_BORDER_CITIES.join(', ')} count as ${O}).${(unknown / total) * 100 > COUNTY_UNKNOWN_LIMIT_PERCENT ? ` **That is more than ${COUNTY_UNKNOWN_LIMIT_PERCENT}% of the leases, so the two groups are less exact than they look and the staff sentences use the whole Ventura-area box.**` : ''}`
+      : 'The county was known for every tested lease.');
+    L.push('');
+    const sideRows = [];
+    for (const m of ['baseline', 'size25_item2']) {
+      for (const [lab, pick] of [[V, inGroup(V)], [O, inGroup(O)], ['Both (the whole Ventura-area box)', () => true]]) {
+        const rows = mls.mls[m].filter(pick);
+        const sm = sum(rows);
+        sideRows.push([m, lab, rows.length, usd(M.median(rows.map(x => x.rent))), sm.estimated, pct(sm.coverage), usd(A(sm).typicalMiss), pct(A(sm).within300), sm.ranged ? pct(sm.ranged.rangeHit200) : '-']);
+      }
+    }
+    L.push(table(['Method', 'Group', 'Leases', 'Median signed rent', 'Estimated', 'Coverage', 'Typical miss', 'Within $300', 'Range hit ($200, ranged only)'], sideRows));
+    L.push('');
+    L.push(`Method baseline is today's tool; size25_item2 is the proposed rules. A group under ${MIN_GROUP_N} leases is not published in the scorecard (shown here only so nothing is hidden).`);
+    L.push('');
+
+    // Westlake Village: the town the county line runs through
+    const wv = base.filter(x => x.city && String(x.city).trim().toLowerCase() === 'westlake village');
+    L.push('### Westlake Village, split by the MLS county');
+    L.push('');
+    const wvRows = [
+      [V, x => M.hasKnownCounty(x) && M.countyGroupOf(x) === V],
+      [O, x => M.hasKnownCounty(x) && M.countyGroupOf(x) === O],
+      ['County unknown (old city list puts these in the LA-border group)', x => !M.hasKnownCounty(x)],
+    ].map(([lab, pick]) => {
+      const rows = wv.filter(pick), sm = sum(rows);
+      return [lab, rows.length, wv.length ? pct(rows.length / wv.length) : '-', rows.length ? usd(M.median(rows.map(x => x.rent))) : '-', rows.length ? usd(A(sm).typicalMiss) : '-', rows.length ? pct(A(sm).within300) : '-'];
+    });
+    L.push(`${wv.length} tested leases are in Westlake Village (today's tool for the last two columns). The old city list put all ${wv.length} in the LA-border group.`);
+    L.push('');
+    L.push(table(['Westlake Village leases', 'Leases', 'Share', 'Median signed rent', 'Typical miss (today)', 'Within $300 (today)'], wvRows));
+    L.push('');
+
+    // every city that is on the border list or has any lease outside the Ventura group
+    const byCity = new Map();
+    for (const x of base) {
+      if (!x.city) continue;
+      const c = String(x.city).trim();
+      const e = byCity.get(c) || { v: 0, o: 0, u: 0 };
+      if (!M.hasKnownCounty(x)) e.u++; else if (M.countyGroupOf(x) === V) e.v++; else e.o++;
+      byCity.set(c, e);
+    }
+    const shown = [...byCity.entries()].filter(([c, e]) => M.isLaBorder(c) || e.o > 0).sort((a, b) => (b[1].v + b[1].o + b[1].u) - (a[1].v + a[1].o + a[1].u) || (a[0] < b[0] ? -1 : 1));
+    const shownNames = new Set(shown.map(([c]) => c));
+    const rest = { v: 0, o: 0, u: 0 };
+    for (const [c, e] of byCity) if (!shownNames.has(c)) { rest.v += e.v; rest.o += e.o; rest.u += e.u; }
+    L.push(`### Leases by city and county (border-list cities and every city with a lease outside ${V})`);
+    L.push('');
+    L.push(table(['City', V, O, 'County unknown', 'Total'],
+      [...shown.map(([c, e]) => [c, e.v, e.o, e.u, e.v + e.o + e.u]), ['All other cities', rest.v, rest.o, rest.u, rest.v + rest.o + rest.u]]));
+    L.push('');
+  }
+
+  // Ventura-area vs LA-border, the old city-list rule (kept for comparison)
   {
     const la = x => M.isLaBorder(x.city), rest = x => x.city && !M.isLaBorder(x.city);
     const share = base.filter(la).length / (base.length || 1);
-    L.push('## Ventura-area leases vs the LA-border cities');
+    L.push('### For comparison: the old city-list rule (not used for the staff sentences)');
+    L.push('');
+    L.push(`Before the report grouped by the MLS county it used a fixed list of cities. That list puts all of Westlake Village, including its Ventura-side homes, in the LA-border group and calls the rest "${REGION_LABELS.venturaOnly}".`);
     L.push('');
     L.push(`The test area also takes in the Los Angeles side of the Conejo Valley border (${LA_BORDER_CITIES.join(', ')}): ${wholePercent(share)}% of the leases tested. Those homes rent for more and the tool misses by more there, so the Ventura-area figures above mix two different markets. Whether staff price homes in those cities is a business question; the comp area was not trimmed because that would change every published number.`);
     L.push('');
@@ -742,11 +884,21 @@ function renderReport(r, previousScorecard, scorecard) {
   L.push('- Signed rent is not always market rent (price cuts after vacancy); nothing records asking-price history yet (Phase A3).');
   L.push(`- A listing entered in the MLS after its lease closed (${r.dataFacts && r.dataFacts.enteredAfterClose !== undefined ? r.dataFacts.enteredAfterClose : 'a few'} records) is treated as not knowable before it was entered.`);
   L.push('- Hit rates on groups of under 100 leases have wide intervals; groups under 20 are not published.');
+  {
+    const u = base.filter(x => !M.hasKnownCounty(x)).length, share = base.length ? u / base.length : 0;
+    const over = share * 100 > COUNTY_UNKNOWN_LIMIT_PERCENT;
+    const otherCounties = new Map();
+    for (const x of base) if (M.hasKnownCounty(x) && M.countyGroupOf(x) === COUNTY_LABELS.other) { const k = String(x.county).trim().replace(/\s+county$/i, ''); otherCounties.set(k, (otherCounties.get(k) || 0) + 1); }
+    const otherNote = otherCounties.size === 0 ? 'No tested lease is in that group by county.'
+      : (otherCounties.size === 1 && [...otherCounties.keys()][0].toLowerCase() === 'los angeles' ? 'In this run every other-county lease is Los Angeles County, so the label is exact today; the county values are printed on every run, so a change would show.'
+        : `In this run that group holds: ${[...otherCounties.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ')} (so it is not only Los Angeles County).`);
+    L.push(`- County: "${COUNTY_LABELS.ventura}" and "${COUNTY_LABELS.other}" use the county the MLS records for each lease. ${u ? `${u} of ${base.length} tested leases (${pct(share, 1)}) had no usable county and were placed by the old city list (${LA_BORDER_CITIES.join(', ')} count as other counties).` : 'Every tested lease had a county.'}${over ? ` That is more than ${COUNTY_UNKNOWN_LIMIT_PERCENT}% of the leases, so the two groups are less exact than they look and the staff sentences use the whole Ventura-area box.` : ''} "${COUNTY_LABELS.other}" means every county except Ventura. ${otherNote}`);
+  }
   L.push('');
   return L.join('\n') + '\n';
 }
 
 module.exports = {
-  assertAggregatesOnly, viewBlock, buildScorecard, accuracyLine, labelHitRates, trackRecordSentence,
+  assertAggregatesOnly, viewBlock, buildScorecard, accuracyLine, labelHitRates, trackRecordSentence, countySide,
   detailCsv, worstMissesCsv, renderReport, table, pct, usd, csvCell, inTen, inTenRange, pts, pts1, fmtCount,
 };

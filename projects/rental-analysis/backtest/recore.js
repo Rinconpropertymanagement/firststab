@@ -27,7 +27,9 @@ const { COUNTY_BOX, PULL_PAD, RECORE_PAGE, RECORE_DELAY_MS } = require('./consta
 const CACHE_DIR = process.env.BACKTEST_CACHE_DIR || path.join(__dirname, 'cache');
 
 // Everything lib/crmls.js's mapComparable() and buildAddress() read, plus the
-// three MLS facts the protocol's target screen and the Item 2 variants use.
+// three MLS facts the protocol's target screen and the Item 2 variants use,
+// plus CountyOrParish (the MLS's county, used only to GROUP the scorecard; no
+// mapper or comp rule reads it).
 // Deliberately NOT selected: PublicRemarks and every agent/office field.
 const SELECT_FIELDS = [
   'ListingKey', 'ListingId', 'StandardStatus', 'PropertySubType',
@@ -38,6 +40,7 @@ const SELECT_FIELDS = [
   'CloseDate', 'OnMarketDate', 'ListingContractDate',
   'Latitude', 'Longitude', 'LivingArea', 'DaysOnMarket',
   'Furnished', 'LeaseTerm', 'SeniorCommunityYN',
+  'CountyOrParish',
 ];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));

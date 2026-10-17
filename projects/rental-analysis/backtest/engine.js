@@ -84,6 +84,7 @@ async function runTarget(world, target, method, pool) {
     date: target.date,
     address: target.address, // local detail only
     city: target.city,
+    county: target.county || null, // the MLS county, for grouping the results only; nothing above reads it
     type: target.propertyType,
     area: target.area,
     beds: target.bedrooms,

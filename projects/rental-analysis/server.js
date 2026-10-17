@@ -151,8 +151,8 @@ const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/google-places');
-const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
-const { computeRecommendedRange, computeRawRange, exclusionReason } = require('./lib/weighting');
+const { findBestPropertyMatch, hasParseableHouseNumber } = require('./lib/property-matching');
+const { computeNumbers } = require('./lib/analyze');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 
@@ -502,39 +502,25 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       const subjectMatch = findBestPropertyMatch(subject_address, properties);
       if (subjectMatch) resolvedPropertyId = subjectMatch.id;
     }
-    const matchedComps = rawComps.map(c => {
-      const match = findBestPropertyMatch(c.address, properties);
-      return { ...c, comp_property_id: match ? match.id : null, is_rincon_managed: !!match };
-    });
-    // Collapse the same real unit reported twice (e.g. RentCast inferring
-    // 'off_market' on a unit CRMLS separately confirms as 'leased') into one
-    // comp before anything downstream counts or ranges them — see
-    // dedupeComps() in lib/property-matching.js. subjectBedrooms/
-    // subjectPropertyType are passed so dedup's own tie-break can prefer
-    // whichever duplicate would actually count toward the range (see that
-    // function's comment) — real sources can disagree on a unit's type or
-    // bedroom count. Reassigning compsWithMatch (rather than introducing a
-    // new name) means every existing downstream use below — recommended/raw
-    // range math, narrative, the DB insert — automatically runs on the
-    // deduped list with no further changes.
-    const compsWithMatch = dedupeComps(matchedComps, bedrooms, subject_property_type);
-    if (compsWithMatch.length !== matchedComps.length) {
-      console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedComps.length} after=${compsWithMatch.length}`);
-    }
 
     // Numbers first — the narrative step below only explains these, never
-    // computes or overrides them.
-    const recommended = computeRecommendedRange(compsWithMatch, bedrooms, subject_property_type);
-    const raw = computeRawRange(compsWithMatch, bedrooms, subject_property_type);
-
-    // The one shared "why doesn't this comp count" verdict (lib/weighting.js
-    // exclusionReason()) computed once, here, and reused by both the
-    // narrative prompt below and the API response further down — so
-    // narrative.js and the dashboard can never independently drift on which
-    // comps are excluded. Positional array, same order as compsWithMatch;
-    // every downstream use below relies on that same order already (see
-    // narrativesByIndex/compRows/responseComps).
-    const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, subject_property_type));
+    // computes or overrides them. Everything between "the sources returned"
+    // and "save" (match comps to `properties`, collapse duplicate units,
+    // recommended/raw range, the shared per-comp "why doesn't this count"
+    // verdict) lives in lib/analyze.js, shared with router.js (the Hub) and
+    // the accuracy test (backtest/), so none of the three can run different
+    // code. Reassigning to compsWithMatch means every downstream use below —
+    // narrative, the DB insert — runs on the deduped list. exclusionReasons is
+    // a positional array, same order as compsWithMatch; narrativesByIndex/
+    // compRows/responseComps below all rely on that same order.
+    const { compsWithMatch, matchedCount, recommended, raw, exclusionReasons } = computeNumbers({
+      comps: rawComps,
+      subject: { address: subject_address.trim(), propertyType: subject_property_type, bedrooms, bathrooms, sqft },
+      properties,
+    });
+    if (compsWithMatch.length !== matchedCount) {
+      console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedCount} after=${compsWithMatch.length}`);
+    }
 
     // Rationale + per-comp narrative text. Non-fatal on failure — the
     // numbers above already stand on their own, and rationale/narrative

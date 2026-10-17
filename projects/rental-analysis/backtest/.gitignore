@@ -1,0 +1,5 @@
+# Local-only data: MLS records, per-address results and Rincon lease rows.
+# The repo is PUBLIC, so none of this may ever be committed or shipped.
+# deploy-to-sally.sh must also exclude these two folders (see README.md).
+cache/
+out/

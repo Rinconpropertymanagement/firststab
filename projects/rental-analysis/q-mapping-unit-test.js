@@ -4735,6 +4735,1441 @@ async function main() {
     }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase A (CMA-QUALITY-SPEC.md): lib/analyze.js (A0) and backtest/ (A1).
+  // Everything below runs offline on small fixtures; nothing touches Recore,
+  // Supabase, RentCast or Anthropic.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- lib/analyze.js (Phase A0) ---');
+  const { computeNumbers } = require('./lib/analyze');
+  const { legacyNumbers } = require('./backtest/tests/a0-legacy-pipeline');
+  const fsA = require('node:fs');
+  const pathA = require('node:path');
+
+  const a0Props = [
+    { id: 'p-1', address: '100 Rincon Way', city: 'Ventura', state: 'CA', zip: '93001' },
+    { id: 'p-2', address: '130 N Garden St', city: 'Ventura', state: 'CA', zip: '93001' },
+  ];
+  const a0Comp = o => ({
+    address: '1 Test St, Ventura, CA 93001', property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.4,
+    latitude: null, longitude: null, monthly_rent: 3000, is_estimated_price: false, original_price: null, had_price_cut: false,
+    listing_status: 'leased', days_on_market: null, listed_date: null, leased_date: '2026-09-01', source_id: 's-crmls', source_name: 'CRMLS', ...o,
+  });
+  const a0Comps = [
+    a0Comp({ address: '10 Alpha St, Ventura, CA 93001', monthly_rent: 3000 }),
+    a0Comp({ address: '10 Alpha Street, Ventura, CA 93001', monthly_rent: 2900, listing_status: 'off_market', source_name: 'RentCast', leased_date: null }), // same unit, weaker status
+    a0Comp({ address: '12 Beta Ave, Ventura, CA 93001', monthly_rent: 3200, listing_status: 'active', source_name: 'RentCast', leased_date: null }),
+    a0Comp({ address: '14 Gamma Ct, Ventura, CA 93001', monthly_rent: 3400, bedrooms: 5 }),                 // 2+ bedrooms off: excluded
+    a0Comp({ address: '16 Delta Dr, Ventura, CA 93001', monthly_rent: 2100, property_type: 'condo' }),       // other type: excluded
+    a0Comp({ address: '18 Eps Ln, Ventura, CA 93001', monthly_rent: 3100, bedrooms: null, property_type: null }), // unknown: counts
+    a0Comp({ address: '100 Rincon Way, Ventura, CA 93001', monthly_rent: 3300 }),                            // Rincon-managed via an outside source: excluded
+    a0Comp({ address: '130 N Garden St, Ventura, CA 93001', monthly_rent: 3150, source_name: 'LeadSimple Move-Ins' }), // Rincon-managed, trusted source: counts
+    a0Comp({ address: '20 Zeta Rd, Ventura, CA 93001', monthly_rent: 3500, distance_miles: null }),
+    a0Comp({ address: '20 Zeta Road, Ventura, CA 93001', monthly_rent: 3500, source_name: 'LeadSimple Move-Ins' }),
+  ];
+  const a0Subject = { address: '1 Test St, Ventura, CA 93001', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family' };
+  const a0Legacy = (comps, properties) => legacyNumbers({ rawComps: comps, bedrooms: a0Subject.bedrooms, subject_property_type: a0Subject.propertyType, properties });
+
+  await check('A0: computeNumbers() is identical to the frozen pre-refactor inline code on a fixture with duplicates, Rincon-managed, other-type and off-size comps', () => {
+    const modern = computeNumbers({ comps: a0Comps, subject: a0Subject, properties: a0Props });
+    assert.deepStrictEqual(modern, a0Legacy(a0Comps, a0Props));
+    // the fixture really exercises every branch, so "identical" means something
+    assert.ok(modern.compsWithMatch.length < a0Comps.length, 'dedupe collapsed at least one duplicate');
+    assert.ok(modern.matchedCount === a0Comps.length);
+    assert.ok(modern.compsWithMatch.some(c => c.is_rincon_managed && c.comp_property_id === 'p-1'));
+    assert.ok(modern.exclusionReasons.includes('rincon_managed') && modern.exclusionReasons.includes('property_type_mismatch') && modern.exclusionReasons.includes('size_mismatch'));
+    assert.ok(modern.recommended.mid !== null && modern.raw.low !== null);
+  });
+
+  await check('A0: still identical with the comps reversed, with no properties, with one comp, and with none', () => {
+    for (const [comps, props] of [[[...a0Comps].reverse(), a0Props], [a0Comps, []], [a0Comps.slice(0, 1), a0Props], [[], a0Props]]) {
+      assert.deepStrictEqual(computeNumbers({ comps, subject: a0Subject, properties: props }), a0Legacy(comps, props));
+    }
+    const none = computeNumbers({ comps: [], subject: a0Subject, properties: a0Props });
+    assert.deepStrictEqual(none.recommended, { low: null, mid: null, high: null });
+    assert.deepStrictEqual(none.raw, { low: null, high: null });
+    assert.equal(none.matchedCount, 0);
+    assert.equal(computeNumbers({ comps: a0Comps, subject: a0Subject }).compsWithMatch.every(c => c.is_rincon_managed === false), true, 'properties omitted means nothing is Rincon-managed');
+  });
+
+  await check('A0: computeNumbers() does not modify its inputs, ignores extra subject fields, and keeps exclusionReasons aligned with compsWithMatch', () => {
+    const before = JSON.stringify([a0Comps, a0Props, a0Subject]);
+    const r = computeNumbers({ comps: a0Comps, subject: { ...a0Subject, sqft: 99999, address: 'ignored' }, properties: a0Props });
+    assert.equal(JSON.stringify([a0Comps, a0Props, a0Subject]), before);
+    assert.equal(r.exclusionReasons.length, r.compsWithMatch.length);
+    r.compsWithMatch.forEach((c, i) => assert.equal(r.exclusionReasons[i], exclusionReason(c, a0Subject.bedrooms, a0Subject.propertyType)));
+    assert.deepStrictEqual(r, computeNumbers({ comps: a0Comps, subject: a0Subject, properties: a0Props }));
+  });
+
+  await check('A0: server.js and router.js call computeNumbers() once and no longer carry the inline pipeline', () => {
+    for (const file of ['server.js', pathA.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathA.join(__dirname, file);
+      if (!fsA.existsSync(p)) continue; // the Hub tree may be absent on a deployed copy
+      const raw = fsA.readFileSync(p, 'utf8');
+      const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'); // code only: comments may still name the old functions
+      assert.match(src, /require\('\.\/lib\/analyze'\)/, `${file} requires ./lib/analyze`);
+      assert.equal((src.match(/\bcomputeNumbers\(/g) || []).length, 1, `${file} calls computeNumbers() exactly once`);
+      for (const fn of ['dedupeComps', 'computeRecommendedRange', 'computeRawRange', 'exclusionReason']) {
+        assert.doesNotMatch(src, new RegExp(`\\b${fn}\\(`), `${file} must not call ${fn}() itself any more`);
+      }
+      assert.match(src, /findBestPropertyMatch\(subject_address, properties\)/, `${file} still links the subject to a property`);
+    }
+  });
+
+  await check('A0: lib/analyze.js is byte-identical in the standalone and Hub lib folders and pulls in only property-matching and weighting', () => {
+    const a = fsA.readFileSync(pathA.join(__dirname, 'lib', 'analyze.js'), 'utf8');
+    const hub = pathA.join(__dirname, '..', 'hub', 'rental-analysis', 'lib', 'analyze.js');
+    if (fsA.existsSync(hub)) assert.equal(fsA.readFileSync(hub, 'utf8'), a);
+    const requires = [...a.matchAll(/require\('([^']+)'\)/g)].map(m => m[1]).sort();
+    assert.deepEqual(requires, ['./property-matching', './weighting'], 'no import cycle possible: analyze.js sits above sources.js, not below it');
+  });
+
+  console.log('--- backtest/: reference rules, targets, metrics ---');
+  const btA = {
+    asof: require('./backtest/asof-sources'),
+    metrics: require('./backtest/metrics'),
+    targets: require('./backtest/targets'),
+    cand: require('./backtest/candidates'),
+    report: require('./backtest/report'),
+    outcomes: require('./backtest/outcomes'),
+    engine: require('./backtest/engine'),
+    selftests: require('./backtest/selftests'),
+    recore: require('./backtest/recore'),
+    db: require('./backtest/db'),
+    env: require('./backtest/env'),
+    facts: require('./backtest/mls-facts-ref'),
+    K: require('./backtest/constants'),
+  };
+
+  await check('MLS facts reference: Furnished and LeaseTerm follow the spec (Item 2), unknown stays unknown', () => {
+    const f = btA.facts;
+    assert.equal(f.normalizeFurnished('Furnished'), 'furnished');
+    assert.equal(f.normalizeFurnished('Unfurnished'), 'unfurnished');
+    assert.equal(f.normalizeFurnished('Partially'), 'partial');
+    assert.equal(f.normalizeFurnished('Furnished Or Unfurnished'), 'either');
+    assert.equal(f.normalizeFurnished('Negotiable'), 'either');
+    assert.equal(f.normalizeFurnished(null), null);
+    assert.equal(f.classifyLeaseTerm('12 Months'), 'long');
+    assert.equal(f.classifyLeaseTerm('24 Months'), 'long');
+    assert.equal(f.classifyLeaseTerm('Month To Month,12 Months'), 'long');
+    assert.equal(f.classifyLeaseTerm('Month To Month'), 'short');
+    assert.equal(f.classifyLeaseTerm('Month To Month,Vacation Rental,Short Term Lease'), 'short');
+    assert.equal(f.classifyLeaseTerm('Seasonal'), 'short');
+    assert.equal(f.classifyLeaseTerm('6 Months'), 'six_month');
+    assert.equal(f.classifyLeaseTerm('Month To Month,Negotiable'), null);
+    assert.equal(f.classifyLeaseTerm('Negotiable'), null);
+    assert.equal(f.classifyLeaseTerm(null), null);
+    assert.equal(f.isLikeForLikeTarget({ Furnished: 'Furnished' }), false);
+    assert.equal(f.isLikeForLikeTarget({ LeaseTerm: 'Month To Month' }), false);
+    assert.equal(f.isLikeForLikeTarget({ LeaseTerm: '6 Months' }), false);
+    assert.equal(f.isLikeForLikeTarget({ SeniorCommunityYN: true }), false);
+    assert.equal(f.isLikeForLikeTarget({ Furnished: null, LeaseTerm: null, SeniorCommunityYN: null }), true);
+  });
+
+  await check('Size band reference: exactly 25.0% counts, 25.1% does not, unknown sizes never exclude, duplex/apartment subjects switch it off', () => {
+    const { sqftOutsideBand, sizeKeep, item2Keep } = btA.cand;
+    assert.equal(sqftOutsideBand(1250, 1000, 25), false);   // exactly 25.0%
+    assert.equal(sqftOutsideBand(1251, 1000, 25), true);    // 25.1%
+    assert.equal(sqftOutsideBand(750, 1000, 25), false);
+    assert.equal(sqftOutsideBand(749, 1000, 25), true);
+    assert.equal(sqftOutsideBand(null, 1000, 25), false);
+    assert.equal(sqftOutsideBand(1000, 0, 25), false);
+    const keep = sizeKeep(25);
+    assert.equal(keep({ sqft: 2467 }, { propertyType: 'single_family', sqft: 1636 }), false);  // Condor Court vs Bunting
+    assert.equal(keep({ sqft: 1145 }, { propertyType: 'single_family', sqft: 1636 }), false);  // Swan St
+    assert.equal(keep({ sqft: 2467 }, { propertyType: 'duplex', sqft: 1636 }), true);
+    assert.equal(keep({ sqft: 2467 }, { propertyType: 'apartment', sqft: 700 }), true);
+    assert.equal(keep({ sqft: null }, { propertyType: 'condo', sqft: 900 }), true);
+    const subj = { furnished: false, leaseTermMonths: 12, ageRestricted: false };
+    assert.equal(item2Keep({ _mls: { furnished: 'furnished', leaseTerm: 'long', ageRestricted: false } }, subj), false);
+    assert.equal(item2Keep({ _mls: { furnished: 'partial', leaseTerm: 'long', ageRestricted: false } }, subj), true);
+    assert.equal(item2Keep({ _mls: { furnished: 'unfurnished', leaseTerm: 'short', ageRestricted: false } }, subj), false);
+    assert.equal(item2Keep({ _mls: { furnished: 'unfurnished', leaseTerm: 'six_month', ageRestricted: false } }, subj), true);
+    assert.equal(item2Keep({ _mls: { furnished: 'unfurnished', leaseTerm: 'long', ageRestricted: true } }, subj), false);
+    assert.equal(item2Keep({ _mls: { furnished: 'unfurnished', leaseTerm: 'long', ageRestricted: true } }, { ...subj, ageRestricted: true }), true);
+    assert.equal(item2Keep({ _mls: { furnished: 'unfurnished', leaseTerm: 'short', ageRestricted: false } }, { ...subj, leaseTermMonths: 3 }), true);
+    assert.equal(item2Keep({}, subj), true, 'a comp with no MLS facts (a Rincon lease) is never excluded');
+  });
+
+  // Fixtures shared by the next checks.
+  const btRec = o => ({
+    ListingKey: 'k0', ListingId: 'L0', StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', StreetNumberNumeric: 100, StreetDirPrefix: null,
+    StreetName: 'Oak', StreetSuffix: 'Street', StreetDirSuffix: null, UnitNumber: null, City: 'Ventura', StateOrProvince: 'CA', PostalCode: '93001',
+    BedroomsTotal: 3, BathroomsTotalDecimal: 2, ListPrice: 3000, ClosePrice: 3000, OriginalListPrice: 3000, CloseDate: '2026-08-01', OnMarketDate: '2026-07-10',
+    ListingContractDate: '2026-07-10', Latitude: 34.2, Longitude: -119.2, LivingArea: 1500, DaysOnMarket: 21, Furnished: 'Unfurnished', LeaseTerm: '12 Months',
+    SeniorCommunityYN: false, ...o,
+  });
+  const btTargetRec = btRec({ ListingKey: 'tgt', ListingId: 'LT', StreetNumberNumeric: 500, StreetName: 'Target', CloseDate: '2026-09-01', ClosePrice: 3400, ListPrice: 3400, OnMarketDate: '2026-08-15', ListingContractDate: '2026-08-15' });
+  const btTarget = btA.targets.mlsTargetFromRecord(btTargetRec);
+  const btSubject = { address: btTarget.address, propertyType: 'single_family', bedrooms: 3, latitude: 34.2, longitude: -119.2 };
+  const btCtx = (T = '2026-09-01', pool = btA.cand.POOLS.mls) => ({ T, target: btTarget, pool, method: null, subjectFacts: { propertyType: 'single_family', sqft: 1500, furnished: false, leaseTermMonths: 12, ageRestricted: false } });
+
+  await check('Targets: only usable, like-for-like, in-box, past-dated leases become MLS targets, oldest first, with the answer key kept apart', () => {
+    const recs = [
+      btRec({ ListingKey: 'ok2', CloseDate: '2026-06-02' }),
+      btRec({ ListingKey: 'ok1', CloseDate: '2026-05-01' }),
+      btRec({ ListingKey: 'old', CloseDate: '2026-04-14' }),                     // before the target-from date
+      btRec({ ListingKey: 'future', CloseDate: '2026-12-01' }),                  // closes in the future
+      btRec({ ListingKey: 'furn', Furnished: 'Furnished' }),
+      btRec({ ListingKey: 'mtm', LeaseTerm: 'Month To Month' }),
+      btRec({ ListingKey: 'six', LeaseTerm: '6 Months' }),
+      btRec({ ListingKey: 'senior', SeniorCommunityYN: true }),
+      btRec({ ListingKey: 'duplex', PropertySubType: 'Duplex' }),
+      btRec({ ListingKey: 'cheap', ClosePrice: 400 }),
+      btRec({ ListingKey: 'rich', ClosePrice: 25000 }),
+      btRec({ ListingKey: 'nobeds', BedroomsTotal: null }),
+      btRec({ ListingKey: 'nosqft', LivingArea: 0 }),
+      btRec({ ListingKey: 'nocoords', Latitude: null }),
+      btRec({ ListingKey: 'outside', Latitude: 35.5 }),
+    ];
+    const t = btA.targets.buildMlsTargets(recs, { targetFrom: '2026-04-15', today: '2026-10-16' });
+    assert.deepEqual(t.map(x => x.key), ['ok1', 'ok2']);
+    assert.equal(t[0].rent, 3000);
+    assert.equal(t[0].area, 'core');
+    assert.equal(t[0].propertyType, 'single_family');
+    assert.equal(t[0].date, '2026-05-01');
+  });
+
+  await check('Targets: the Rincon portfolio screen drops odd rents, rent per sq ft, unknown sizes, non-single homes and old leases', () => {
+    const row = o => ({ id: 'r', address: '1 A St', city: 'Ventura', state: 'CA', zip_code: '93001', property_type: 'Single Home', bedrooms: 3, bathrooms: 2, sqft: 1500, rent: 3500, lease_start_date: '2026-06-01', closed_at: '2026-06-09T00:00:00Z', latitude: 34.2, longitude: -119.2, ...o });
+    const rows = [
+      row({ id: 'good' }),
+      row({ id: 'oldlease', lease_start_date: '2025-10-15' }),
+      row({ id: 'edge', lease_start_date: '2025-10-16' }),
+      row({ id: 'cheap', rent: 199 }),
+      row({ id: 'dear', rent: 12500 }),
+      row({ id: 'sqftlow', rent: 1202, sqft: 1996 }),    // $0.60 per sq ft
+      row({ id: 'sqfthigh', rent: 9000, sqft: 1200 }),   // $7.50 per sq ft
+      row({ id: 'nosqft', sqft: null }),
+      row({ id: 'multi', property_type: 'Multi-Family' }),
+      row({ id: 'nocoords', latitude: null }),
+    ];
+    const { targets, screenedOut } = btA.targets.buildRinconTargets(rows, { today: '2026-10-16' });
+    assert.deepEqual(targets.map(t => t.key).sort(), ['edge', 'good']);
+    assert.equal(screenedOut.tooOld, 1);
+    assert.equal(screenedOut.rentOutOfRange, 2);
+    assert.equal(screenedOut.rentPerSqftOutOfRange, 2);
+    assert.equal(screenedOut.notSingleHome, 1);
+    assert.equal(screenedOut.missingFacts, 2);
+    assert.equal(targets[0].kind, 'rincon');
+  });
+
+  await check('Walk-forward split: hold-out is the newest 3 months of targets, boundary day goes to the hold-out', () => {
+    const ts = ['2026-04-20', '2026-07-15', '2026-07-16', '2026-10-16'].map(date => ({ date }));
+    assert.equal(btA.targets.holdoutStartFor(ts), '2026-07-16');
+    const { tune, holdout } = btA.targets.splitWalkForward(ts, '2026-07-16');
+    assert.deepEqual(tune.map(t => t.date), ['2026-04-20', '2026-07-15']);
+    assert.deepEqual(holdout.map(t => t.date), ['2026-07-16', '2026-10-16']);
+    assert.equal(btA.targets.holdoutStartFor([]), null);
+    assert.equal(btA.targets.monthsBefore('2026-10-16', 12), '2025-10-16');
+  });
+
+  await check('Metrics: median, mean and the Wilson interval on hand-worked values', () => {
+    const m = btA.metrics;
+    assert.equal(m.median([5, 1, 3]), 3);
+    assert.equal(m.median([4, 1, 3, 2]), 2.5);
+    assert.equal(m.median([]), null);
+    assert.equal(m.mean([1, 2, 3, 6]), 3);
+    const w = m.wilson(50, 100);
+    assert.ok(Math.abs(w.low - 0.4038) < 0.001 && Math.abs(w.high - 0.5962) < 0.001, `${w.low} ${w.high}`);
+    assert.equal(m.wilson(0, 0), null);
+    assert.ok(m.wilson(0, 10).low === 0 && m.wilson(10, 10).high === 1);
+  });
+
+  await check('Metrics: the $200 range, suggested price and stretch price follow spec 4.2 (mid 4,350 gives 4,200-4,400, 4,350, 4,600)', () => {
+    const m = btA.metrics;
+    assert.deepEqual(m.headlineRange({ est: 4350, low: 4000, high: 4700, n: 8 }), { centre: 4300, low: 4200, high: 4400, listPrice: 4350, stretchPrice: 4600 });
+    assert.equal(m.headlineRange({ est: 2700, low: 2500, high: 2900, n: 5 }).low, 2600, 'a mid exactly on a $100 mark centres on it');
+    assert.equal(m.headlineRange({ est: 2700, low: 2500, high: 2900, n: 5 }).high, 2800);
+    assert.equal(m.headlineRange({ est: 4350, low: 4300, high: 4500, n: 5 }).centre, 4400, 'a halfway mid goes to the candidate nearer the middle of the 25th-75th gap');
+    assert.equal(m.headlineRange({ est: 4350, low: 4000, high: 4700, n: 5 }).centre, 4300, 'exactly tied: the lower');
+    assert.equal(m.headlineRange({ est: 4349.99, low: 4000, high: 4700, n: 5 }).centre, 4300);
+    assert.equal(m.headlineRange({ est: 4350.01, low: 4000, high: 4700, n: 5 }).centre, 4400);
+    assert.equal(m.headlineRange({ est: 4000, low: 3900, high: 4100, n: 3 }), null, 'fewer than 4 counted comps: no range and no prices');
+    assert.equal(m.headlineRange({ est: null, low: null, high: null, n: 0 }), null);
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+    for (let i = 0; i < 1000; i++) {
+      const est = Math.round((500 + rnd() * 9000) * 100) / 100;
+      const h = m.headlineRange({ est, low: est - 200 * rnd(), high: est + 200 * rnd(), n: 4 + Math.floor(rnd() * 10) });
+      assert.equal(h.high - h.low, 200);
+      assert.equal(h.low % 100, 0);
+      assert.equal(h.high % 100, 0);
+      assert.equal(h.listPrice % 50, 0);
+      assert.ok(h.listPrice >= h.low && h.listPrice <= h.high, `${est} -> ${JSON.stringify(h)}`);
+      assert.equal(h.stretchPrice, h.high + 200);
+      assert.ok(Math.abs(h.centre - est) <= 50 + 1e-9, 'the centre is the nearest $100 to the estimate');
+    }
+  });
+
+  await check('Metrics: summarize() on a hand-worked fixture (typical miss, within-N, range hit, bias, coverage, thin)', () => {
+    const row = (rent, est, low, high, n) => ({ rent, est, low, high, n, spread: est === null ? null : high - low });
+    const rows = [row(3000, 3100, 2900, 3300, 6), row(4000, 3650, 3500, 3900, 5), row(2000, 2400, 2300, 2500, 3), row(5000, null, null, null, 0), row(3500, 3480, 3300, 3700, 8)];
+    const s = btA.metrics.summarize(rows);
+    assert.equal(s.targets, 5);
+    assert.equal(s.estimated, 4);
+    assert.equal(s.thin, 1);
+    assert.equal(s.rangedCount, 3);
+    assert.equal(s.coverage, 3 / 5);
+    assert.equal(s.all.n, 4);
+    assert.equal(s.all.typicalMiss, 225);
+    assert.equal(s.all.meanMiss, 217.5);
+    assert.equal(s.all.within100, 0.5);
+    assert.equal(s.all.within200, 0.5);
+    assert.equal(s.all.within300, 0.5);
+    assert.equal(s.all.medianBias, -40);
+    assert.equal(s.all.band200, 0.5);
+    assert.equal(s.all.band300, 0.5);
+    assert.equal(s.all.band500, 0.5);
+    assert.equal(s.ranged.n, 3);
+    assert.equal(s.ranged.typicalMiss, 100);
+    assert.equal(s.ranged.rangeHit200, 2 / 3);
+    assert.equal(s.ranged.within300OfSuggested, 2 / 3);
+    assert.equal(s.ranged.medianBiasVsSuggested, 0);
+    assert.deepEqual(btA.metrics.summarize([]).all, null);
+  });
+
+  await check('Metrics: confidence label and spread buckets switch exactly at the spec 4.3 boundaries', () => {
+    const m = btA.metrics;
+    const r = o => ({ est: 1, n: 8, leased: 3, spread: 100, nearRange: true, ...o });
+    assert.equal(m.spreadBucket(249.99), 'agree (spread under 250)');
+    assert.equal(m.spreadBucket(250), 'moderate (spread 250-499)');
+    assert.equal(m.spreadBucket(499.99), 'moderate (spread 250-499)');
+    assert.equal(m.spreadBucket(500), 'disagree (spread 500 or more)');
+    assert.equal(m.confidenceLabel(r({ spread: 249.99 })), 'High');
+    assert.equal(m.confidenceLabel(r({ spread: 250 })), 'Medium');
+    assert.equal(m.confidenceLabel(r({ spread: 499.99 })), 'Medium');
+    assert.equal(m.confidenceLabel(r({ spread: 500 })), 'Low');
+    assert.equal(m.confidenceLabel(r({ n: 4 })), 'Low');
+    assert.equal(m.confidenceLabel(r({ n: 5 })), 'Medium');
+    assert.equal(m.confidenceLabel(r({ n: 6 })), 'High');
+    assert.equal(m.confidenceLabel(r({ leased: 0 })), 'Low');
+    assert.equal(m.confidenceLabel(r({ leased: 1 })), 'Medium');
+    assert.equal(m.confidenceLabel(r({ leased: 2 })), 'High');
+    assert.equal(m.confidenceLabel(r({ nearRange: false })), 'Low');
+    assert.equal(m.confidenceLabel(r({ n: 3 })), null, 'no range, no label');
+    assert.equal(m.confidenceLabel(r({ est: null })), null);
+    assert.equal(m.confidenceSimple(r({ n: 4, leased: 0, spread: 100 })), 'Medium', 'the Appendix G starting definition ignores leases and the 5-comp floor');
+    assert.equal(m.rentBand(2499), 'under 2,500');
+    assert.equal(m.rentBand(2500), '2,500-3,499');
+    assert.equal(m.rentBand(5000), '5,000 and up');
+    assert.equal(m.compCountBand(3), 'under 4 comps');
+    assert.equal(m.compCountBand(5), '4-5 comps');
+    assert.equal(m.compCountBand(12), '12 or more comps');
+  });
+
+  console.log('--- backtest/: the as-of replay and the no-peeking rules ---');
+
+  await check('No-peeking guard: throws for a comp dated on or after T (lease date or on-market date), allows earlier ones, planted comps only when asked', () => {
+    const { assertNoFuture } = btA.asof;
+    const leased = o => ({ address: 'x', listing_status: 'leased', leased_date: '2026-08-31', listed_date: '2026-08-01', ...o });
+    assertNoFuture([leased({})], '2026-09-01');
+    assert.throws(() => assertNoFuture([leased({ leased_date: '2026-09-01' })], '2026-09-01'), /No-peeking violation/);
+    assert.throws(() => assertNoFuture([leased({ leased_date: '2026-09-15' })], '2026-09-01'), /No-peeking violation/);
+    assert.throws(() => assertNoFuture([leased({ listed_date: '2026-09-02' })], '2026-09-01'), /No-peeking violation/);
+    assert.throws(() => assertNoFuture([leased({ leased_date: null })], '2026-09-01'), /no lease date/);
+    assert.throws(() => assertNoFuture([{ address: 'x', listing_status: 'active', listed_date: null, leased_date: null }], '2026-09-01'), /no on-market date/);
+    assertNoFuture([{ address: 'x', listing_status: 'active', listed_date: '2026-08-20', leased_date: null }], '2026-09-01');
+    assert.throws(() => assertNoFuture([leased({ _planted: true, leased_date: '2026-09-01' })], '2026-09-01'), /planted/);
+    assertNoFuture([leased({ _planted: true, leased_date: '2026-09-01' })], '2026-09-01', { allowPlanted: true });
+  });
+
+  await check('Same-property rule: removes the target by key, by address spelling and by duplicate coordinates; keeps the next-door neighbour and other units', () => {
+    const { isTargetOrDuplicate } = btA.asof;
+    const target = { key: 'tgt', listingId: 'LT', address: '500 Target Street, Ventura, CA 93001', latitude: 34.2, longitude: -119.2, bedrooms: 3 };
+    const cand = o => ({ key: 'c', listingId: 'LC', address: '900 Other Ave, Ventura, CA 93001', latitude: 34.25, longitude: -119.25, bedrooms: 3, ...o });
+    assert.equal(isTargetOrDuplicate(cand({ key: 'tgt' }), target), true, 'same listing key');
+    assert.equal(isTargetOrDuplicate(cand({ listingId: 'LT' }), target), true, 'same MLS id');
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 Target St, Ventura, CA 93001' }), target), true, 'same address, different spelling (real addressesMatch)');
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 target st' }), target), true);
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 Targat Street Ventura', latitude: 34.20001, longitude: -119.2 }), target), true, 'same coordinates, same bedrooms, same house number, misspelled street');
+    assert.equal(isTargetOrDuplicate(cand({ address: '502 Target Street, Ventura, CA 93001', latitude: 34.2002, longitude: -119.2 }), target), false, 'the next-door house 22 m away is a different property');
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 Targat Street Ventura', latitude: 34.20001, longitude: -119.2, bedrooms: 4 }), target), false, 'different bedrooms');
+    const unitTarget = { ...target, address: '500 Target Street, Unit 4, Ventura, CA 93001' };
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 Target Street, Unit 9, Ventura, CA 93001', latitude: 34.2, longitude: -119.2 }), unitTarget), false, 'another unit of the same building at the same coordinates is a real comp');
+    assert.equal(isTargetOrDuplicate(cand({ address: '500 Target Street, Unit 4, Ventura, CA 93001' }), unitTarget), true);
+    assert.equal(isTargetOrDuplicate(cand({ address: '123 Elsewhere', latitude: 34.3, longitude: -119.3 }), target), false);
+  });
+
+  await check('Replay CRMLS closed pool: before T, inside 6 months, inside the box, same type and bedrooms, newest first, target and duplicates and not-yet-entered records removed', () => {
+    const recs = [
+      btRec({ ListingKey: 'a1', StreetNumberNumeric: 101, CloseDate: '2026-08-01', Latitude: 34.201 }),
+      btRec({ ListingKey: 'a2', StreetNumberNumeric: 102, CloseDate: '2026-09-01' }),                        // closes on T: unknown at T
+      btRec({ ListingKey: 'a3', StreetNumberNumeric: 103, CloseDate: '2026-09-10' }),                        // after T
+      btRec({ ListingKey: 'a4', StreetNumberNumeric: 104, CloseDate: '2026-02-15' }),                        // before the 6-month lookback
+      btRec({ ListingKey: 'a5', StreetNumberNumeric: 105, Latitude: 34.3 }),                                  // outside the 2-mile box
+      btRec({ ListingKey: 'a6', StreetNumberNumeric: 106, PropertySubType: 'Condominium' }),                  // other type
+      btRec({ ListingKey: 'a7', StreetNumberNumeric: 107, BedroomsTotal: 5 }),                                // 2 bedrooms off
+      btRec({ ListingKey: 'a8', StreetNumberNumeric: 108, BedroomsTotal: null, CloseDate: '2026-07-31' }),    // unknown bedrooms: kept
+      btRec({ ListingKey: 'a9', StreetNumberNumeric: 109, PropertySubType: null, CloseDate: '2026-07-30' }),  // unknown type: kept
+      btRec({ ListingKey: 'tgt', StreetNumberNumeric: 500, StreetName: 'Target', CloseDate: '2026-08-30' }), // the target itself
+      btRec({ ListingKey: 'a10', ListingId: 'L10', StreetNumberNumeric: 500, StreetName: 'Target', StreetSuffix: 'St', CloseDate: '2026-08-29' }), // same address, other spelling
+      btRec({ ListingKey: 'a11', StreetNumberNumeric: 111, CloseDate: '2026-08-20', OnMarketDate: '2026-09-05', ListingContractDate: '2026-09-05' }), // entered after the lease closed
+      btRec({ ListingKey: 'a12', StreetNumberNumeric: 502, StreetName: 'Target', CloseDate: '2026-08-28', Latitude: 34.2002 }), // next-door neighbour: a real comp
+    ];
+    const world = btA.asof.createWorld({ closed: recs });
+    const picked = btA.asof.selectClosed(world, btCtx(), btSubject);
+    assert.deepEqual(picked.map(r => r.ListingKey), ['a12', 'a1', 'a8', 'a9']);
+  });
+
+  await check('Replay CRMLS closed pool: keeps the live query\'s 200-record cap (the 200 newest)', () => {
+    const recs = [];
+    for (let i = 0; i < 250; i++) recs.push(btRec({ ListingKey: `c${String(i).padStart(3, '0')}`, StreetNumberNumeric: 1000 + i, CloseDate: `2026-${i < 125 ? '07' : '08'}-${String(1 + (i % 25)).padStart(2, '0')}` }));
+    const world = btA.asof.createWorld({ closed: recs });
+    const picked = btA.asof.selectClosed(world, btCtx(), btSubject);
+    assert.equal(picked.length, 200);
+    const oldestKept = picked[picked.length - 1].CloseDate;
+    const droppedNewer = recs.filter(r => !picked.includes(r) && r.CloseDate > oldestKept);
+    assert.equal(droppedNewer.length, 0, 'nothing newer than the oldest kept record was dropped');
+  });
+
+  await check('Replay asking pool: a listing on the market before T that leased later shows as Active at its list price, no close price, no close date, days on market measured to T; own listing, already-leased and not-yet-listed ones are out', () => {
+    const recs = [
+      btRec({ ListingKey: 'b1', StreetNumberNumeric: 201, OnMarketDate: '2026-08-20', ListingContractDate: '2026-08-20', CloseDate: '2026-09-15', ListPrice: 3500, ClosePrice: 3400, OriginalListPrice: 3600 }),
+      btRec({ ListingKey: 'b2', StreetNumberNumeric: 202, OnMarketDate: '2026-08-01', ListingContractDate: '2026-08-01', CloseDate: '2026-08-20' }),   // already leased: a closed comp, not asking
+      btRec({ ListingKey: 'b3', StreetNumberNumeric: 203, OnMarketDate: '2026-09-02', ListingContractDate: '2026-09-02', CloseDate: '2026-09-20' }),   // listed after T
+      btRec({ ListingKey: 'tgt', StreetNumberNumeric: 500, StreetName: 'Target', OnMarketDate: '2026-08-15', ListingContractDate: '2026-08-15', CloseDate: '2026-09-01' }), // the target's own listing
+      btRec({ ListingKey: 'b5', StreetNumberNumeric: 205, OnMarketDate: '2026-08-10', ListingContractDate: '2026-08-10', CloseDate: '2026-09-01' }),   // closes on T: still on the market at T
+    ];
+    const world = btA.asof.createWorld({ closed: recs });
+    const picked = btA.asof.selectAsking(world, btCtx('2026-09-01', { ...btA.cand.POOLS['mls+asking'] }), btSubject);
+    assert.deepEqual(picked.map(r => r.ListingKey), ['b1', 'b5']);
+    const b1 = picked[0];
+    assert.equal(b1.StandardStatus, 'Active');
+    assert.equal(b1.ClosePrice, null);
+    assert.equal(b1.CloseDate, null);
+    assert.equal(b1.ListPrice, 3600, 'the default prices an asking comp at the ORIGINAL list price, since the final price may include cuts made after T');
+    assert.equal(b1.DaysOnMarket, 12);
+    const comp = btA.asof.mapRecords([b1], btSubject)[0];
+    assert.equal(comp.listing_status, 'active');
+    assert.equal(comp.monthly_rent, 3600);
+    assert.equal(comp.leased_date, null);
+    assert.equal(comp.listed_date, '2026-08-20');
+    const final = btA.asof.selectAsking(world, btCtx('2026-09-01', { ...btA.cand.POOLS['mls+asking'], askingPrice: 'final' }), btSubject);
+    assert.equal(final[0].ListPrice, 3500, 'the final list price stays available as an option');
+    // no original price (or a useless one) falls back to the list price
+    const noOrig = btA.asof.createWorld({ closed: [btRec({ ListingKey: 'n1', StreetNumberNumeric: 301, OnMarketDate: '2026-08-20', ListingContractDate: '2026-08-20', CloseDate: '2026-09-15', ListPrice: 3500, OriginalListPrice: null }), btRec({ ListingKey: 'n2', StreetNumberNumeric: 302, OnMarketDate: '2026-08-20', ListingContractDate: '2026-08-20', CloseDate: '2026-09-15', ListPrice: 3450, OriginalListPrice: 0 })] });
+    assert.deepEqual(btA.asof.selectAsking(noOrig, btCtx('2026-09-01', { ...btA.cand.POOLS['mls+asking'] }), btSubject).map(r => r.ListPrice), [3500, 3450]);
+  });
+
+  await check('Replay mapping uses the real CRMLS mapper (same output as mapComparable) and adds only the transient MLS-facts field', () => {
+    const rec = btRec({ ListingKey: 'm1', StreetNumberNumeric: 321, Furnished: 'Furnished', LeaseTerm: 'Month To Month', SeniorCommunityYN: true, Latitude: 34.2014 });
+    const [comp] = btA.asof.mapRecords([rec], btSubject);
+    const dist = require('./lib/crmls').haversineMiles(34.2, -119.2, 34.2014, -119.2);
+    const { _mls, ...rest } = comp;
+    assert.deepStrictEqual(rest, mapCrmlsComparable(rec, dist));
+    assert.deepEqual(_mls, { furnished: 'furnished', leaseTerm: 'short', ageRestricted: true });
+  });
+
+  await check('Replay LeadSimple pool: same zip, started and move-in record closed before T, inside 24 months, within 2 miles, target address removed, mapped by the real mapper', async () => {
+    const row = o => ({ id: 'r', address: '200 Rincon St', city: 'Ventura', state: 'CA', zip_code: '93001', property_type: 'Single Home', bedrooms: 3, bathrooms: 2, sqft: 1500, rent: 3300, lease_start_date: '2026-06-01', closed_at: '2026-06-10T10:00:00+00:00', latitude: 34.201, longitude: -119.2, ...o });
+    const rows = [
+      row({ id: 'ok' }),
+      row({ id: 'late', address: '201 Rincon St', lease_start_date: '2026-09-01', closed_at: '2026-09-09T00:00:00+00:00' }),         // starts on T
+      row({ id: 'notyet', address: '202 Rincon St', lease_start_date: '2026-08-30', closed_at: '2026-09-05T00:00:00+00:00' }),        // move-in record closed after T
+      row({ id: 'ancient', address: '203 Rincon St', lease_start_date: '2024-05-01', closed_at: '2024-05-08T00:00:00+00:00' }),      // outside 24 months
+      row({ id: 'zip', address: '204 Rincon St', zip_code: '93003' }),
+      row({ id: 'far', address: '205 Rincon St', latitude: 34.3 }),
+      row({ id: 'self', address: '500 Target Street' }),                                                                             // the target's own address
+      row({ id: 'nocoords', address: '206 Rincon St', latitude: null, longitude: null }),
+    ];
+    const world = btA.asof.createWorld({ closed: [], leadsimple: rows });
+    btA.asof.setContext(btCtx('2026-09-01', { ...btA.cand.POOLS.full }));
+    try {
+      const res = await btA.asof.leadsimpleHandler(world)({ ...btSubject, address: '500 Target Street, Ventura, CA 93001' });
+      assert.deepEqual(res.comps.map(c => c.address).sort(), ['200 Rincon St, Ventura, CA 93001', '206 Rincon St, Ventura, CA 93001']);
+      const ok = res.comps.find(c => c.address.startsWith('200 '));
+      assert.deepStrictEqual(ok, require('./lib/leadsimple').mapComparable(rows[0], ok.distance_miles));
+      assert.equal(res.comps.find(c => c.address.startsWith('206 ')).distance_miles, null, 'a row with no coordinates is kept with no distance, as live');
+    } finally {
+      btA.asof.clearContext();
+    }
+  });
+
+  await check('withReplayHandlers() swaps the three live handlers for the replay ones and always puts the live ones back', async () => {
+    const live = { ...sourcesLib.SOURCE_HANDLERS };
+    const world = btA.asof.createWorld({ closed: [] });
+    await btA.asof.withReplayHandlers(world, async () => {
+      for (const n of btA.asof.REPLAY_SOURCE_NAMES) assert.notEqual(sourcesLib.SOURCE_HANDLERS[n], live[n]);
+    });
+    for (const n of btA.asof.REPLAY_SOURCE_NAMES) assert.equal(sourcesLib.SOURCE_HANDLERS[n], live[n]);
+    await assert.rejects(() => btA.asof.withReplayHandlers(world, async () => { throw new Error('boom'); }), /boom/);
+    for (const n of btA.asof.REPLAY_SOURCE_NAMES) assert.equal(sourcesLib.SOURCE_HANDLERS[n], live[n]);
+  });
+
+  console.log('--- backtest/: running a target through the real tool, leak and fidelity self-tests ---');
+  // A small synthetic county: 150 leases within about a mile of one point, rents
+  // that follow bedrooms plus noise, one special lease with an absurd rent.
+  let lcgSeed = 42;
+  const lcg = () => (lcgSeed = (lcgSeed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const synthClosed = [];
+  for (let i = 0; i < 150; i++) {
+    const beds = 2 + Math.floor(lcg() * 3);
+    const month = 1 + Math.floor(lcg() * 8), day = 1 + Math.floor(lcg() * 27);
+    const rent = Math.round((2000 + beds * 500 + (lcg() - 0.5) * 600) / 25) * 25;
+    synthClosed.push(btRec({
+      ListingKey: `s${i}`, ListingId: `S${i}`, StreetNumberNumeric: 1000 + i * 2, StreetName: 'Synth', BedroomsTotal: beds, ClosePrice: rent, ListPrice: rent, OriginalListPrice: rent,
+      CloseDate: `2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`, OnMarketDate: '2025-12-01', ListingContractDate: '2025-12-01',
+      Latitude: 34.2 + (lcg() - 0.5) * 0.02, Longitude: -119.2 + (lcg() - 0.5) * 0.02, LivingArea: 1200 + beds * 300,
+    }));
+  }
+  const oddLease = btRec({ ListingKey: 'odd', ListingId: 'ODD', StreetNumberNumeric: 777, StreetName: 'Odd', ClosePrice: 19999, ListPrice: 19999, OriginalListPrice: 19999, CloseDate: '2026-09-12', BedroomsTotal: 3, LivingArea: 1800 });
+  const synthWorld = btA.asof.createWorld({ closed: [...synthClosed, oddLease], leadsimple: [], properties: [] });
+  const synthTargets = btA.targets.buildMlsTargets([...synthClosed, oddLease], { targetFrom: '2026-06-01', today: '2026-10-16' });
+
+  await check('Engine: runs a lease through the real runActiveSources + computeNumbers, never uses the lease\'s own rent, and keeps the answer key out of the tool', async () => {
+    const odd = synthTargets.find(t => t.key === 'odd');
+    assert.ok(odd && synthTargets.length > 40);
+    const [row] = await btA.engine.runTargets(synthWorld, [odd], btA.cand.METHODS.baseline, btA.cand.POOLS.mls);
+    assert.equal(row.rent, 19999);
+    assert.ok(row.est !== null && row.n >= 4);
+    assert.ok(row.rawHigh < 10000, `the target's own $19,999 lease must not be a comp (raw high ${row.rawHigh})`);
+    assert.equal(row.planted, false);
+    assert.ok(row.rents.every(r => r !== 19999));
+    // with the lease planted on purpose, it is the comp that shows up
+    const [leaky] = await btA.engine.runTargets(synthWorld, [odd], btA.cand.METHODS.baseline, { ...btA.cand.POOLS.mls, plantLeak: 1 });
+    assert.equal(leaky.planted, true);
+    assert.equal(leaky.rawHigh, 19999);
+    const before = btA.engine.stats.targetRuns;
+    await btA.engine.runTargets(synthWorld, synthTargets.slice(0, 3), btA.cand.METHODS.baseline, btA.cand.POOLS.mls);
+    assert.equal(btA.engine.stats.targetRuns, before + 3);
+  });
+
+  await check('Engine: a source that fails stops the run (runActiveSources would otherwise swallow it), and so does a comp dated on or after T', async () => {
+    await assert.rejects(() => btA.engine.runTargets(synthWorld, synthTargets.slice(0, 1), { id: 'boom', keep: () => { throw new Error('handler broke'); } }, btA.cand.POOLS.mls), /Replay source failed.*handler broke/);
+    const sneaky = { id: 'sneaky', keep: comp => { comp.leased_date = '2999-01-01'; return true; } };
+    await assert.rejects(() => btA.engine.runTargets(synthWorld, synthTargets.slice(0, 1), sneaky, btA.cand.POOLS.mls), /No-peeking violation/);
+    assert.notEqual(sourcesLib.SOURCE_HANDLERS.CRMLS.name, 'replayCrmls', 'the live CRMLS handler is back after a failed run');
+    assert.equal(sourcesLib.SOURCE_HANDLERS.CRMLS, require('./lib/crmls').pullCrmlsComps);
+    assert.equal(sourcesLib.SOURCE_HANDLERS.RentCast, require('./lib/rentcast').pullRentCastComps);
+  });
+
+  await check('Engine: a method can remove comps before the tool sees them (a method that removes everything leaves no estimate), and the signed rent is never changed by the method', async () => {
+    const t = synthTargets.slice(0, 6);
+    const base = await btA.engine.runTargets(synthWorld, t, btA.cand.METHODS.baseline, btA.cand.POOLS.mls);
+    const none = await btA.engine.runTargets(synthWorld, t, { id: 'none', keep: () => false }, btA.cand.POOLS.mls);
+    assert.ok(base.every(r => r.est !== null));
+    assert.ok(none.every(r => r.est === null && r.n === 0));
+    assert.deepEqual(none.map(r => r.rent), base.map(r => r.rent));
+    const rincon = await btA.engine.runTargets(synthWorld, t, btA.cand.METHODS.baseline, btA.cand.POOLS.full);
+    assert.ok(rincon.every(r => r.mix.rincon === 0), 'the synthetic county has no Rincon leases');
+  });
+
+  await check('Leak self-test passes on the synthetic county: planting the answer collapses the typical miss, a clean run contains no planted comp', async () => {
+    const res = await btA.selftests.leakSelfTest({ world: synthWorld, targets: synthTargets, sampleSize: 40, heavyCopies: 8 });
+    assert.equal(res.clean.plantedRows, 0);
+    assert.ok(res.clean.typicalMiss > 0);
+    assert.ok(res.single.typicalMiss <= res.clean.typicalMiss * btA.K.LEAK.singleMaxShare, JSON.stringify([res.clean.typicalMiss, res.single.typicalMiss]));
+    assert.ok(res.heavy.typicalMiss <= res.clean.typicalMiss * btA.K.LEAK.heavyMaxShare, JSON.stringify([res.clean.typicalMiss, res.heavy.typicalMiss]));
+    assert.equal(res.pass, true);
+  });
+
+  await check('Fidelity check: identical comp sets pass, a missing or extra comp fails, and the replay matches the real mapper\'s output for "as of now"', async () => {
+    const world = btA.asof.createWorld({ closed: [btRec({ ListingKey: 'f1', StreetNumberNumeric: 301, CloseDate: '2026-10-01' }), btRec({ ListingKey: 'f2', StreetNumberNumeric: 302, CloseDate: '2026-09-20', BedroomsTotal: 9 })] });
+    const active = [btRec({ ListingKey: 'f3', StreetNumberNumeric: 303, StandardStatus: 'Active', CloseDate: null, ClosePrice: null, ListPrice: 3800, OnMarketDate: '2026-10-05' })];
+    const subject = { address: '500 Target Street, Ventura, CA 93001', propertyType: 'single_family', bedrooms: 3, latitude: 34.2, longitude: -119.2 };
+    const now = new Date('2026-10-16T12:00:00Z');
+    const replay = btA.selftests.replayAsNow(world, active, subject, now);
+    assert.deepEqual(replay.map(c => [c.monthly_rent, c.listing_status]).sort(), [[3000, 'leased'], [3800, 'active']]);
+    const live = replay.map(({ _mls, ...c }) => c);
+    const pass = await btA.selftests.fidelityCheck({ world, active, subjects: [subject], livePull: async () => ({ comps: live }), now });
+    assert.equal(pass.pass, true);
+    const missing = await btA.selftests.fidelityCheck({ world, active, subjects: [subject], livePull: async () => ({ comps: live.slice(1) }), now });
+    assert.equal(missing.pass, false);
+    assert.equal(missing.results[0].onlyReplay, 1);
+    const extra = await btA.selftests.fidelityCheck({ world, active, subjects: [subject], livePull: async () => ({ comps: [...live, { ...live[0], monthly_rent: 1 }] }), now });
+    assert.equal(extra.pass, false);
+    assert.equal(extra.results[0].onlyLive, 1);
+  });
+
+  console.log('--- backtest/: tuning rules, outcomes, output files ---');
+
+  await check('Acceptance rule (Decision 4): all five conditions must hold; each one can fail the change on its own', () => {
+    const summary = (w300, miss, cov, est) => ({ all: { within300: w300, typicalMiss: miss }, coverage: cov, estimated: est });
+    const base = summary(0.50, 300, 0.80, 400);
+    const good = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400) });
+    assert.equal(good.pass, true);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.53, 250, 0.78, 400) }).checks.find(c => c.id === 'a').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 290, 0.78, 400) }).checks.find(c => c.id === 'b').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.74, 400) }).checks.find(c => c.id === 'c').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 299) }).checks.find(c => c.id === 'e').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 150), rinconOnly: true }).checks.find(c => c.id === 'e').pass, true);
+    const g = (w, est) => ({ all: { within300: w }, estimated: est });
+    const worse = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400), baselineGroups: { propertyType: { condo: g(0.60, 120) } }, candidateGroups: { propertyType: { condo: g(0.55, 120) } } });
+    assert.equal(worse.checks.find(c => c.id === 'd').pass, false);
+    assert.equal(worse.pass, false);
+    const smallGroup = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400), baselineGroups: { propertyType: { condo: g(0.60, 40) } }, candidateGroups: { propertyType: { condo: g(0.40, 40) } } });
+    assert.equal(smallGroup.checks.find(c => c.id === 'd').pass, true, 'groups under 100 leases are not "large"');
+  });
+
+  await check('Candidate list is pre-registered: ten numbered candidates, each runnable now or naming the phase it waits for', () => {
+    assert.equal(btA.cand.CANDIDATES.length, 10);
+    btA.cand.CANDIDATES.forEach((c, i) => { assert.equal(c.id, i + 1); assert.match(c.status, /^(runnable|runnable-post-hoc|needs-phase-[A-F]|needs-A2)$/); });
+    assert.equal(btA.K.ACCEPTANCE.minGainWithin300Points, 4);
+    assert.equal(btA.K.ACCEPTANCE.minMissImprovementDollars, 25);
+    assert.equal(btA.K.ACCEPTANCE.maxCoverageLossPoints, 5);
+    assert.equal(btA.K.ACCEPTANCE.maxLargeGroupWorsePoints, 3);
+    assert.equal(btA.K.ACCEPTANCE.minHoldoutLeases, 300);
+    assert.equal(btA.K.ACCEPTANCE.minHoldoutLeasesRinconOnly, 150);
+  });
+
+  await check('Outcome matcher: only a lease that started AFTER the report, within 120 days, at the same address, counts as forward; the latest earlier report is used; stored headline columns win when present', () => {
+    const lease = o => ({ id: 'l1', address: '2303 Otter Creek Ln', city: 'Ventura', state: 'CA', zip_code: '93003', rent: 3865, lease_start_date: '2026-09-20', ...o });
+    const an = o => ({ id: 'a1', status: 'complete', subject_address: '2303 Otter Creek Ln, Ventura, CA 93003', created_at: '2026-08-20T10:00:00Z', recommended_rent_low: 3700, recommended_rent_mid: 3800, recommended_rent_high: 3900, ...o });
+    const r = btA.outcomes.matchOutcomes([
+      an({}),
+      an({ id: 'a2', created_at: '2026-09-01T10:00:00Z' }),                                                  // the later report wins
+      an({ id: 'a3', created_at: '2026-09-25T10:00:00Z' }),                                                  // run after the lease started: retrospective
+      an({ id: 'a4', subject_address: '999 Nowhere Rd, Ventura, CA 93003' }),
+      an({ id: 'a5', status: 'failed' }),
+      an({ id: 'a6', created_at: '2026-04-01T00:00:00Z' }),                                                  // more than 120 days before the start
+    ], [lease({}), lease({ id: 'l2', address: '55 Far Ave', rent: 1 })]);
+    assert.equal(r.counts.analyses, 6);
+    assert.equal(r.counts.complete, 5);
+    assert.equal(r.counts.forwardMatches, 1);
+    assert.equal(r.counts.retrospectiveMatches, 1);
+    assert.equal(r.forward[0].analysisId, 'a2');
+    assert.equal(r.forward[0].insideRange, true);
+    assert.match(r.forward[0].basis, /computed range/);
+    const headline = btA.outcomes.matchOutcomes([an({ headline_range_low: 3800, headline_range_high: 4000, suggested_list_price: 3900 })], [lease({})]);
+    assert.equal(headline.forward[0].rangeLow, 3800);
+    assert.match(headline.forward[0].basis, /recommended range/);
+    assert.equal(btA.outcomes.matchOutcomes([], []).counts.forwardMatches, 0);
+  });
+
+  const fakeRow = (i, city, extra = {}) => ({
+    key: `0123456789abcdef0123456789abcd${String(i).padStart(2, '0')}`, kind: 'mls', date: '2026-08-01', address: `${1000 + i} Fake Street, ${city}, CA 93001`, city, type: 'single_family', area: 'core',
+    beds: 3, sqft: 1500, rent: 3000 + (i % 7) * 50, est: 3000 + (i % 5) * 40, low: 2950, high: 3150, spread: 200, n: 6, leased: 3, nearRange: true,
+    mix: { mlsLeased: 6, asking: 0, rincon: 0 }, rents: [3000, 3100], planted: false, ...extra,
+  });
+  const fakeResults = () => {
+    const alpha = Array.from({ length: 130 }, (_, i) => fakeRow(i, 'Alpha City'));
+    const beta = Array.from({ length: 5 }, (_, i) => fakeRow(100 + i, 'Beta City'));
+    const rows = [...alpha, ...beta];
+    return {
+      generatedAt: '2026-10-16T00:00:00Z', runDate: '2026-10-16', dataThrough: '2026-10-16', cachePulledAt: 'P1', partial: false,
+      config: { holdoutStart: '2026-07-16', targetFrom: '2026-04-15' }, counts: { tune: 10, holdout: 20 },
+      dataPulledOn: '2026-10-16', dataCoverage: { dataFrom: '2025-03-15', requiredFrom: '2025-04-16', ok: true }, medianGapDays: 33, partialReasons: [],
+      network: { measured: true, rentcastRequests: 0, anthropicRequests: 0, otherHostRequests: 0, requestsDuringReplay: 0, recoreRequests: 37, supabaseRequests: 3 },
+      trackedHashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' },
+      selfTests: { leak: { pass: true, sample: 30, clean: { typicalMiss: 300 }, single: { typicalMiss: 150 }, heavy: { typicalMiss: 0 } }, fidelity: { pass: true, subjects: 5, pulledAt: 'P1', hashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' } } },
+      mls: { mls: { baseline: rows, size25_item2: rows } },
+      rincon: { headline: { baseline: btA.metrics.summarize(rows.slice(0, 8)), size25_item2: btA.metrics.summarize(rows.slice(0, 8)) } },
+      outcomes: { counts: { analyses: 71, complete: 69, analysesWithAnyAddressMatch: 10, retrospectiveMatches: 10, forwardMatches: 0 } },
+    };
+  };
+
+  await check('Scorecard: aggregates only. No address or listing key survives, groups under 20 leases are dropped, and it is trusted only when both self-tests passed on this data pull', () => {
+    const sc = btA.report.buildScorecard(fakeResults());
+    const text = JSON.stringify(sc);
+    assert.doesNotMatch(text, /Fake Street/);
+    assert.doesNotMatch(text, /0123456789abcdef/);
+    assert.ok(sc.groups.baseline.county.city['Alpha City'], 'a 25-lease city is published');
+    assert.equal(sc.groups.baseline.county.city['Beta City'], undefined, 'a 5-lease city is not');
+    assert.equal(sc.minGroupN, 20);
+    assert.equal(sc.trusted, true);
+    assert.equal(sc.overall.baseline.county.estimated, 135);
+    const noLeak = fakeResults(); noLeak.selfTests.leak.pass = false;
+    assert.equal(btA.report.buildScorecard(noLeak).trusted, false);
+    const oldFid = fakeResults(); oldFid.selfTests.fidelity.pulledAt = 'OLDER';
+    assert.equal(btA.report.buildScorecard(oldFid).trusted, false);
+    const changedCode = fakeResults(); changedCode.trackedHashes = { files: { 'lib/crmls.js': 'bbbb' }, combined: 'H2' };
+    const scChanged = btA.report.buildScorecard(changedCode);
+    assert.equal(scChanged.trusted, false, 'a fidelity pass recorded against different code does not count');
+    assert.match(scChanged.trustReasons.join(' '), /code changed since the fidelity check ran \(lib\/crmls\.js\)/);
+    const noHashes = fakeResults(); delete noHashes.selfTests.fidelity.hashes;
+    assert.equal(btA.report.buildScorecard(noHashes).trusted, false, 'an old result that recorded no code hashes is not good enough');
+    const partial = fakeResults(); partial.partial = true;
+    assert.equal(btA.report.buildScorecard(partial).trusted, false);
+  });
+
+  await check('Aggregates-only guard refuses addresses, zip codes, listing keys, UUIDs, emails and record-shaped fields, and allows plain results', () => {
+    const g = btA.report.assertAggregatesOnly;
+    g({ a: 1, b: 'Thousand Oaks', c: ['3,500-4,999', '2026-10-16'], d: { e: null } });
+    assert.throws(() => g({ note: '1234 Fake Street' }), /street address/);
+    assert.throws(() => g({ note: 'Ventura, CA 93001' }), /zip code/);
+    assert.throws(() => g({ note: '0123456789abcdef0123456789abcdef' }), /listing key/);
+    assert.throws(() => g({ note: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' }), /UUID/);
+    assert.throws(() => g({ note: 'peter@example.com' }), /email/);
+    assert.throws(() => g({ address: 'x' }), /"address" field/);
+    assert.throws(() => g({ rows: [] }), /"rows" field/);
+    assert.throws(() => g({ '742 Evergreen Terrace': 3 }), /street address/);
+  });
+
+  // A scorecard fragment with exact counts, for the wording tests.
+  const wordingCard = (label, n, k, ci, kk, ci2, extra = {}) => ({
+    testedOn: '2026-10-16', dataPulledOn: '2026-10-15', pool: { rentcast: 'not included (RentCast as-of snapshot, A2, is not built)' },
+    overall: { baseline: { county: { coveragePct: 91.3, ranged: { n, typicalMiss: 451, within300OfSuggestedCount: kk, within300OfSuggestedCiPct: ci2 } } } },
+    groups: { size25_item2: { county: { confidence: { [label]: { ranged: { n, rangeHit200Count: k, rangeHit200CiPct: ci, within300OfSuggestedCount: kk, within300OfSuggestedCiPct: ci2 } } } } } },
+    ...extra,
+  });
+
+  await check('Staff wording rounds ONCE from the raw count, half goes down: 73% is 7 in 10 (not 8), 75% is 7, 35% is 3, 86% is 9, 5% is 0, 10% is "1 time"; it never claims more than the data', () => {
+    const { inTen } = btA.report;
+    assert.equal(inTen(73, 100), 7);
+    assert.equal(inTen(75, 100), 7);
+    assert.equal(inTen(35, 100), 3);
+    assert.equal(inTen(38, 100), 4);
+    assert.equal(inTen(85, 100), 8);
+    assert.equal(inTen(86, 100), 9);
+    assert.equal(inTen(5, 100), 0);
+    assert.equal(inTen(0, 100), 0);
+    assert.equal(inTen(100, 100), 10);
+    for (let k = 0; k <= 100; k++) assert.ok(inTen(k, 100) * 10 <= k + 5, `${k}% must never be spoken as more than ${k + 5}%`);
+    for (let k = 0; k <= 317; k++) assert.ok(inTen(k, 317) * 10 <= (k / 317) * 100 + 5 + 1e-9);
+    const sc = wordingCard('Medium', 317, 95, [25.0, 35.0], 200, [57.0, 68.0]);
+    assert.match(btA.report.trackRecordSentence(sc, 'Medium'), /range about 3 times in 10 \(roughly 2 to 4 times in 10\) and landed within \$300 of the suggested price about 6 times in 10 \(roughly 5 to 7 times in 10\)\./);
+    assert.match(btA.report.trackRecordSentence(wordingCard('Low', 455, 46, [7.7, 13.3], 187, [37, 45]), 'Low'), /about 1 time in 10 \(roughly 0 to 2 times in 10\)/);
+  });
+
+  await check('Staff wording needs at least 100 leases behind a label, names the Ventura-area, shows coverage and the DATA date, says RentCast listings (about 45% of what staff see) were not tested, and makes no promise', () => {
+    const at = n => wordingCard('High', n, Math.round(n * 0.4), [30, 50], Math.round(n * 0.7), [60, 80]);
+    assert.equal(btA.report.trackRecordSentence(at(99), 'High'), 'High confidence: too few tests to say yet.');
+    assert.match(btA.report.trackRecordSentence(at(100), 'High'), /^High confidence\. In blind tests on 100 past Ventura-area leases, reports like this held the signed rent inside the recommended range about 4 times in 10 \(roughly 3 to 5 times in 10\)/);
+    assert.equal(btA.report.trackRecordSentence(at(500), 'Low'), 'Low confidence: too few tests to say yet.', 'a label with no data says so');
+    const line = btA.report.accuracyLine(wordingCard('High', 400, 160, [30, 50], 280, [65, 75]));
+    assert.equal(line, 'Blind-tested on 400 past Ventura-area leases: typical miss about $500; the suggested price landed within $300 of the signed rent about 7 times in 10 (roughly 6 to 8 times in 10); a recommended range could be shown for 91% of the homes tried (data pulled 2026-10-15). RentCast listings, about 45% of the comps staff see, were not part of this test.');
+    assert.doesNotMatch(line, /Ventura County/);
+    assert.doesNotMatch(line, /tested 2026/, 'the date is the day the data was pulled, not the day the test ran');
+    const exact = wordingCard('High', 400, 160, [30, 50], 280, [65, 75]); exact.overall.baseline.county.ranged.typicalMiss = 450;
+    assert.match(btA.report.accuracyLine(exact), /typical miss about \$450;/, 'the typical miss is rounded up to $50, never down');
+    const lowCov = wordingCard('High', 400, 160, [30, 50], 280, [65, 75]); lowCov.overall.baseline.county.coveragePct = 75.99;
+    assert.match(btA.report.accuracyLine(lowCov), /could be shown for 75% of the homes tried/, 'coverage is rounded down');
+    const noCov = wordingCard('High', 400, 160, [30, 50], 280, [65, 75]); delete noCov.overall.baseline.county.coveragePct;
+    assert.doesNotMatch(btA.report.accuracyLine(noCov), /could be shown/);
+    const small = wordingCard('High', 60, 20, [30, 50], 40, [60, 80]);
+    assert.match(btA.report.accuracyLine(small), /^Blind-tested on only 60 past Ventura-area leases: too few tests to say yet \(data pulled 2026-10-15\)/);
+    const one = wordingCard('High', 1, 1, [0, 100], 1, [0, 100]);
+    assert.match(btA.report.accuracyLine(one), /^Blind-tested on only 1 past Ventura-area lease: too few/, 'one lease, singular');
+    const withRentcast = wordingCard('High', 400, 160, [30, 50], 280, [65, 75], { pool: { rentcast: 'included' } });
+    assert.doesNotMatch(btA.report.accuracyLine(withRentcast), /RentCast/, 'the note disappears once RentCast is really in the test');
+    const all = line + btA.report.trackRecordSentence(at(300), 'High');
+    assert.doesNotMatch(all, /accurate to|guarantee|promise|will |always|window|\bdays\b|weeks|months|chance|probab/i);
+  });
+
+  await check('Staff wording: every sentence names its area (county or core) with the same default, and singular/plural are right', () => {
+    const core = wordingCard('High', 400, 160, [30, 50], 280, [65, 75]);
+    core.overall.baseline.core = core.overall.baseline.county;
+    core.groups.size25_item2.core = core.groups.size25_item2.county;
+    assert.match(btA.report.accuracyLine(core, { area: 'core' }), /^Blind-tested on 400 past Ventura core leases:/);
+    assert.match(btA.report.trackRecordSentence(core, 'High', { area: 'core' }), /on 400 past Ventura core leases,/);
+    assert.match(btA.report.trackRecordSentence(core, 'High'), /on 400 past Ventura-area leases,/, 'the default area is the same as the accuracy line\'s');
+    assert.match(btA.report.trackRecordSentence(core, 'High', { areaLabel: 'Camarillo' }), /on 400 past Camarillo leases,/);
+    const single = wordingCard('Medium', 1, 1, [0, 100], 1, [0, 100]);
+    assert.equal(btA.report.trackRecordSentence(single, 'Medium'), 'Medium confidence: too few tests to say yet.');
+    const bigOne = wordingCard('Medium', 100, 30, [20, 40], 60, [50, 70]);
+    assert.doesNotMatch(btA.report.trackRecordSentence(bigOne, 'Medium'), /Ventura County/);
+  });
+
+  await check('Detail and worst-miss files keep addresses (local only); the report text never contains one', () => {
+    const results = fakeResults();
+    const csv = btA.report.detailCsv([{ pool: 'mls', method: 'baseline', rows: results.mls.mls.baseline.slice(0, 2) }]);
+    assert.match(csv, /1000 Fake Street/);
+    assert.match(csv, /^pool,method,kind,key,date,address/);
+    const worst = btA.report.worstMissesCsv(results.mls.mls.baseline, 3).trim().split('\n');
+    assert.equal(worst.length, 4);
+    const withNoise = { ...results, rincon: { combos: [], headline: results.rincon.headline }, candidates: { sizeBands: [], rinconLookback: [] }, rincon2: null, recoreRequests: 0, elapsedSeconds: 1, guardChecks: 5 };
+    withNoise.rincon.combos = [{ label: 'x', isHeadline: true, rows: results.mls.mls.baseline.slice(0, 5) }];
+    withNoise.counts = { ...results.counts, closedRecords: 10, countyTargets: 30, coreTargets: 30, rinconTargets: 5, rinconScreenedOut: { tooOld: 1 } };
+    const md = btA.report.renderReport(withNoise, null);
+    assert.doesNotMatch(md, /Fake Street/);
+    assert.doesNotMatch(md, /0123456789abcdef/);
+    assert.doesNotMatch(md, /\bwindow\b/i);
+    assert.match(md, /Leak self-test: PASS/);
+  });
+
+  await check('db.js makes only GET requests, pages until a short page, and never puts the key in an error message', async () => {
+    const saved = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY };
+    process.env.SUPABASE_URL = 'https://example.supabase.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-key-SECRET-0123456789';
+    try {
+      const calls = [];
+      const fakeFetch = async (url, opts) => {
+        calls.push({ url, method: opts.method });
+        const page = calls.length === 1 ? Array.from({ length: btA.db.PAGE }, (_, i) => ({ i })) : [{ i: 'last' }];
+        return { ok: true, json: async () => page };
+      };
+      const rows = await btA.db.getAll('leadsimple_new_leases', 'select=*', fakeFetch);
+      assert.equal(rows.length, btA.db.PAGE + 1);
+      assert.deepEqual(calls.map(c => c.method), ['GET', 'GET']);
+      assert.match(calls[1].url, /offset=1000/);
+      const failing = async () => ({ ok: false, status: 401, text: async () => 'bad key service-role-key-SECRET-0123456789' });
+      await assert.rejects(() => btA.db.getAll('x', 'select=*', async () => { throw new Error('connect failed apikey: service-role-key-SECRET-0123456789'); }), err => !/SECRET/.test(err.message));
+      await assert.rejects(() => btA.db.getAll('x', 'select=*', failing), err => /401/.test(err.message) && !/SECRET/.test(err.message));
+    } finally {
+      process.env.SUPABASE_URL = saved.url; process.env.SUPABASE_SERVICE_ROLE_KEY = saved.key;
+    }
+  });
+
+  await check('recore.js pages with a stable order, stops on a short page, fails on a count mismatch, never asks for listing text, and redacts the token from errors', async () => {
+    const calls = [];
+    const mk = (n, countHeader) => ({ ok: true, status: 200, json: async () => ({ value: Array.from({ length: n }, (_, i) => ({ ListingKey: `k${i}`, ListPrice: 1, PublicRemarks: 'secret remarks', FeedTypes: [] })), '@odata.count': countHeader }) });
+    const client = btA.recore.makeClient({ token: 'tok123', delayMs: 0, fetchImpl: async url => { calls.push(String(url)); return calls.length === 1 ? mk(200, 203) : mk(3, undefined); } });
+    const got = await btA.recore.pagedPull(client, { filter: 'x', orderby: 'CloseDate asc,ListingKey asc', label: 't' });
+    assert.equal(got.length, 203);
+    assert.equal(client.requests, 2);
+    assert.ok(calls[0].includes('%24count=true') && calls[0].includes('%24skip=0') && calls[1].includes('%24skip=200'));
+    assert.ok(got.every(r => r.PublicRemarks === undefined && r.FeedTypes === undefined), 'only selected fields are cached');
+    assert.ok(!btA.recore.SELECT_FIELDS.includes('PublicRemarks'));
+    const short = btA.recore.makeClient({ token: 'tok123', delayMs: 0, fetchImpl: async () => mk(5, 9) });
+    await assert.rejects(() => btA.recore.pagedPull(short, { filter: 'x', orderby: 'y', label: 't' }), /reported 9/);
+    const leaky = btA.recore.makeClient({ token: 'tok123', delayMs: 0, retryMs: 0, fetchImpl: async () => { throw new Error('GET https://api.test/?access_token=tok123&x=1 failed'); } });
+    leaky.get = leaky.get.bind(leaky);
+    await assert.rejects(() => leaky.get({ a: 'b' }), err => !/tok123/.test(err.message) && /REDACTED/.test(err.message));
+  });
+
+  await check('Cache and output folders are git-ignored by backtest/.gitignore, and every cached field the mappers read is in the Recore select', () => {
+    const ignore = fsA.readFileSync(pathA.join(__dirname, 'backtest', '.gitignore'), 'utf8').split('\n').map(l => l.trim());
+    assert.ok(ignore.includes('cache/') && ignore.includes('out/'));
+    const mapperFields = ['StandardStatus', 'ClosePrice', 'ListPrice', 'PropertySubType', 'BedroomsTotal', 'BathroomsTotalDecimal', 'LivingArea', 'Latitude', 'Longitude', 'OriginalListPrice', 'DaysOnMarket', 'OnMarketDate', 'ListingContractDate', 'CloseDate',
+      'StreetNumberNumeric', 'StreetDirPrefix', 'StreetName', 'StreetSuffix', 'StreetDirSuffix', 'UnitNumber', 'City', 'StateOrProvince', 'PostalCode'];
+    for (const f of mapperFields) assert.ok(btA.recore.SELECT_FIELDS.includes(f), `${f} must be selected or the replay would map differently from the live tool`);
+  });
+
+  console.log('--- backtest/: publishing, provenance, judged-once, pins to the product, listing time ---');
+  const osA = require('node:os');
+  const mkTmp = () => fsA.mkdtempSync(pathA.join(osA.tmpdir(), 'q-backtest-test-'));
+  const rmTmp = d => fsA.rmSync(d, { recursive: true, force: true });
+  const { publishScorecard } = require('./backtest/publish');
+
+  await check('--publish: a trusted, complete scorecard is published to every target file (a temp folder here, never the real lib folders)', () => {
+    const d = mkTmp();
+    try {
+      const targets = [pathA.join(d, 'a', 'accuracy-scorecard.json'), pathA.join(d, 'b', 'accuracy-scorecard.json')];
+      const sc = { trusted: true, trustReasons: [], testedOn: '2026-10-16', marker: 'THIS-RUN' };
+      const r = publishScorecard({ scorecard: sc, partial: false, targets });
+      assert.equal(r.ok, true);
+      for (const t of targets) assert.deepEqual(JSON.parse(fsA.readFileSync(t, 'utf8')), sc);
+    } finally { rmTmp(d); }
+  });
+
+  await check('--publish: an untrusted scorecard is refused with the reasons, and nothing is written', () => {
+    const d = mkTmp();
+    try {
+      const target = pathA.join(d, 'accuracy-scorecard.json');
+      fsA.writeFileSync(target, '{"stale":true}');
+      const r = publishScorecard({ scorecard: { trusted: false, trustReasons: ['leak self-test did not pass in this run'] }, partial: false, targets: [target] });
+      assert.equal(r.ok, false);
+      assert.match(r.message, /not trusted \(leak self-test did not pass in this run\)/);
+      assert.equal(fsA.readFileSync(target, 'utf8'), '{"stale":true}', 'the earlier file is untouched');
+      assert.equal(publishScorecard({ scorecard: null, partial: false, targets: [target] }).ok, false);
+    } finally { rmTmp(d); }
+  });
+
+  await check('--publish: a partial run is refused even when its scorecard says trusted, and nothing is written', () => {
+    const d = mkTmp();
+    try {
+      const target = pathA.join(d, 'x', 'accuracy-scorecard.json');
+      const r = publishScorecard({ scorecard: { trusted: true, trustReasons: [] }, partial: true, targets: [target] });
+      assert.equal(r.ok, false);
+      assert.match(r.message, /partial run/);
+      assert.equal(fsA.existsSync(target), false);
+    } finally { rmTmp(d); }
+  });
+
+  await check('--publish in run.js publishes THIS run\'s scorecard (not the committed file) and turns a refusal into a non-zero exit', () => {
+    const src = fsA.readFileSync(pathA.join(__dirname, 'backtest', 'run.js'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    assert.match(src, /publishScorecard\(\{ scorecard, partial, targets: LIB_TARGETS \}\)/);
+    assert.doesNotMatch(src, /readJson\(SCORECARD_PATH\)[\s\S]{0,80}LIB_TARGETS/, 'must not publish the previously committed file');
+    assert.match(src, /process\.exitCode = 1/);
+  });
+
+  const prov = require('./backtest/provenance');
+
+  await check('Provenance: the real tracked files all hash (including rentcast.js and asof-sources.js), and a change to any one changes the combined hash', () => {
+    const h = prov.trackedFilesHash();
+    for (const f of ['lib/crmls.js', 'lib/leadsimple.js', 'lib/sources.js', 'lib/rentcast.js', 'lib/weighting.js', 'lib/property-matching.js', 'lib/analyze.js', 'backtest/asof-sources.js']) {
+      assert.ok(prov.TRACKED_FILES.includes(f), `${f} is tracked`);
+      assert.match(h.files[f], /^[0-9a-f]{16}$/, `${f} has a real hash`);
+    }
+    const d = mkTmp();
+    try {
+      for (const f of prov.TRACKED_FILES) { fsA.mkdirSync(pathA.dirname(pathA.join(d, f)), { recursive: true }); fsA.writeFileSync(pathA.join(d, f), `// ${f}\n`); }
+      const before = prov.trackedFilesHash(d);
+      assert.deepEqual(prov.trackedFilesHash(d), before, 'hashing is stable');
+      fsA.writeFileSync(pathA.join(d, 'lib/crmls.js'), '// lib/crmls.js\nconst CRMLS_CLOSED_LOOKBACK_MONTHS = 9;\n');
+      const after = prov.trackedFilesHash(d);
+      assert.notEqual(after.combined, before.combined);
+      assert.notEqual(after.files['lib/crmls.js'], before.files['lib/crmls.js']);
+      assert.equal(after.files['lib/leadsimple.js'], before.files['lib/leadsimple.js']);
+      fsA.rmSync(pathA.join(d, 'lib/rentcast.js'));
+      assert.equal(prov.trackedFilesHash(d).files['lib/rentcast.js'], 'missing');
+    } finally { rmTmp(d); }
+  });
+
+  await check('Provenance: a stored fidelity result is invalid when the code, the data pull or the record of the code differs, and the reason names the changed file', () => {
+    const files = { 'lib/crmls.js': 'aaaa', 'lib/sources.js': 'cccc' };
+    const now = { files, combined: 'H1' };
+    const fid = { pass: true, pulledAt: 'P1', hashes: { files, combined: 'H1' } };
+    assert.deepEqual(prov.fidelityValidity(fid, now, 'P1'), { valid: true, reason: null });
+    assert.equal(prov.fidelityValidity(null, now, 'P1').valid, false);
+    assert.equal(prov.fidelityValidity({ ...fid, pass: false }, now, 'P1').valid, false);
+    assert.match(prov.fidelityValidity(fid, now, 'P2').reason, /older data pull/);
+    assert.match(prov.fidelityValidity({ pass: true, pulledAt: 'P1' }, now, 'P1').reason, /does not record which code/);
+    const changed = prov.fidelityValidity(fid, { files: { ...files, 'lib/crmls.js': 'bbbb' }, combined: 'H2' }, 'P1');
+    assert.equal(changed.valid, false);
+    assert.match(changed.reason, /code changed since the fidelity check ran \(lib\/crmls\.js\)/);
+  });
+
+  await check('Replay constants come from the product\'s own modules, and the replay\'s closed-lease cutoff follows the pool setting', () => {
+    assert.equal(btA.cand.POOLS.mls.mlsMonths, require('./lib/crmls').CRMLS_CLOSED_LOOKBACK_MONTHS);
+    assert.equal(btA.cand.POOLS.mls.rinconMonths, require('./lib/leadsimple').MOVE_IN_LOOKBACK_MONTHS);
+    assert.equal(btA.cand.LIVE_MLS_MONTHS, require('./lib/crmls').CRMLS_CLOSED_LOOKBACK_MONTHS);
+    assert.equal(btA.cand.POOLS.full.mlsMonths, btA.cand.POOLS.mls.mlsMonths);
+    // the live setting uses the product's own closedSinceDate(); any other setting is honoured too
+    const live = btA.cand.POOLS.mls.mlsMonths;
+    assert.equal(btA.asof.closedSinceFor('2026-09-01', live), require('./lib/crmls').closedSinceDate(new Date('2026-09-01T12:00:00Z')));
+    const old = btRec({ ListingKey: 'old8', StreetNumberNumeric: 801, CloseDate: '2026-01-05' });   // about 8 months before T
+    const world = btA.asof.createWorld({ closed: [old] });
+    assert.equal(btA.asof.selectClosed(world, btCtx('2026-09-01', { ...btA.cand.POOLS.mls, mlsMonths: 6 }), btSubject).length, 0);
+    assert.equal(btA.asof.selectClosed(world, btCtx('2026-09-01', { ...btA.cand.POOLS.mls, mlsMonths: 9 }), btSubject).length, 1, 'a product change from 6 to 9 months would change what the replay sees');
+  });
+
+  // A tiny evaluator for the OData $filter strings lib/crmls.js builds. It is strict: any clause it does
+  // not recognise throws, so a change to the product's filter shape fails the pin tests below.
+  const evalODataFilter = (filter, record) => {
+    const tokens = [];
+    const re = /\s*(\(|\)|'[^']*'|[A-Za-z_][A-Za-z0-9_]*|-?\d[\d.\-]*)/y;
+    let m, pos = 0;
+    while (pos < filter.length) { re.lastIndex = pos; m = re.exec(filter); if (!m) throw new Error(`unrecognised filter text at: ${filter.slice(pos, pos + 30)}`); tokens.push(m[1]); pos = re.lastIndex; }
+    let i = 0;
+    const literal = t => (t === 'null' ? null : t.startsWith("'") ? t.slice(1, -1) : /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : Number(t));
+    const comparison = () => {
+      const field = tokens[i++], op = tokens[i++], value = literal(tokens[i++]);
+      if (!['eq', 'ge', 'le'].includes(op) || !/^[A-Za-z]+$/.test(field)) throw new Error(`unrecognised clause: ${field} ${op}`);
+      const actual = record[field] === undefined ? null : record[field];
+      if (op === 'eq') return actual === value;
+      if (actual === null) return false;
+      return op === 'ge' ? actual >= value : actual <= value;
+    };
+    const factor = () => { if (tokens[i] === '(') { i++; const v = expr(); if (tokens[i++] !== ')') throw new Error('unbalanced parenthesis'); return v; } return comparison(); };
+    const term = () => { let v = factor(); while (tokens[i] === 'and') { i++; const r = factor(); v = v && r; } return v; };
+    const expr = () => { let v = term(); while (tokens[i] === 'or') { i++; const r = term(); v = v || r; } return v; };
+    const result = expr();
+    if (i !== tokens.length) throw new Error(`unparsed filter text after token ${i}`);
+    return result;
+  };
+
+  await check('Pin: the replay\'s record selection (box, property type, bedrooms, closed-since date) agrees with the product\'s own buildFilter() on a grid of records, for Closed and Active', () => {
+    const crmlsLib = require('./lib/crmls');
+    const subtypes = [...Object.keys(crmlsLib.FROM_CRMLS_PROPERTY_TYPE), 'Loft', 'Stock Cooperative', null];
+    const centre = { lat: 34.2, lon: -119.2 };
+    const box = crmlsLib.buildBoundingBox(centre.lat, centre.lon, crmlsLib.WIDE_SEARCH_RADIUS_MILES);
+    const positions = [[centre.lat, centre.lon], [box.maxLat, box.maxLon], [box.minLat, box.minLon], [box.maxLat + 0.0001, centre.lon], [box.minLat - 0.0001, centre.lon], [centre.lat, box.maxLon + 0.0001], [centre.lat, box.minLon - 0.0001]];
+    const since = btA.asof.closedSinceFor('2026-09-01', btA.cand.POOLS.mls.mlsMonths);
+    const dates = ['2025-01-01', since, '2026-08-15'];
+    let compared = 0;
+    for (const propertyType of ['single_family', 'condo', 'townhouse', 'duplex', 'apartment', 'other']) {
+      for (const bedrooms of [0, 3, 5, undefined]) {
+        for (const status of ['Closed', 'Active']) {
+          const filter = crmlsLib.buildFilter(status, { type: 'box', ...box }, { propertyType, bedrooms, closedSince: since });
+          for (const sub of subtypes) for (const beds of [null, 0, 1, 2, 3, 4, 5, 6, 8]) for (const [lat, lon] of positions) for (const date of dates) {
+            const rec = { StandardStatus: status, PropertyType: 'Residential Lease', PropertySubType: sub, BedroomsTotal: beds, Latitude: lat, Longitude: lon, CloseDate: date };
+            const fromProduct = evalODataFilter(filter, rec);
+            const fromReplay = btA.asof.inBoundingBox(rec, box) && btA.asof.passesRelevance(rec, { propertyType, bedrooms }) && (status !== 'Closed' || date >= since);
+            assert.equal(fromReplay, fromProduct, `${status} ${propertyType} beds=${bedrooms} record=${JSON.stringify(rec)} filter=${filter}`);
+            compared++;
+          }
+        }
+      }
+    }
+    assert.ok(compared > 30000);
+    assert.throws(() => evalODataFilter("StandardStatus eq 'Closed' and Surprise lt 3", {}), /unrecognised clause/, 'a clause the pin does not know fails loudly');
+  });
+
+  await check('Pin: the product still asks Recore for 200 records per status, Closed newest-close first and Active newest-listing first, with the closed-since floor; the replay uses the same cap', async () => {
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    const seen = [];
+    global.fetch = async url => { const p = new URL(String(url)).searchParams; seen.push({ filter: p.get('$filter'), orderby: p.get('$orderby'), top: p.get('$top') }); return { ok: true, json: async () => ({ value: [] }) }; };
+    try {
+      await pullCrmlsComps({ address: '1 Pin St, Ventura, CA 93001', latitude: 34.2, longitude: -119.2, propertyType: 'single_family', bedrooms: 3 });
+      const closed = seen.find(q => q.filter.includes("StandardStatus eq 'Closed'")), active = seen.find(q => q.filter.includes("StandardStatus eq 'Active'"));
+      assert.equal(closed.orderby, 'CloseDate desc');
+      assert.equal(active.orderby, 'OnMarketDate desc');
+      assert.equal(closed.top, String(MAX_RECORDS_PER_STATUS));
+      assert.equal(active.top, String(MAX_RECORDS_PER_STATUS));
+      assert.ok(closed.filter.includes(`CloseDate ge ${closedSinceDate()}`));
+      assert.ok(!active.filter.includes('CloseDate'), 'Active listings get no date floor');
+      const world = btA.asof.createWorld({ closed: Array.from({ length: MAX_RECORDS_PER_STATUS + 50 }, (_, i) => btRec({ ListingKey: `p${i}`, StreetNumberNumeric: 2000 + i, CloseDate: '2026-08-01' })) });
+      assert.equal(btA.asof.selectClosed(world, btCtx(), btSubject).length, MAX_RECORDS_PER_STATUS);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  await check('Pin: the product\'s Rincon query is zip-scoped with a closed_at floor of today minus MOVE_IN_LOOKBACK_MONTHS, the same rule the replay applies relative to T', async () => {
+    const originalFetch = global.fetch;
+    const urls = [];
+    global.fetch = async url => { urls.push(String(url)); return { ok: true, json: async () => ([]) }; };
+    try {
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      await pullLeadSimpleComps({ address: '2303 Otter Creek Ln, Oxnard, CA 93036' });
+      const q = new URL(urls[0]).search;
+      assert.match(q, /zip_code=eq\.93036/);
+      const floor = q.match(/closed_at=gte\.(\d{4}-\d{2}-\d{2})/)[1];
+      assert.equal(floor, btA.asof.monthsBeforeDate(todayUtc, require('./lib/leadsimple').MOVE_IN_LOOKBACK_MONTHS));
+      assert.equal(floor, btA.asof.monthsBeforeDate(todayUtc, btA.cand.POOLS.full.rinconMonths), 'the replay\'s default Rincon lookback is the product\'s');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  const judging = require('./backtest/judging');
+  const mkItems = (calls, passes = true) => ['A', 'B'].map(name => ({
+    key: `${name} vs base`, label: `Candidate ${name}`,
+    evaluate: () => { calls.push(name); return { pass: passes, checks: [{ id: 'a', pass: passes, detail: '5.0 points' }, { id: 'e', pass: true, detail: '400 leases' }] }; },
+  }));
+
+  await check('Judged once: the first judgement stores the full verdict text and the hold-out dates', () => {
+    const calls = [];
+    const { verdicts, store } = judging.judgeCandidates({ store: {}, items: mkItems(calls), holdoutStart: '2026-07-16', holdoutEnd: '2026-10-16', today: '2026-10-17' });
+    assert.deepEqual(calls, ['A', 'B']);
+    assert.equal(verdicts.length, 2);
+    assert.equal(verdicts[0].stored, false);
+    assert.equal(store['A vs base'].holdoutEnd, '2026-10-16');
+    assert.equal(store['A vs base'].holdoutStart, '2026-07-16');
+    assert.equal(store['A vs base'].text, 'Candidate A: PASSES (a: ok 5.0 points; e: ok 400 leases)');
+    assert.equal(store['A vs base'].verdict.pass, true);
+  });
+
+  await check('Judged once: a repeat on an overlapping hold-out (including one that slid forward a month) returns the STORED verdict, judges nothing, changes nothing, and the report keeps it', () => {
+    const first = judging.judgeCandidates({ store: {}, items: mkItems([]), holdoutStart: '2026-07-16', holdoutEnd: '2026-10-16', today: '2026-10-17' });
+    const before = JSON.stringify(first.store);
+    for (const [start, end] of [['2026-07-16', '2026-10-16'], ['2026-08-16', '2026-11-16'], ['2026-10-16', '2027-01-16']]) {
+      const calls = [];
+      const again = judging.judgeCandidates({ store: first.store, items: mkItems(calls, false), holdoutStart: start, holdoutEnd: end, today: '2026-11-17' });
+      assert.deepEqual(calls, [], `nothing is re-evaluated for a hold-out starting ${start}`);
+      assert.equal(again.verdicts.length, 2);
+      assert.ok(again.verdicts.every(v => v.stored === true));
+      assert.equal(again.verdicts[0].text, first.verdicts[0].text, 'the stored text comes back, not a new one');
+      assert.match(judging.verdictLine(again.verdicts[0]), /Candidate A: PASSES .*\[stored verdict, judged 2026-10-17 on the hold-out 2026-07-16 to 2026-10-16; not judged again: /);
+      assert.equal(JSON.stringify(again.store), before);
+    }
+    // the report prints a stored verdict instead of an empty section
+    const results = { ...fakeResults(), candidates: { sizeBands: [], rinconLookback: [], holdoutVerdicts: judging.judgeCandidates({ store: first.store, items: mkItems([]), holdoutStart: '2026-08-16', holdoutEnd: '2026-11-16', today: '2026-11-17' }).verdicts } };
+    results.rincon = { combos: [{ label: 'x', isHeadline: true, rows: results.mls.mls.baseline.slice(0, 5) }], headline: results.rincon.headline };
+    results.counts = { ...results.counts, closedRecords: 1, countyTargets: 1, coreTargets: 1, rinconTargets: 1, rinconScreenedOut: {} };
+    const md = btA.report.renderReport({ ...results, recoreRequests: 0, elapsedSeconds: 1, guardChecks: 1 }, null);
+    assert.match(md, /Hold-out verdicts \(acceptance rule, judged once\)/);
+    assert.match(md, /Candidate A: PASSES \(a: ok 5\.0 points; e: ok 400 leases\) \[stored verdict/);
+  });
+
+  await check('Judged once: a candidate may be judged again only on a hold-out that STARTS AFTER the last judged end (and --rejudge overrides, keeping the history)', () => {
+    const first = judging.judgeCandidates({ store: {}, items: mkItems([]), holdoutStart: '2026-07-16', holdoutEnd: '2026-10-16', today: '2026-10-17' });
+    assert.equal(judging.canJudge(first.store['A vs base'], '2026-10-16').ok, false, 'starting ON the last judged end day is still overlap');
+    assert.equal(judging.canJudge(first.store['A vs base'], '2026-10-17').ok, true);
+    const calls = [];
+    const later = judging.judgeCandidates({ store: first.store, items: mkItems(calls, false), holdoutStart: '2026-10-17', holdoutEnd: '2027-01-17', today: '2027-01-18' });
+    assert.deepEqual(calls, ['A', 'B']);
+    assert.equal(later.store['A vs base'].holdoutEnd, '2027-01-17');
+    assert.equal(later.store['A vs base'].verdict.pass, false);
+    assert.equal(later.store['A vs base'].previous.length, 1);
+    assert.equal(later.store['A vs base'].previous[0].holdoutEnd, '2026-10-16', 'the earlier judgement is kept');
+    const forced = judging.judgeCandidates({ store: first.store, items: mkItems([]), holdoutStart: '2026-08-01', holdoutEnd: '2026-11-01', today: '2026-11-02', rejudge: true });
+    assert.equal(forced.verdicts[0].stored, false);
+    assert.equal(forced.store['A vs base'].previous.length, 1);
+    // an old-format lock (a bare date string, no stored verdict) is respected, not silently overwritten
+    const legacy = judging.judgeCandidates({ store: { 'A vs base': '2026-10-16' }, items: mkItems([]), holdoutStart: '2027-06-01', holdoutEnd: '2027-09-01', today: '2027-09-02' });
+    assert.equal(legacy.verdicts[0].stored, true);
+    assert.match(legacy.verdicts[0].text, /verdict text was not saved/);
+  });
+
+  await check('Missing saved data stops with one clean line and exit code 1, no stack trace (loadCache throws NO_CACHE; run.js prints the message only)', () => {
+    const d = mkTmp();
+    try {
+      assert.throws(() => require('./backtest/data').loadCache(d), err => err.code === 'NO_CACHE' && /Run: node backtest\/run\.js --refresh/.test(err.message));
+      const { spawnSync } = require('node:child_process');
+      const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js')], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: d }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(res.status, 1);
+      const out = `${res.stdout}${res.stderr}`.trim().split('\n').filter(Boolean);
+      assert.equal(out.length, 1, `expected one line, got: ${out.join(' | ')}`);
+      assert.match(out[0], /^No saved data found \(closed\.json is missing from .+\)\. Run: node backtest\/run\.js --refresh$/);
+      assert.doesNotMatch(res.stdout + res.stderr, /\n\s+at |Error:/);
+    } finally { rmTmp(d); }
+  });
+
+  await check('Listing-time view (--asof-listing): the same MLS leases stand on the day each went on the market; leases with no earlier listing date are left out; the close date stays the lease date', async () => {
+    const mk = (key, onMarket, close) => btA.targets.mlsTargetFromRecord(btRec({ ListingKey: key, StreetNumberNumeric: 600 + key.length, CloseDate: close, OnMarketDate: onMarket, ListingContractDate: onMarket }));
+    const ts = [mk('a', '2026-08-01', '2026-09-03'), mk('bb', '2026-08-20', '2026-09-03'), mk('ccc', '2026-09-03', '2026-09-03'), mk('dddd', '2026-09-10', '2026-09-03')];
+    const lt = btA.targets.listingTimeTargets(ts);
+    assert.deepEqual(lt.targets.map(t => t.asOf), ['2026-08-01', '2026-08-20']);
+    assert.equal(lt.skipped, 2, 'listed on or after the close date: no listing-time view');
+    assert.equal(lt.medianGapDays, (33 + 14) / 2);
+    assert.equal(lt.targets[0].date, '2026-09-03', 'the lease date is unchanged');
+    // the engine stands on asOf: comps that closed between the listing day and the close day are not visible
+    const closed = Array.from({ length: 8 }, (_, i) => btRec({ ListingKey: `w${i}`, StreetNumberNumeric: 700 + i * 2, CloseDate: `2026-08-${String(10 + i).padStart(2, '0')}`, OnMarketDate: '2026-07-01', ListingContractDate: '2026-07-01' }));
+    const world = btA.asof.createWorld({ closed });
+    const target = { ...btTarget, date: '2026-09-01', rent: 3300 };
+    const [atClose] = await btA.engine.runTargets(world, [target], btA.cand.METHODS.baseline, btA.cand.POOLS.mls);
+    const [atListing] = await btA.engine.runTargets(world, [{ ...target, asOf: '2026-08-05' }], btA.cand.METHODS.baseline, btA.cand.POOLS.mls);
+    assert.ok(atClose.est !== null && atClose.n >= 4);
+    assert.equal(atListing.est, null, 'on 2026-08-05 none of those eight leases had closed yet');
+    assert.equal(atListing.date, '2026-09-01', 'the row keeps the close date for splits and reports');
+  });
+
+  await check('Disclosure: the report lists the optimism of pricing at listing time and the asking-price caveat; the README says the day before the lease CLOSED; the deploy script leaves the local data out', () => {
+    const results = fakeResults();
+    results.rincon = { combos: [{ label: 'x', isHeadline: true, rows: results.mls.mls.baseline.slice(0, 5) }], headline: results.rincon.headline };
+    results.counts = { ...results.counts, closedRecords: 1, countyTargets: 1, coreTargets: 1, rinconTargets: 1, rinconScreenedOut: {} };
+    results.candidates = { sizeBands: [], rinconLookback: [] };
+    const md = btA.report.renderReport({ ...results, recoreRequests: 0, elapsedSeconds: 1, guardChecks: 1 }, null);
+    assert.match(md, /Pricing happens at listing time, but the test knows everything up to the day the lease closed/);
+    assert.match(md, /final list price, which may include cuts made after the as-of date/);
+    const readme = fsA.readFileSync(pathA.join(__dirname, 'backtest', 'README.md'), 'utf8');
+    assert.match(readme, /the day before this lease closed/);
+    assert.match(readme, /about 2 minutes on an idle machine, longer when the computer is busy/);
+    assert.doesNotMatch(readme, /the day before this lease started/);
+    const deploy = fsA.readFileSync(pathA.join(__dirname, 'deploy-to-sally.sh'), 'utf8');
+    assert.match(deploy, /--exclude 'backtest\/cache\/'/);
+    assert.match(deploy, /--exclude 'backtest\/out\/'/);
+  });
+
+  console.log('--- backtest/: area groups, trust rules, partial runs, network guard, staff preview ---');
+  const K2 = require('./backtest/constants');
+  const netguard = require('./backtest/netguard');
+
+  await check('LA-border cities: the listed cities (any case, stray spaces) form their own group; everything else is "Ventura-area excluding LA-border"; groups under 20 leases are not published', () => {
+    const m = btA.metrics;
+    for (const c of ['Westlake Village', 'agoura hills', 'Calabasas ', 'West Hills', 'Woodland Hills', 'Malibu', 'Hidden Hills', 'Canoga Park', 'Agoura', 'Los Angeles']) assert.equal(m.isLaBorder(c), true, c);
+    for (const c of ['Thousand Oaks', 'Newbury Park', 'Lake Sherwood', 'Oak Park', '', null, undefined]) assert.equal(!!m.isLaBorder(c), false, String(c));
+    assert.equal(m.GROUPINGS.region({ city: 'Calabasas' }), 'LA-border cities');
+    assert.equal(m.GROUPINGS.region({ city: 'Camarillo' }), 'Ventura-area excluding LA-border');
+    assert.equal(m.GROUPINGS.region({ city: null }), null);
+    assert.equal(K2.LA_BORDER_CITIES.length, 10);
+    const rows = [...Array.from({ length: 25 }, (_, i) => fakeRow(i, 'Westlake Village')), ...Array.from({ length: 40 }, (_, i) => fakeRow(200 + i, 'Camarillo')), ...Array.from({ length: 6 }, (_, i) => fakeRow(400 + i, 'Malibu'))];
+    const res = fakeResults(); res.mls = { mls: { baseline: rows, size25_item2: rows } };
+    const sc = btA.report.buildScorecard(res);
+    assert.ok(sc.regions.baseline.laBorder && sc.regions.baseline.venturaOnly, 'both sides are big enough to publish');
+    assert.equal(sc.regions.baseline.laBorder.targets, 31);
+    assert.equal(sc.regions.baseline.venturaOnly.targets, 40);
+    assert.equal(typeof sc.regions.baseline.laBorder.medianRent, 'number');
+    assert.equal(sc.regions.shareOfLeasesPct, Math.round((31 / 71) * 1000) / 10);
+    assert.deepEqual(Object.keys(sc.groups.baseline.county.region).sort(), ['LA-border cities', 'Ventura-area excluding LA-border']);
+    const tiny = fakeResults(); tiny.mls = { mls: { baseline: [...Array.from({ length: 30 }, (_, i) => fakeRow(i, 'Camarillo')), ...Array.from({ length: 8 }, (_, i) => fakeRow(300 + i, 'Calabasas'))], size25_item2: [] } };
+    tiny.mls.mls.size25_item2 = tiny.mls.mls.baseline;
+    const sc2 = btA.report.buildScorecard(tiny);
+    assert.equal(sc2.regions.baseline.laBorder, null, 'an 8-lease side is not published');
+    assert.equal(sc2.groups.baseline.county.region['LA-border cities'], undefined);
+    assert.match(sc.scope.county, /^the Ventura-area service box .* about \d+% of the leases are in the Calabasas \/ Agoura Hills \/ Westlake Village \/ West Hills border area/);
+    assert.doesNotMatch(JSON.stringify(sc), /Ventura County|Los Angeles County cities/);
+  });
+
+  await check('Trust: a lookback that differs from the product\'s, in ANY pool, makes the scorecard untrusted and the pool text names the months actually used', () => {
+    const pools = btA.cand.POOLS;
+    const live = pools.full.mlsMonths;
+    try {
+      pools.full.mlsMonths = 3;
+      const sc = btA.report.buildScorecard(fakeResults());
+      assert.equal(sc.trusted, false);
+      assert.match(sc.trustReasons.join(' '), /replay's lookback differs from the product's .* pool\(s\): full/);
+      pools.full.mlsMonths = live;
+      pools.mls.rinconMonths = 12;
+      const sc2 = btA.report.buildScorecard(fakeResults());
+      assert.equal(sc2.trusted, false);
+      assert.match(sc2.trustReasons.join(' '), /pool\(s\): mls/);
+      pools.mls.rinconMonths = require('./lib/leadsimple').MOVE_IN_LOOKBACK_MONTHS;
+      pools.mls.mlsMonths = 3;
+      assert.match(btA.report.buildScorecard(fakeResults()).pool.mls, /3-month lookback/, 'the text states what the replay really used');
+    } finally {
+      pools.full.mlsMonths = live;
+      pools.mls.mlsMonths = live;
+      pools.mls.rinconMonths = require('./lib/leadsimple').MOVE_IN_LOOKBACK_MONTHS;
+    }
+    assert.equal(btA.report.buildScorecard(fakeResults()).trusted, true, 'restored settings are trusted again');
+    for (const f of ['backtest/candidates.js', 'backtest/engine.js', 'backtest/selftests.js', 'backtest/asof-sources.js']) assert.ok(require('./backtest/provenance').TRACKED_FILES.includes(f), `${f} is tracked`);
+  });
+
+  await check('Trust: data older than 45 days, an unknown data date, data that does not reach back far enough, and unmeasured or non-zero replay network use all make the scorecard untrusted', () => {
+    assert.equal(K2.MAX_DATA_AGE_DAYS, 45);
+    const make = mutate => { const r = fakeResults(); mutate(r); return btA.report.buildScorecard(r); };
+    assert.equal(make(r => { r.dataPulledOn = '2026-09-01'; }).trusted, true, '45 days old is still fine');
+    const old = make(r => { r.dataPulledOn = '2026-08-31'; });
+    assert.equal(old.trusted, false);
+    assert.match(old.trustReasons.join(' '), /data older than 45 days \(pulled 2026-08-31\); re-pull with --refresh/);
+    assert.match(make(r => { delete r.dataPulledOn; }).trustReasons.join(' '), /date the data was pulled is unknown/);
+    const short = make(r => { r.dataCoverage = { dataFrom: '2025-09-01', requiredFrom: '2025-04-16', ok: false }; });
+    assert.equal(short.trusted, false);
+    assert.match(short.trustReasons.join(' '), /saved data starts 2025-09-01 but the targets need data from 2025-04-16/);
+    assert.match(make(r => { delete r.network; }).trustReasons.join(' '), /network use was not measured/);
+    assert.match(make(r => { r.network.requestsDuringReplay = 2; }).trustReasons.join(' '), /replay made 2 outbound request/);
+    assert.match(make(r => { r.network.rentcastRequests = 1; }).trustReasons.join(' '), /RentCast, Anthropic or other/);
+    const ok = btA.report.buildScorecard(fakeResults());
+    assert.equal(ok.dataPulledOn, '2026-10-16');
+    assert.deepEqual(ok.network, fakeResults().network);
+  });
+
+  await check('Network guard: counts every outbound attempt by host and phase, lets Recore and Supabase through, and BLOCKS RentCast, Anthropic and anything else', async () => {
+    const calls = [];
+    const target = { fetch: async url => { calls.push(String(url)); return { ok: true }; } };
+    const fakeModules = () => ({ request: function () { calls.push('http-request'); return {}; }, get: function () { calls.push('http-get'); return {}; } });
+    const modules = { http: fakeModules(), https: fakeModules() };
+    const g = netguard.installNetGuard({ target, modules, supabaseUrl: 'https://abc.supabase.co' });
+    try {
+      g.setPhase('refresh');
+      await target.fetch('https://api.marketplace.recore.net/api/v2/OData/crmls/Property?x=1');
+      await target.fetch('https://abc.supabase.co/rest/v1/properties?select=*');
+      g.setPhase('replay');
+      await assert.rejects(() => target.fetch('https://api.rentcast.io/v1/listings'), /Blocked outbound request to rentcast/);
+      await assert.rejects(() => target.fetch('https://api.anthropic.com/v1/messages'), /Blocked outbound request to anthropic/);
+      await assert.rejects(() => target.fetch(new URL('https://example.com/x')), /Blocked outbound request to an unexpected host/);
+      assert.throws(() => modules.https.request({ hostname: 'api.rentcast.io', path: '/v1' }), /rentcast/);
+      assert.throws(() => modules.https.get('https://api.anthropic.com/v1'), /anthropic/);
+      assert.throws(() => modules.http.request({ host: 'evil.example:8080' }), /unexpected host/);
+      modules.https.request('https://api.marketplace.recore.net/x');
+      const c = g.counts();
+      assert.deepEqual(c, { measured: true, rentcastRequests: 2, anthropicRequests: 2, otherHostRequests: 2, requestsDuringReplay: 7, recoreRequests: 2, supabaseRequests: 1 });
+      assert.deepEqual(calls, ['https://api.marketplace.recore.net/api/v2/OData/crmls/Property?x=1', 'https://abc.supabase.co/rest/v1/properties?select=*', 'http-request'], 'blocked requests were never made');
+    } finally {
+      g.uninstall();
+    }
+    assert.equal(typeof target.fetch, 'function');
+    assert.notEqual(target.fetch.name, 'guardedFetch', 'the original fetch is restored');
+    assert.equal(netguard.classify('api.rentcast.io'), 'rentcast');
+    assert.equal(netguard.classify('Api.Anthropic.Com'), 'anthropic');
+    assert.equal(netguard.classify('abc.supabase.co', 'abc.supabase.co'), 'supabase');
+  });
+
+  await check('run.js: any option that narrows the targets (or a plant-leak) makes the run partial, and --publish with it is refused up front with exit 1, before any data is read', () => {
+    const { spawnSync } = require('node:child_process');
+    const d = mkTmp();
+    try {
+      const combos = [['--target-from', '2026-10-10'], ['--holdout-from', '2026-09-01'], ['--today', '2026-12-01'], ['--limit', '5'], ['--plant-leak']];
+      for (const extra of combos) {
+        const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js'), ...extra, '--publish'], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: d }, encoding: 'utf8', timeout: 60000 });
+        assert.equal(res.status, 1, `${extra.join(' ')} --publish must exit 1`);
+        const out = `${res.stdout}${res.stderr}`;
+        assert.match(out, /Refusing to --publish: this run uses .* so it is partial/, extra.join(' '));
+        assert.match(out, new RegExp(extra[0].replace(/-/g, '\\-')));
+        assert.doesNotMatch(out, /No saved data/, 'refused before the saved data was even looked at');
+      }
+      const src = fsA.readFileSync(pathA.join(__dirname, 'backtest', 'run.js'), 'utf8');
+      assert.match(src, /if \(!partial && \(scorecard\.trusted \|\| !previous\)\)/, 'a partial run never writes backtest/scorecard.json');
+    } finally { rmTmp(d); }
+  });
+
+  await check('Missing or damaged saved data: one clean line and exit 1, no stack trace (damaged closed.json included)', () => {
+    const { spawnSync } = require('node:child_process');
+    const d = mkTmp();
+    try {
+      fsA.writeFileSync(pathA.join(d, 'closed.json'), '{"not": valid json');
+      assert.throws(() => require('./backtest/data').loadCache(d), err => err.code === 'BAD_CACHE' && /closed\.json is damaged .* Run: node backtest\/run\.js --refresh/.test(err.message));
+      const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js')], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: d }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(res.status, 1);
+      const out = `${res.stdout}${res.stderr}`.trim().split('\n').filter(Boolean);
+      assert.equal(out.length, 1, out.join(' | '));
+      assert.match(out[0], /^Saved data file closed\.json is damaged and cannot be read\. Run: node backtest\/run\.js --refresh$/);
+      assert.doesNotMatch(res.stdout + res.stderr, /\n\s+at |SyntaxError/);
+    } finally { rmTmp(d); }
+  });
+
+  await check('Judged once, old-format locks: no "undefined" anywhere, and --rejudge over a bare-date lock keeps the earlier judgement', () => {
+    const items = () => [{ key: 'A vs base', label: 'Candidate A', evaluate: () => ({ pass: true, checks: [{ id: 'a', pass: true, detail: '5.0 points' }] }) }];
+    for (const legacy of ['2026-10-16', { judgedOn: '2026-10-16' }, {}]) {
+      const r = judging.judgeCandidates({ store: { 'A vs base': legacy }, items: items(), holdoutStart: '2026-12-01', holdoutEnd: '2027-03-01', today: '2027-03-02' });
+      const line = judging.verdictLine(r.verdicts[0]);
+      assert.doesNotMatch(line, /undefined/, line);
+      assert.match(line, /^Candidate A: judged .*\(verdict text was not saved\)/);
+      assert.doesNotMatch(line, /hold-out undefined/);
+    }
+    assert.match(judging.verdictLine(judging.judgeCandidates({ store: { 'A vs base': '2026-10-16' }, items: items(), holdoutStart: '2026-12-01', holdoutEnd: '2027-03-01', today: '2027-03-02' }).verdicts[0]), /^Candidate A: judged on 2026-10-16 \(verdict text was not saved\) \[stored verdict, judged 2026-10-16; not judged again:/);
+    const forced = judging.judgeCandidates({ store: { 'A vs base': '2026-10-16' }, items: items(), holdoutStart: '2026-12-01', holdoutEnd: '2027-03-01', today: '2027-03-02', rejudge: true });
+    assert.deepEqual(forced.store['A vs base'].previous, [{ judgedOn: '2026-10-16' }], 'the earlier judgement is not lost');
+    assert.equal(forced.store['A vs base'].holdoutEnd, '2027-03-01');
+  });
+
+  const readyForRender = (mutate = () => {}) => {
+    const results = fakeResults();
+    results.rincon = { combos: [{ label: 'x', isHeadline: true, rows: results.mls.mls.baseline.slice(0, 5) }], headline: results.rincon.headline };
+    results.counts = { ...results.counts, closedRecords: 1, countyTargets: 135, coreTargets: 135, rinconTargets: 1, rinconScreenedOut: {} };
+    results.candidates = { sizeBands: [], rinconLookback: [] };
+    results.recoreRequests = 0; results.elapsedSeconds = 1; results.guardChecks = 1;
+    mutate(results);
+    return results;
+  };
+
+  await check('Report: a candidate\'s hold-out numbers show only when the verdict was produced in THIS run for THIS window (a stored verdict, or one for another window, keeps them hidden)', () => {
+    const verdict = (stored, holdoutStart) => ({ label: 'Candidate A', stored, text: 'Candidate A: PASSES (a: ok 5.0 points)', judgedOn: '2026-10-17', holdoutStart, holdoutEnd: '2026-10-16', note: 'x' });
+    const render = vs => btA.report.renderReport(readyForRender(r => { r.candidates.holdoutVerdicts = vs; }), null);
+    assert.match(render([]), /size25_item2 \| hold-out \| not looked at/);
+    assert.match(render([verdict(true, '2026-07-16')]), /size25_item2 \| hold-out \| not looked at/, 'stored verdict: still hidden');
+    assert.match(render([verdict(false, '2026-04-16')]), /size25_item2 \| hold-out \| not looked at/, 'verdict for a different window: still hidden');
+    assert.doesNotMatch(render([verdict(false, '2026-07-16')]), /size25_item2 \| hold-out \| not looked at/, 'judged now, on this window: shown');
+  });
+
+  await check('Report: the optimism, survivor-bias and not-tested limits are stated from the run\'s own numbers (median gap, listing-time deltas, share of multi-family runs)', () => {
+    const base = fakeResults().mls.mls.baseline;
+    const worse = base.map((r, i) => ({ ...r, est: r.est + (i % 2 ? 400 : 0), n: i % 4 === 0 ? 3 : r.n }));
+    const lt = { targets: base.length, skipped: 2, medianGapDays: 41, sameLeases: { baseline: base, size25_item2: base }, rows: { baseline: worse, size25_item2: worse } };
+    const md = btA.report.renderReport(readyForRender(r => { r.listingTime = lt; r.medianGapDays = 41; r.staffRunMix = { total: 69, multiFamily: 7 }; r.dataFacts = { enteredAfterClose: 9 }; }), null);
+    assert.match(md, /up to the day the lease closed \(a median of 41 days later in this data\), so the default figures are optimistic\. Re-run as of the day each home went on the market \(135 leases, MLS-only pool\): the share within \$300 is .* points lower, the typical miss is .* worse, and coverage is .* points lower across the Ventura-area; in the Ventura core with the size rule coverage falls from \d+\.\d% to \d+\.\d%\./);
+    assert.doesNotMatch(md, /median of 33 days/, 'the gap is computed, never typed');
+    assert.match(md, /Only homes that actually leased are tested\. The MLS feed holds no withdrawn, expired or canceled leases/);
+    assert.match(md, /Duplexes, triplexes, fourplexes and apartments are not tested, although they are about 10% of staff runs \(7 of 69 saved reports\)/);
+    assert.match(md, /entered in the MLS after its lease closed \(9 records\)/);
+    const none = btA.report.renderReport(readyForRender(r => { r.medianGapDays = 28; }), null);
+    assert.match(none, /\(a median of 28 days later in this data\), so every figure here is optimistic\. How much was not measured in this run/);
+    assert.equal(btA.report.buildScorecard(readyForRender(r => { r.medianGapDays = 28; })).pool.timing.includes('median gap 28 days'), true);
+  });
+
+  await check('Report: "How to read this" opens the page, and the staff sentences are previewed exactly as generated from the scorecard', () => {
+    const results = readyForRender();
+    const sc = btA.report.buildScorecard(results);
+    const md = btA.report.renderReport(results, null, sc);
+    assert.ok(md.indexOf('## How to read this') > -1 && md.indexOf('## How to read this') < md.indexOf('## Self-tests'));
+    for (const word of ['Typical miss', 'Within $300', 'Range hit', 'Thin', 'Coverage', 'Tune and hold-out']) assert.ok(md.includes(`**${word}**`), word);
+    assert.match(md, /## What staff would see \(the exact sentences/);
+    assert.ok(md.includes(`- ${btA.report.accuracyLine(sc)}`), 'the accuracy line is printed exactly');
+    for (const label of ['High', 'Medium', 'Low']) assert.ok(md.includes(`- ${btA.report.trackRecordSentence(sc, label)}`), `${label} sentence printed exactly`);
+    assert.match(md, /Network use, measured by a guard/);
+    assert.match(md, /RentCast requests 0; Anthropic calls 0/);
+    assert.doesNotMatch(md, /\bwindow\b/i);
+  });
+
+  await check('Listing-time view leaves out a lease listed before the saved data can give it a full lookback (so the data-coverage rule is about real targets, not one odd old listing)', () => {
+    const mk = (key, onMarket) => btA.targets.mlsTargetFromRecord(btRec({ ListingKey: key, StreetNumberNumeric: 650 + key.length, CloseDate: '2026-09-03', OnMarketDate: onMarket, ListingContractDate: onMarket }));
+    const ts = [mk('a', '2024-06-13'), mk('bb', '2025-09-14'), mk('ccc', '2026-08-20')];
+    const notBefore = btA.targets.monthsBefore('2025-03-15', -6);
+    assert.equal(notBefore, '2025-09-15');
+    const lt = btA.targets.listingTimeTargets(ts, { notBefore });
+    assert.deepEqual(lt.targets.map(t => t.asOf), ['2026-08-20']);
+    assert.equal(lt.skipped, 2);
+    assert.equal(lt.tooEarly, 2);
+    assert.equal(btA.targets.listingTimeTargets(ts).targets.length, 3, 'without a limit every usable listing date counts');
+  });
+
+  console.log('--- backtest/: strict options, damaged data, large counts, wording ---');
+  const cli = require('./backtest/cli');
+
+  await check('Options: --name value and --name=value both work; an unknown option, a missing or bad value, a value on a flag, or a stray word is a one-line error that lists the valid options', () => {
+    const a = cli.parseArgs(['--limit', '50', '--refresh', '--target-from=2026-05-01', '--out', '/tmp/x', '--publish']);
+    assert.equal(a.values.limit, '50');
+    assert.equal(a.values['target-from'], '2026-05-01');
+    assert.equal(a.values.out, '/tmp/x');
+    assert.ok(a.flags.has('refresh') && a.flags.has('publish'));
+    assert.equal(cli.parseArgs(['--limit=50']).values.limit, '50');
+    assert.equal(cli.parseArgs(['--asof-listing']).flags.has('asof-listing'), true, 'the old on-switch is still accepted');
+    for (const bad of [['--limt', '50'], ['--limt=50'], ['--refesh'], ['--limit'], ['--limit', '--refresh'], ['--limit=abc'], ['--limit=0'], ['--today=2026-13-45'], ['--today', 'soon'], ['--publish=yes'], ['50'], ['--refresh', 'now']]) {
+      assert.throws(() => cli.parseArgs(bad), err => err instanceof cli.CliError && !/\n/.test(err.message), `rejects ${bad.join(' ')}`);
+    }
+    assert.throws(() => cli.parseArgs(['--limt', '50']), /Unknown option "--limt"\. Valid options: --a0, .*--limit, .*--target-from, --today$/);
+    for (const o of [...cli.FLAG_OPTIONS, ...Object.keys(cli.VALUE_OPTIONS)]) assert.ok(cli.validOptionsText().includes(`--${o}`), o);
+  });
+
+  await check('run.js: a mistyped option (--limt 50, --limit=abc, a stray word) exits 1 with one line before any work, and --limit=50 is understood', () => {
+    const { spawnSync } = require('node:child_process');
+    const d = mkTmp();
+    try {
+      const run = args => spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js'), ...args], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: d }, encoding: 'utf8', timeout: 60000 });
+      for (const bad of [['--limt', '50'], ['--limit=abc'], ['50']]) {
+        const res = run(bad);
+        assert.equal(res.status, 1, bad.join(' '));
+        const lines = `${res.stdout}${res.stderr}`.trim().split('\n').filter(Boolean);
+        assert.equal(lines.length, 1, lines.join(' | '));
+        assert.doesNotMatch(lines[0], /Using cache|No saved data/, 'refused before any work');
+      }
+      assert.match(run(['--limt', '50']).stderr, /Unknown option "--limt"\. Valid options: --a0, /);
+      // the equals form reaches the real program: it gets as far as looking for saved data
+      assert.match(run(['--limit=50']).stderr, /No saved data found/);
+    } finally { rmTmp(d); }
+  });
+
+  await check('Damaged saved data: valid JSON of the wrong shape (an object or empty list for closed.json, a list for meta.json, records without dates) gets the same one-line message as unreadable JSON', () => {
+    const { spawnSync } = require('node:child_process');
+    const data = require('./backtest/data');
+    const good = { ListingKey: 'k', CloseDate: '2026-05-01' };
+    assert.equal(data.hasExpectedShape('closed', [good]), true);
+    assert.equal(data.hasExpectedShape('closed', []), false);
+    assert.equal(data.hasExpectedShape('closed', { a: 1 }), false);
+    assert.equal(data.hasExpectedShape('closed', [{}]), false);
+    assert.equal(data.hasExpectedShape('closed', [good, 5]), false);
+    assert.equal(data.hasExpectedShape('active', []), true, 'no active listings is a legitimate state');
+    assert.equal(data.hasExpectedShape('analyses', { a: 1 }), false);
+    assert.equal(data.hasExpectedShape('meta', {}), true);
+    assert.equal(data.hasExpectedShape('meta', []), false);
+    assert.equal(data.hasExpectedShape('meta', null), false);
+    for (const [file, content] of [['closed.json', '{"a":1}'], ['closed.json', '[]'], ['closed.json', '[{"x":1}]'], ['closed.json', '"text"']]) {
+      const d = mkTmp();
+      try {
+        fsA.writeFileSync(pathA.join(d, file), content);
+        assert.throws(() => data.loadCache(d), err => err.code === 'BAD_CACHE', `${file} = ${content}`);
+        const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js')], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: d }, encoding: 'utf8', timeout: 60000 });
+        assert.equal(res.status, 1);
+        const lines = `${res.stdout}${res.stderr}`.trim().split('\n').filter(Boolean);
+        assert.deepEqual(lines, ['Saved data file closed.json is damaged and cannot be read. Run: node backtest/run.js --refresh']);
+      } finally { rmTmp(d); }
+    }
+  });
+
+  await check('Unknown data date, end to end: a meta.json with no or garbage pull time gives a scorecard that is NOT trusted ("the date the data was pulled is unknown"), a null data date, and no "Invalid Date" anywhere', () => {
+    const { spawnSync } = require('node:child_process');
+    const makeCache = meta => {
+      const d = mkTmp();
+      const closed = Array.from({ length: 40 }, (_, i) => btRec({ ListingKey: `e${i}`, ListingId: `E${i}`, StreetNumberNumeric: 3000 + i * 2, StreetName: 'End', BedroomsTotal: 3, ClosePrice: 3000 + (i % 6) * 50, ListPrice: 3000 + (i % 6) * 50, OriginalListPrice: 3100, CloseDate: `2026-0${5 + Math.floor(i / 10)}-${String(1 + (i % 10) * 2).padStart(2, '0')}`, OnMarketDate: '2026-04-01', ListingContractDate: '2026-04-01', Latitude: 34.2 + (i % 5) * 0.001, Longitude: -119.2 + (i % 4) * 0.001, LivingArea: 1500 }));
+      fsA.writeFileSync(pathA.join(d, 'closed.json'), JSON.stringify(closed));
+      for (const f of ['active', 'leadsimple', 'properties', 'analyses']) fsA.writeFileSync(pathA.join(d, `${f}.json`), '[]');
+      fsA.writeFileSync(pathA.join(d, 'meta.json'), JSON.stringify(meta));
+      return d;
+    };
+    for (const meta of [{ dataFrom: '2025-03-15', counts: {}, fidelity: null }, { pulledAt: 'not a date', dataFrom: '2025-03-15', counts: {}, fidelity: null }, { pulledAt: null, dataFrom: '2025-03-15', counts: {}, fidelity: null }]) {
+      const cacheDir = makeCache(meta), outDir = mkTmp();
+      try {
+        const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js'), '--limit', '8', '--today', '2026-10-16', '--no-leak-test', '--out', outDir], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: cacheDir }, encoding: 'utf8', timeout: 120000 });
+        assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`.slice(-600));
+        const sc = JSON.parse(fsA.readFileSync(pathA.join(outDir, '2026-10-16', 'scorecard.json'), 'utf8'));
+        const md = fsA.readFileSync(pathA.join(outDir, '2026-10-16', 'report.md'), 'utf8');
+        assert.equal(sc.dataPulledOn, null);
+        assert.equal(sc.trusted, false);
+        assert.ok(sc.trustReasons.includes('the date the data was pulled is unknown'), sc.trustReasons.join(' | '));
+        const line = btA.report.accuracyLine(sc);
+        const everything = `${JSON.stringify(sc)}\n${md}\n${line}\n${res.stdout}`;
+        assert.doesNotMatch(everything, /Invalid Date/);
+        if (line) assert.match(line, /\(data date unknown\)/, 'the sentence admits it does not know the data date');
+      } finally { rmTmp(cacheDir); rmTmp(outDir); }
+    }
+  });
+
+  await check('Large counts: a replay with 10,000 to 999,999 outbound attempts is untrusted with the count spelled with commas, the exact count recorded, and no crash from the zip-code guard', () => {
+    for (const n of [9999, 10000, 41424, 99999, 100000, 123456]) {
+      const r = fakeResults(); r.network.requestsDuringReplay = n;
+      const sc = btA.report.buildScorecard(r);
+      assert.equal(sc.trusted, false, String(n));
+      assert.match(sc.trustReasons.join(' '), new RegExp(`the replay made ${n.toLocaleString('en-US').replace(',', ',')} outbound request`), String(n));
+      assert.equal(sc.network.requestsDuringReplay, n, 'the exact count is recorded');
+    }
+    assert.equal(btA.report.fmtCount(41424), '41,424');
+    assert.doesNotThrow(() => btA.report.assertAggregatesOnly({ reason: 'the replay made 41,424 outbound request(s)' }));
+    assert.throws(() => btA.report.assertAggregatesOnly({ reason: 'the replay made 41424 outbound request(s)' }), /zip code/, 'a bare five-digit number is still (correctly) refused');
+  });
+
+  await check('Wording: no "-0" anywhere in the point-change columns, one rounded LA-border share used in both the scope text and the report, "Ventura-area" in the headings, and no "Ventura County" label left in the test code', () => {
+    assert.equal(btA.report.pts(-0.2), '0');
+    assert.equal(btA.report.pts(0.4), '0');
+    assert.equal(btA.report.pts(2.6), '+3');
+    assert.equal(btA.report.pts(-12.4), '-12');
+    assert.equal(btA.report.pts1(-0.2), '-0.2');
+    assert.equal(btA.report.pts1(-0.04), '0.0');
+    assert.equal(btA.report.pts1(1.26), '+1.3');
+    assert.equal(btA.report.pts(null), '-');
+    const rows = [...Array.from({ length: 31 }, (_, i) => fakeRow(i, 'Westlake Village')), ...Array.from({ length: 40 }, (_, i) => fakeRow(200 + i, 'Camarillo'))];
+    const res = readyForRender(r => { r.mls = { mls: { baseline: rows, size25_item2: rows } }; });
+    const sc = btA.report.buildScorecard(res);
+    const md = btA.report.renderReport(res, null, sc);
+    const share = Math.round((31 / 71) * 100);
+    assert.match(sc.scope.county, new RegExp(`about ${share}% of the leases are in the Calabasas`));
+    assert.match(md, new RegExp(`: ${share}% of the leases tested\\.`));
+    assert.doesNotMatch(md, /County-wide|county-wide|county targets|county box/);
+    assert.match(md, /### Ventura-area\n/);
+    assert.match(md, /## Where it is strong and weak \(Ventura-area, MLS pool\)/);
+    assert.match(md, /\| Ventura-area \| \$/, 'the size-rule table row is labelled Ventura-area');
+    const files = fsA.readdirSync(pathA.join(__dirname, 'backtest')).filter(f => f.endsWith('.js') || f.endsWith('.md'));
+    for (const f of files) assert.doesNotMatch(fsA.readFileSync(pathA.join(__dirname, 'backtest', f), 'utf8'), /Ventura[ -]County/, `${f} still says Ventura County`);
+  });
+  }
+
   console.log(`\n${passed} check(s) passed.${process.exitCode ? ' SOME CHECKS FAILED — see FAIL lines above.' : ''}`);
 }
 

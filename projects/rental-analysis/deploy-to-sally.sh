@@ -57,6 +57,8 @@ rsync -az \
   --exclude '.git' \
   --exclude '.DS_Store' \
   --exclude '*.log' \
+  --exclude 'backtest/cache/' \
+  --exclude 'backtest/out/' \
   "$LOCAL_DIR/" "$SALLY:$REMOTE_DIR/"
 
 echo ""

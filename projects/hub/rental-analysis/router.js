@@ -83,8 +83,8 @@ const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/google-places');
-const { findBestPropertyMatch, hasParseableHouseNumber, dedupeComps } = require('./lib/property-matching');
-const { computeRecommendedRange, computeRawRange, exclusionReason } = require('./lib/weighting');
+const { findBestPropertyMatch, hasParseableHouseNumber } = require('./lib/property-matching');
+const { computeNumbers } = require('./lib/analyze');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
@@ -450,28 +450,21 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
       const subjectMatch = findBestPropertyMatch(subject_address, properties);
       if (subjectMatch) resolvedPropertyId = subjectMatch.id;
     }
-    const matchedComps = rawComps.map(c => {
-      const match = findBestPropertyMatch(c.address, properties);
-      return { ...c, comp_property_id: match ? match.id : null, is_rincon_managed: !!match };
+
+    // Everything between "the sources returned" and "save" (comp-to-property
+    // matching, duplicate-unit collapse, recommended/raw range, the shared
+    // per-comp "why doesn't this count" verdict) lives in lib/analyze.js —
+    // the same file the standalone server.js and the accuracy test (backtest/)
+    // call, so none of them can run different code. exclusionReasons is a
+    // positional array, same order as compsWithMatch.
+    const { compsWithMatch, matchedCount, recommended, raw, exclusionReasons } = computeNumbers({
+      comps: rawComps,
+      subject: { address: subject_address.trim(), propertyType: subject_property_type, bedrooms, bathrooms, sqft },
+      properties,
     });
-    // subjectBedrooms/subjectPropertyType are passed so dedup's own
-    // tie-break can prefer whichever duplicate would actually count toward
-    // the range (see dedupeComps()'s own comment, lib/property-matching.js)
-    // — real sources can disagree on a unit's type or bedroom count.
-    const compsWithMatch = dedupeComps(matchedComps, bedrooms, subject_property_type);
-    if (compsWithMatch.length !== matchedComps.length) {
-      console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedComps.length} after=${compsWithMatch.length}`);
+    if (compsWithMatch.length !== matchedCount) {
+      console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedCount} after=${compsWithMatch.length}`);
     }
-
-    const recommended = computeRecommendedRange(compsWithMatch, bedrooms, subject_property_type);
-    const raw = computeRawRange(compsWithMatch, bedrooms, subject_property_type);
-
-    // The one shared "why doesn't this comp count" verdict (lib/weighting.js
-    // exclusionReason()) computed once, here, and reused by both the
-    // narrative prompt below and the API response further down — so
-    // narrative.js and the dashboard can never independently drift on which
-    // comps are excluded. Positional array, same order as compsWithMatch.
-    const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, subject_property_type));
 
     let rationale = null;
     let narrativesByIndex = compsWithMatch.map(() => null);

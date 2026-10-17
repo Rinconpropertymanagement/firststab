@@ -58,6 +58,7 @@ function mlsTargetFromRecord(r) {
     date: r.CloseDate.slice(0, 10),
     address: buildCrmlsAddress(r),
     city: r.City || null,
+    county: typeof r.CountyOrParish === 'string' && r.CountyOrParish.trim() ? r.CountyOrParish.trim() : null, // grouping only
     zip: r.PostalCode || null,
     propertyType: FROM_CRMLS_PROPERTY_TYPE[r.PropertySubType],
     bedrooms: r.BedroomsTotal,

@@ -5855,7 +5855,8 @@ async function main() {
     assert.equal(sc2.regions.baseline.laBorder, null, 'an 8-lease side is not published');
     assert.equal(sc2.groups.baseline.county.region['LA-border cities'], undefined);
     assert.match(sc.scope.county, /^the Ventura-area service box .* about \d+% of the leases are in the Calabasas \/ Agoura Hills \/ Westlake Village \/ West Hills border area/);
-    assert.doesNotMatch(JSON.stringify(sc), /Ventura County|Los Angeles County cities/);
+    assert.doesNotMatch(JSON.stringify(sc), /Los Angeles County cities/);
+    assert.doesNotMatch(JSON.stringify({ regions: sc.regions, scope: sc.scope }), /Ventura County/, 'the old city-list blocks never use the county label (that label belongs to the county blocks)');
   });
 
   await check('Trust: a lookback that differs from the product\'s, in ANY pool, makes the scorecard untrusted and the pool text names the months actually used', () => {
@@ -6166,7 +6167,335 @@ async function main() {
     assert.match(md, /## Where it is strong and weak \(Ventura-area, MLS pool\)/);
     assert.match(md, /\| Ventura-area \| \$/, 'the size-rule table row is labelled Ventura-area');
     const files = fsA.readdirSync(pathA.join(__dirname, 'backtest')).filter(f => f.endsWith('.js') || f.endsWith('.md'));
-    for (const f of files) assert.doesNotMatch(fsA.readFileSync(pathA.join(__dirname, 'backtest', f), 'utf8'), /Ventura[ -]County/, `${f} still says Ventura County`);
+    // The county groups (grouped by the MLS county field) are called "Ventura County"; that label lives in constants.js
+    // (and is explained in the README) and nowhere else, so no other file can hard-code it.
+    for (const f of files.filter(f => f !== 'constants.js' && f !== 'README.md')) assert.doesNotMatch(fsA.readFileSync(pathA.join(__dirname, 'backtest', f), 'utf8'), /Ventura[ -]County/, `${f} still says Ventura County`);
+    assert.match(fsA.readFileSync(pathA.join(__dirname, 'backtest', 'constants.js'), 'utf8'), /ventura: 'Ventura County'/, 'the county label is defined once, in constants.js');
+  });
+
+  console.log('--- backtest/: grouping by the MLS county (Ventura County vs the LA-border area) ---');
+
+  await check('County: the field is read tolerantly (case, spaces, "County"), a blank or placeholder is unknown, and any other county is "other"', () => {
+    const m = btA.metrics;
+    for (const v of ['Ventura', 'ventura', ' VENTURA ', 'Ventura County', 'ventura county']) assert.equal(m.countyOf(v), 'ventura', String(v));
+    for (const v of ['Los Angeles', 'Los Angeles County', 'Santa Barbara', 'Orange']) assert.equal(m.countyOf(v), 'other', String(v));
+    for (const v of ['', '  ', null, undefined, 5, 'Unknown', 'N/A', 'Other County']) assert.equal(m.countyOf(v), null, String(v));
+    const V = btA.K.COUNTY_LABELS.ventura, O = btA.K.COUNTY_LABELS.other;
+    assert.equal(V, 'Ventura County');
+    assert.equal(O, 'Other counties (LA-border area)');
+    assert.equal(m.countyGroupOf({ county: 'Ventura', city: 'Calabasas' }), V, 'the county wins over the old city list');
+    assert.equal(m.countyGroupOf({ county: 'Ventura', city: 'Westlake Village' }), V, 'a Westlake Village home on the Ventura side is Ventura County');
+    assert.equal(m.countyGroupOf({ county: 'Los Angeles', city: 'Westlake Village' }), O);
+    assert.equal(m.countyGroupOf({ county: 'Los Angeles', city: 'Camarillo' }), O);
+    assert.equal(m.countyGroupOf({ county: null, city: 'Westlake Village' }), O, 'no county: the city list decides');
+    assert.equal(m.countyGroupOf({ county: 'Other County', city: 'Malibu' }), O);
+    assert.equal(m.countyGroupOf({ county: null, city: 'Camarillo' }), V);
+    assert.equal(m.countyGroupOf({ county: null, city: null }), null);
+    assert.equal(m.GROUPINGS.countyGroup({ county: 'Ventura' }), V);
+    assert.equal(m.hasKnownCounty({ county: 'Los Angeles' }), true);
+    assert.equal(m.hasKnownCounty({ county: 'Other County' }), false);
+    const fill = m.countyFill([{ CountyOrParish: 'Ventura' }, { CountyOrParish: 'Ventura' }, { CountyOrParish: 'Los Angeles' }, { CountyOrParish: null }, {}]);
+    assert.deepEqual([fill.records, fill.known, fill.unknown], [5, 3, 2]);
+    assert.equal(fill.knownShare, 0.6);
+    assert.deepEqual(fill.values.find(v => v.value === 'Ventura'), { value: 'Ventura', count: 2 });
+    assert.deepEqual(fill.values.find(v => v.value === '(blank)'), { value: '(blank)', count: 2 });
+  });
+
+  await check('County: the Recore pull selects CountyOrParish, the cache keeps it, and targets carry it (trimmed; null when the record has none)', () => {
+    assert.ok(btA.recore.SELECT_FIELDS.includes('CountyOrParish'));
+    assert.equal(btA.K.COUNTY_FIELD, 'CountyOrParish');
+    assert.equal(btA.recore.cleanRecord({ ListingKey: 'k', CountyOrParish: 'Ventura', PublicRemarks: 'x' }).CountyOrParish, 'Ventura');
+    assert.equal(btA.targets.mlsTargetFromRecord(btRec({ CountyOrParish: ' Los Angeles ' })).county, 'Los Angeles');
+    assert.equal(btA.targets.mlsTargetFromRecord(btRec({})).county, null);
+    assert.equal(btA.targets.mlsTargetFromRecord(btRec({ CountyOrParish: '  ' })).county, null);
+  });
+
+  await check('County is for grouping ONLY: with and without the county field every comp, every counted comp, every estimate and every headline number is identical (only the row\'s own county label differs)', async () => {
+    const withCounty = synthClosed.map((r, i) => ({ ...r, CountyOrParish: i % 3 ? 'Ventura' : 'Los Angeles' }));
+    const worldA = btA.asof.createWorld({ closed: synthClosed, leadsimple: [], properties: [] });
+    const worldB = btA.asof.createWorld({ closed: withCounty, leadsimple: [], properties: [] });
+    const tA = btA.targets.buildMlsTargets(synthClosed, { targetFrom: '2026-06-01', today: '2026-10-16' }).slice(0, 25);
+    const tB = btA.targets.buildMlsTargets(withCounty, { targetFrom: '2026-06-01', today: '2026-10-16' }).slice(0, 25);
+    assert.equal(tA.length, tB.length);
+    assert.ok(tA.length >= 20);
+    for (const [pool, method] of [['mls', 'baseline'], ['mls', 'size25_item2'], ['mls+asking', 'baseline']]) {
+      const a = await btA.engine.runTargets(worldA, tA, btA.cand.METHODS[method], btA.cand.POOLS[pool]);
+      const b = await btA.engine.runTargets(worldB, tB, btA.cand.METHODS[method], btA.cand.POOLS[pool]);
+      const strip = rows => rows.map(({ county, ...rest }) => rest);
+      assert.deepEqual(strip(b), strip(a), `${pool}/${method}: nothing but the county label changes`);
+      assert.ok(b.some(r => r.county === 'Ventura') && b.some(r => r.county === 'Los Angeles'), 'the row carries the county');
+      assert.ok(a.every(r => r.county === null), 'no county in the record: null on the row');
+      assert.deepEqual(btA.metrics.summarize(b), btA.metrics.summarize(a), 'the summary numbers are identical');
+    }
+    // the selection and the mapped comps themselves are identical too
+    const sub = { address: tA[0].address, propertyType: 'single_family', bedrooms: 3, latitude: 34.2, longitude: -119.2 };
+    assert.deepEqual(btA.asof.mapRecords(withCounty.slice(0, 30), sub), btA.asof.mapRecords(synthClosed.slice(0, 30), sub));
+  });
+
+  await check('Provenance: the pull file (recore.js, which says what is selected, county field included) is tracked, so a change to the pull invalidates a stored fidelity result', () => {
+    assert.ok(prov.TRACKED_FILES.includes('backtest/recore.js'));
+    const real = prov.trackedFilesHash();
+    assert.match(real.files['backtest/recore.js'], /^[0-9a-f]{16}$/);
+    // a fidelity result stored before recore.js was tracked (no entry for it) is not valid today
+    const oldHashes = { files: { ...real.files }, combined: 'old' };
+    delete oldHashes.files['backtest/recore.js'];
+    const fid = { pass: true, pulledAt: 'P', hashes: oldHashes };
+    const v = prov.fidelityValidity(fid, real, 'P');
+    assert.equal(v.valid, false);
+    assert.match(v.reason, /code changed since the fidelity check ran .*backtest\/recore\.js/);
+    assert.equal(prov.fidelityValidity({ pass: true, pulledAt: 'P', hashes: real }, real, 'P').valid, true, 'the same code and the same pull is valid');
+    assert.equal(prov.fidelityValidity({ pass: true, pulledAt: 'P', hashes: real }, real, 'P2').valid, false, 'a new pull needs a new fidelity run');
+  });
+
+  // 130 Ventura County leases (30 of them in Westlake Village), 45 in other counties (25 of them Westlake Village on the LA side), 3 with no county.
+  const countyRows = () => [
+    ...Array.from({ length: 100 }, (_, i) => fakeRow(i, 'Thousand Oaks', { county: 'Ventura' })),
+    ...Array.from({ length: 30 }, (_, i) => fakeRow(200 + i, 'Westlake Village', { county: 'Ventura' })),
+    ...Array.from({ length: 25 }, (_, i) => fakeRow(300 + i, 'Westlake Village', { county: 'Los Angeles', rent: 4500 + (i % 5) * 100, est: 4100 })),
+    ...Array.from({ length: 20 }, (_, i) => fakeRow(400 + i, 'Calabasas', { county: 'Los Angeles', rent: 5000, est: 4300 })),
+  ];
+  const countyResults = (rows = countyRows()) => { const r = fakeResults(); r.mls = { mls: { baseline: rows, size25_item2: rows } }; return r; };
+
+  await check('Scorecard: a "counties" block groups by the MLS county, publishes a side only at 20 or more leases, counts the unknowns, and splits Westlake Village by county (aggregates only)', () => {
+    const sc = btA.report.buildScorecard(countyResults());
+    const c = sc.counties;
+    assert.equal(c.field, 'CountyOrParish');
+    assert.equal(c.baseline.venturaCounty.targets, 130);
+    assert.equal(c.baseline.otherCounties.targets, 45);
+    assert.equal(c.size25_item2.venturaCounty.targets, 130);
+    assert.equal(c.baseline.venturaCounty.label, 'Ventura County');
+    assert.equal(c.baseline.venturaCounty.leasesFromCityRule, 0);
+    assert.equal(typeof c.baseline.otherCounties.medianRent, 'number');
+    assert.ok(c.baseline.otherCounties.medianRent > c.baseline.venturaCounty.medianRent, 'the LA side rents for more in this fake data');
+    assert.equal(c.unknown.leases, 0);
+    assert.equal(c.unknown.sharePct, 0);
+    assert.equal(c.unknown.overLimit, false);
+    assert.equal(c.shareOfLeasesPct, Math.round((45 / 175) * 1000) / 10);
+    assert.deepEqual([c.westlakeVillage.leases, c.westlakeVillage.venturaCounty, c.westlakeVillage.otherCounties, c.westlakeVillage.countyUnknown], [55, 30, 25, null], 'unknown is 0, under 20, so not published');
+    assert.deepEqual(Object.keys(sc.groups.baseline.county.countyGroup).sort(), ['Other counties (LA-border area)', 'Ventura County']);
+    assert.ok(c.baseline.venturaCounty.confidence.High, 'a confidence block per label so the staff sentences can quote this side');
+    assert.match(c.definition, /grouped by the county the MLS records/);
+    assert.doesNotThrow(() => btA.report.assertAggregatesOnly(sc));
+    assert.doesNotMatch(JSON.stringify(sc), /Fake Street|0123456789abcdef/);
+    // a side with 8 leases is not published
+    const small = countyRows().filter(r => r.county === 'Ventura').concat(Array.from({ length: 8 }, (_, i) => fakeRow(600 + i, 'Calabasas', { county: 'Los Angeles' })));
+    const sc2 = btA.report.buildScorecard(countyResults(small));
+    assert.equal(sc2.counties.baseline.otherCounties, null);
+    assert.equal(sc2.groups.baseline.county.countyGroup['Other counties (LA-border area)'], undefined);
+    // the old city-list blocks are still there and unchanged
+    assert.ok(sc.regions.baseline.laBorder && sc.regions.baseline.venturaOnly);
+  });
+
+  await check('Scorecard: leases with no county fall back to the city list, are counted, and more than 2% unknown is flagged (and no longer called a county figure in the staff sentences)', () => {
+    const rows = countyRows();
+    const noCounty = rows.map((r, i) => (i < 6 ? { ...r, county: null } : r)); // 6 of 175 = 3.4%
+    const sc = btA.report.buildScorecard(countyResults(noCounty));
+    assert.equal(sc.counties.unknown.leases, 6);
+    assert.equal(sc.counties.unknown.sharePct, Math.round((6 / 175) * 1000) / 10);
+    assert.equal(sc.counties.unknown.limitPct, 2);
+    assert.equal(sc.counties.unknown.overLimit, true);
+    assert.equal(sc.counties.baseline.venturaCounty.targets, 130, 'the 6 unknowns are Thousand Oaks, which the city list calls Ventura County');
+    assert.equal(sc.counties.baseline.venturaCounty.leasesFromCityRule, 6);
+    assert.equal(btA.report.countySide(sc, 'baseline'), null, 'over the limit: the county figures are not used for the staff sentences');
+    assert.doesNotMatch(btA.report.accuracyLine(sc), /Ventura County/);
+    assert.match(btA.report.accuracyLine(sc), /^Blind-tested on 175 past Ventura-area leases:/);
+    const md = btA.report.renderReport(readyForRender(r => { r.mls = { mls: { baseline: noCounty, size25_item2: noCounty } }; }), null);
+    assert.match(md, /County unknown for 6 of 175 tested leases \(3\.4%\)/);
+    assert.match(md, /more than 2% of the leases, so the two groups are less exact than they look/);
+    // at or under 2% is fine: 3 of 175 = 1.7%
+    const few = btA.report.buildScorecard(countyResults(rows.map((r, i) => (i < 3 ? { ...r, county: undefined } : r))));
+    assert.equal(few.counties.unknown.overLimit, false);
+    assert.ok(btA.report.countySide(few, 'baseline'));
+    // a cache pulled before the county field existed has no county at all: 100% unknown, never labelled Ventura County
+    const none = btA.report.buildScorecard(countyResults(rows.map(r => ({ ...r, county: undefined }))));
+    assert.equal(none.counties.unknown.sharePct, 100);
+    assert.doesNotMatch(btA.report.accuracyLine(none), /Ventura County/);
+  });
+
+  await check('Staff sentences quote the Ventura County group (labelled Ventura County, with the LA-border note) when it has 100 or more leases; otherwise they keep the whole-box "Ventura-area" wording', () => {
+    const sc = btA.report.buildScorecard(countyResults());
+    const line = btA.report.accuracyLine(sc);
+    assert.match(line, /^Blind-tested on 130 past Ventura County leases: typical miss about \$\d+;/);
+    assert.ok(line.includes('Figures for homes in the LA-border area (other counties) are reported separately.'));
+    assert.match(line, /\(data pulled 2026-10-16\)\. Figures for homes in the LA-border area \(other counties\) are reported separately\. RentCast listings, about 45% of the comps staff see, were not part of this test\.$/);
+    assert.doesNotMatch(line, /Ventura-area/);
+    const high = btA.report.trackRecordSentence(sc, 'High');
+    assert.match(high, /^High confidence\. In blind tests on 130 past Ventura County leases, reports like this held the signed rent inside the recommended range about \d+ times? in 10/);
+    assert.ok(high.includes('Figures for homes in the LA-border area (other counties) are reported separately.'));
+    assert.equal(btA.report.trackRecordSentence(sc, 'Low'), 'Low confidence: too few tests to say yet.', 'no leases at that label: unchanged');
+    assert.equal(btA.report.trackRecordSentence(sc, 'Medium'), 'Medium confidence: too few tests to say yet.');
+    // the county figures are the Ventura County group's own, not the whole box's
+    const whole = btA.report.accuracyLine({ ...sc, counties: undefined });
+    assert.match(whole, /^Blind-tested on 175 past Ventura-area leases:/, 'without the county block the whole box is quoted, as before');
+    assert.notEqual(line.split(';')[0], whole.split(';')[0]);
+    assert.equal(sc.counties.baseline.venturaCounty.ranged.n, 130);
+    // 99 leases in the county group: too small, back to the whole box
+    const rows99b = [...countyRows().filter(r => r.county !== 'Ventura'), ...countyRows().filter(r => r.county === 'Ventura').slice(0, 99)];
+    const scSmall = btA.report.buildScorecard(countyResults(rows99b));
+    assert.equal(scSmall.counties.baseline.venturaCounty.ranged.n, 99);
+    assert.match(btA.report.accuracyLine(scSmall), /^Blind-tested on 144 past Ventura-area leases:/);
+    assert.doesNotMatch(btA.report.accuracyLine(scSmall) + btA.report.trackRecordSentence(scSmall, 'High'), /Ventura County|LA-border area/);
+    assert.match(btA.report.trackRecordSentence(scSmall, 'High'), /^High confidence\. In blind tests on 144 past Ventura-area leases/);
+    // 100 exactly is enough
+    const rows100 = [...countyRows().filter(r => r.county !== 'Ventura'), ...countyRows().filter(r => r.county === 'Ventura').slice(0, 100)];
+    assert.match(btA.report.accuracyLine(btA.report.buildScorecard(countyResults(rows100))), /^Blind-tested on 100 past Ventura County leases:/);
+    // asking for a named area bypasses the county group
+    assert.match(btA.report.accuracyLine(sc, { areaLabel: 'Camarillo' }), /^Blind-tested on 175 past Camarillo leases:/);
+    assert.match(btA.report.trackRecordSentence(sc, 'High', { areaLabel: 'Camarillo' }), /on 175 past Camarillo leases,/);
+    assert.match(btA.report.accuracyLine(sc, { area: 'core' }) || 'none', /^Blind-tested on 175 past Ventura core leases:/);
+    const all = line + high;
+    assert.doesNotMatch(all, /accurate to|guarantee|promise|will |always|window|\bdays\b|weeks|months|chance|probab/i);
+  });
+
+  await check('Report: a "Ventura County vs the LA-border area" section shows both groups side by side for today\'s code and the proposed rules, the Westlake Village split, a city-by-county table and the county values; the old city-list rule is kept below for comparison', () => {
+    const rows = countyRows();
+    const results = readyForRender(r => {
+      r.mls = { mls: { baseline: rows, size25_item2: rows } };
+      r.countyFill = { closed: btA.metrics.countyFill(rows.map(x => ({ CountyOrParish: x.county }))), active: btA.metrics.countyFill([{ CountyOrParish: 'Ventura' }]) };
+    });
+    const sc = btA.report.buildScorecard(results);
+    const md = btA.report.renderReport(results, null, sc);
+    assert.match(md, /## Ventura County vs the LA-border area \(grouped by the MLS county\)/);
+    assert.match(md, /Of the 175 tested leases, 130 \(74\.3%\) are Ventura County and 45 \(25\.7%\) are Other counties \(LA-border area\)\./);
+    assert.match(md, /County values among the tested leases: Ventura 130, Los Angeles 45\./);
+    assert.match(md, /The county was known for every tested lease\./);
+    for (const m of ['baseline', 'size25_item2']) {
+      assert.match(md, new RegExp(`\\| ${m} \\| Ventura County \\| 130 \\|`));
+      assert.match(md, new RegExp(`\\| ${m} \\| Other counties \\(LA-border area\\) \\| 45 \\|`));
+      assert.match(md, new RegExp(`\\| ${m} \\| Both \\(the whole Ventura-area box\\) \\| 175 \\|`));
+    }
+    assert.match(md, /Coverage \| Typical miss \| Within \$300 \| Range hit/);
+    assert.match(md, /### Westlake Village, split by the MLS county/);
+    assert.match(md, /55 tested leases are in Westlake Village/);
+    assert.match(md, /\| Ventura County \| 30 \| 55% \|/);
+    assert.match(md, /\| Other counties \(LA-border area\) \| 25 \| 45% \|/);
+    assert.match(md, /### Leases by city and county/);
+    assert.match(md, /\| Westlake Village \| 30 \| 25 \| 0 \| 55 \|/);
+    assert.match(md, /\| Calabasas \| 0 \| 20 \| 0 \| 20 \|/);
+    assert.match(md, /\| All other cities \| 100 \| 0 \| 0 \| 100 \|/);
+    assert.match(md, /### For comparison: the old city-list rule/);
+    assert.match(md, /- County field \(CountyOrParish\): present on 175 of 175 closed records \(100\.0%\) and 1 of 1 active records/);
+    assert.match(md, /- County: "Ventura County" and "Other counties \(LA-border area\)" use the county the MLS records for each lease\. Every tested lease had a county\./);
+    assert.match(md, /staff sentences quote the Ventura County figures when that group has 100 or more leases with a range and no more than 2% of the leases lack a county/);
+    assert.match(md, /In this run the first line quotes Ventura County and the label sentences quote Ventura County\./);
+    assert.ok(md.includes(`- ${btA.report.accuracyLine(sc)}`), 'the preview prints the county-based line exactly');
+    assert.ok(md.includes(`- ${btA.report.trackRecordSentence(sc, 'High')}`));
+    assert.doesNotMatch(md, /Fake Street|0123456789abcdef/, 'aggregates only');
+    // no county data at all (an old cache): the preview says it falls back, and the section still renders
+    const old = readyForRender(r => { const nc = rows.map(x => ({ ...x, county: undefined })); r.mls = { mls: { baseline: nc, size25_item2: nc } }; });
+    const mdOld = btA.report.renderReport(old, null, btA.report.buildScorecard(old));
+    assert.match(mdOld, /County unknown for 175 of 175 tested leases \(100\.0%\)/);
+    assert.match(mdOld, /In this run the first line quotes the whole Ventura-area box and the label sentences quote the whole Ventura-area box\./);
+  });
+
+  await check('Local detail file: two columns are added at the END (county, county_group) so every existing column keeps its place', () => {
+    const csv = btA.report.detailCsv([{ pool: 'mls', method: 'baseline', rows: [fakeRow(1, 'Westlake Village', { county: 'Ventura' }), fakeRow(2, 'Westlake Village', { county: null })] }]).trim().split('\n');
+    assert.match(csv[0], /^pool,method,kind,key,date,address,city,type,area,beds,sqft,signed_rent,estimate,signed_minus_estimate,counted_comps,leased_comps,spread,confidence_label,county,county_group$/);
+    assert.match(csv[1], /,Ventura,Ventura County$/);
+    assert.match(csv[2], /,,Other counties \(LA-border area\)$/, 'no county: the old city list decides, and the file shows the county is blank');
+  });
+
+  await check('run.js end to end: leases with a county get a counties block in the scorecard and a county section in the report; the original numbers do not depend on it', () => {
+    const { spawnSync } = require('node:child_process');
+    const d = mkTmp(), outDir = mkTmp();
+    try {
+      const closed = Array.from({ length: 40 }, (_, i) => btRec({ ListingKey: `c${i}`, ListingId: `C${i}`, StreetNumberNumeric: 4000 + i * 2, StreetName: 'County', BedroomsTotal: 3, ClosePrice: 3000 + (i % 6) * 50, ListPrice: 3000 + (i % 6) * 50, OriginalListPrice: 3100, CloseDate: `2026-0${5 + Math.floor(i / 10)}-${String(1 + (i % 10) * 2).padStart(2, '0')}`, OnMarketDate: '2026-04-01', ListingContractDate: '2026-04-01', Latitude: 34.2 + (i % 5) * 0.001, Longitude: -119.2 + (i % 4) * 0.001, LivingArea: 1500, CountyOrParish: i % 2 ? 'Ventura' : 'Los Angeles' }));
+      const noCountyClosed = closed.map(({ CountyOrParish, ...rest }) => rest);
+      const runWith = (records, sub) => {
+        const dir = pathA.join(d, sub); fsA.mkdirSync(dir);
+        fsA.writeFileSync(pathA.join(dir, 'closed.json'), JSON.stringify(records));
+        for (const f of ['active', 'leadsimple', 'properties', 'analyses']) fsA.writeFileSync(pathA.join(dir, `${f}.json`), '[]');
+        fsA.writeFileSync(pathA.join(dir, 'meta.json'), JSON.stringify({ pulledAt: '2026-10-15T12:00:00Z', dataFrom: '2025-03-15', counts: {}, fidelity: null }));
+        const out = pathA.join(outDir, sub);
+        const res = spawnSync(process.execPath, [pathA.join(__dirname, 'backtest', 'run.js'), '--limit', '8', '--today', '2026-10-16', '--no-leak-test', '--no-asof-listing', '--out', out], { cwd: __dirname, env: { ...process.env, BACKTEST_CACHE_DIR: dir }, encoding: 'utf8', timeout: 120000 });
+        assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`.slice(-600));
+        return { sc: JSON.parse(fsA.readFileSync(pathA.join(out, '2026-10-16', 'scorecard.json'), 'utf8')), md: fsA.readFileSync(pathA.join(out, '2026-10-16', 'report.md'), 'utf8'), stdout: res.stdout };
+      };
+      const withC = runWith(closed, 'with'), without = runWith(noCountyClosed, 'without');
+      assert.equal(withC.sc.counties.unknown.leases, 0);
+      assert.equal(without.sc.counties.unknown.sharePct, 100);
+      assert.match(withC.stdout, /County field: on 40 of 40 closed and 0 of 0 active records \(closed values: (Ventura 20, Los Angeles 20|Los Angeles 20, Ventura 20)\)/);
+      assert.match(withC.md, /## Ventura County vs the LA-border area/);
+      assert.match(withC.md, /- County field \(CountyOrParish\): present on 40 of 40 closed records/);
+      // identical results with and without the county field, everywhere outside the county blocks
+      const strip = sc => { const { counties, scope, generatedAt, groups, ...rest } = JSON.parse(JSON.stringify(sc)); for (const m of Object.keys(groups)) for (const a of Object.keys(groups[m])) delete groups[m][a].countyGroup; return { ...rest, groups }; };
+      assert.deepEqual(strip(withC.sc), strip(without.sc), 'the county field changes nothing outside the county blocks and the scope sentence');
+    } finally { rmTmp(d); rmTmp(outDir); }
+  });
+
+  await check('County fallback fails closed and agrees with the scorecard\'s own flag: about 2.02% unknown (21 of 1,040) falls back to the whole-box wording, exactly 2.0% (20 of 1,000) still quotes Ventura County, and a missing or malformed unknown block falls back', () => {
+    const mk = (nVentura, nLa, nUnknown) => {
+      const rows = [
+        ...Array.from({ length: nVentura }, (_, i) => fakeRow(i, 'Thousand Oaks', { county: 'Ventura' })),
+        ...Array.from({ length: nLa }, (_, i) => fakeRow(5000 + i, 'Calabasas', { county: 'Los Angeles' })),
+      ];
+      for (let i = 0; i < nUnknown; i++) rows[i] = { ...rows[i], county: null }; // unknown Thousand Oaks leases: the city list calls them Ventura County
+      return btA.report.buildScorecard(countyResults(rows));
+    };
+    // 21 of 1,040 = 2.019%: the rounded percent reads 2.0, but the exact share is over the 2% limit
+    const over = mk(800, 240, 21);
+    assert.equal(over.counties.unknown.leases, 21);
+    assert.equal(over.counties.unknown.sharePct, 2, 'rounded to one decimal it reads 2.0');
+    assert.equal(over.counties.unknown.overLimit, true, 'the exact share (2.019%) is over');
+    assert.equal(btA.report.countySide(over, 'baseline'), null);
+    assert.equal(btA.report.countySide(over, 'size25_item2'), null);
+    assert.match(btA.report.accuracyLine(over), /^Blind-tested on 1\d\d\d past Ventura-area leases:/);
+    assert.doesNotMatch(btA.report.accuracyLine(over) + btA.report.trackRecordSentence(over, 'High'), /Ventura County|LA-border area/);
+    assert.match(btA.report.trackRecordSentence(over, 'High'), /on 1\d\d\d past Ventura-area leases,/);
+    // 20 of 1,000 = exactly 2.0%: not over the limit, so the county figures are quoted
+    const exact = mk(760, 240, 20);
+    assert.equal(exact.counties.unknown.sharePct, 2);
+    assert.equal(exact.counties.unknown.overLimit, false);
+    assert.ok(btA.report.countySide(exact, 'baseline'));
+    assert.match(btA.report.accuracyLine(exact), /^Blind-tested on 7\d\d past Ventura County leases:/);
+    assert.match(btA.report.trackRecordSentence(exact, 'High'), /on 7\d\d past Ventura County leases,/);
+    // a missing, empty or malformed unknown block cannot show the county is known: whole box
+    const base = mk(760, 240, 0);
+    assert.ok(btA.report.countySide(base, 'baseline'), 'sanity: the intact scorecard quotes Ventura County');
+    const variants = {
+      'no unknown block': sc => { delete sc.counties.unknown; },
+      'empty unknown block': sc => { sc.counties.unknown = {}; },
+      'no overLimit flag': sc => { delete sc.counties.unknown.overLimit; },
+      'overLimit not a boolean': sc => { sc.counties.unknown.overLimit = 'no'; },
+      'share missing': sc => { delete sc.counties.unknown.sharePct; },
+      'share not a number': sc => { sc.counties.unknown.sharePct = 'low'; },
+      'share over the limit with a false flag': sc => { sc.counties.unknown.sharePct = 3.5; },
+    };
+    for (const [name, mutate] of Object.entries(variants)) {
+      const sc = JSON.parse(JSON.stringify(base));
+      mutate(sc);
+      assert.equal(btA.report.countySide(sc, 'baseline'), null, name);
+      assert.match(btA.report.accuracyLine(sc), /^Blind-tested on 1000 past Ventura-area leases:/, name);
+      assert.doesNotMatch(btA.report.accuracyLine(sc), /Ventura County|LA-border area/, name);
+    }
+    const noCounties = JSON.parse(JSON.stringify(base)); delete noCounties.counties;
+    assert.equal(btA.report.countySide(noCounties, 'baseline'), null);
+    assert.equal(btA.report.countySide(null, 'baseline'), null);
+  });
+
+  await check('Local detail file: a Rincon row has a blank county and a blank county_group (it has no MLS county), while an MLS row with no county still shows the city-list group', () => {
+    const csv = btA.report.detailCsv([
+      { pool: 'rincon:full', method: 'baseline', rows: [fakeRow(1, 'Thousand Oaks', { kind: 'rincon', county: null })] },
+      { pool: 'mls', method: 'baseline', rows: [fakeRow(2, 'Thousand Oaks', { kind: 'mls', county: null }), fakeRow(3, 'Thousand Oaks', { kind: 'mls', county: 'Ventura' })] },
+    ]).trim().split('\n');
+    assert.match(csv[1], /,,$/, 'Rincon: county and county_group both blank');
+    assert.doesNotMatch(csv[1], /Ventura County/);
+    assert.match(csv[2], /,,Ventura County$/, 'MLS lease with no county: blank county, city-list group');
+    assert.match(csv[3], /,Ventura,Ventura County$/);
+  });
+
+  await check('Report: what the other-counties group holds is read from the run\'s own data (Los Angeles only: said so; anything else in it: said so), never typed in', () => {
+    const run = rows => btA.report.renderReport(readyForRender(r => { r.mls = { mls: { baseline: rows, size25_item2: rows } }; }), null);
+    const onlyLa = run(countyRows());
+    assert.match(onlyLa, /"Other counties \(LA-border area\)" means every county except Ventura\. In this run every other-county lease is Los Angeles County, so the label is exact today; the county values are printed on every run, so a change would show\./);
+    assert.doesNotMatch(onlyLa, /almost entirely/);
+    const withSb = run([...countyRows(), ...Array.from({ length: 3 }, (_, i) => fakeRow(700 + i, 'Carpinteria', { county: 'Santa Barbara' }))]);
+    assert.match(withSb, /In this run that group holds: Los Angeles 45, Santa Barbara 3 \(so it is not only Los Angeles County\)\./);
+    const none = run(countyRows().filter(r => r.county === 'Ventura'));
+    assert.match(none, /No tested lease is in that group by county\./);
+    const readme = fsA.readFileSync(pathA.join(__dirname, 'backtest', 'README.md'), 'utf8');
+    assert.doesNotMatch(readme, /almost entirely Los Angeles/);
+    assert.match(readme, /in the current pull every other-county lease is Los Angeles County, so the label is exact today/);
   });
   }
 

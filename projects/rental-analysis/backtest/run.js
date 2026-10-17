@@ -197,6 +197,9 @@ async function main() {
   const enteredAfterClose = cache.closed.filter(r => { const l = (r.OnMarketDate || r.ListingContractDate || '').slice(0, 10); return l && r.CloseDate && l > r.CloseDate.slice(0, 10); }).length;
   const completeAnalyses = cache.analyses.filter(a => a.status === 'complete');
   const staffRunMix = { total: completeAnalyses.length, multiFamily: completeAnalyses.filter(a => ['duplex', 'triplex', 'fourplex', 'apartment'].includes(a.subject_property_type)).length };
+  // The MLS county field is used only to group the results; its fill is measured and shown, never assumed.
+  const countyFill = { closed: M.countyFill(cache.closed), active: M.countyFill(cache.active) };
+  log(`County field: on ${countyFill.closed.known} of ${countyFill.closed.records} closed and ${countyFill.active.known} of ${countyFill.active.records} active records (closed values: ${countyFill.closed.values.map(v => `${v.value} ${v.count}`).join(', ')}).`);
   log(`Targets: ${mlsTargets.length} MLS (${mlsTargets.filter(t => t.area === 'core').length} core), ${rinconTargets.length} Rincon. Hold-out from ${holdoutStart} (${split.tune.length} tune / ${split.holdout.length} hold-out).`);
 
   // ── self-tests ─────────────────────────────────────────────────────────────
@@ -351,6 +354,7 @@ async function main() {
     dataPulledOn: localDateOrNull(cache.meta.pulledAt),
     dataCoverage,
     staffRunMix,
+    countyFill,
     dataFacts: { enteredAfterClose },
     network: guard.counts(),
   };

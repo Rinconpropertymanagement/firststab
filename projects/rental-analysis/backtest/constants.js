@@ -63,6 +63,15 @@ const RENTCAST_SHARE_PERCENT = 45;
 const LA_BORDER_CITIES = ['Westlake Village', 'Agoura Hills', 'Calabasas', 'West Hills', 'Woodland Hills', 'Malibu', 'Hidden Hills', 'Canoga Park', 'Agoura', 'Los Angeles'];
 const REGION_LABELS = { laBorder: 'LA-border cities', venturaOnly: 'Ventura-area excluding LA-border' };
 
+// Grouping by the MLS's own county field (Recore CRMLS field CountyOrParish; values seen: "Ventura", "Los Angeles").
+// This is for GROUPING ONLY: it never changes which comps the tool uses or any headline number. The "Ventura County"
+// label is accurate because it comes from the county field; a record with no county uses the city list above instead
+// (and is counted and reported). When more than COUNTY_UNKNOWN_LIMIT_PERCENT of the tested leases have no county the
+// report states it as a limit and the staff sentences go back to the all-box wording.
+const COUNTY_FIELD = 'CountyOrParish';
+const COUNTY_LABELS = { ventura: 'Ventura County', other: 'Other counties (LA-border area)' };
+const COUNTY_UNKNOWN_LIMIT_PERCENT = 2;
+
 // The saved data must have been pulled within this many days of the run, or the
 // scorecard is not trusted (so a stale cache cannot be published as fresh).
 const MAX_DATA_AGE_DAYS = 45;
@@ -98,6 +107,6 @@ const RECORE_DELAY_MS = 300;        // polite pause between requests
 
 module.exports = {
   COUNTY_BOX, CORE_BOX, PULL_PAD, DEFAULT_DATA_FROM, DEFAULT_TARGET_FROM, USABLE, USABLE_TARGET_TYPES,
-  RINCON, OUTCOME_MAX_DAYS, HOLDOUT_MONTHS, MIN_GROUP_N, TRACK_RECORD_MIN_LEASES, RENTCAST_SHARE_PERCENT, LA_BORDER_CITIES, REGION_LABELS, MAX_DATA_AGE_DAYS, HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH,
+  RINCON, OUTCOME_MAX_DAYS, HOLDOUT_MONTHS, MIN_GROUP_N, TRACK_RECORD_MIN_LEASES, RENTCAST_SHARE_PERCENT, LA_BORDER_CITIES, REGION_LABELS, COUNTY_FIELD, COUNTY_LABELS, COUNTY_UNKNOWN_LIMIT_PERCENT, MAX_DATA_AGE_DAYS, HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH,
   DUPLICATE_DISTANCE_METERS, LEAK, ACCEPTANCE, RECORE_PAGE, RECORE_DELAY_MS,
 };

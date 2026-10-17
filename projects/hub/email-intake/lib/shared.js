@@ -51,6 +51,7 @@
  * incompatible things, which is worse than two short, purpose-built loops.
  */
 
+const crypto = require('crypto');
 const cheerio = require('cheerio');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -203,13 +204,93 @@ async function writeAuditLog({ action, entity_type, entity_id, actor_id, privacy
   }
 }
 
+// ─── Work Order Alert exclusion ──────────────────────────────────────────
+// The Hub's own "Work Order Alert" emails (lib/notify.js sends them from the
+// noreply address below, to the two pod inboxes this connector reads) must NOT
+// be copied into missive_message_intake: when the optional description block
+// is switched on (approval-briefing/lib/work-order-notes-alert.js, spec
+// Section 6A) they carry tenant-written text, and a copy here is searchable by
+// every Archive Search user and reaches the archive passes. See
+// compliance/work-order-note-alerts-description-governance-review.md Section 8
+// (Asimov's ingestion ruling). This narrows collection: no new mailbox and no
+// new field; a skipped message simply is not written, so no row, no stub, no
+// body_text, nothing in missive_message_intake or archive_search_corpus.
+//
+// BOTH parts are required, never the subject alone: an outside sender could
+// copy the subject and hide a real message from complaint tracking.
+//   (a) the sender is the Hub notification address (case-insensitive, trimmed)
+//       and the subject, after any leading Re:/Fw:/Fwd:, starts with
+//       "Work Order Alert"  -> reason 'sender_and_subject'
+//   (b) REPLY GUARD: the sender is any other @rinconmanagement.com address and
+//       the subject starts the same way, because a staff reply can quote the
+//       alert body  -> reason 'internal_reply'
+// An outside sender with that subject is stored normally.
+//
+// KNOWN LIMIT: this trusts the From header Missive reports. A forged From of
+// the Hub address would be skipped (hidden from intake); mail authentication
+// (SPF/DKIM/DMARC on rinconmanagement.com) is what protects against forgery.
+const HUB_NOTIFICATION_SENDER = 'noreply@rinconmanagement.com'; // must equal the From address in lib/notify.js (a test checks)
+const INTERNAL_ADDRESS = /^[^@\s]+@rinconmanagement\.com$/;
+const ALERT_SUBJECT_START = 'work order alert';
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizedAlertSubject(subject) {
+  let s = typeof subject === 'string' ? subject.trim() : '';
+  for (let i = 0; i < 20; i++) {
+    const m = s.match(/^(?:re|fw|fwd)\s*:\s*/i);
+    if (!m) break;
+    s = s.slice(m[0].length);
+  }
+  return s.toLowerCase();
+}
+
+/** @returns {'sender_and_subject'|'internal_reply'|null} why a message is excluded, or null to store it. */
+function workOrderAlertExclusionReason(message) {
+  if (!message || typeof message !== 'object') return null;
+  if (!normalizedAlertSubject(message.subject).startsWith(ALERT_SUBJECT_START)) return null;
+  const addr = message.from_field && message.from_field.address;
+  const sender = typeof addr === 'string' ? addr.trim().toLowerCase() : '';
+  if (sender === HUB_NOTIFICATION_SENDER) return 'sender_and_subject';
+  if (INTERNAL_ADDRESS.test(sender)) return 'internal_reply';
+  return null;
+}
+
+/** Pure: true when storeMessage will skip this message. */
+function isWorkOrderAlertMessage(message) {
+  return workOrderAlertExclusionReason(message) !== null;
+}
+
 // ─── Storing one message ──────────────────────────────────────────────────
 // Implements plan Section 2.3 steps 6-7 in order: verbatim write commits
 // first (the actual "Rincon receives and stores" step), THEN the per-
 // message audit_log row, THEN — only after both have committed — the
 // body_text derivation. Returns the new/existing row's id. UNCHANGED
-// behavior from router.js's original inline version — moved, not rewritten.
+// behavior from router.js's original inline version — moved, not rewritten —
+// EXCEPT that a Hub "Work Order Alert" email (see isWorkOrderAlertMessage
+// above) is not stored at all: one counts-only audit event is written and
+// null is returned. Both callers count a null as "excluded", not "stored".
 async function storeMessage({ mailboxKey, conversationId, message }) {
+  const exclusionReason = workOrderAlertExclusionReason(message);
+  if (exclusionReason) {
+    const messageId = String(message.id);
+    await writeAuditLog({
+      action: 'email_intake.work_order_alert_excluded',
+      entity_type: 'missive_message',
+      entity_id: UUID_SHAPE.test(messageId) ? messageId : crypto.randomUUID(),
+      actor_id: 'email-intake-missive-sync',
+      privacy_category: 'collection',
+      risk_level: 'low',
+      // Ids and a reason code only. Never the subject, an address or the body.
+      details: {
+        missive_message_id: messageId,
+        missive_conversation_id: String(conversationId),
+        mailbox_key: mailboxKey,
+        reason: exclusionReason,
+      },
+    });
+    return null;
+  }
+
   const bodyHtml = typeof message.body === 'string' ? message.body : null;
 
   // Step 6 — verbatim, untouched, before anything else. Upsert on
@@ -293,4 +374,7 @@ module.exports = {
   getExistingMessageIds,
   writeAuditLog,
   storeMessage,
+  HUB_NOTIFICATION_SENDER,
+  workOrderAlertExclusionReason,
+  isWorkOrderAlertMessage,
 };

@@ -375,6 +375,7 @@ const {
   getExistingMessageIds,
   writeAuditLog,
   storeMessage,
+  isWorkOrderAlertMessage,
 } = require('./lib/shared');
 
 const MAILBOX_LABELS = {
@@ -582,6 +583,7 @@ async function syncConversationMessagesBackfill({ contentMailboxKey, teamId, con
   const existingIds = await getExistingMessageIds(conversationId);
 
   let stored = 0;
+  let excluded = 0;
   let until = null;
 
   for (;;) {
@@ -614,13 +616,15 @@ async function syncConversationMessagesBackfill({ contentMailboxKey, teamId, con
       }
 
       if (dryRun) {
-        stored++; // count only — no Supabase write in dry-run mode
+        if (isWorkOrderAlertMessage(full)) excluded++; else stored++; // count only — no Supabase write in dry-run mode
         continue;
       }
 
       try {
-        await storeMessage({ mailboxKey: contentMailboxKey, conversationId, message: full });
-        stored++;
+        // null = a Hub "Work Order Alert" email, deliberately not stored
+        // (lib/shared.js isWorkOrderAlertMessage): counted as excluded.
+        const rowId = await storeMessage({ mailboxKey: contentMailboxKey, conversationId, message: full });
+        if (rowId === null) excluded++; else stored++;
       } catch (err) {
         console.error(`[email-intake-backfill] Failed to store message ${msg.id} (conversation ${conversationId}):`, err.message);
       }
@@ -630,7 +634,7 @@ async function syncConversationMessagesBackfill({ contentMailboxKey, teamId, con
     until = messages[messages.length - 1].delivered_at;
   }
 
-  return stored;
+  return { stored, excluded };
 }
 
 // Common error-recording path — used both when the initial checkpoint read
@@ -754,6 +758,7 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId, chec
 
   let conversationsThisRun = 0;
   let messagesThisRun = 0;
+  let excludedThisRun = 0;
   let errors = 0;
   let naturalEndReached = false;
   let stoppedForLimit = false;
@@ -836,7 +841,9 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId, chec
 
         let stored = 0;
         try {
-          stored = await syncConversationMessagesBackfill({ contentMailboxKey, teamId, conversationId: conv.id, dryRun });
+          const synced = await syncConversationMessagesBackfill({ contentMailboxKey, teamId, conversationId: conv.id, dryRun });
+          stored = synced.stored;
+          excludedThisRun += synced.excluded;
         } catch (err) {
           console.error(`[${ts()}] ${label}: failed to sync conversation ${conv.id}:`, err.message);
           errors++;
@@ -957,7 +964,7 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId, chec
       actor_id: 'email-intake-missive-backfill',
       privacy_category: 'collection',
       risk_level: 'low',
-      details: { mailbox_key: progressKey, conversations_seen: conversationsThisRun, messages_stored: messagesThisRun, errors, status, dry_run: dryRun },
+      details: { mailbox_key: progressKey, conversations_seen: conversationsThisRun, messages_stored: messagesThisRun, messages_excluded: excludedThisRun, errors, status, dry_run: dryRun },
     });
 
     // Distinct batch-level events, on top of (not instead of) the
@@ -1021,7 +1028,7 @@ async function backfillMailbox(teamId, { dryRun, maxConversations, batchId, chec
     }
   }
 
-  return { label, conversationsThisRun, messagesThisRun, errors, status };
+  return { label, conversationsThisRun, messagesThisRun, messagesExcluded: excludedThisRun, errors, status };
 }
 
 // ─── Graceful-enough shutdown — see "RESUMABILITY" above: nothing needs ──

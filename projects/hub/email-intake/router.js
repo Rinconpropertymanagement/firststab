@@ -102,6 +102,7 @@ async function syncConversationMessages({ mailboxKey, teamId, conversationId }) 
   const existingIds = await getExistingMessageIds(conversationId);
 
   let stored = 0;
+  let excluded = 0;
   let until = null;
 
   for (let page = 0; page < MAX_MESSAGE_PAGES_PER_CONVERSATION; page++) {
@@ -130,8 +131,10 @@ async function syncConversationMessages({ mailboxKey, teamId, conversationId }) 
       }
 
       try {
-        await storeMessage({ mailboxKey, conversationId, message: full });
-        stored++;
+        // null = a Hub "Work Order Alert" email, deliberately not stored
+        // (lib/shared.js isWorkOrderAlertMessage): counted as excluded.
+        const rowId = await storeMessage({ mailboxKey, conversationId, message: full });
+        if (rowId === null) excluded++; else stored++;
       } catch (err) {
         console.error(`[email-intake] Failed to store message ${msg.id} (conversation ${conversationId}):`, err.message);
       }
@@ -141,7 +144,7 @@ async function syncConversationMessages({ mailboxKey, teamId, conversationId }) 
     until = messages[messages.length - 1].delivered_at;
   }
 
-  return stored;
+  return { stored, excluded };
 }
 
 // ─── Syncing one mailbox ──────────────────────────────────────────────────
@@ -156,6 +159,7 @@ async function syncConversationMessages({ mailboxKey, teamId, conversationId }) 
 async function syncMailbox(mailboxKey, teamId) {
   let conversationsSeen = 0;
   let messagesStored = 0;
+  let messagesExcluded = 0;
   let errors = 0;
   let lastError = null;
   let newestConversationId = null;
@@ -210,7 +214,9 @@ async function syncMailbox(mailboxKey, teamId) {
         }
 
         try {
-          messagesStored += await syncConversationMessages({ mailboxKey, teamId, conversationId: conv.id });
+          const result = await syncConversationMessages({ mailboxKey, teamId, conversationId: conv.id });
+          messagesStored += result.stored;
+          messagesExcluded += result.excluded;
         } catch (err) {
           console.error(`[email-intake] Failed to sync conversation ${conv.id} (mailbox ${mailboxKey}):`, err.message);
           errors++;
@@ -242,12 +248,12 @@ async function syncMailbox(mailboxKey, teamId) {
     errors++;
   }
 
-  return { conversationsSeen, messagesStored, errors };
+  return { conversationsSeen, messagesStored, messagesExcluded, errors };
 }
 
 // ─── One full run, across every allowlisted mailbox ──────────────────────
 async function runMissiveSync() {
-  const summary = { mailboxes_checked: 0, conversations_seen: 0, messages_stored: 0, errors: 0 };
+  const summary = { mailboxes_checked: 0, conversations_seen: 0, messages_stored: 0, messages_excluded: 0, errors: 0 };
 
   for (const teamId of MISSIVE_ALLOWED_TEAM_IDS) {
     assertAllowedTeam(teamId, `mailbox team:${teamId}`); // structurally always true — see assertAllowedTeam's own comment
@@ -257,6 +263,7 @@ async function runMissiveSync() {
       const result = await syncMailbox(mailboxKey, teamId);
       summary.conversations_seen += result.conversationsSeen;
       summary.messages_stored += result.messagesStored;
+      summary.messages_excluded += result.messagesExcluded;
       summary.errors += result.errors;
     } catch (err) {
       // syncMailbox is written to never throw (see its own comment) — this
@@ -341,4 +348,9 @@ internalRouter.post('/api/email-intake/internal/sync-missive', async (req, res) 
   }
 });
 
-module.exports = { internalRouter, htmlToPlainText };
+module.exports = {
+  internalRouter,
+  htmlToPlainText,
+  // exported so the exclusion counters can be tested without a live Missive
+  _syncConversationMessagesForTesting: syncConversationMessages,
+};

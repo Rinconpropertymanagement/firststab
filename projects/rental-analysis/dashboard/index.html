@@ -749,6 +749,64 @@
     .legacy-range-box .legacy-note { display: block; font-size: 13px; color: #4b5563; margin-top: 4px; }
     .legacy-range-box .legacy-figures { display: block; font-size: 18px; font-weight: 600; color: #4b5563; }
 
+
+    /* ══════════════════════════════════════════════════════════════
+       OWNER VIEW — the one-page rent opinion for a property owner.
+       Built entirely from the server's ownerView object (lib/owner-view.js).
+       On screen it looks like the printed page; printing is done by the
+       existing "Print / Save as PDF" button (body.owner-mode hides the
+       full report and prints only this page, on one Letter sheet).
+       ══════════════════════════════════════════════════════════════ */
+    .toolbar-right { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .owner-note { display: none; font-size: 13px; color: #4b5563; margin: -4px 0 14px; line-height: 1.5; }
+    .owner-note.visible { display: block; }
+
+    @page owner { size: 8.5in 11in; margin: 0; }
+    .owner-doc { page: owner; background: #e5e7eb; border-radius: 10px; padding: 16px; }
+    .owner-page {
+      font-family: Lato, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 10pt; line-height: 1.38; color: #1f2937;
+      background: #fff; width: 100%; max-width: 8.5in; min-height: 10.96in; margin: 0 auto;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .op-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 0.36in 0.6in 0.12in; border-bottom: 3px solid #DF8C41; }
+    .op-head > div:first-child { flex: 1 1 auto; min-width: 0; }
+    .op-title { font-size: 15pt; font-weight: 800; line-height: 1.15; color: #41486F; letter-spacing: 0; }
+    .op-asof { font-size: 10.5pt; font-weight: 700; color: #b96f2e; margin-top: 5px; }
+    .op-brand { text-align: right; flex: none; }
+    .op-wordmark { display: inline-block; border: 1.5px solid #41486F; color: #41486F; font-size: 8.5pt; font-weight: 800; letter-spacing: 0.07em; padding: 5px 9px; }
+    .op-dre { font-size: 7.5pt; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #41486F; margin-top: 5px; }
+    .op-body { padding: 0.16in 0.6in 0.08in; display: flex; flex-direction: column; flex: 1 1 auto; }
+    .op-body p { margin: 0 0 6pt; }
+    .op-range { font-size: 11.5pt; line-height: 1.4; margin-bottom: 5pt !important; }
+    .op-agree { color: #374151; }
+    .op-table-wrap { overflow-x: auto; margin: 3pt 0 4pt; }
+    .op-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 8.8pt; }
+    .op-table th { background: #41486F; color: #fff; font-weight: 700; text-align: left; padding: 5pt 5pt; font-size: 8.3pt; }
+    .op-table td { padding: 3.6pt 5pt; vertical-align: top; overflow-wrap: anywhere; }
+    .op-table tbody tr:nth-child(odd) td { background: #F1DCCD; }
+    .op-table tbody tr:nth-child(even) td { background: #F8ECE6; }
+    .op-table .nw { white-space: nowrap; }
+    .op-table col.c-addr { width: 29%; } .op-table col.c-type { width: 10%; } .op-table col.c-br { width: 5.5%; }
+    .op-table col.c-ba { width: 6.5%; } .op-table col.c-sqft { width: 9%; } .op-table col.c-status { width: 16.5%; } .op-table col.c-amt { width: 23.5%; }
+    .op-table td:nth-child(3), .op-table td:nth-child(4), .op-table td:nth-child(5), .op-table th { white-space: nowrap; } /* bedrooms, baths and square feet never break ("1.75") */
+    .op-key { font-size: 7.8pt; color: #4b5563; line-height: 1.35; margin-bottom: 6pt !important; }
+    .op-count { font-size: 9pt; }
+    .op-disclaimer { font-size: 7.6pt; color: #4b5563; line-height: 1.35; margin: auto 0 0 !important; padding-top: 6pt; }
+    .op-footer { background: #FBEEDF; text-align: center; padding: 0.12in 0.6in; font-size: 8.5pt; line-height: 1.5; color: #374151; }
+    .op-footer .op-f1 { font-weight: 800; color: #41486F; font-size: 9.5pt; }
+    /* phone width, on screen only: tighter margins, the heading stacks, and the table scrolls sideways inside its own box
+       (the printed page never uses these) */
+    @media screen and (max-width: 640px) {
+      .owner-doc { padding: 8px; }
+      .op-head { flex-wrap: wrap; padding: 20px 18px 12px; }
+      .op-brand { text-align: left; }
+      .op-title { font-size: 15pt; }
+      .op-body { padding: 14px 18px 8px; }
+      .op-table { min-width: 560px; }
+      .op-footer { padding: 14px 18px; }
+    }
+
     /* ── Responsive ── */
     @media (max-width: 640px) {
       .field-grid { grid-template-columns: 1fr; }
@@ -781,12 +839,26 @@
     /* ── Print ── */
     @media print {
       body { background: #fff; }
-      .header, .report-toolbar, .form-view, .history-view, .saved-banner { display: none !important; }
+      .header, .report-toolbar, .form-view, .history-view, .saved-banner, .owner-note { display: none !important; }
+      /* the owner page is only ever printed in owner mode; in the full report's print it is not there at all */
+      body:not(.owner-mode) .owner-doc { display: none !important; }
       .page { max-width: 100%; padding: 0; }
       .report-doc { border: none; }
       .map-wrap { display: none !important; }
+
+      /* Owner view: print only the one-page owner document, on one Letter sheet, colors kept. */
+      body.owner-mode { min-height: 0; background: #fff; }
+      body.owner-mode .page { max-width: none; width: auto; margin: 0; padding: 0; }
+      body.owner-mode #errorBanner, body.owner-mode .saved-banner, body.owner-mode .owner-note, body.owner-mode #reportDoc { display: none !important; }
+      body.owner-mode .owner-doc { display: block !important; background: #fff; border-radius: 0; padding: 0; overflow: visible; }
+      /* a sheet that is at least a full page high, and never clipped: if an absurdly long address pushes the content over, it flows onto a second sheet instead of losing the disclaimer or the footer */
+      body.owner-mode .owner-page { width: 8.5in; max-width: none; height: auto; min-height: 10.96in; margin: 0; overflow: visible; }
+      body.owner-mode .op-table-wrap { overflow: visible; }
+      body.owner-mode .owner-page, body.owner-mode .owner-page * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     }
   </style>
+  <!-- Filled by setOwnerMode() only while the owner view is showing: an unnamed @page rule, for browsers that ignore the named page above. Empty otherwise, so the full report prints exactly as before. -->
+  <style id="ownerPageRule"></style>
 </head>
 <body>
 
@@ -944,9 +1016,15 @@
     </div>
     <div class="report-toolbar">
       <button class="btn-secondary" id="newAnalysisBtn">&larr; New Analysis</button>
-      <button class="btn-secondary" id="printBtn">Print / Save as PDF</button>
+      <div class="toolbar-right">
+        <!-- Shown only when the server sent an owner view for this report (see lib/owner-view.js) -->
+        <button class="btn-secondary" id="ownerViewBtn" style="display:none">Owner view (one page)</button>
+        <button class="btn-secondary" id="printBtn">Print / Save as PDF</button>
+      </div>
     </div>
+    <div class="owner-note" id="ownerViewNote" role="status"></div>
     <div class="report-doc" id="reportDoc"></div>
+    <div class="owner-doc" id="ownerDoc" style="display:none"></div>
   </div><!-- /reportView -->
 
 </div><!-- /page -->
@@ -988,7 +1066,7 @@
   function fmtBath(n) {
     if (n == null) return '&#8212;';
     const num = Number(n);
-    return Number.isInteger(num) ? String(num) : num.toFixed(1);
+    return Number.isInteger(num) ? String(num) : num.toFixed(1).replace(/\.8$/, '.75').replace(/\.3$/, '.25'); // the database keeps one decimal: 1.75 comes back as 1.8
   }
 
   // rent / sqft, e.g. "$1.90/sqft" — mirrors the "Per sqft" stat on Blanket's
@@ -1048,6 +1126,7 @@
   }
 
   function showView(view) {
+    if (view !== 'report') { setOwnerMode(false); document.getElementById('ownerDoc').innerHTML = ''; } // leaving a report always leaves the owner view too, and no old page stays behind
     document.getElementById('formView').style.display    = view === 'form'    ? '' : 'none';
     document.getElementById('historyView').style.display = view === 'history' ? '' : 'none';
     document.getElementById('loadingView').style.display  = view === 'loading' ? '' : 'none';
@@ -1372,6 +1451,7 @@
     showView('form');
   });
   document.getElementById('printBtn').addEventListener('click', () => window.print());
+  document.getElementById('ownerViewBtn').addEventListener('click', () => setOwnerMode(!document.body.classList.contains('owner-mode')));
 
   // ── Report rendering ─────────────────────────────────────────────────
   function statusMeta(status) {
@@ -2076,10 +2156,95 @@
       '</div>';
 
     document.getElementById('reportDoc').innerHTML = html;
+    renderOwnerView(extras);
 
     // Deferred so it runs after showView('report') makes the container
     // visible — see the comment in initMap() for why that matters.
     setTimeout(() => initMap(shown, comps), 0);
+  }
+
+  // ── Owner view (one page) ────────────────────────────────────────────
+  // The server (lib/owner-view.js) builds everything the owner reads: the sentences, the six rows, the
+  // counts and the date. This only lays that object out. It never works out, adds or picks anything, and the
+  // object carries no staff-only field, so nothing staff-only can end up on the page. Every string goes
+  // through esc(). Nothing here sends anything: the page is printed to PDF and attached to an email by a person.
+  function ownerSegsHtml(segs) {
+    return (Array.isArray(segs) ? segs : []).map(function (s) {
+      const t = esc(s && s.text);
+      return s && s.bold ? '<strong>' + t + '</strong>' : t;
+    }).join('');
+  }
+
+  function ownerParagraph(cls, segs) {
+    return Array.isArray(segs) && segs.length ? '<p class="' + cls + '">' + ownerSegsHtml(segs) + '</p>' : '';
+  }
+
+  // "$4,300/mo last asking": the dollar part never breaks in the middle, the words after it may wrap.
+  function ownerRentHtml(rent) {
+    const text = String(rent == null ? '' : rent);
+    const at = text.indexOf(' ');
+    return at === -1 ? '<span class="nw">' + esc(text) + '</span>' : '<span class="nw">' + esc(text.slice(0, at)) + '</span>' + esc(text.slice(at));
+  }
+
+  function buildOwnerHtml(v) {
+    const heads = (v.table && Array.isArray(v.table.heads) ? v.table.heads : []);
+    const rows = (v.table && Array.isArray(v.table.rows) ? v.table.rows : []);
+    const cols = ['c-addr', 'c-type', 'c-br', 'c-ba', 'c-sqft', 'c-status', 'c-amt'];
+    const brand = v.brand || {};
+    return (
+      '<div class="owner-page">' +
+        '<div class="op-head">' +
+          '<div><div class="op-title">' + esc(v.title) + '</div><div class="op-asof">' + esc(v.asOfLine) + '</div></div>' +
+          '<div class="op-brand"><div class="op-wordmark">' + esc(brand.wordmark) + '</div><div class="op-dre">' + esc(brand.dre) + '</div></div>' +
+        '</div>' +
+        '<div class="op-body">' +
+          ownerParagraph('op-intro', v.intro) +
+          ownerParagraph('op-facts', v.facts) +
+          ownerParagraph('op-range', v.range) +
+          ownerParagraph('op-agree', v.agreement) +
+          ownerParagraph('op-goal', v.goal) +
+          ownerParagraph('op-ends', v.ends) +
+          '<div class="op-table-wrap"><table class="op-table"><colgroup>' + cols.map(function (c) { return '<col class="' + c + '">'; }).join('') + '</colgroup>' +
+            '<thead><tr>' + heads.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') + '</tr></thead>' +
+            '<tbody>' + rows.map(function (r) {
+              return '<tr><td>' + esc(r.address) + '</td><td>' + esc(r.type) + '</td><td>' + esc(r.beds) + '</td><td>' + esc(r.baths) +
+                '</td><td>' + esc(r.sqft) + '</td><td>' + esc(r.status) + '</td><td>' + ownerRentHtml(r.rent) + '</td></tr>';
+            }).join('') + '</tbody></table></div>' +
+          '<p class="op-key">' + esc(v.key) + '</p>' +
+          '<p class="op-count">' + esc(v.countLine) + '</p>' +
+          '<p class="op-disclaimer">' + esc(v.disclaimer) + '</p>' +
+        '</div>' +
+        '<div class="op-footer">' + (Array.isArray(v.footer) ? v.footer : []).map(function (line, i) {
+          return '<div' + (i === 0 ? ' class="op-f1"' : '') + '>' + esc(line) + '</div>';
+        }).join('') + '</div>' +
+      '</div>'
+    );
+  }
+
+  // Swaps the full report for the one-page owner view (and back). Printing then prints whichever one is showing.
+  function setOwnerMode(on) {
+    const btn = document.getElementById('ownerViewBtn');
+    const hasView = !!document.getElementById('ownerDoc').innerHTML;
+    const active = !!on && hasView;
+    document.body.classList.toggle('owner-mode', active);
+    document.getElementById('reportDoc').style.display = active ? 'none' : '';
+    document.getElementById('ownerDoc').style.display = active ? '' : 'none';
+    document.getElementById('ownerPageRule').textContent = active ? '@page { size: 8.5in 11in; margin: 0; }' : '';
+    btn.textContent = active ? 'Back to full report' : 'Owner view (one page)';
+    if (active) window.scrollTo({ top: 0 });
+  }
+
+  // Called each time a report is drawn (a live run or a reopened one): puts this report's owner view, or the plain
+  // reason there is none, on the page. The previous report's owner view never stays behind.
+  function renderOwnerView(extras) {
+    const v = extras && extras.ownerView && typeof extras.ownerView === 'object' ? extras.ownerView : null;
+    const note = document.getElementById('ownerViewNote');
+    document.getElementById('ownerDoc').innerHTML = v ? buildOwnerHtml(v) : '';
+    document.getElementById('ownerViewBtn').style.display = v ? '' : 'none';
+    const reason = !v && extras && typeof extras.ownerViewNote === 'string' ? extras.ownerViewNote : '';
+    note.textContent = reason;
+    note.classList.toggle('visible', !!reason);
+    setOwnerMode(false);
   }
 
   // ── Past reports ─────────────────────────────────────────────────────

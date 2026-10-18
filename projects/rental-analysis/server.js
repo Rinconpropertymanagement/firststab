@@ -720,6 +720,9 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // range (recommended_rent_*, raw_comp_rent_*): those are saved for the audit trail only.
     // A source that did not fully come back (while others supplied comps) is said so on the screen, in plain words;
     // nothing is saved for it and the numbers are unchanged.
+    // The answer also carries `ownerView` (the one-page owner view, built by lib/owner-view.js from this report's saved
+    // data; nothing staff-only is in it) or, when it cannot be offered, null plus a plain reason in `ownerViewNote`.
+    // Nothing about it is saved, and nothing here ever sends it anywhere: staff print it to PDF and email it themselves.
     return res.json(buildApiResponse({ analysis: updatedAnalysis, comps: responseComps, marketData, numbers, sourceNotes: buildSourceNotes({ sourceErrors, sourceWarnings }) }));
   } catch (err) {
     console.error(`[${ts}] Analysis pipeline error: id=${analysis.id}`, err.message);

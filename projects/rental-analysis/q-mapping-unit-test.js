@@ -10566,6 +10566,547 @@ async function main() {
   });
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Past reports (read-only list and reopen). Added after the entry-point harness checks; the
+  // harness (node q-entry-point-harness.js router) runs the real Hub router against a pretend database.
+  // ═══════════════════════════════════════════════════════════════════════════
+  console.log('--- Past reports: list, reopen, older format, the page ---');
+  {
+    const fsH = require('node:fs');
+    const pathH = require('node:path');
+    const vmH = require('node:vm');
+    const H = require('./lib/history');
+    const OcH = require('./lib/outcome');
+    const { computeNumbers: computeNumbersH } = require('./lib/analyze');
+    const { buildCompRows: buildCompRowsH } = require('./lib/comp-rows');
+    const { sizeBandPctFor: sizeBandPctForH } = require('./lib/weighting');
+    const hubDirH = pathH.join(__dirname, '..', 'hub', 'rental-analysis');
+    const hubExistsH = fsH.existsSync(hubDirH);
+
+    await check('Past reports / search text: only letters, digits, spaces and . \' # / & - survive; wildcard marks, commas, brackets, quotes and backslashes become spaces; at most 6 words of 40 characters from the first 200 typed characters', () => {
+      assert.deepEqual(H.searchWords('2461 Bunting Avenue'), ['2461', 'Bunting', 'Avenue']);
+      assert.deepEqual(H.searchWords('  2461   Bunting Ave., Ventura, CA 93003 '), ['2461', 'Bunting', 'Ave.', 'Ventura', 'CA', '93003']);
+      assert.deepEqual(H.searchWords("O'Brien St #4 & Co"), ["O'Brien", 'St', '#4', '&', 'Co']);
+      assert.deepEqual(H.searchWords('Bunt%ng_Ave*'), ['Bunt', 'ng', 'Ave']);
+      assert.deepEqual(H.searchWords('\\%_*,()"\u0000;='), []);
+      assert.deepEqual(H.searchWords("x'; drop table rental_analyses; --"), ["x'", 'drop', 'table', 'rental', 'analyses', '--']);
+      assert.deepEqual(H.searchWords('ｅｑ.ｘ'), ['eq.x'], 'full-width look-alikes are brought to plain letters before the check');
+      assert.deepEqual(H.searchWords('Cañon Ñandú'), ['Cañon', 'Ñandú'], 'letters of any language are kept');
+      assert.deepEqual(H.searchWords(''), []);
+      for (const notText of [undefined, null, 5, {}, ['a'], true]) assert.deepEqual(H.searchWords(notText), []);
+      assert.equal(H.searchWords('word '.repeat(50)).length, 6);
+      const long = H.searchWords('x'.repeat(5000));
+      assert.equal(long.length, 1);
+      assert.equal(long[0].length, 40);
+      assert.equal(H.searchWords(`${'a'.repeat(190)} ${'b'.repeat(190)}`).join(' ').length <= 200, true, 'only the first 200 typed characters are looked at');
+    });
+
+    await check('Past reports / web address options: 50 by default, any bigger number brought down to 100, plain messages for anything else, failed reports off unless "1" or "true"', () => {
+      assert.deepEqual(H.parseHistoryQuery({}), { limit: 50, offset: 0, words: [], showFailed: false });
+      assert.deepEqual(H.parseHistoryQuery(undefined), { limit: 50, offset: 0, words: [], showFailed: false });
+      assert.equal(H.parseHistoryQuery({ limit: '1' }).limit, 1);
+      assert.equal(H.parseHistoryQuery({ limit: '100' }).limit, 100);
+      assert.equal(H.parseHistoryQuery({ limit: '101' }).limit, 100);
+      assert.equal(H.parseHistoryQuery({ limit: '999999' }).limit, 100);
+      assert.equal(H.parseHistoryQuery({ limit: '' }).limit, 50);
+      assert.equal(H.parseHistoryQuery({ offset: '250' }).offset, 250);
+      assert.equal(H.parseHistoryQuery({ q: 'Bunting Ave', show_failed: '1' }).showFailed, true);
+      assert.equal(H.parseHistoryQuery({ show_failed: 'true' }).showFailed, true);
+      for (const v of ['0', '', 'yes', 'on', 'TRUE']) assert.equal(H.parseHistoryQuery({ show_failed: v }).showFailed, false, v);
+      for (const bad of [{ limit: '0' }, { limit: '-1' }, { limit: 'abc' }, { limit: '1.5' }, { limit: '1e3' }, { limit: ' 5' }, { limit: '1234567' }, { offset: '-1' }, { offset: 'x' }, { offset: '100001' }, { offset: '12345678' },
+        { limit: ['1', '2'] }, { q: ['a', 'b'] }, { q: { a: 1 } }, { show_failed: ['1', '0'] }, { offset: 5 }, { limit: 5 }]) {
+        const r = H.parseHistoryQuery(bad);
+        assert.equal(typeof r.error, 'string', JSON.stringify(bad));
+        assert.doesNotMatch(r.error, /violat|constraint|postgres|column|select/i, 'a plain message');
+      }
+    });
+
+    await check('Past reports / database request: finished reports only unless failed ones are asked for, newest first, one extra row to learn if there is more, every search word URL-encoded and ANDed', () => {
+      const q = H.buildListQuery({ limit: 50, offset: 100, words: [], showFailed: false });
+      const p = new URLSearchParams(q);
+      assert.equal(p.get('select'), H.LIST_COLUMNS);
+      assert.equal(p.get('order'), 'created_at.desc,id.desc');
+      assert.equal(p.get('limit'), '51');
+      assert.equal(p.get('offset'), '100');
+      assert.equal(p.get('status'), 'eq.complete');
+      assert.equal(p.getAll('subject_address').length, 0);
+      const failedToo = new URLSearchParams(H.buildListQuery({ limit: 5, offset: 0, words: ['Old', "O'Brien", '#4', 'a&b'], showFailed: true }));
+      assert.equal(failedToo.get('status'), null, 'no status filter when failed reports are asked for');
+      assert.deepEqual(failedToo.getAll('subject_address'), ['ilike.*Old*', "ilike.*O'Brien*", 'ilike.*#4*', 'ilike.*a&b*']);
+      assert.deepEqual([...failedToo.keys()].filter((k, i, all) => all.indexOf(k) === i).sort(), ['limit', 'offset', 'order', 'select', 'subject_address'], 'an "&" in a search word does not start a new filter');
+      assert.ok(!H.LIST_COLUMNS.split(',').includes('notes') && !H.REPORT_COLUMNS.split(',').includes('notes'), 'staff notes are never read');
+      assert.ok(!H.LIST_COLUMNS.split(',').some(c => /^(recommended_rent|raw_comp_rent)/.test(c)), 'the list does not even read the old wide range');
+      for (const col of H.LIST_COLUMNS.split(',').concat(H.REPORT_COLUMNS.split(','), H.COMP_COLUMNS.split(','))) assert.doesNotMatch(col, /email|phone|password|token|key$/i, col);
+    });
+
+    await check('Past reports / which kind of report: new when any of method_version, the headline columns or the counted-comps column is saved; older when finished with none of them; otherwise unfinished', () => {
+      assert.equal(H.reportFormat({ status: 'complete', method_version: 'cma-2026-10-v1', headline_range_low: 3900 }), 'new');
+      assert.equal(H.reportFormat({ status: 'complete', method_version: 'cma-2026-10-v1', counted_comp_count: 2 }), 'new', 'a thin report: no range, but it is the new method');
+      assert.equal(H.reportFormat({ status: 'complete', counted_comp_count: 0 }), 'new');
+      assert.equal(H.reportFormat({ status: 'complete', recommended_rent_low: 3000, method_version: null, headline_range_low: null, counted_comp_count: null }), 'older');
+      assert.equal(H.reportFormat({ status: 'complete' }), 'older');
+      assert.equal(H.reportFormat({ status: 'failed' }), 'unfinished');
+      assert.equal(H.reportFormat({ status: 'running' }), 'unfinished');
+      assert.equal(H.reportFormat({ status: 'pending' }), 'unfinished');
+      assert.equal(H.reportFormat(null), 'unfinished');
+    });
+
+    const LIST_ROW_KEYS = ['confidence_label', 'created_at', 'format', 'headline', 'id', 'run_by_name', 'status', 'subject_address', 'subject_bathrooms', 'subject_bedrooms', 'subject_property_type', 'subject_sqft', 'suggested_list_price'];
+    const listBase = { id: 'a1', created_at: '2026-10-18T03:52:56.846344+00:00', subject_address: '1 Test St, Ventura, CA 93003', subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, subject_property_type: 'single_family', status: 'complete', run_by: 'u1' };
+
+    await check('Past reports / one line of the list: a new report carries its saved range, suggested price and label; an older one only the "older" mark and no dollar figures at all; a failed one nothing; never run_by, emails or phone numbers', () => {
+      const fresh = H.shapeListRow({ ...listBase, method_version: 'cma-2026-10-v1', counted_comp_count: 13, headline_range_low: 3900, headline_range_high: 4100, suggested_list_price: 3950, confidence_label: 'medium', recommended_rent_low: 3500, recommended_rent_mid: 4000, recommended_rent_high: 4800, notes: 'x', email: 'a@b.test' }, 'Pat Runner');
+      assert.deepEqual(Object.keys(fresh).sort(), LIST_ROW_KEYS);
+      assert.deepEqual(fresh.headline, { low: 3900, high: 4100 });
+      assert.equal(fresh.suggested_list_price, 3950);
+      assert.equal(fresh.confidence_label, 'medium');
+      assert.equal(fresh.format, 'new');
+      assert.ok(!('older_range' in fresh), 'the old wide numbers of a new report are audit only and are not sent');
+      assert.equal(fresh.run_by_name, 'Pat Runner');
+      assert.ok(!JSON.stringify(fresh).includes('a@b.test'));
+      const thin = H.shapeListRow({ ...listBase, method_version: 'cma-2026-10-v1', counted_comp_count: 2 }, null);
+      assert.deepEqual([thin.format, thin.headline, thin.confidence_label, thin.suggested_list_price, thin.run_by_name], ['new', null, null, null, null]);
+      const older = H.shapeListRow({ ...listBase, recommended_rent_low: 3800, recommended_rent_mid: 4200, recommended_rent_high: 4650 }, 'Sam Second');
+      assert.deepEqual([older.format, older.headline, older.confidence_label, older.suggested_list_price], ['older', null, null, null]);
+      assert.ok(!('older_range' in older), 'an older row carries no old figures at all');
+      for (const figure of ['3800', '4200', '4650']) assert.ok(!JSON.stringify(older).includes(figure), `${figure} is not in an older row`);
+      const failed = H.shapeListRow({ ...listBase, status: 'failed' }, 'Pat');
+      assert.deepEqual([failed.format, failed.headline, failed.status], ['unfinished', null, 'failed']);
+      // Peter's rule: a saved "recommended" range that is not exactly $200 wide is never listed as one
+      for (const [low, high, price] of [[3900, 4400, 3950], [3900, 4100, 4200], [3900, 4100, null], [null, 4100, 3950], [3900, 4000, 3950]]) {
+        const bad = H.shapeListRow({ ...listBase, method_version: 'cma-2026-10-v1', counted_comp_count: 9, headline_range_low: low, headline_range_high: high, suggested_list_price: price, confidence_label: 'high' }, 'x');
+        assert.deepEqual([bad.headline, bad.suggested_list_price, bad.confidence_label], [null, null, null], JSON.stringify([low, high, price]));
+      }
+      assert.equal(H.shapeListRow({ ...listBase, method_version: 'cma-2026-10-v1', counted_comp_count: 9, headline_range_low: 3900, headline_range_high: 4100, suggested_list_price: 3950, confidence_label: 'amazing' }, 'x').confidence_label, null, 'a label outside the three words is not passed on');
+    });
+
+    // ── building "saved" reports with the real pipeline, so what is rebuilt can be compared with what the live run showed ──
+    const sourcesH = [{ id: 'src-r', name: 'RentCast' }, { id: 'src-c', name: 'CRMLS' }, { id: 'src-l', name: 'LeadSimple Move-Ins' }];
+    const namesH = Object.fromEntries(sourcesH.map(s => [s.id, s.name]));
+    const pickCols = (row, cols) => Object.fromEntries(cols.split(',').map(c => [c, row[c]]));
+    function makeSavedReport(seed) {
+      let state = seed;
+      const rand = () => (state = (state * 1664525 + 1013904223) % 4294967296) / 4294967296;
+      const pick = arr => arr[Math.floor(rand() * arr.length)];
+      const subject = {
+        address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: pick(['single_family', 'single_family', 'condo', 'townhouse', 'duplex']),
+        bedrooms: pick([2, 3, 4]), bathrooms: 2, sqft: pick([900, 1500, 2200]), furnished: rand() < 0.2, leaseTermMonths: pick([12, 12, 12, 6, 3]),
+        ageRestricted: rand() < 0.15, ownerGoal: pick(['lease_quickly', 'balanced', 'maximize_rent', undefined]),
+      };
+      const spread = pick([0.1, 0.1, 0.5, 2.5]);
+      const count = Math.floor(rand() * 26);
+      const comps = Array.from({ length: count }, (_, i) => {
+        const src = pick(sourcesH);
+        return {
+          address: `${100 + i} Test St, Ventura, CA 93003`, source_id: src.id, source_name: src.name,
+          property_type: rand() < 0.93 ? subject.propertyType : pick(['single_family', 'condo', 'townhouse', 'duplex', null]),
+          bedrooms: rand() < 0.1 ? null : Math.max(0, subject.bedrooms + pick([0, 0, 0, 0, 0, 0, 0, 1, -1, 2])), bathrooms: 2,
+          sqft: rand() < 0.2 ? null : Math.round(subject.sqft * (0.72 + rand() * 0.56)), distance_miles: rand() < 0.1 ? null : Math.round(rand() * 150) / 100,
+          monthly_rent: 4000 + Math.round((rand() - 0.5) * 40 * spread) * 50, is_estimated_price: false,
+          listing_status: src.name === 'RentCast' ? pick(['active', 'off_market']) : pick(['leased', 'leased', 'leased', 'active']),
+          is_rincon_managed: rand() < 0.04, furnished_status: pick([null, null, null, null, 'unfurnished', 'unfurnished', 'partial', 'either', 'furnished']),
+          lease_term_class: pick([null, null, null, 'long', 'long', 'six_month', 'short']), age_restricted: pick([null, null, null, false, false, true]),
+          latitude: 34.2 + rand() / 100, longitude: -119.2 - rand() / 100, mls_flags: [], condition_tags: [],
+        };
+      });
+      const numbers = computeNumbersH({ comps, subject, properties: [] });
+      const analysisId = `bbbbbbbb-0000-4000-8000-${String(seed).padStart(12, '0')}`;
+      const compRows = buildCompRowsH(numbers.compsWithMatch, { analysisId, narratives: numbers.compsWithMatch.map((c, i) => (i % 3 === 0 ? `Narrative ${i}` : null)) })
+        .map((r, i) => ({ ...r, id: `comp-${seed}-${i}`, created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:00Z' }));
+      const patch = OcH.buildCompletionPatch({ numbers, ownerGoal: subject.ownerGoal, propertyId: null, subjectEstimatedRent: 3900, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003', rationale: `Saved explanation ${seed}.` });
+      const analysisRow = {
+        id: analysisId, subject_address: subject.address, subject_bedrooms: subject.bedrooms, subject_bathrooms: subject.bathrooms, subject_sqft: subject.sqft,
+        subject_property_type: subject.propertyType, subject_year_built: null, lease_term_months: subject.leaseTermMonths, furnished: subject.furnished,
+        run_by: 'u-1', subject_age_restricted: subject.ageRestricted, subject_subdivision: null, size_band_pct: sizeBandPctForH(subject.propertyType, subject.sqft),
+        created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:30Z', notes: 'PRIVATE', property_id: 'p-1', ...patch,
+      };
+      const liveComps = compRows.map((r, i) => ({ ...r, exclusion_reason: numbers.exclusionReasons[i] }));
+      const live = OcH.buildApiResponse({ analysis: analysisRow, comps: liveComps, marketData: null, numbers, sourceNotes: [] });
+      return { analysisRow, compRows, live, numbers };
+    }
+
+    await check('Past reports / round trip: 400 reports made by the real pipeline (random homes, goals, sizes, furnished, 55+, lease lengths, Rincon-managed) are rebuilt from the saved rows to exactly what the live run showed: range, prices, label and reasons, counts, why each home was not counted', () => {
+      const seen = { range: 0, thin: 0, none: 0, high: 0, medium: 0, low: 0, stretch: 0, hiddenStretch: 0, excluded: 0, goals: new Set() };
+      for (let seed = 1; seed <= 400; seed++) {
+        const { analysisRow, compRows, live } = makeSavedReport(seed);
+        const { report, flags } = H.rebuildReport({
+          analysis: pickCols(analysisRow, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH, runByName: 'Pat Runner', marketData: null,
+        });
+        assert.deepEqual(flags, [], `seed ${seed}: nothing disagrees`);
+        for (const k of ['headline', 'confidence', 'counted', 'noRange', 'sizeBand', 'sizeNote', 'accuracyLine']) assert.deepEqual(report[k], live[k], `seed ${seed}: ${k}`);
+        for (const key of Object.keys(report.analysis)) assert.deepEqual(report.analysis[key], live.analysis[key], `seed ${seed}: analysis.${key}`);
+        assert.ok(!('run_by' in report.analysis) && !('notes' in report.analysis) && !('property_id' in report.analysis), 'no run_by / notes / property_id');
+        for (const audit of OcH.AUDIT_ONLY_COLUMNS) assert.ok(!(audit in report.analysis), `seed ${seed}: ${audit}`);
+        assert.equal(report.comps.length, live.comps.length);
+        for (const c of report.comps) {
+          const was = live.comps.find(x => x.id === c.id);
+          assert.equal(c.exclusion_reason, was.exclusion_reason, `seed ${seed}: ${c.address}`);
+          assert.equal(c.narrative, was.narrative, 'comp narratives are shown exactly as saved');
+        }
+        assert.equal(report.analysis.rationale, analysisRow.rationale, 'the explanation is shown exactly as saved');
+        assert.equal(report.format, 'new');
+        assert.equal(report.olderFormat, false);
+        assert.ok(!('legacyRange' in report));
+        assert.deepEqual(report.sourceNotes, report.comps.length > 1 ? [H.ORDER_NOTE, H.NO_MARKET_NOTE] : [H.NO_MARKET_NOTE]);
+        // the headline numbers ARE the saved columns
+        if (report.headline) {
+          assert.equal(report.headline.low, analysisRow.headline_range_low);
+          assert.equal(report.headline.high, analysisRow.headline_range_high);
+          assert.equal(report.headline.listPrice, analysisRow.suggested_list_price);
+          assert.equal(report.headline.goal, analysisRow.owner_goal);
+          assert.equal(report.confidence.label, analysisRow.confidence_label);
+          assert.equal(report.headline.high - report.headline.low, 200, 'never a range of $500 or more');
+          seen.range++; seen[report.confidence.label]++; seen.goals.add(report.headline.goal);
+          if (report.headline.stretchPrice !== null) { seen.stretch++; assert.equal(report.headline.stretchPrice, analysisRow.stretch_price); assert.notEqual(report.confidence.label, 'low'); }
+          else { seen.hiddenStretch++; assert.equal(report.confidence.label, 'low'); assert.equal(analysisRow.stretch_price, null, 'a Low report has no saved stretch price'); }
+        } else if (report.comps.length) { seen.thin++; } else { seen.none++; }
+        seen.excluded += report.comps.filter(c => c.exclusion_reason).length;
+      }
+      assert.ok(seen.range >= 120 && seen.high >= 15 && seen.medium >= 15 && seen.low >= 15 && seen.thin >= 15 && seen.none >= 5 && seen.stretch >= 15 && seen.hiddenStretch >= 15 && seen.excluded >= 300 && seen.goals.size === 3, JSON.stringify({ ...seen, goals: [...seen.goals] }));
+    });
+
+    await check('Past reports / saved values win: a recount that disagrees (counts, label, size band) is flagged and noted on the screen, and the saved figures are the ones shown', () => {
+      let tried = 0;
+      for (let seed = 1; seed <= 400 && tried < 5; seed++) {
+        const { analysisRow, compRows } = makeSavedReport(seed);
+        if (analysisRow.headline_range_low == null) continue;
+        tried++;
+        const rebuild = tamper => H.rebuildReport({ analysis: pickCols({ ...analysisRow, ...tamper }, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH, runByName: null, marketData: null });
+        const counts = rebuild({ counted_comp_count: analysisRow.counted_comp_count + 1 });
+        assert.ok(counts.flags.includes('counts'));
+        assert.equal(counts.report.counted.total, analysisRow.counted_comp_count + 1);
+        assert.ok(counts.report.sourceNotes.includes(H.NOT_MATCHING_NOTE));
+        const other = analysisRow.confidence_label === 'low' ? 'high' : 'low';
+        const label = rebuild({ confidence_label: other });
+        assert.ok(label.flags.includes('label'));
+        assert.equal(label.report.confidence.label, other, 'the saved label is shown');
+        assert.equal(label.report.confidence.reasons.length, 1, 'only the plain count sentence, which cannot contradict the saved label');
+        assert.equal(rebuild({ size_band_pct: analysisRow.size_band_pct === 25 ? null : 25 }).flags.includes('size_band'), true);
+        assert.deepEqual(rebuild({}).flags, []);
+      }
+      assert.equal(tried, 5);
+    });
+
+    await check('Past reports / Peter\'s rule on a rebuilt new report: a saved range not exactly $200 wide, or with a price outside it or missing, is not shown as a recommendation and is passed on in no field', () => {
+      let tried = 0;
+      for (let seed = 1; seed <= 400 && tried < 6; seed++) {
+        const { analysisRow, compRows } = makeSavedReport(seed);
+        if (analysisRow.headline_range_low == null) continue;
+        const tampers = [{ headline_range_high: analysisRow.headline_range_low + 500 }, { headline_range_high: analysisRow.headline_range_low + 300 }, { suggested_list_price: analysisRow.headline_range_high + 50 }, { suggested_list_price: null }, { headline_range_low: null }, { headline_range_high: analysisRow.headline_range_low }];
+        const tamper = tampers[tried++];
+        const { report, flags } = H.rebuildReport({ analysis: pickCols({ ...analysisRow, ...tamper }, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH });
+        assert.ok(flags.includes('range_not_valid'), JSON.stringify(tamper));
+        assert.equal(report.headline, null);
+        assert.equal(report.confidence, null);
+        assert.equal(report.noRange, H.RANGE_NOT_SHOWN);
+        for (const col of ['headline_range_low', 'headline_range_high', 'suggested_list_price', 'stretch_price', 'confidence_label']) assert.equal(report.analysis[col], null, col);
+      }
+      assert.equal(tried, 6);
+    });
+
+    await check('Past reports / the stretch price is shown on Medium and High reports only: a saved label that is missing or not one of the three words hides it too (in the headline AND the analysis)', () => {
+      let withStretch = 0;
+      for (let seed = 1; seed <= 400 && withStretch < 5; seed++) {
+        const { analysisRow, compRows } = makeSavedReport(seed);
+        if (analysisRow.stretch_price == null) continue;
+        withStretch++;
+        const go = tamper => H.rebuildReport({ analysis: pickCols({ ...analysisRow, ...tamper }, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH }).report;
+        assert.equal(go({}).headline.stretchPrice, analysisRow.stretch_price, 'a Medium or High report keeps it');
+        for (const label of [null, 'amazing', '', 'HIGH']) {
+          const r = go({ confidence_label: label });
+          assert.equal(r.headline.stretchPrice, null, JSON.stringify(label));
+          assert.equal(r.analysis.stretch_price, null, JSON.stringify(label));
+          assert.equal(r.confidence, null);
+        }
+        const low = go({ confidence_label: 'low', stretch_price: analysisRow.headline_range_high + 200 });
+        assert.equal(low.headline.stretchPrice, null);
+        assert.equal(low.analysis.stretch_price, null);
+      }
+      assert.equal(withStretch, 5);
+    });
+
+    await check('Past reports / an older report is shown as it was saved but never as a recommendation: no headline, no label, no suggested or stretch price, no accuracy line or size note, the old low/middle/high kept apart, the old written explanation and the old notes on each home NOT shown, no new range worked out', () => {
+      const olderRow = {
+        id: 'cccccccc-0000-4000-8000-000000000001', subject_address: '77 Old Method Way, Ventura, CA 93001', subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500,
+        subject_property_type: 'single_family', subject_year_built: null, lease_term_months: 12, furnished: false, run_by: 'u-9', status: 'complete', rationale: 'OLD-STYLE explanation: the range is $3,800 to $4,650.',
+        subject_estimated_rent: 4100, subject_latitude: 34.2, subject_longitude: -119.2, subject_zip: '93001', subject_age_restricted: false, subject_subdivision: null, size_band_pct: null,
+        owner_goal: null, headline_range_low: null, headline_range_high: null, suggested_list_price: null, stretch_price: null, confidence_label: null, confidence_spread: null,
+        counted_comp_count: null, counted_leased_count: null, method_version: null, recommended_rent_low: 3800, recommended_rent_mid: 4200, recommended_rent_high: 4650,
+        created_at: '2026-09-02T17:00:00Z', updated_at: '2026-09-02T17:00:30Z',
+      };
+      const comp = (id, over) => ({ id, source_id: 'src-c', address: `${id} Old Lane`, property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, monthly_rent: 4100, listing_status: 'leased', is_rincon_managed: false, narrative: `N ${id}`, mls_flags: [], condition_tags: [], ...over });
+      const comps = [comp('a', {}), comp('b', { sqft: 3300 }), comp('c', { property_type: 'condo' }), comp('d', { is_rincon_managed: true }), comp('e', { bedrooms: 5 }), comp('f', { furnished_status: 'furnished', age_restricted: true, lease_term_class: 'short', listing_status: 'active' })];
+      const { report, flags } = H.rebuildReport({ analysis: olderRow, comps, sourceNamesById: namesH, runByName: 'Sam Second' });
+      assert.deepEqual(flags, []);
+      assert.equal(report.format, 'older');
+      assert.equal(report.olderFormat, true);
+      assert.equal(report.headline, null);
+      assert.equal(report.confidence, null);
+      assert.equal(report.accuracyLine, null);
+      assert.equal(report.sizeBand, null);
+      assert.equal(report.sizeNote, null);
+      assert.equal(report.noRange, H.OLDER_NO_RANGE);
+      assert.deepEqual(report.legacyRange, { low: 3800, mid: 4200, high: 4650 });
+      assert.equal(report.analysis.rationale, null, 'the old written explanation is not shown');
+      assert.ok(report.comps.length === 6 && report.comps.every(c => c.narrative === null), 'the old notes on each home are not shown');
+      assert.ok(!JSON.stringify(report).includes('OLD-STYLE') && !/"narrative":"N /.test(JSON.stringify(report)), 'none of that text is anywhere in the answer');
+      assert.equal(report.analysis.stretch_price, null);
+      assert.equal(report.analysis.suggested_list_price, null);
+      for (const audit of OcH.AUDIT_ONLY_COLUMNS) assert.ok(!(audit in report.analysis), audit);
+      assert.deepEqual(Object.fromEntries(report.comps.map(c => [c.id, c.exclusion_reason])), { a: null, b: null, c: 'property_type_mismatch', d: 'rincon_managed', e: 'size_mismatch', f: null }, 'only the three rules that existed then; the size, furnished, short-term and 55+ rules did not');
+      assert.deepEqual(report.counted, { total: 3, leased: 2, active: 1, offMarket: 0 });
+      assert.equal(report.runByName, 'Sam Second');
+      // an older report with nothing saved at all, and one that never finished
+      const bare = H.rebuildReport({ analysis: { ...olderRow, recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null }, comps: [], sourceNamesById: namesH }).report;
+      assert.deepEqual(bare.legacyRange, { low: null, mid: null, high: null });
+      const failed = H.rebuildReport({ analysis: { ...olderRow, status: 'failed', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null, rationale: null }, comps, sourceNamesById: namesH }).report;
+      assert.equal(failed.format, 'unfinished');
+      assert.equal(failed.olderFormat, false);
+      assert.equal(failed.noRange, H.UNFINISHED_NO_RANGE.failed);
+      assert.equal(failed.headline, null);
+      const failedWithText = H.rebuildReport({ analysis: { ...olderRow, status: 'failed', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null, rationale: 'The recommended range of $3,000-$3,900' }, comps, sourceNamesById: namesH }).report;
+      assert.equal(failedWithText.analysis.rationale, null, 'a report that never finished cannot be told from an older one, so its old text is not shown either');
+      assert.ok(failedWithText.comps.every(c => c.narrative === null));
+      const running = H.rebuildReport({ analysis: { ...olderRow, status: 'running', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null }, comps: [], sourceNamesById: namesH }).report;
+      assert.equal(running.noRange, H.UNFINISHED_NO_RANGE.other);
+    });
+
+    await check('Past reports / saved area figures: used with a plain "latest saved" note when a row for the zip is saved, left out with a note when not; the accuracy sentences come from the CURRENT published scorecard (overridable only for tests)', () => {
+      let seed = 7;
+      while (makeSavedReport(seed).compRows.length < 3) seed++;
+      const { analysisRow, compRows, live } = makeSavedReport(seed);
+      const args = { analysis: pickCols(analysisRow, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH };
+      const withData = H.rebuildReport({ ...args, marketData: { zip: '93003', median_rent: 4000, fetched_at: '2026-10-17T21:41:02.674+00:00' } }).report;
+      assert.equal(withData.marketData.zip, '93003');
+      assert.ok(args.comps.length > 1, 'setup: two or more homes');
+      assert.deepEqual(withData.sourceNotes, [H.ORDER_NOTE, 'Area market figures are the latest saved for this zip code (updated 2026-10-17), not necessarily the figures from the day this report was run.']);
+      assert.equal(H.rebuildReport({ ...args, marketData: { zip: '93003' } }).report.sourceNotes.slice(-1)[0], 'Area market figures are the latest saved for this zip code, not necessarily the figures from the day this report was run.');
+      assert.equal(H.rebuildReport({ ...args, marketData: null }).report.marketData, null);
+      // nothing saved for the zip says "not saved"; a lookup that FAILED says "could not be loaded", never "not saved"
+      assert.deepEqual(H.rebuildReport({ ...args, marketData: null }).report.sourceNotes, [H.ORDER_NOTE, H.NO_MARKET_NOTE]);
+      assert.deepEqual(H.rebuildReport({ ...args, marketData: null, marketLookupFailed: true }).report.sourceNotes, [H.ORDER_NOTE, H.MARKET_FAILED_NOTE]);
+      assert.doesNotMatch(H.MARKET_FAILED_NOTE, /not saved/);
+      assert.deepEqual(H.rebuildReport({ ...args, marketData: { zip: '93003' }, marketLookupFailed: true }).report.sourceNotes.slice(-1)[0].startsWith('Area market figures are the latest saved'), true, 'figures that were read win over a failed flag');
+      // the order note appears only when there are two or more homes
+      assert.ok(!H.rebuildReport({ ...args, comps: args.comps.slice(0, 1) }).report.sourceNotes.includes(H.ORDER_NOTE));
+      assert.ok(!H.rebuildReport({ ...args, comps: [] }).report.sourceNotes.includes(H.ORDER_NOTE));
+      assert.equal(H.ORDER_NOTE, 'Comparable homes are listed nearest first; the order may differ from the original run.');
+      assert.equal(H.rebuildReport({ ...args }).report.accuracyLine, live.accuracyLine, 'with no override the current published scorecard is used, exactly as a live run uses it');
+      assert.equal(H.rebuildReport({ ...args, scorecard: null }).report.accuracyLine, null, 'a missing scorecard leaves the sentence out');
+      assert.match(fsH.readFileSync(pathH.join(__dirname, 'lib', 'history.js'), 'utf8'), /CURRENT published[\s*]+accuracy scorecard/);
+    });
+
+    await check('Past reports / hub router.js: exactly two history routes, each behind requireRentalAnalysisAccess, read-only (no run, no market-data fetch, no writer, no insert/update/upsert in that part of the file), no database wording sent back', () => {
+      if (!hubExistsH) return;
+      const src = fsH.readFileSync(pathH.join(hubDirH, 'router.js'), 'utf8');
+      const routes = [...src.matchAll(/router\.(get|post|put|patch|delete)\(\s*'(\/api\/rental-analysis\/history[^']*)',\s*([A-Za-z]+),/g)];
+      assert.deepEqual(routes.map(m => `${m[1]} ${m[2]} ${m[3]}`), ['get /api/rental-analysis/history requireRentalAnalysisAccess', 'get /api/rental-analysis/history/:id requireRentalAnalysisAccess']);
+      const part = src.slice(src.indexOf('// ─── Past reports (read-only)'), src.indexOf("// ─── GET /api/rental-analysis/property-lookup"));
+      assert.ok(part.length > 1500);
+      const code = part.replace(/\/\/.*$/gm, '');
+      for (const forbidden of ['getMarketData', 'runActiveSources', 'generateNarrative', 'lookupPropertyDetails', 'insert(', 'update(', 'upsert(', 'rentcast', 'process.env', 'err.message }', 'detail:']) assert.ok(!code.includes(forbidden), `the past-reports routes must not use ${forbidden}`);
+      assert.doesNotMatch(code, /res\.(json|send)\([^)]*err\b/, 'an error object is never sent to the browser');
+      assert.match(code, /Cache-Control', 'no-store'/);
+    });
+
+    await check('Past reports / the standalone app has no history route (it has no login) and does not even load the file; the Hub mounts its router AFTER requireLogin', () => {
+      const standalone = fsH.readFileSync(pathH.join(__dirname, 'server.js'), 'utf8');
+      assert.doesNotMatch(standalone, /\/api\/rental-analysis\/history|lib\/history|rebuildReport|buildListQuery/, 'server.js has no past-reports address and does not load the past-reports file');
+      if (!hubExistsH) return;
+      const hubServer = fsH.readFileSync(pathH.join(hubDirH, '..', 'server.js'), 'utf8');
+      const login = hubServer.indexOf('app.use(requireLogin);');
+      const mount = hubServer.indexOf('app.use(rentalAnalysisRouter);');
+      assert.ok(login > 0 && mount > login, 'requireLogin is registered before the rental analysis router');
+      assert.equal(fsH.readFileSync(pathH.join(hubDirH, 'lib', 'history.js'), 'utf8'), fsH.readFileSync(pathH.join(__dirname, 'lib', 'history.js'), 'utf8'), 'lib/history.js is identical in both lib folders');
+    });
+
+    // ── the page (both copies) ──────────────────────────────────────────────
+    const pagesH = [pathH.join(__dirname, 'dashboard', 'index.html'), ...(hubExistsH ? [pathH.join(hubDirH, 'dashboard', 'index.html')] : [])];
+    function loadPageH(file, historyAnswer) {
+      const html = fsH.readFileSync(file, 'utf8');
+      const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+      const els = {};
+      const makeEl = id => ({
+        id, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, dataset: {}, value: '', checked: false, innerHTML: '', textContent: '', disabled: false,
+        handlers: {}, addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); }, appendChild() {}, focusCalls: [], attrs: {},
+        focus(opts) { this.focusCalls.push(opts); }, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute() { return null; }, removeAttribute() {},
+        querySelector() { return makeEl('q'); }, querySelectorAll() { return []; }, closest() { return null; }, remove() {}, options: [],
+      });
+      const queried = {};
+      const document = { getElementById: id => els[id] || (els[id] = makeEl(id)), addEventListener() {}, querySelector: sel => queried[sel] || (queried[sel] = makeEl(sel)), querySelectorAll: () => [], createElement: () => makeEl('c'), body: makeEl('body') };
+      assert.match(html, /id="pastReportsBtn"[^>]*style="display:none"/, 'the button starts hidden');
+      document.getElementById('pastReportsBtn').style.display = 'none';
+      const consoleCalls = [], fetched = [];
+      const ctx = vmH.createContext({
+        document, window: { scrollTo() {}, print() {}, addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} },
+        fetch: async (url) => {
+          fetched.push(String(url));
+          if (String(url).includes('/history')) return historyAnswer(String(url));
+          if (String(url).includes('/users')) return { ok: true, status: 200, json: async () => [] };
+          if (String(url).includes('/map-config')) return { ok: true, status: 200, json: async () => ({ tileKey: null }) };
+          return { ok: false, status: 404, json: async () => ({}) };
+        },
+        console: { error: (...a) => consoleCalls.push(a), warn: (...a) => consoleCalls.push(a), log() {} },
+        setTimeout: () => 0, clearTimeout() {},
+      });
+      vmH.runInContext(script, ctx);
+      return { ctx, els, consoleCalls, fetched, queried, run: code => vmH.runInContext(code, ctx) };
+    }
+    const flushH = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+    await check('Past reports / the page asks once whether the list exists and shows the "Past reports" button only for a good answer: a 404 (the standalone app), a refusal, a broken answer or a network failure all leave it hidden, with nothing written to the console', async () => {
+      const answers = {
+        'a good list': { shown: true, fn: async () => ({ ok: true, status: 200, json: async () => ({ rows: [], limit: 1, offset: 0, hasMore: false }) }) },
+        'a 404': { shown: false, fn: async () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('not json'); } }) },
+        'a 403': { shown: false, fn: async () => ({ ok: false, status: 403, json: async () => ({ error: 'no access' }) }) },
+        'a login redirect page': { shown: false, fn: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('<html>'); } }) },
+        'an answer without a list': { shown: false, fn: async () => ({ ok: true, status: 200, json: async () => ({ error: 'x' }) }) },
+        'a null answer': { shown: false, fn: async () => ({ ok: true, status: 200, json: async () => null }) },
+        'the network down': { shown: false, fn: async () => { throw new TypeError('Failed to fetch'); } },
+      };
+      for (const file of pagesH) {
+        for (const [name, { shown, fn }] of Object.entries(answers)) {
+          const page = loadPageH(file, fn);
+          await flushH();
+          assert.equal(page.els.pastReportsBtn.style.display, shown ? '' : 'none', `${pathH.basename(pathH.dirname(pathH.dirname(file)))}: ${name}`);
+          assert.deepEqual(page.consoleCalls, [], `${name}: nothing is written to the console`);
+          assert.equal(page.fetched.filter(u => u.includes('/history')).length, 1, `${name}: one request, once`);
+          assert.equal(page.fetched.find(u => u.includes('/history')), '/api/rental-analysis/history?limit=1');
+        }
+      }
+    });
+
+    await check('Past reports / everything the server sends goes through esc(): hostile names, addresses and ids cannot add markup to the list, and the typed search text is never put into the page', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'<script>alert(2)</script>';
+      for (const file of pagesH) {
+        const page = loadPageH(file, async () => ({ ok: false, status: 404, json: async () => ({}) }));
+        const row = { id: `${evil}`, created_at: evil, subject_address: evil, subject_bedrooms: evil, subject_bathrooms: evil, subject_sqft: evil, subject_property_type: evil, status: 'complete', run_by_name: evil, format: 'new', headline: { low: 3900, high: 4100 }, suggested_list_price: 3950, confidence_label: evil };
+        for (const variant of [row, { ...row, format: 'older', headline: null, suggested_list_price: null, confidence_label: null }, { ...row, format: 'unfinished', status: evil }]) {
+          page.ctx.__row = variant;
+          const out = page.run('histRowHtml(__row)');
+          assert.ok(!out.includes('<img') && !out.includes('<script'), 'no tag from the data survives');
+          assert.ok((out.match(/<tr /g) || []).length === 1 && (out.match(/<\/tr>/g) || []).length === 1, 'still one row');
+          if (variant.format === 'older') {
+            const rangeCell = out.slice(out.indexOf('data-label="Range"'), out.indexOf('data-label="Confidence"'));
+            assert.match(rangeCell, /<span class="hist-tag">Older report<\/span>/);
+            assert.ok(!rangeCell.includes('$') && !/\d/.test(rangeCell.replace(/data-label="Range"/, '')), 'an older row shows only the tag, no dollar figures');
+          }
+        }
+        const src = fsH.readFileSync(file, 'utf8');
+        const block = src.slice(src.indexOf('// ── Past reports'), src.indexOf('// ── Init'));
+        assert.ok(block.length > 3000);
+        assert.doesNotMatch(block, /innerHTML\s*=\s*[^;]*(HIST\.query|histSearch|\.value)/, 'the search text never goes into HTML');
+        assert.match(block, /encodeURIComponent\(HIST\.query\)/, 'the search text goes only into the web address');
+        assert.match(block, /textContent =\s*\n?\s*'Saved report from '/, 'the saved-report banner is plain text, not HTML');
+      }
+    });
+
+    await check('Past reports / opening a saved report uses the SAME renderReport as a live run; the older report gets its grey banner at the top and its saved figures marked as the previous method; a new report gets no banner and no such box', () => {
+      const bannerText = 'Older report. This was run with the previous method (a wide range). Run it again for the current recommended range.';
+      for (const file of pagesH) {
+        const page = loadPageH(file, async () => ({ ok: false, status: 404, json: async () => ({}) }));
+        const analysis = { id: 'a', subject_address: '77 Old Method Way', subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, lease_term_months: 12, furnished: false, created_at: '2026-09-02T17:00:00Z', rationale: null };
+        const comps = [{ address: '1 A St', monthly_rent: 4100, listing_status: 'leased', property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, mls_flags: [] }];
+        page.ctx.__a = analysis; page.ctx.__c = comps;
+        page.ctx.__older = { headline: null, confidence: null, counted: { total: 1, leased: 1, active: 0, offMarket: 0 }, noRange: 'x', olderFormat: true, legacyRange: { low: 3800, mid: 4200, high: 4650 }, sourceNotes: [], format: 'older' };
+        page.run('renderReport(__a, __c, null, __older)');
+        const olderHtml = page.els.reportDoc.innerHTML;
+        assert.ok(olderHtml.startsWith(`<div class="older-banner">${bannerText}</div>`), 'the grey banner is the first thing in the report');
+        assert.match(olderHtml, /class="legacy-range-box"/);
+        assert.match(olderHtml, /Result saved by the previous method[\s\S]*\$3,800 to \$4,650 a month \(middle \$4,200\)[\s\S]*This is not a current recommendation\./);
+        assert.doesNotMatch(olderHtml.replace(bannerText, ''), /Recommended range|Suggested|Stretch price|class="rent-headline|class="no-range-box"/i, 'not drawn as a recommendation');
+        assert.match(olderHtml, /<span class="legacy-note">The written explanation from the previous method is not shown\.<\/span>/, 'the box says plainly that the old explanation is not shown');
+        assert.doesNotMatch(olderHtml, /Why This Range|rationale-box|section-heading">Why /, 'no explanation section for an older report');
+        assert.doesNotMatch(olderHtml, /comp-narrative/, 'no notes on the homes either');
+        page.ctx.__new = { headline: { low: 3900, high: 4100, lowLabel: 'Lease quickly', highLabel: 'Hold out for more', listPrice: 3950, goal: 'balanced', goalSentence: 'Based on your goal of a balanced approach, we suggest listing at $3,950.', stretchPrice: null, stretchWords: null }, confidence: { label: 'low', reasonText: 'r.' }, counted: { total: 1, leased: 1, active: 0, offMarket: 0 }, noRange: null, olderFormat: false, sourceNotes: [] };
+        page.ctx.__aNew = { ...analysis, rationale: 'The current written explanation.' };
+        page.run('renderReport(__aNew, __c, null, __new)');
+        const newHtml = page.els.reportDoc.innerHTML;
+        assert.ok(!newHtml.includes('older-banner">') && !newHtml.includes('class="legacy-range-box"'));
+        assert.match(newHtml, /Recommended range/);
+        assert.match(newHtml, /Why \$3,900&ndash;\$4,100\/mo/);
+        // a failed or never-finished report: the small counts box (and its dash-only price box) are left out
+        page.ctx.__unfinished = { headline: null, confidence: null, counted: { total: 0, leased: 0, active: 0, offMarket: 0 }, noRange: 'This report did not finish.', olderFormat: false, sourceNotes: [], format: 'unfinished' };
+        page.run('renderReport(__a, __c, null, __unfinished)');
+        assert.doesNotMatch(page.els.reportDoc.innerHTML, /class="stat-row|stat-label">Comps Counted|0 leased, 0 active/, 'no Comps Counted box on an unfinished report');
+        assert.match(page.els.reportDoc.innerHTML, /No comparable|This report did not finish\./);
+        for (const extras of ['__new', '__older']) {
+          page.run(`renderReport(__a, __c, null, ${extras})`);
+          assert.match(page.els.reportDoc.innerHTML, /stat-label">Comps Counted/, `${extras}: the box stays on finished reports`);
+        }
+        // a live run (an answer with none of the new fields) is drawn exactly as before
+        page.ctx.__live = { headline: null, confidence: null, counted: null, noRange: 'No comparable homes were found.', sourceNotes: [] };
+        page.run('renderReport(__a, __c, null, __live)');
+        assert.ok(!page.els.reportDoc.innerHTML.includes('older-banner">'));
+        assert.match(page.els.reportDoc.innerHTML, /class="no-range-box">No comparable homes were found\./);
+        // the saved banner
+        page.ctx.__saved = { analysis: { created_at: '2026-10-18T12:00:00Z' }, runByName: 'Pat <b>Runner</b>' };
+        page.run('showSavedBanner(__saved)');
+        assert.match(page.els.savedBannerText.textContent, /^Saved report from October 18, 2026, run by Pat <b>Runner<\/b>$/, 'plain text (set as text, so the tag is shown, not run)');
+        assert.equal(page.els.savedBanner.style.display, '');
+        page.run('hideSavedBanner()');
+        assert.equal(page.els.savedBanner.style.display, 'none');
+        // the existing live path hides the banner after a run
+        const src = fsH.readFileSync(file, 'utf8');
+        assert.match(src, /renderReport\(data\.analysis, data\.comps \|\| \[\], data\.marketData \|\| null, data\);\s*hideSavedBanner\(\);/);
+        assert.match(src, /renderReport\(data\.analysis, data\.comps \|\| \[\], data\.marketData \|\| null, data\);\s*showSavedBanner\(data\);/, 'a saved report goes through the same renderReport');
+      }
+    });
+
+    await check('Past reports / keyboard and contrast: after a saved report opens, focus moves to the report heading (tabindex -1, no scroll jump); the small grey list, phone-card and legacy-box text is #6b7280 or darker, never the pale #9ca3af', async () => {
+      for (const file of pagesH) {
+        const detail = { analysis: { id: 'a', subject_address: '1 Test St', subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, lease_term_months: 12, furnished: false, created_at: '2026-10-18T12:00:00Z', rationale: null }, comps: [], marketData: null, headline: null, confidence: null, counted: { total: 0, leased: 0, active: 0, offMarket: 0 }, noRange: 'x', sourceNotes: [], runByName: 'Pat', format: 'new' };
+        const page = loadPageH(file, async (url) => (url.includes('/history/') ? { ok: true, status: 200, json: async () => detail } : { ok: false, status: 404, json: async () => ({}) }));
+        await flushH();
+        await page.run('openSavedReport("11111111-1111-4111-8111-111111111111")');
+        const heading = page.queried['#reportDoc h2'];
+        assert.ok(heading, 'the report heading is looked up');
+        assert.equal(heading.attrs.tabindex, '-1');
+        assert.equal(JSON.stringify(heading.focusCalls), '[{"preventScroll":true}]', 'focus moved once, without scrolling');
+        assert.equal(page.els.reportView.style.display, '', 'the report is showing');
+        assert.deepEqual(page.consoleCalls, []);
+        const css = fsH.readFileSync(file, 'utf8');
+        for (const rule of ['.hist-sub', '.hist-none', '.hist-table td::before', '.legacy-range-box .legacy-label']) {
+          const at = css.indexOf(`${rule} {`);
+          assert.ok(at > 0, rule);
+          const body = css.slice(at, css.indexOf('}', at));
+          assert.doesNotMatch(body, /#9ca3af/i, `${rule} is not pale grey`);
+          assert.match(body, /color: #(6b7280|4b5563)/, `${rule} is #6b7280 or darker`);
+        }
+      }
+    });
+
+    await check('Past reports / the list page: search box, a table of date / address / ran by / range / confidence, "Load more", a "Show failed reports" box, a Back to list link, and a card layout at phone width (375px) with no sideways scrolling table', () => {
+      for (const file of pagesH) {
+        const html = fsH.readFileSync(file, 'utf8');
+        for (const id of ['histSearch', 'histShowFailed', 'histTable', 'histBody', 'histMore', 'historyView', 'savedBanner', 'backToListBtn', 'pastReportsBtn']) assert.match(html, new RegExp(`id="${id}"`), id);
+        assert.match(html, /<th>Date<\/th><th>Address<\/th><th>Ran by<\/th><th>Range<\/th><th>Confidence<\/th>/);
+        assert.match(html, />Show failed reports</);
+        assert.match(html, />Load more</);
+        assert.match(html, /&larr; Back to list/);
+        assert.match(html, />Past reports</);
+        const phone = html.slice(html.indexOf('@media (max-width: 640px)'));
+        assert.match(phone, /\.hist-table thead \{ display: none; \}/);
+        assert.match(phone, /\.hist-table tr \{[^}]*display|\.hist-table, \.hist-table tbody, \.hist-table tr, \.hist-table td \{ display: block; width: 100%; \}/);
+        assert.match(phone, /\.hist-table td::before \{ content: attr\(data-label\)/);
+        assert.match(html, /\.history-view, \.saved-banner \{ display: none !important; \}/, 'the list and the saved banner are not printed');
+      }
+    });
+
+    await check('Past reports / both dashboards are byte-identical apart from the Leaflet lines between the title and the style block, and both carry the new code', () => {
+      if (!hubExistsH) return;
+      const [standalone, hub] = pagesH.map(f => fsH.readFileSync(f, 'utf8'));
+      const before = html => html.slice(0, html.indexOf('</title>'));
+      const between = html => html.slice(html.indexOf('</title>'), html.indexOf('<style>'));
+      const after = html => html.slice(html.indexOf('<style>'));
+      assert.equal(before(hub), before(standalone));
+      assert.equal(after(hub), after(standalone));
+      assert.equal((between(standalone).match(/<(link|script)\b/g) || []).length, 2, 'the standalone page has just its two Leaflet tags there');
+      assert.ok(/leaflet\.css/.test(between(hub)) && /leaflet\.js/.test(between(hub)));
+      for (const html of [standalone, hub]) assert.match(html, /function detectPastReports\(\)/);
+    });
+  }
+
   console.log(`\n${passed} check(s) passed.${process.exitCode ? ' SOME CHECKS FAILED — see FAIL lines above.' : ''}`);
 }
 

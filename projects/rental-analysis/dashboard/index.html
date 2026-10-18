@@ -706,9 +706,62 @@
     }
     .report-footer .brand-name { font-weight: 700; color: var(--violet); }
 
+    /* ── Past reports (the list, the saved-report banner, the older-report notes) ── */
+    .history-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 12px; }
+    .history-controls input[type="search"] {
+      flex: 1 1 240px; min-width: 0; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 14px; font-family: inherit; color: #111827; background: #fff;
+    }
+    .history-controls input[type="search"]:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    .history-controls .checkbox-row { padding-top: 0; }
+    .hist-status { font-size: 13px; color: #6b7280; min-height: 18px; margin-bottom: 8px; }
+    .hist-table { width: 100%; border-collapse: collapse; }
+    .hist-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+    .hist-table td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; font-size: 13px; color: #374151; }
+    .hist-table tbody tr { cursor: pointer; }
+    .hist-table tbody tr:hover { background: #f9fafb; }
+    .hist-open { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: #1d4ed8; text-align: left; cursor: pointer; }
+    .hist-open:hover { text-decoration: underline; }
+    .hist-sub { display: block; font-size: 11px; color: #6b7280; margin-top: 2px; }
+    .hist-none { color: #6b7280; font-style: italic; }
+    .hist-tag { display: inline-block; white-space: nowrap; padding: 1px 7px; border-radius: 10px; background: #e5e7eb; color: #4b5563; font-size: 11px; font-weight: 600; }
+    .hist-table td strong { white-space: nowrap; }
+    .hist-tag.failed { background: #fee2e2; color: #b91c1c; }
+    .hist-conf-high { color: #15803d; font-weight: 600; }
+    .hist-conf-medium { color: #b45309; font-weight: 600; }
+    .hist-conf-low { color: #b91c1c; font-weight: 600; }
+    .hist-more { text-align: center; margin-top: 14px; }
+    .saved-banner {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px;
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; border-radius: 8px;
+      padding: 9px 14px; font-size: 13px; margin-bottom: 12px;
+    }
+    .link-btn { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: #1d4ed8; cursor: pointer; }
+    .link-btn:hover { text-decoration: underline; }
+    .older-banner {
+      background: #e5e7eb; border-bottom: 1px solid #d1d5db; color: #374151;
+      padding: 14px 28px; font-size: 14px; font-weight: 600; line-height: 1.5;
+    }
+    .legacy-range-box {
+      background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;
+      margin-bottom: 24px; font-size: 14px; color: #4b5563; text-align: center; line-height: 1.6;
+    }
+    .legacy-range-box .legacy-label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #4b5563; margin-bottom: 4px; }
+    .legacy-range-box .legacy-note { display: block; font-size: 13px; color: #4b5563; margin-top: 4px; }
+    .legacy-range-box .legacy-figures { display: block; font-size: 18px; font-weight: 600; color: #4b5563; }
+
     /* ── Responsive ── */
     @media (max-width: 640px) {
       .field-grid { grid-template-columns: 1fr; }
+      .older-banner { padding: 14px 16px; }
+      /* the list turns into one small card per report, so nothing needs side-scrolling */
+      .hist-table thead { display: none; }
+      .hist-table, .hist-table tbody, .hist-table tr, .hist-table td { display: block; width: 100%; }
+      .hist-table tr { border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; background: #fff; }
+      .hist-table td { display: flex; justify-content: space-between; gap: 12px; border-bottom: none; padding: 4px 0; text-align: right; }
+      .hist-table td::before { content: attr(data-label); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; text-align: left; flex: none; padding-top: 2px; }
+      .hist-table td.hist-cell-address { display: block; text-align: left; }
+      .hist-table td.hist-cell-address::before { display: block; margin-bottom: 2px; }
       .stat-row, .stat-row.two-up { grid-template-columns: 1fr; }
       .rent-headline .amount { font-size: 30px; }
       .report-band, .report-body { padding: 18px 16px; }
@@ -729,7 +782,7 @@
     /* ── Print ── */
     @media print {
       body { background: #fff; }
-      .header, .report-toolbar, .form-view { display: none !important; }
+      .header, .report-toolbar, .form-view, .history-view, .saved-banner { display: none !important; }
       .page { max-width: 100%; padding: 0; }
       .report-doc { border: none; }
       .map-wrap { display: none !important; }
@@ -746,11 +799,13 @@
       <h1>Rental Market Analysis</h1>
       <p>Rincon Management</p>
     </div>
+    <!-- Shown only when the server answers the past-reports list (the Hub does; the standalone app has no login and no list) -->
+    <button type="button" class="btn-secondary" id="pastReportsBtn" style="display:none">Past reports</button>
   </div>
 
   <!-- ── Error banner (validation / network) ── -->
   <div class="banner-error" id="errorBanner">
-    <strong>Couldn&rsquo;t run this analysis</strong>
+    <strong id="errorBannerTitle">Couldn&rsquo;t run this analysis</strong>
     <span id="errorBannerText"></span>
   </div>
 
@@ -851,6 +906,28 @@
     </form>
   </div><!-- /formView -->
 
+  <!-- ── Past reports list ── -->
+  <div id="historyView" class="history-view" style="display:none">
+    <div class="card">
+      <div class="history-controls">
+        <input type="search" id="histSearch" placeholder="Search by address" maxlength="60" autocomplete="off" aria-label="Search past reports by address">
+        <div class="checkbox-row">
+          <input type="checkbox" id="histShowFailed">
+          <label for="histShowFailed">Show failed reports</label>
+        </div>
+        <button type="button" class="btn-secondary" id="histNewBtn">&larr; New Analysis</button>
+      </div>
+      <div class="hist-status" id="histStatus" role="status" aria-live="polite"></div>
+      <table class="hist-table" id="histTable">
+        <thead>
+          <tr><th>Date</th><th>Address</th><th>Ran by</th><th>Range</th><th>Confidence</th></tr>
+        </thead>
+        <tbody id="histBody"></tbody>
+      </table>
+      <div class="hist-more"><button type="button" class="btn-secondary" id="histMore" style="display:none">Load more</button></div>
+    </div>
+  </div><!-- /historyView -->
+
   <!-- ── Loading View ── -->
   <div id="loadingView" style="display:none">
     <div class="loading-wrap">
@@ -862,6 +939,10 @@
 
   <!-- ── Report View ── -->
   <div id="reportView" style="display:none">
+    <div class="saved-banner" id="savedBanner" style="display:none">
+      <span id="savedBannerText"></span>
+      <button type="button" class="link-btn" id="backToListBtn">&larr; Back to list</button>
+    </div>
     <div class="report-toolbar">
       <button class="btn-secondary" id="newAnalysisBtn">&larr; New Analysis</button>
       <button class="btn-secondary" id="printBtn">Print / Save as PDF</button>
@@ -954,7 +1035,10 @@
     return map[t] || t || '';
   }
 
-  function showError(msg) {
+  const DEFAULT_ERROR_TITLE = 'Couldn\u2019t run this analysis';
+
+  function showError(msg, title) {
+    document.getElementById('errorBannerTitle').textContent = title || DEFAULT_ERROR_TITLE;
     document.getElementById('errorBannerText').textContent = msg;
     document.getElementById('errorBanner').classList.add('visible');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -966,6 +1050,7 @@
 
   function showView(view) {
     document.getElementById('formView').style.display    = view === 'form'    ? '' : 'none';
+    document.getElementById('historyView').style.display = view === 'history' ? '' : 'none';
     document.getElementById('loadingView').style.display  = view === 'loading' ? '' : 'none';
     document.getElementById('reportView').style.display   = view === 'report'  ? '' : 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1274,6 +1359,7 @@
       }
 
       renderReport(data.analysis, data.comps || [], data.marketData || null, data);
+      hideSavedBanner();
       showView('report');
     } catch (err) {
       console.error(err);
@@ -1822,6 +1908,22 @@
     return safe.slice(0, at) + '<strong>' + esc(price) + '</strong>' + safe.slice(at + esc(price).length);
   }
 
+  // An older report (saved before the recommended-range method): the figures it was saved with, in grey and
+  // plainly marked as the previous method's result. Never drawn as a recommended range, and there is no
+  // suggested price or stretch price beside it.
+  function legacyRangeHtml(r) {
+    const have = r && (r.low != null || r.high != null || r.mid != null);
+    const figures = have
+      ? fmtMoney(r.low) + ' to ' + fmtMoney(r.high) + ' a month' + (r.mid != null ? ' (middle ' + fmtMoney(r.mid) + ')' : '')
+      : 'No figures were saved with this report.';
+    return '<div class="legacy-range-box">' +
+      '<span class="legacy-label">Result saved by the previous method</span>' +
+      '<span class="legacy-figures">' + figures + '</span>' +
+      'This is not a current recommendation.' +
+      '<span class="legacy-note">The written explanation from the previous method is not shown.</span>' +
+    '</div>';
+  }
+
   // The headline block, top to bottom: the recommended range with its two end labels, the
   // goal sentence with the suggested price, the stretch price on its own line (Medium and High
   // reports only), the confidence label with its reasons and track record, and the accuracy line.
@@ -1831,6 +1933,7 @@
     const x = extras || {};
     const h = x.headline;
     if (!h) {
+      if (x.olderFormat) return legacyRangeHtml(x.legacyRange);
       return '<div class="no-range-box">' +
         esc(x.noRange || 'This report was made before the recommended-range format, so only the comparable homes are shown.') +
       '</div>';
@@ -1880,6 +1983,8 @@
 
     const headline = extras && extras.headline ? extras.headline : null;
     const counted = extras && extras.counted ? extras.counted : null;
+    // a failed or never-finished report has no counts or price to show, so the small boxes are left out altogether
+    const hideStats = !!(extras && extras.format === 'unfinished');
 
     // RentCast's own automated estimate is shown only beside a recommended range, and labelled as not part of it.
     // With no range it is not shown anywhere (the box, the map pin's popup and the chart's dashed line all get a copy
@@ -1912,7 +2017,12 @@
         '</div>';
     const notUsedRowsHtml = notUsedComps.map(c => buildNotUsedRow(c, analysis)).join('');
 
+    const olderBanner = extras && extras.olderFormat
+      ? '<div class="older-banner">Older report. This was run with the previous method (a wide range). Run it again for the current recommended range.</div>'
+      : '';
+
     const html =
+      olderBanner +
       '<div class="report-band">' +
         '<div class="eyebrow">Rental Market Analysis</div>' +
         '<h2>' + esc(analysis.subject_address) + '</h2>' +
@@ -1924,6 +2034,7 @@
 
         buildAgreementStrip(headline, comps) +
 
+        (hideStats ? '' :
         '<div class="stat-row' + (estimateBox ? '' : ' two-up') + '">' +
           estimateBox +
           '<div class="stat-box">' +
@@ -1934,7 +2045,7 @@
             '<div class="stat-label">Price per Sqft</div>' +
             '<div class="stat-value">' + (headline ? pricePerSqft(headline.listPrice, analysis.subject_sqft) : '&#8212;') + '</div>' +
           '</div>' +
-        '</div>' +
+        '</div>') +
 
         sourceNotesHtml(extras) +
 
@@ -1972,9 +2083,176 @@
     setTimeout(() => initMap(shown, comps), 0);
   }
 
+  // ── Past reports ─────────────────────────────────────────────────────
+  // The list of reports that were run before, and reopening one. Read-only: nothing here runs, changes or
+  // deletes an analysis. The "Past reports" button stays hidden unless the server answers the list (the Hub
+  // does; the standalone app has no login and no such address, so it never shows the button). Everything the
+  // server sends is put on the page through esc(); the typed search text only ever goes into the web address.
+  const HIST = { rows: [], hasMore: false, query: '', showFailed: false, requestNo: 0, busy: false };
+  const HIST_PAGE_SIZE = 50;
+
+  function fmtWhen(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' ' +
+      d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function histRangeHtml(r) {
+    if (r.format === 'new') {
+      if (r.headline) {
+        return '<strong>' + fmtMoney(r.headline.low) + '&ndash;' + fmtMoney(r.headline.high) + '</strong>' +
+          (r.suggested_list_price != null ? '<span class="hist-sub">suggested ' + fmtMoney(r.suggested_list_price) + '</span>' : '');
+      }
+      return '<span class="hist-none">No range</span>';
+    }
+    // an older report shows no dollar figures in the list, only the tag (its old range is seen inside the report, in the grey box)
+    if (r.format === 'older') return '<span class="hist-tag">Older report</span>';
+    return '<span class="hist-tag failed">' + (r.status === 'failed' ? 'Failed' : 'Not finished') + '</span>';
+  }
+
+  function histConfidenceHtml(r) {
+    const label = ['high', 'medium', 'low'].includes(r.confidence_label) ? r.confidence_label : null;
+    return label ? '<span class="hist-conf-' + label + '">' + label.charAt(0).toUpperCase() + label.slice(1) + '</span>' : '&#8212;';
+  }
+
+  function histRowHtml(r) {
+    const meta = [
+      r.subject_bedrooms != null ? esc(r.subject_bedrooms) + ' bd' : '',
+      r.subject_bathrooms != null ? esc(fmtBath(r.subject_bathrooms)) + ' ba' : '',
+      r.subject_sqft ? fmtNum(r.subject_sqft) + ' sqft' : '',
+      esc(propertyTypeLabel(r.subject_property_type)),
+    ].filter(Boolean).join(' &middot; ');
+    return '<tr data-id="' + esc(r.id) + '">' +
+      '<td data-label="Date"><span class="hist-cell-body">' + esc(fmtWhen(r.created_at)) + '</span></td>' +
+      '<td class="hist-cell-address" data-label="Address"><span class="hist-cell-body"><button type="button" class="hist-open">' + esc(r.subject_address) + '</button>' +
+        (meta ? '<span class="hist-sub">' + meta + '</span>' : '') + '</span></td>' +
+      '<td data-label="Ran by"><span class="hist-cell-body">' + (r.run_by_name ? esc(r.run_by_name) : '&#8212;') + '</span></td>' +
+      '<td data-label="Range"><span class="hist-cell-body">' + histRangeHtml(r) + '</span></td>' +
+      '<td data-label="Confidence"><span class="hist-cell-body">' + histConfidenceHtml(r) + '</span></td>' +
+    '</tr>';
+  }
+
+  function setHistStatus(text) {
+    document.getElementById('histStatus').textContent = text;
+  }
+
+  function renderHistory() {
+    document.getElementById('histBody').innerHTML = HIST.rows.map(histRowHtml).join('');
+    document.getElementById('histTable').style.display = HIST.rows.length ? '' : 'none';
+    document.getElementById('histMore').style.display = HIST.hasMore ? '' : 'none';
+  }
+
+  // reset = start the list again from the newest (a new search, the failed box, or just opening the list);
+  // otherwise the next page is added under the ones already shown.
+  async function loadHistory(reset) {
+    if (reset) {
+      HIST.rows = [];
+      HIST.hasMore = false;
+      renderHistory();
+    } else if (HIST.busy) {
+      return;
+    }
+    const thisRequest = ++HIST.requestNo;
+    HIST.busy = true;
+    setHistStatus('Loading…');
+    const params = 'limit=' + HIST_PAGE_SIZE + '&offset=' + HIST.rows.length +
+      '&q=' + encodeURIComponent(HIST.query) + (HIST.showFailed ? '&show_failed=1' : '');
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/history?' + params, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (thisRequest !== HIST.requestNo) return; // a newer search was started; this answer is out of date
+      if (!data || !Array.isArray(data.rows)) throw new Error('unexpected answer');
+      HIST.rows = HIST.rows.concat(data.rows);
+      HIST.hasMore = !!data.hasMore;
+      renderHistory();
+      setHistStatus(HIST.rows.length ? '' : (HIST.query ? 'No past reports match that address.' : 'No past reports yet.'));
+    } catch (err) {
+      if (thisRequest !== HIST.requestNo) return;
+      setHistStatus('Couldn’t load past reports. Please try again.');
+    } finally {
+      if (thisRequest === HIST.requestNo) HIST.busy = false;
+    }
+  }
+
+  function showSavedBanner(data) {
+    const when = fmtDate(data.analysis && data.analysis.created_at);
+    document.getElementById('savedBannerText').textContent =
+      'Saved report from ' + when + (data.runByName ? ', run by ' + data.runByName : '');
+    document.getElementById('savedBanner').style.display = '';
+  }
+
+  function hideSavedBanner() {
+    document.getElementById('savedBanner').style.display = 'none';
+  }
+
+  async function openSavedReport(id) {
+    if (!id) return;
+    hideError();
+    setHistStatus('Opening saved report…');
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/history/' + encodeURIComponent(id), { credentials: 'same-origin' });
+      const data = await res.json().catch(() => null);
+      setHistStatus('');
+      if (!res.ok || !data || !data.analysis) {
+        showError((data && data.error) ? data.error : 'The server returned an error (HTTP ' + res.status + ').', 'Couldn’t open this saved report');
+        return;
+      }
+      renderReport(data.analysis, data.comps || [], data.marketData || null, data);
+      showSavedBanner(data);
+      showView('report');
+      // keyboard users: the list they were on is now hidden, so focus moves to the report's heading instead of being dropped at the top of the page
+      const heading = document.querySelector('#reportDoc h2');
+      if (heading) {
+        heading.setAttribute('tabindex', '-1');
+        heading.focus({ preventScroll: true });
+      }
+    } catch (err) {
+      setHistStatus('');
+      showError('Couldn’t reach the server. Please try again.', 'Couldn’t open this saved report');
+    }
+  }
+
+  document.getElementById('pastReportsBtn').addEventListener('click', () => {
+    hideError();
+    showView('history');
+    loadHistory(true);
+  });
+  document.getElementById('histNewBtn').addEventListener('click', () => { hideError(); showView('form'); });
+  document.getElementById('backToListBtn').addEventListener('click', () => { hideError(); showView('history'); });
+  document.getElementById('histMore').addEventListener('click', () => loadHistory(false));
+  document.getElementById('histShowFailed').addEventListener('change', (e) => {
+    HIST.showFailed = e.target.checked;
+    loadHistory(true);
+  });
+  let histSearchTimer = null;
+  document.getElementById('histSearch').addEventListener('input', (e) => {
+    clearTimeout(histSearchTimer);
+    const typed = e.target.value;
+    histSearchTimer = setTimeout(() => { HIST.query = typed.trim(); loadHistory(true); }, 300);
+  });
+  document.getElementById('histBody').addEventListener('click', (e) => {
+    const row = e.target.closest('tr[data-id]');
+    if (row) openSavedReport(row.getAttribute('data-id'));
+  });
+
+  // One request, once, when the page loads: does this server have the past-reports list? Only a good answer
+  // with a list in it shows the button; a 404 (the standalone app), a login or role refusal, a network
+  // failure or anything unexpected leaves it hidden, and nothing is written to the console.
+  function detectPastReports() {
+    fetch(API_BASE + '/api/rental-analysis/history?limit=1', { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data.rows)) document.getElementById('pastReportsBtn').style.display = '';
+      })
+      .catch(() => {});
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────
   loadUsers();
   loadMapConfig();
+  detectPastReports();
 </script>
 
 </body>

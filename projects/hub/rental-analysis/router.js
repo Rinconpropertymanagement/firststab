@@ -68,6 +68,11 @@
  *      tool in the Hub too, not just this one page. No CSP change was
  *      needed anywhere as a result of this choice.
  *
+ *   7. Past reports (added later): GET /api/rental-analysis/history and
+ *      GET /api/rental-analysis/history/:id list and reopen saved reports,
+ *      read-only. They exist only here, never in the standalone server.js
+ *      (which has no login). See the "Past reports" block below.
+ *
  * Only one router is exported (no internalRouter): confirmed by reading
  * the standalone rental-analysis/server.js in full — it has no cron/
  * webhook endpoint today, unlike tools that export one.
@@ -92,6 +97,7 @@ const { sizeBandPctFor } = require('./lib/weighting');
 const { parseOwnerGoalInput, classifySourceResult, noCompsRationale, buildCompletionPatch, headlineForDisplay, buildApiResponse, buildSourceNotes } = require('./lib/outcome');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
+const { isUuid, parseHistoryQuery, buildListQuery, shapeListRow, rebuildReport, REPORT_COLUMNS, COMP_COLUMNS } = require('./lib/history');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 
 // ─── Config ─────────────────────────────────────────────────────────────
@@ -268,6 +274,95 @@ router.get('/api/rental-analysis/users', requireRentalAnalysisAccess, async (req
   } catch (err) {
     console.error(`[${new Date().toISOString()}] users lookup error:`, err.message);
     return res.status(500).json({ error: 'Failed to load users.', detail: err.message });
+  }
+});
+
+// ─── Past reports (read-only) ──────────────────────────────────────────────
+// Added after the migration: a way for staff to list and reopen reports that
+// were run before. Hub only: the standalone app has no login, so it has no
+// copy of these two routes on purpose. Both sit behind the same two gates as
+// every other route here (the Hub login that runs before this router, then
+// requireRentalAnalysisAccess). They only READ saved rows: no RentCast, Recore
+// or AI call is ever made, and nothing is written. The rules (what is listed,
+// how a saved report is shown again) are in lib/history.js.
+//
+// Who may open what: anyone who may use Rental Analysis may open any saved
+// report, the same as the tool has always shown every report's comps to every
+// person with access. The only thing said about who ran it is their NAME, taken
+// from the same `users` table the "Run by" list uses; nobody's email or phone
+// number is ever read, and database error text never goes to the browser.
+async function lookupRunByNames(ids) {
+  const wanted = [...new Set((ids || []).filter(isUuid))];
+  if (!wanted.length) return {};
+  const rows = await select('users', `select=id,name&id=in.(${wanted.join(',')})`);
+  return Object.fromEntries(rows.map(u => [u.id, u.name]));
+}
+
+// ─── GET /api/rental-analysis/history ──────────────────────────────────────
+// ?limit= (default 50, at most 100) &offset= &q= (address text) &show_failed=1
+// Newest first. Failed (and never-finished) reports are left out unless asked for.
+router.get('/api/rental-analysis/history', requireRentalAnalysisAccess, async (req, res) => {
+  const parsed = parseHistoryQuery(req.query);
+  if (parsed.error) return validationError(res, parsed.error);
+  try {
+    const rows = await select('rental_analyses', buildListQuery(parsed));
+    const page = rows.slice(0, parsed.limit);
+    // a name that cannot be looked up leaves that column empty; it never stops the list
+    const names = await lookupRunByNames(page.map(r => r.run_by)).catch(err => {
+      console.error(`[${new Date().toISOString()}] past reports: names lookup error:`, err.message);
+      return {};
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      rows: page.map(r => shapeListRow(r, names[r.run_by])),
+      limit: parsed.limit,
+      offset: parsed.offset,
+      hasMore: rows.length > parsed.limit,
+    });
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] past reports list error:`, err.message);
+    return res.status(500).json({ error: 'Could not load past reports.' });
+  }
+});
+
+// ─── GET /api/rental-analysis/history/:id ──────────────────────────────────
+// One saved report, in the same shape POST /run answers with, so the page draws
+// it with the same code. 400 for an id that is not a UUID, 404 when there is no such report.
+router.get('/api/rental-analysis/history/:id', requireRentalAnalysisAccess, async (req, res) => {
+  const id = req.params.id;
+  if (!isUuid(id)) return validationError(res, 'id must be a report id (a UUID).');
+  try {
+    const found = await select('rental_analyses', `select=${REPORT_COLUMNS}&id=eq.${id}`);
+    if (!found.length) return res.status(404).json({ error: 'No saved report was found with that id.' });
+    const analysis = found[0];
+    // only the saved area-figures row for this zip is read (never getMarketData(), which can spend a RentCast request)
+    const zip = typeof analysis.subject_zip === 'string' && /^\d{5}$/.test(analysis.subject_zip) ? analysis.subject_zip : null;
+    // a figures lookup that FAILS is worded differently on screen from figures that were never saved
+    let marketLookupFailed = false;
+    const [comps, sources, names, marketRows] = await Promise.all([
+      select('rental_comps', `select=${COMP_COLUMNS}&analysis_id=eq.${id}&limit=500`),
+      select('rental_comp_sources', 'select=id,name'),
+      lookupRunByNames([analysis.run_by]).catch(() => ({})),
+      zip ? select('rental_market_data', `select=*&zip=eq.${zip}`).catch(err => {
+        marketLookupFailed = true;
+        console.error(`[${new Date().toISOString()}] past report ${id}: area figures lookup error:`, err.message);
+        return [];
+      }) : Promise.resolve([]),
+    ]);
+    const { report, flags } = rebuildReport({
+      analysis,
+      comps,
+      sourceNamesById: Object.fromEntries(sources.map(s => [s.id, s.name])),
+      runByName: names[analysis.run_by] || null,
+      marketData: marketRows[0] || null,
+      marketLookupFailed,
+    });
+    if (flags.length) console.warn(`[${new Date().toISOString()}] past report ${id}: a recount from the saved homes did not match the saved values (${flags.join(', ')}); the saved values are shown.`);
+    res.set('Cache-Control', 'no-store');
+    return res.json(report);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] past report ${id} error:`, err.message);
+    return res.status(500).json({ error: 'Could not load this saved report.' });
   }
 });
 

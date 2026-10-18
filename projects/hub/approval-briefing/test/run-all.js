@@ -14,7 +14,7 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 
-const FILES = ['run-tests.js', 'cleaner-tests.js', 'screen-corpus.js', 'no-ai-proof.js', 'fix-round-tests.js', 'round3-tests.js', 'round4-tests.js'];
+const FILES = ['run-tests.js', 'cleaner-tests.js', 'screen-corpus.js', 'no-ai-proof.js', 'fix-round-tests.js', 'round3-tests.js', 'round4-tests.js', 'unscreened-tests.js', 'mask-tests.js'];
 const quiet = process.argv.includes('--quiet');
 
 let passed = 0;

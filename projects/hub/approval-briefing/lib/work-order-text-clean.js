@@ -528,9 +528,485 @@ function cleanTextBoth(value) {
   return { shown, spaced, symbols, both, ambiguousLink: sink.ambiguousLink };
 }
 
+// ═══ THE OWNER'S "NO CONTENT SCREEN" PATH (WORK_ORDER_ALERT_DESCRIPTION_SCREEN=off) ═══
+// Added 2026-10-17 on Peter's explicit instruction (nothing held, nothing sent back
+// to Latchel; recorded as an owner override in the decision record, never as met).
+// When that switch is off the word-list screen is NOT consulted, so nothing is held for
+// what the text says. The two functions below are everything that path adds to this
+// file. They are NOT a screen: they never decide show-or-hide, they only
+//   (a) make the text safe to print (the same cleaning as above, with a web-like
+//       token neutralised instead of the block being held), and
+//   (b) replace, as a best effort and not a guarantee, the known shapes of some strings
+//       that must never be written into an inbox under Peter's standing rule (no SSNs,
+//       bank account numbers or passwords in any file or table): see maskNeverStore.
+// Phone numbers, e-mail addresses, names and gate or lockbox codes are NOT masked
+// (Peter's earlier decision). The default path (screen on) never calls either function.
+
+const MASK_TEXT = '[removed]';
+
+// The decimal digit of any script as a plain 0-9 string (other characters dropped).
+const ND_ONE = /\p{Nd}/u;
+function digitsOf(s) {
+  let out = '';
+  for (const ch of s) {
+    if (!ND_ONE.test(ch)) continue;
+    const cp = ch.codePointAt(0);
+    if (cp >= 0x30 && cp <= 0x39) { out += ch; continue; }
+    let zero = cp;
+    while (zero > 0 && ND_ONE.test(String.fromCodePoint(zero - 1))) zero--;
+    out += String((cp - zero) % 10);
+  }
+  return out;
+}
+
+function luhnOk(digits) {
+  let sum = 0;
+  let dbl = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+    dbl = !dbl;
+  }
+  return sum % 10 === 0;
+}
+
+const KW_START = '(?<![\\p{L}\\p{N}])';
+const KW_END = '(?![\\p{L}\\p{N}])';
+const PUNCT = '[\\s:=#.\\-\\u2013\\u2014>]';
+// A few filler words that may sit between a keyword and its value ("account number is 123...").
+const FILL_WORDS = 'number|numbers|num|no|nr|numero|n\\u00FAmero|is|es|are|was|the|my|our|bank|checking|savings|de|del|bancaria|corriente|ahorros';
+const FILLER = `(?:${PUNCT}{1,6}(?:${FILL_WORDS})${KW_END}){0,4}${PUNCT}{0,6}`;
+const SEP = '[ \\-\\u2010-\\u2015\\u2212]';
+// A run of digit groups (two or more digits each) with single spaces or dashes between them.
+const NUMBER_RUN = `\\p{Nd}{2,}(?:${SEP}\\p{Nd}{2,})*`;
+
+/** keyword, filler, value: the value (only) is replaced when `decide(value)` says so. */
+function keywordRule(keywords, valueSrc, decide) {
+  const re = new RegExp(`(${KW_START}(?:${keywords})${KW_END}${FILLER})(${valueSrc})`, 'giu');
+  return (s) => s.replace(re, (m, head, value) => (decide(value) ? head + MASK_TEXT : m));
+}
+
+const PHONE_SHAPE = /^\(?\p{Nd}{3}\)?[ .\-]\p{Nd}{3}[ .\-]\p{Nd}{4}$/u;       // phone numbers pass through (Peter's decision)
+const DATE_SHAPE = /^(?:\p{Nd}{4}[ \-]\p{Nd}{2}[ \-]\p{Nd}{2}|\p{Nd}{1,2}[ \-]\p{Nd}{1,2}[ \-]\p{Nd}{2,4})$/u;
+
+/** A date shape is only a date when its numbers can be one: year-month-day, or month-day-year / day-month-year (year 1900 to 2199, or two digits). */
+function isRealDate(v) {
+  if (!DATE_SHAPE.test(v)) return false;
+  const p = v.split(/[ \-]/u).map((x) => digitsOf(x));
+  const [a, b, c] = p.map(Number);
+  const inYears = (y) => y >= 1900 && y <= 2199;
+  if (p[0].length === 4) return inYears(a) && b >= 1 && b <= 12 && c >= 1 && c <= 31;
+  if (p[2].length === 3 || (p[2].length === 4 && !inYears(c))) return false;
+  return (a >= 1 && a <= 12 && b >= 1 && b <= 31) || (a >= 1 && a <= 31 && b >= 1 && b <= 12);
+}
+
+// "account", "acct", "routing", "aba", "rtn" or Spanish "cuenta", then a number of at least six digits.
+const maskAccountNumbers = keywordRule('accounts?|acct|routing|aba|rtn|cuenta', NUMBER_RUN, (v) => {
+  if (digitsOf(v).length < 6) return false;
+  return !(PHONE_SHAPE.test(v) || isRealDate(v));
+});
+
+// "card", a card brand or Spanish "tarjeta", then 13 to 19 digits (no check digit needed: the word says it is a card).
+const maskCardsByWord = keywordRule('cards?|credit card|debit card|tarjeta|visa|mastercard|master card|amex|american express|discover', NUMBER_RUN, (v) => {
+  const n = digitsOf(v).length;
+  return n >= 13 && n <= 19;
+});
+
+// "ssn", "social security", "social" and the like, then exactly nine digits (dashes or spaces allowed).
+const maskSocialByWord = keywordRule(
+  'ssn|ss ?#|social security|social sec|social|soc sec|seguro social',
+  '\\p{Nd}{3}[ \\-\\u2010-\\u2015\\u2212]?\\p{Nd}{2}[ \\-\\u2010-\\u2015\\u2212]?\\p{Nd}{4}(?!\\p{Nd})',
+  () => true,
+);
+
+// "cvv", "cvc", "csc" and the 3 or 4 digit code after it.
+const maskSecurityCodes = keywordRule('cvv2?|cvc2?|csc', '\\p{Nd}{3,4}(?!\\p{Nd})', () => true);
+
+// "iban" and the code after it (two letters, two digits, then up to 30 letters and digits). The value may run on over the next
+// words, but never over a second "iban" (so "iban X and iban Y" masks both).
+const maskIbans = keywordRule('iban', '[A-Za-z]{2}\\p{Nd}{2}(?: ?(?!iban(?![A-Za-z0-9]))[A-Za-z0-9]){10,30}(?![A-Za-z0-9])', () => true);
+
+// "swift" or "bic", optionally followed by "code", "number" or similar, then an 8 or 11 character code that has a digit or is all
+// capitals (so "swift response" and "swift repairs" are not touched; "SWIFT: DEUTDEFF" and "swift DEUTDEFF" are).
+const SWIFT_RE = new RegExp(
+  `(${KW_START}(?:swift|bic)${KW_END}(?:[\\s:=#.\\-/]{1,6}(?:code|number|no|num|is|bic|swift)${KW_END}){0,3}[\\s:=#.\\-/]{1,6})`
+  + '([A-Za-z]{6}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?(?![A-Za-z0-9]))', 'giu');
+// A password word typed in capitals right after "swift" ("SWIFT PASSWORD: x") is not a code: the password rules read it.
+const SWIFT_NOT_A_CODE = /^(?:password|passcode|contrasenas)$/i;
+function maskSwiftCodes(s) {
+  return s.replace(SWIFT_RE, (m, head, code) => (!SWIFT_NOT_A_CODE.test(code) && (/\p{Nd}/u.test(code) || code === code.toUpperCase()) ? head + MASK_TEXT : m));
+}
+
+// "password", "passcode", "pwd", Spanish "contrasena", then a value. The value is masked when the word is joined to it by a
+// colon, an equals sign or "is" / "es", or when the word standing alone looks like a secret (a digit, a symbol inside it, or
+// a capital in the middle). Everyday follow-on words ("password reset", "password for the portal", "password is wrong") stay.
+// Three readings, in this order: (1) a colon or equals sign whose first word is an everyday word but which is followed by
+// words that look like a passphrase ("password: correct horse battery"); (2) a few filler words between the keyword and the
+// value ("the password for the portal is hunter2", "password for wifi: Summer2024", "password reset to Temp1234"), or "to" /
+// "be" / "as" / "now" straight after the keyword when the value looks like a secret ("changed the password to Rincon2026",
+// "password will be Welcome1"); (3) the value right after the keyword (the original rule). After a value is masked, up to three
+// more password-like values joined to it by "/", a comma, "and" and the like are masked with it ("Passwords: Maria1990 / Pedro1991").
+// None of the three ever takes the keyword of another mask rule (or another password word) as a value or reads a phrase past one.
+const PW_STOP = new Set((`
+  the a an to for on in of at by and or but if is are was were be been being has have had do does did not no nor never wrong
+  incorrect invalid expired missing blank empty correct needed needs need required requires reset resets changed change changes
+  working works work worked broken locked saved set default same still just now new old weak strong protected manager that this
+  it its your my our their his her tenant owner vendor too very also please pls thanks thank cant cannot couldnt wont didnt
+  doesnt isnt wasnt arent dont unknown forgot forgotten lost unable issue problem problems error errors failed fails fail
+  sent emailed texted called provided given issued created updated deleted removed requested completed complete resolved fixed verified
+  confirmed accepted rejected denied approved posted received delivered submitted taken done ready active disabled enabled valid
+  ok okay fine good bad shared written listed attached included stored taped printed encrypted see none na n/a installed managed configured activated deactivated pending available unavailable
+  with from already held kept
+  el la los las un una de del en por para y o que es incorrecta incorrecto invalida invalido expirada expirado nueva nuevo
+  vieja viejo cambiada cambio olvido olvidada perdida problema falla mal bien ya aun todavia
+`).split(/\s+/).filter(Boolean));
+const PW_KEYWORD_SRC = 'passwords?|passcodes?|pass code|passwd|passphrase|pwd|contrase[n\\u00F1]as?';
+const PW_KEYWORD = `${KW_START}(?:${PW_KEYWORD_SRC})${KW_END}`;
+// The keywords of the other mask rules (Social Security, account, routing, card, security code, IBAN, SWIFT). A password rule
+// never takes one of them as its value and never reads a phrase past one or past another password word, so what stands after
+// the word is left for the rule that owns it (and the keyword stays visible in the printed text). The rules that need a keyword
+// run before the password rules (maskNeverStore), except the IBAN rule, which runs after them because its value can run on into
+// the next words.
+const RULE_KEYWORD_SRC = 'ssn|social|soc sec|accounts?|acct|routing|aba|rtn|cuenta|cards?|tarjeta|visa|mastercard|master card|amex|american express|discover|cvv2?|cvc2?|csc|iban|swift|bic';
+const ANY_KEYWORD = new RegExp(`${KW_START}(?:${PW_KEYWORD_SRC}|${RULE_KEYWORD_SRC})${KW_END}`, 'iu');
+const RULE_KEYWORD_WORD = new RegExp(`^(?:${RULE_KEYWORD_SRC})$`, 'iu');
+const PW_VALUE = '(\\[link removed\\]|\\[removed\\]\\S*|["\'\\u201C\\u2018\\u00AB`][^"\'\\u201D\\u2019\\u00BB`]{1,40}["\'\\u201D\\u2019\\u00BB`]|\\S+)';
+const PASSWORD_RE = new RegExp(
+  `(${PW_KEYWORD})`
+  + `([\\s:=\\-\\u2013\\u2014>]{0,6}(?:(?:is|es|are|was|era|son)${KW_END}[\\s:=\\-\\u2013\\u2014>]{0,6})?)`
+  + PW_VALUE, 'giu');
+// (2) filler words of letters between the keyword and the value, then a colon / equals sign, "is" / "was" ... or "to" / "be" /
+// "as" / "now" (the last four only for a value that looks like a secret): read one word at a time (see passwordFillerValue) so a
+// connector word that is only an everyday word ("... was reset to Temp1234") does not hide the real one.
+const PW_KEYWORD_G = new RegExp(PW_KEYWORD, 'giu');
+const PW_FILLER_WORD = /\s+[\p{L}'\u2019]{1,15}(?![\p{L}\p{N}'\u2019])/uy;
+const PW_CONNECTOR = new RegExp(`(\\s{0,3}[:=]\\s{0,3})|(\\s+(?:is|es|are|was|era|son)${KW_END}\\s{1,3})|(\\s+(?:to|be|as|now)${KW_END}\\s{1,3})`, 'iuy');
+const PW_VALUE_AT = new RegExp(PW_VALUE, 'uy');
+// the next value of a list ("Maria1990 / Pedro1991", "A1b2, C3d4 and E5f6")
+const PW_NEXT = new RegExp(`(?:\\s*[/|&,;]\\s*|\\s+(?:and|or|y|o)${KW_END}\\s+)`, 'iuy');
+// (1) a colon or equals sign (after at most four filler words), then up to five plain words
+const PW_WORD_SRC = "\\p{L}[\\p{L}'\\u2019-]*[.,;!?]*(?![\\p{L}\\p{N}_@#$%^&*+=~\\\\|<>/])";
+const PW_WORD_G = new RegExp(PW_WORD_SRC, 'gu');
+const PW_PHRASE_RE = new RegExp(
+  `(${PW_KEYWORD})((?:\\s+[\\p{L}'\\u2019]{1,15}){0,4}\\s{0,3}[:=]\\s{0,3})(${PW_WORD_SRC}(?:\\s+${PW_WORD_SRC}){0,4})`, 'giu');
+const PW_EMAIL = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/u;
+
+/** The value token of a password match, normalised: its text without trailing punctuation, that punctuation, the bare word, and what it looks like. */
+function pwValue(value) {
+  const core = value.replace(/[.,;:]+$/u, '');
+  const tail = value.slice(core.length);
+  const word = core.toLowerCase().replace(/^[("'“‘]+|[)"'”’]+$/gu, '').replace(/['’]/g, '');
+  const secretLooking = core === '[link removed]' || /^["'“‘«`]/.test(core) || /\p{Nd}/u.test(core) || /[@#$%^&*!_+=~\\|<>]/.test(core) || /\p{Ll}\p{Lu}/u.test(core);
+  return { core, tail, hasValue: /[\p{L}\p{N}]/u.test(core), stop: PW_STOP.has(word), keyword: RULE_KEYWORD_WORD.test(word), secretLooking };
+}
+const pwStopWord = (token) => PW_STOP.has(token.toLowerCase().replace(/[.,;!?]+$/u, '').replace(/['’]/g, '').replace(/^-+|-+$/g, ''));
+
+/** For the text after the colon of reading (1): where (an offset in `phrase`) the masking stops, or -1 when the phrase is a status note. */
+function passphraseEnd(phrase) {
+  const cut = phrase.search(ANY_KEYWORD);                            // never read past the keyword of another rule or another password word
+  const text = cut >= 0 ? phrase.slice(0, cut) : phrase;
+  const toks = [...text.matchAll(PW_WORD_G)];
+  let n = toks.length;
+  for (let k = 0; k < toks.length; k++) if (/[.,;!?]$/.test(toks[k][0])) { n = k + 1; break; }
+  const clause = toks.slice(0, n);
+  if (!clause.length || !pwStopWord(clause[0][0])) return -1;        // a first word that is not an everyday word: the rule below masks it
+  let stops = 0;
+  let others = 0;
+  let last = -1;
+  clause.forEach((t, k) => { if (pwStopWord(t[0])) stops++; else { others++; last = k; } });
+  if (others < 2 || others <= stops) return -1;                      // a short status note ("not working on portal"), not a passphrase
+  return clause[last].index + clause[last][0].replace(/[.,;!?]+$/u, '').length;
+}
+function maskPasswordPhrases(s) {
+  let out = '';
+  let at = 0;
+  PW_PHRASE_RE.lastIndex = 0;
+  let m;
+  while ((m = PW_PHRASE_RE.exec(s)) !== null) {
+    const keywordEnd = m.index + m[1].length;
+    const end = passphraseEnd(m[3]);
+    if (end < 0) { PW_PHRASE_RE.lastIndex = keywordEnd; continue; }   // read on from just after the keyword: a second password word inside this match gets its own turn
+    const valueStart = keywordEnd + m[2].length;
+    out += s.slice(at, valueStart) + MASK_TEXT;
+    at = valueStart + end;
+    PW_PHRASE_RE.lastIndex = at;
+  }
+  return out + s.slice(at);
+}
+/** After the end of a masked value: the end of the run of further password-like values joined to it ("/", a comma, "and" ...), at most three more. */
+function passwordListEnd(s, end) {
+  let pos = end;
+  for (let k = 0; k < 3; k++) {
+    PW_NEXT.lastIndex = pos;
+    const sep = PW_NEXT.exec(s);
+    if (!sep) break;
+    PW_VALUE_AT.lastIndex = pos + sep[0].length;
+    const val = PW_VALUE_AT.exec(s);
+    if (!val || val[0].startsWith(MASK_TEXT)) break;
+    const v = pwValue(val[0]);
+    // a letter and a digit, symbol or inner capital: a pure number or a plain word after the list separator is not taken
+    if (!v.hasValue || v.stop || v.keyword || !v.secretLooking || !/\p{L}/u.test(v.core) || PW_EMAIL.test(v.core)) break;
+    pos = val.index + v.core.length;
+  }
+  return pos;
+}
+/** After a keyword ending at `from`: the first value (start, end) that a filler-word reading says is a password, or null. */
+function passwordFillerValue(s, from) {
+  let pos = from;
+  for (let k = 0; k <= 6; k++) {
+    if (k > 0) {
+      PW_FILLER_WORD.lastIndex = pos;
+      const w = PW_FILLER_WORD.exec(s);
+      if (!w) return null;
+      pos += w[0].length;
+    }
+    PW_CONNECTOR.lastIndex = pos;
+    const c = PW_CONNECTOR.exec(s);
+    if (!c) continue;
+    const weak = c[3] !== undefined;
+    if (k === 0 && !weak) continue;                                  // straight after the keyword the colon and "is" forms belong to reading (3)
+    if (k > 4 && !weak) continue;                                    // up to four filler words, six before "to" / "be" / "as" / "now"
+    PW_VALUE_AT.lastIndex = pos + c[0].length;
+    const val = PW_VALUE_AT.exec(s);
+    if (!val || val[0].startsWith(MASK_TEXT)) continue;
+    const v = pwValue(val[0]);
+    if (!v.hasValue || v.stop || v.keyword || PW_EMAIL.test(v.core)) continue;   // an e-mail address after "password reset sent to:" is not a password
+    if (weak && !v.secretLooking) continue;                          // "password reset to tenant": only a secret-looking value after "to"
+    return { start: val.index, end: passwordListEnd(s, val.index + v.core.length) };
+  }
+  return null;
+}
+function maskPasswordFillers(s) {
+  let out = '';
+  let at = 0;
+  PW_KEYWORD_G.lastIndex = 0;
+  let m;
+  while ((m = PW_KEYWORD_G.exec(s)) !== null) {
+    const hit = passwordFillerValue(s, m.index + m[0].length);
+    if (!hit || hit.start < at) continue;
+    out += s.slice(at, hit.start) + MASK_TEXT;
+    at = hit.end;
+    PW_KEYWORD_G.lastIndex = Math.max(PW_KEYWORD_G.lastIndex, hit.end);
+  }
+  return out + s.slice(at);
+}
+function maskPasswordsRight(s) {
+  let out = '';
+  let at = 0;
+  PASSWORD_RE.lastIndex = 0;
+  let m;
+  while ((m = PASSWORD_RE.exec(s)) !== null) {
+    const [, kw, sep, value] = m;
+    if (value.startsWith(MASK_TEXT)) continue;                      // already masked: the mask is idempotent
+    const v = pwValue(value);
+    if (!v.hasValue) continue;                                      // only punctuation: there is no value
+    const assigned = /[:=>]/.test(sep) || /(?:^|\s)(?:is|es|are|was|era|son)(?![\p{L}\p{N}])/iu.test(sep);
+    if (v.stop || v.keyword) continue;                              // an everyday word, or the keyword of another rule, is not a password
+    if (!assigned && !v.secretLooking) continue;
+    const start = m.index + kw.length + sep.length;
+    out += s.slice(at, start) + MASK_TEXT;
+    at = passwordListEnd(s, start + v.core.length);
+    PASSWORD_RE.lastIndex = Math.max(PASSWORD_RE.lastIndex, at);
+  }
+  return out + s.slice(at);
+}
+function maskPasswords(s) { return maskPasswordsRight(maskPasswordFillers(maskPasswordPhrases(s))); }
+
+// A separated Social Security number (###-##-####, dashes or spaces) and a payment card number on its own (no card word in front of
+// it), in ONE pass over each run of digits (digits with at most one space or dash between any two), so that neither rule can cut
+// the other: the spans of both are united and every group that touches a span is replaced with it, whichever comes first
+// ("123-45-6789 4111 1111 1111 1111", "4111 1111 1111 1111 123-45-6789" and "123-45-6789 4521 4522 4523 4524" leave no digit of the
+// SSN or the card). A Social Security number is three groups of 3, 2 and 4 digits. The card readings are run on the whole run (a
+// card that contains an SSN-shaped stretch is masked whole) and again on the stretches between the SSNs (an SSN beside a card must
+// not use up the card's window). Two readings of a run for a card, each needing a valid check digit (Luhn) and 13 to 19 digits:
+//  1. The old content screen's own card test (kept in step with it by mask-tests.js C2): the run is read from its start, one
+//     longest window of 13 to 19 digits (ending at the end of a group) at a time, whatever the grouping; when a window fails the
+//     check digit the next window starts after it. A list of ordinary numbers (unit numbers, tickets, a phone number and an
+//     extension) is masked no more often than the check digit's own 1 in 10 for a single number.
+//  2. A number written the way cards are written (one group of 13 to 19 digits, 4-4-4-1 to 4-4-4-4-3, or the American Express
+//     4-6-5), wherever it starts inside a longer run, so a card number written straight after another number ("apt 12 4111 1111
+//     1111 1111") is found. A group of four 4-digit numbers is NOT masked just because its first digits look like a card prefix:
+//     the check digit must pass (unit and ticket numbers stay). The price is a second chance for the check digit to pass by luck
+//     in a long list of 4-digit numbers (the SPEC gives the measured rates).
+const DIGIT_RUN = new RegExp(`(?<!\\p{Nd})\\p{Nd}(?:${SEP}?\\p{Nd})*(?!\\p{Nd})`, 'gu');
+
+function isCardLayout(groups, i, j) {
+  if (i === j) return true;
+  const lens = [];
+  for (let k = i; k <= j; k++) lens.push(groups[k].digits.length);
+  const last = lens[lens.length - 1];
+  const fourFourFour = lens.length >= 4 && lens.slice(0, -1).every((n) => n === 4) && last >= 1 && last <= 4;     // 4-4-4-1 ... 4-4-4-4, 4-4-4-4-3
+  const amex = lens.length === 3 && lens[0] === 4 && lens[1] === 6 && lens[2] === 5;
+  return fourFourFour || amex;
+}
+
+/** The windows (first group, last group) of a run that are card numbers. */
+function cardWindows(groups) {
+  const hits = [];
+  let i = 0;
+  while (i < groups.length) {
+    let total = 0;
+    let best = -1;
+    let digits = '';
+    let bestDigits = '';
+    for (let j = i; j < groups.length; j++) {
+      total += groups[j].digits.length;
+      digits += groups[j].digits;
+      if (total > 19) break;
+      if (total >= 13) { best = j; bestDigits = digits; }
+    }
+    if (best >= 0) {
+      if (luhnOk(bestDigits)) hits.push([i, best]);
+      i = best + 1;
+    } else i++;
+  }
+  for (let a = 0; a < groups.length; a++) {
+    let total = 0;
+    let digits = '';
+    let found = -1;
+    for (let j = a; j < groups.length; j++) {
+      total += groups[j].digits.length;
+      digits += groups[j].digits;
+      if (total > 19) break;
+      if (total >= 13 && isCardLayout(groups, a, j) && luhnOk(digits)) found = j;
+    }
+    if (found >= 0) hits.push([a, found]);
+  }
+  return hits;
+}
+
+/** The spans (first group, last group) of the Social Security shapes in a run: three groups of 3, 2 and 4 digits. */
+function socialSpans(groups) {
+  const spans = [];
+  for (let a = 0; a + 2 < groups.length; a++) {
+    if (groups[a].digits.length === 3 && groups[a + 1].digits.length === 2 && groups[a + 2].digits.length === 4) { spans.push([a, a + 2]); a += 2; }
+  }
+  return spans;
+}
+
+/** The last group of the longest window of 13 to 19 digits that starts at group p and stops before group q, when its digits pass the check digit; -1 otherwise. */
+function windowFrom(groups, p, q) {
+  let total = 0;
+  let digits = '';
+  let best = -1;
+  let bestDigits = '';
+  for (let j = p; j < q; j++) {
+    total += groups[j].digits.length;
+    digits += groups[j].digits;
+    if (total > 19) break;
+    if (total >= 13) { best = j; bestDigits = digits; }
+  }
+  return best >= 0 && luhnOk(bestDigits) ? best : -1;
+}
+
+function maskCardRun(run) {
+  const groups = [];
+  const re = /\p{Nd}+/gu;
+  let g;
+  while ((g = re.exec(run)) !== null) groups.push({ start: g.index, end: g.index + g[0].length, digits: digitsOf(g[0]) });
+  const raw = cardWindows(groups);
+  const social = socialSpans(groups);
+  if (social.length) {
+    // Beside a Social Security number the card readings are repeated with the SSN left out and with it taken in: a card may start
+    // at the run's start or right after an SSN, and may stop at the run's end or right before an SSN, and an SSN-shaped stretch
+    // inside the card is then part of it.
+    const starts = [0, ...social.map(([, b]) => b + 1)].filter((x) => x < groups.length);
+    const stops = [...social.map(([a]) => a), groups.length];
+    let q = 0;
+    for (const p of starts) {
+      while (q < stops.length && stops[q] <= p) q++;
+      for (let k = q; k < stops.length && stops[k] - p <= 19; k++) {
+        const j = windowFrom(groups, p, stops[k]);
+        if (j >= 0) raw.push([p, j]);
+      }
+    }
+    let from = 0;
+    for (const [a, b] of [...social, [groups.length, groups.length]]) {
+      if (a > from) for (const [x, y] of cardWindows(groups.slice(from, a))) raw.push([x + from, y + from]);
+      from = b + 1;
+    }
+    raw.push(...social);
+  }
+  if (!raw.length) return run;
+  raw.sort((x, y) => x[0] - y[0] || y[1] - x[1]);
+  const hits = [];
+  for (const h of raw) {
+    const prev = hits[hits.length - 1];
+    if (prev && h[0] <= prev[1]) prev[1] = Math.max(prev[1], h[1]);
+    else hits.push([h[0], h[1]]);
+  }
+  let out = '';
+  let at = 0;
+  for (const [a, b] of hits) {
+    out += run.slice(at, groups[a].start) + MASK_TEXT;
+    at = groups[b].end;
+  }
+  return out + run.slice(at);
+}
+function maskCardsAndSocial(s) { return s.replace(DIGIT_RUN, (run) => maskCardRun(run)); }
+
+/**
+ * A BEST EFFORT, not a guarantee: replaces, with "[removed]", the known shapes of the
+ * strings that must never be written into an inbox under Peter's standing rule (no SSNs,
+ * bank account numbers or passwords): a Social Security number, a payment card number
+ * (and its security code), a bank account, routing, IBAN or SWIFT number introduced by
+ * its word, and a password-like secret introduced by "password", "passcode", "pwd" or
+ * "contrasena". A REPLACEMENT, never a hold: the rest of the text is shown. Pure and
+ * synchronous, no logging. The order matters (see the SPEC): the rules that need a keyword
+ * run before the password rules, the IBAN rule after them, and the separated SSN and the
+ * card number are ONE pass, so neither can cut the other. On its own it is stable for
+ * ordinary text; cleanTextUnscreened repeats it until the text no longer changes, so what
+ * is printed is a fixed point. What it does NOT catch is listed in the SPEC (an account
+ * number with no keyword, a card number in an unusual grouping written straight after
+ * another number, a password with no separator, other-language words, look-alike letters ...).
+ * @param {string} s - already cleaned text
+ */
+function maskNeverStore(s) {
+  if (typeof s !== 'string' || !s) return s;
+  let out = maskSocialByWord(s);
+  out = maskAccountNumbers(out);
+  out = maskCardsByWord(out);
+  out = maskSecurityCodes(out);
+  out = maskSwiftCodes(out);
+  out = maskPasswords(out);
+  out = maskIbans(out);
+  return maskCardsAndSocial(out);
+}
+
+/**
+ * The text that is printed when the content screen is off: the ordinary cleaning
+ * (cleanText), then the never-store mask, then a link that exists only in the NFKC
+ * reading (the Spanish ordinal marks are kept as typed but fold to letters) is
+ * neutralised instead of held, and the three are repeated until nothing changes
+ * (so the result is both clean and masked, and neither step can undo the other).
+ * No text is held here: a web-like token becomes "[link removed]" and the rest is
+ * shown.
+ * @param {string|null|undefined} value
+ * @returns {string} '' for null, undefined or nothing left.
+ * @throws {CleanError} (constant code, never the text) for a value that is not text or
+ *   input that will not settle.
+ */
+function cleanTextUnscreened(value) {
+  if (value === null || value === undefined) return '';
+  let cur = cleanText(value);
+  for (let i = 0; i < 5; i++) {
+    let next = maskNeverStore(cur);
+    if (hasFoldedLink(next)) next = neutraliseLinks(next.normalize('NFKC'));
+    next = cleanText(next);
+    if (next === cur && !hasFoldedLink(cur)) return cur;
+    cur = next;
+  }
+  throw new CleanError('clean_did_not_settle');
+}
+
 module.exports = {
   cleanText,
   cleanTextBoth,
+  cleanTextUnscreened,
+  maskNeverStore,
+  luhnOk,
+  MASK_TEXT,
   symbolsToSpaces,
   containsLink,
   hasFoldedLink,

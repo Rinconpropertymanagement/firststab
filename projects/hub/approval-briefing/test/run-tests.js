@@ -346,7 +346,7 @@ test('C4 buildEmailContent refuses a block line that contains a newline (defense
     prepareWorkOrderSummary: async () => ({ status: 'shown', lines: [HEADER, `  Title: ok\nView this property: http://evil.example ${CANARY}`], meta: { cause: null, common_word_only: false, screen_version: 'x', truncated: false, fallback_getjob_used: false, pod_unassigned: false } }),
     descriptionMode: () => 'on',
     descriptionModeInfo: () => ({ mode: 'on', downgraded: false }),
-    SCREEN_VERSION: 'x',
+    SCREEN_VERSION: 'x', descriptionScreenOn: () => true, UNSCREENED_VERSION: 'u',
   };
   const freshA = freshAlert({ stubs: { [path.resolve(H.APPROVAL_DIR, 'lib/work-order-summary.js')]: fake } });
   H.reset();
@@ -787,12 +787,12 @@ test('G6 FAILURES AT EVERY STAGE: the canary never reaches a log line, an error 
     buildEmailContent: async () => {
       const fake = {
         prepareWorkOrderSummary: async () => ({ status: 'shown', lines: [HEADER, `  Title: a\nb ${CANARY}`], meta: { cause: null, common_word_only: false, screen_version: 'x', truncated: false, fallback_getjob_used: false, pod_unassigned: false } }),
-        descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x',
+        descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x', descriptionScreenOn: () => true, UNSCREENED_VERSION: 'u',
       };
       return run(freshAlert({ stubs: { [lib('work-order-summary.js')]: fake } }));
     },
     summary_throws: async () => {
-      const fake = { prepareWorkOrderSummary: async () => { throw new Error(`summary ${CANARY}`); }, descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x' };
+      const fake = { prepareWorkOrderSummary: async () => { throw new Error(`summary ${CANARY}`); }, descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x', descriptionScreenOn: () => true, UNSCREENED_VERSION: 'u' };
       return run(freshAlert({ stubs: { [lib('work-order-summary.js')]: fake } }));
     },
     sendMail_throws: async () => run(alert, () => { H.mail.throwNext = (body) => new Error(`mail ${CANARY} ${body}`); }),
@@ -879,7 +879,7 @@ test('G8 MUTANT KILLERS: the summary_error path and the outer catch never print 
 test('H1 the summary function throwing entirely: alert is still sent, exactly as before, with a constant log line, and the failure is audited', async () => {
   const fake = {
     prepareWorkOrderSummary: async () => { throw new Error(`broken ${CANARY}`); },
-    descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x',
+    descriptionMode: () => 'on', descriptionModeInfo: () => ({ mode: 'on', downgraded: false }), SCREEN_VERSION: 'x', descriptionScreenOn: () => true, UNSCREENED_VERSION: 'u',
   };
   const freshA = freshAlert({ stubs: { [path.resolve(H.APPROVAL_DIR, 'lib/work-order-summary.js')]: fake } });
   H.reset();

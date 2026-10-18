@@ -59,7 +59,11 @@
  * is 'shadow' or 'on', it only ever reads job.name / job.description /
  * is_emergency / is_urgent from the job this handler already passes in,
  * and it sits behind a required LOCAL word-list screen (no AI, nothing sent
- * anywhere). This file does nothing
+ * anywhere) unless the owner has set WORK_ORDER_ALERT_DESCRIPTION_SCREEN to
+ * exactly 'off' (Peter's recorded choice: then nothing is held and a best-effort
+ * never-store mask replaces some SSNs, card and bank numbers and passwords: known
+ * shapes only, not a guarantee). This
+ * file does nothing
  * differently for it: the job object goes to handleWorkOrderJob() exactly
  * as before.
  */

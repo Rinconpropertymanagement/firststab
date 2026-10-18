@@ -86,6 +86,32 @@
  * and compliance/work-order-note-alerts-description-decision-resolution.md.
  * Spec: work-order-notes-alert-SPEC.md Section 6A.
  *
+ * OWNER SWITCH, THE CONTENT SCREEN OFF (WORK_ORDER_ALERT_DESCRIPTION_SCREEN, added
+ * 2026-10-17 on Peter's explicit instruction; an owner override, recorded as such in
+ * the decision record and never to be described as a met condition). Only the
+ * lowercase value 'off' turns the content screen off; unset, empty, 'on', 'OFF',
+ * 'Off' or anything else leaves it ON and changes nothing in this file's behaviour.
+ * It is independent of the mode (above) and of the ingestion interlock. With it off
+ * (mode 'shadow' or 'on' as before):
+ *   - the word-list screen (work-order-text-screen.js and its terms) is NOT consulted,
+ *     so nothing is held for what the text says, for any pod, including an unassigned
+ *     one (the text goes to both inboxes);
+ *   - the text is still cleaned for the email's own safety (tags, invisible and bidi
+ *     characters, whitespace, the quote wrapper, the cut to 100 / 300, links replaced
+ *     by "[link removed]"; the header, subject and recipients never see it);
+ *   - a hold the cleaner would ask for (sentence-break shape, a web fragment left by
+ *     the cut) becomes a replacement instead, and the rest is shown;
+ *   - a best-effort never-store mask replaces known shapes of SSNs, card numbers, bank
+ *     account / routing numbers and passwords with "[removed]" (Peter's standing rule;
+ *     a list of shapes, not a guarantee; see maskNeverStore in
+ *     work-order-text-clean.js). Phones, e-mail addresses, names
+ *     and gate or lockbox codes are NOT masked;
+ *   - text that cannot be made safe to print (it will not settle in the cleaner) is not
+ *     held: the neutral "could not be retrieved, see Latchel" line is shown instead
+ *     (status 'unavailable', cause 'unprintable_text', counted on its own);
+ *   - the last line says the text is not screened, and the audit row records
+ *     screen_version 'unscreened-owner-override' (same 11 keys, no text, no category).
+ *
  * NEVER STORE, LOG OR RETURN THE TITLE/DESCRIPTION ANYWHERE BUT `lines`.
  */
 
@@ -94,7 +120,9 @@
 const {
   categorize, CATEGORY_ORDER, CATEGORY_LABELS,
 } = require('../../maintenance-history/lib/component-categories');
-const { cleanTextBoth, containsLink, hasFoldedLink } = require('./work-order-text-clean');
+const {
+  cleanTextBoth, cleanTextUnscreened, containsLink, hasFoldedLink, CleanError,
+} = require('./work-order-text-clean');
 const { screenWorkOrderText, SCREEN_VERSION } = require('./work-order-text-screen');
 
 // ─── THE LIMITS (the knobs) ─────────────────────────────────────────────────
@@ -130,6 +158,13 @@ const CUT_POINTER = ' (shortened; full text is in Latchel)';
 // does not exist: the screen is a word list, it does not look for names,
 // phone numbers or access codes.
 const SHOWN_FOOTER = '  (Quoted as typed in Latchel. Not checked for names, phone numbers or access codes. Internal use only.)';
+// The same slot when the owner has turned the content screen off: the email says plainly that nothing was screened, and that
+// only SOME links, cards, SSNs and passwords are taken out (the mask is a list of known shapes, not a guarantee: the SPEC lists
+// what it misses). It must not be longer than SHOWN_FOOTER (104 characters), so the longest possible block stays at most 733
+// (it is 101 characters, so the screen-off worst case is 730). The audit row carries UNSCREENED_VERSION in the existing
+// screen_version value.
+const UNSCREENED_FOOTER = '  (Quoted from Latchel. Not screened; some links, cards, SSNs, passwords removed. Internal use only.)';
+const UNSCREENED_VERSION = 'unscreened-owner-override';
 
 
 // ─── Mode ───────────────────────────────────────────────────────────────────
@@ -151,6 +186,16 @@ function descriptionModeInfo() {
 
 function descriptionMode() {
   return descriptionModeInfo().mode;
+}
+
+/**
+ * WORK_ORDER_ALERT_DESCRIPTION_SCREEN: the owner's switch for the content screen. ONLY the
+ * lowercase value 'off' turns it off. Unset, empty, 'on', 'OFF', 'Off', ' off' or anything
+ * else leaves the screen ON (the fail-closed behaviour, unchanged). Independent of the mode
+ * and of the ingestion interlock: with the mode 'off' nothing in this file runs at all.
+ */
+function descriptionScreenOn() {
+  return process.env.WORK_ORDER_ALERT_DESCRIPTION_SCREEN !== 'off';
 }
 
 // ─── Truncation: code points, last whole word if one falls in the last quarter ───
@@ -265,9 +310,11 @@ async function prepareWorkOrderSummary(job, opts = {}) {
     fetchTimeoutMs = FETCH_TIMEOUT_MS,
   } = opts;
   const meta = newMeta(podUnassigned);
+  const screenOn = descriptionScreenOn();
+  if (!screenOn) meta.screen_version = UNSCREENED_VERSION;
 
   try {
-    if (podUnassigned) {
+    if (podUnassigned && screenOn) {
       meta.cause = 'pod_unassigned';
       return { status: 'held', lines: unassignedBlock(), meta };
     }
@@ -296,6 +343,9 @@ async function prepareWorkOrderSummary(job, opts = {}) {
       }
       source = detail;
     }
+
+    // The owner has turned the content screen off: nothing below this line (the screen, the holds) runs.
+    if (!screenOn) return buildUnscreenedSummary(source, meta);
 
     // The cleaner throws (constant message) for a value that is not text.
     let title;
@@ -376,18 +426,97 @@ async function prepareWorkOrderSummary(job, opts = {}) {
     lines.push(SHOWN_FOOTER);
     return { status: 'shown', lines, meta };
   } catch (_err) {
-    console.error('[work-order-summary] Unexpected error building the description block - failing closed (held).');
     meta.cause = 'summary_error';
     meta.common_word_only = false;
+    if (!screenOn) {
+      // Nothing is held with the screen off: the neutral unavailable line, still no text.
+      console.error('[work-order-summary] Unexpected error building the description block - showing the unavailable line (screen off).');
+      return { status: 'unavailable', lines: [UNAVAILABLE_LINE], meta };
+    }
+    console.error('[work-order-summary] Unexpected error building the description block - failing closed (held).');
     return { status: 'held', lines: heldBlock(), meta };
   }
+}
+
+// ─── The content screen switched off (WORK_ORDER_ALERT_DESCRIPTION_SCREEN=off) ─────
+const cpLen = (str) => Array.from(str).length;
+
+/**
+ * Cuts settled text to `limit` the way truncate() does, then makes the CUT text safe to print
+ * again (a cut can leave a web-like fragment or part of a number): links replaced, the
+ * never-store mask applied. A replacement can make the text longer ("a.co" becomes "[link removed]"),
+ * so the cut is made a little shorter until the printed text is no longer than truncate() would
+ * have made it (limit plus the " ..." mark): the 100 / 300 limits hold. Throws CleanError (a
+ * constant code, never the text) when it cannot.
+ */
+function fitUnscreened(text, limit) {
+  if (cpLen(text) <= limit) return { text, cut: false };
+  const room = limit + cpLen(' ...');
+  let lim = limit;
+  for (let tries = 0; tries < 4 && lim >= 20; tries++) {
+    const out = cleanTextUnscreened(truncate(text, lim).text);
+    const n = cpLen(out);
+    if (n <= room) return { text: out, cut: true };
+    lim -= n - room;
+  }
+  throw new CleanError('unprintable_text');
+}
+
+/**
+ * The block when the owner has turned the content screen off. Nothing here consults the word
+ * list, so nothing is held for what the text says. A web-like token is replaced, the
+ * never-store mask is applied, and the rest is shown. Text that cannot be made safe to print
+ * gets the neutral unavailable line (cause 'unprintable_text'); that is a safety fallback,
+ * not a content hold. Anything unexpected is thrown to the caller's outer catch.
+ */
+function buildUnscreenedSummary(source, meta) {
+  let title;
+  let description;
+  let shownTitle;
+  let shownDescription;
+  try {
+    title = cleanTextUnscreened(source.name);
+    description = cleanTextUnscreened(source.description);
+    if (!title && !description) return { status: 'none', lines: [NONE_LINE], meta };
+
+    meta.truncated = cpLen(title) > TITLE_MAX || cpLen(description) > DESCRIPTION_MAX;
+    const titleIsJustTheStart = title && description
+      && description.toLowerCase().startsWith(title.toLowerCase());
+    shownTitle = title && !titleIsJustTheStart ? fitUnscreened(title, TITLE_MAX) : null;
+    shownDescription = description ? fitUnscreened(description, DESCRIPTION_MAX) : null;
+  } catch (err) {
+    if (!(err instanceof CleanError)) throw err;
+    // The text will not settle in the cleaner, or is not text at all. One constant line, no text, no code.
+    meta.cause = 'unprintable_text';
+    console.error('[work-order-summary] The title or description could not be made safe to print - showing the unavailable line (unprintable_text).');
+    return { status: 'unavailable', lines: [UNAVAILABLE_LINE], meta };
+  }
+
+  let categoryLabel = null;
+  try { categoryLabel = categoryLabels(`${title} ${description}`); } catch (_err) { categoryLabel = null; }
+
+  const lines = [HEADER];
+  if (shownTitle) lines.push(`  Title: ${quoteSafe(shownTitle.text)}`);
+  if (categoryLabel) lines.push(`  Category (auto-sorted guess): ${categoryLabel}`);
+  const priority = priorityLabel(source);
+  if (priority) lines.push(`  Priority: ${priority} (flagged in Latchel)`);
+  if (shownDescription) {
+    lines.push(`  Description: "${quoteSafe(shownDescription.text)}"${shownDescription.cut ? CUT_POINTER : ''}`);
+  } else {
+    lines.push(`  Description: ${NO_DESCRIPTION}`);
+  }
+  lines.push(UNSCREENED_FOOTER);
+  return { status: 'shown', lines, meta };
 }
 
 module.exports = {
   prepareWorkOrderSummary,
   descriptionMode,
   descriptionModeInfo,
+  descriptionScreenOn,
   SCREEN_VERSION,
+  UNSCREENED_VERSION,
+  UNSCREENED_FOOTER,
   // exported for tests
   truncate,
   HEADER, HELD_NOTICE, UNASSIGNED_NOTICE, NONE_LINE, UNAVAILABLE_LINE, NO_DESCRIPTION,

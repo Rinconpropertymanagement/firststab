@@ -37,6 +37,16 @@
  * the failure email); the sent email is the only copy. A problem building the
  * block never stops the alert: it is sent without it.
  *
+ * OWNER SWITCH, THE CONTENT SCREEN OFF (added 2026-10-17): WORK_ORDER_ALERT_DESCRIPTION_SCREEN
+ * set to exactly the lowercase 'off' turns the word-list screen OFF for the block (any other
+ * value, or unset, leaves it ON and changes nothing). It is Peter's explicit, recorded
+ * owner override (nothing held, nothing sent back to Latchel), never a met condition, and it
+ * is independent of the mode and of the interlock above. The text is then still cleaned for
+ * the email's own safety and a best-effort never-store mask removes some SSNs, card and bank
+ * numbers and passwords (known shapes only, not a guarantee); the audit row records
+ * screen_version 'unscreened-owner-override'. See
+ * lib/work-order-summary.js and Section 6A of the spec.
+ *
  * RULE 9 (GOVERNANCE.md): THE TEXT, THE HOLD RESULT AND THE CATEGORY ONLY
  * DECIDE WHAT IS DISPLAYED. They never reach resolveRecipients(), the dedup
  * lookup, the subject, the task write, the work_order_note_alerts row, the
@@ -127,7 +137,7 @@ const crypto = require('crypto');
 const latchel = require('../../maintenance-history/lib/latchel-connector');
 const { getSharedInbox, sendMail } = require('../../lib/notify');
 const {
-  prepareWorkOrderSummary, descriptionMode, descriptionModeInfo, SCREEN_VERSION,
+  prepareWorkOrderSummary, descriptionMode, descriptionModeInfo, descriptionScreenOn, SCREEN_VERSION, UNSCREENED_VERSION,
 } = require('./work-order-summary');
 
 const supabase = createClient(
@@ -407,8 +417,10 @@ async function writeDescriptionAudit({ property, latchelJobId, triggerSource, mo
   // pod. A scanner error (check_error), unsettled text (unsettled_text), a hold
   // the cleaner asked for by itself (link_shape) and a summary error are always
   // holds, so they are medium too; shown and none are low.
+  // With the owner's screen-off switch, shown text was not screened, so even a shown row is medium.
   const medium = summary.status === 'unavailable'
-    || (summary.status === 'held' && m.cause !== 'pod_unassigned');
+    || (summary.status === 'held' && m.cause !== 'pod_unassigned')
+    || m.screen_version === UNSCREENED_VERSION;
   await writeAuditLog({
     action: DESCRIPTION_AUDIT_ACTION,
     entity_type: 'property',
@@ -468,7 +480,8 @@ async function prepareDescriptionBlock({ job, latchelJobId, property, pod, trigg
           status: 'held',
           meta: {
             cause: 'summary_error', common_word_only: false,
-            screen_version: SCREEN_VERSION, truncated: false, fallback_getjob_used: false, pod_unassigned: pod === 'unassigned_both',
+            screen_version: descriptionScreenOn() ? SCREEN_VERSION : UNSCREENED_VERSION,
+            truncated: false, fallback_getjob_used: false, pod_unassigned: pod === 'unassigned_both',
           },
         },
       });

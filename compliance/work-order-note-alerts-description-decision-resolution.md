@@ -6,6 +6,8 @@
 
 **Date Peter read this record and confirmed it:** 2026-10-16 *(entered by Asimov at Jarvis's instruction, from Peter's reply as relayed by Jarvis. It covers the four questions and four answers only; see the scope note above.)*
 
+**Update of 2026-10-17 (Asimov):** Peter's decisions of 2026-10-17 are recorded in the section "Peter's decisions of 2026-10-17: the content screen turned off (Option B), ..." below. They turn the content screen itself off, as an **owner override** (CLAUDE.md rule 3) that is **never to be described as a met condition**, and they are the newest word on every point they touch. Where an older section of this record describes the word-list screen as the safeguard that holds text, read it as the record of the **screened version**, which stays in the code and is what runs unless the owner's switch `WORK_ORDER_ALERT_DESCRIPTION_SCREEN` is set to exactly `off`. Older sections are not rewritten; later notes say where they are superseded.
+
 ---
 
 ## What Asimov's earlier rulings required
@@ -100,6 +102,202 @@ How Asimov applied each reply:
 2. **"accept it": the real worst-case block length is accepted.** The figure is **733 characters over six lines at most** (a theoretical ceiling; the testers could reach 723 with the real category labels), **typical about 330, and the "about 600" was a soft target that nothing was cut to meet.** No cut. The acceptance is of the limits as built (title 100, description 300, the fixed last line of 104 characters); **if any of those numbers changes, the question is asked again.** This closes the block-length item in "What Peter has NOT yet decided". It does **not** replace his sign-off on the sample emails or the word-list diff, which he still has not seen on the final commit.
 3. **"ignore and treat as normal": the repository caution is accepted by the owner.** This is an owner override of Asimov's condition that the repository be private before any push (O-4). Jarvis surfaced the condition and the stake in the question, and Peter answered it directly, so under `CLAUDE.md` rule 3 it stands. It is not one of the things nobody can waive (Rule 9 and the Fair Housing Standard are not touched; the repository holds no tenant data from this feature, only synthetic test data). Jarvis's mitigation: when the work is merged, Jarvis uses `git merge --squash`, so the merged history carries no slur literal. **What the question did not say, recorded here so his answer is judged on the whole fact:** the squash removes the stray literal from the history of the first build commit, but **the squashed tree itself still contains the screening vocabulary and the list of 81 slur entries, written out in `work-order-text-screen-terms.js`, because the screen needs them to work.** That is the one file where such words are allowed. Pushing to a public repository publishes that file. Asimov's recommendation stays that the repository be private; the override does not change what the files contain. **Nothing needs deciding now:** deploying to the server involves no push. **At the moment of any push or merge to the shared repository, Jarvis tells Peter this one sentence and asks once more; his answer then stands.**
 
+## Peter's decisions of 2026-10-17: the content screen turned off (Option B), "turned on, not off", and his answers to the five questions
+
+**Date:** 2026-10-17 (chat; confirmed against the instruction that carried these words to Asimov, and it is today's date). **Source and limits.** Peter's own words are quoted exactly as Jarvis relayed them. Jarvis's five questions and his explanation of what a block with no screen means were relayed to Asimov as summaries, not word for word; every place where only a summary exists is marked "(summary)". Asimov did not see the chat and relies on Jarvis's relay for what was said and what each answer settled. **Peter has not yet seen this section.** It is put to him with the switch-on question (see "What Peter must still say" below), and he confirms it or corrects it then.
+
+### What was said, in order
+
+1. After Jarvis's recap, Peter said, verbatim: **"yes to merge. i want the tool turned on not off like asimov suggested"**.
+2. Jarvis then asked him five fresh questions (summary): (1) are the quotations of his earlier decisions accurate; (2) does he still skip Mason's review; (3) the as-built version put in plain words, with the hold rate; (4) does he accept that a miss is possible; (5) does he sign off the sample emails, the v4 word list and the two side effects. Peter answered, verbatim: **"1,2, 4,5 yes, for 3. i dont want anything held or anything to be told to go back to latchel"**.
+3. Jarvis then told him, in plain words (summary), that the hold is the safeguard and that removing it removes the screen entirely; that his earlier "I accept misses" covered the screen's gaps and not having no screen; and what happens with no screen: every word a tenant types is emailed word for word to the two shared pod inboxes, where it stays in those inboxes, in Missive and in the sent folder, and cannot be unsent. The examples he gave, as relayed: "My husband hit me, I need the locks changed", "I'm undocumented", "I use a wheelchair", "I have cancer", a child's name, a gate code. He told Peter that this puts protected information in writing in team inboxes, which can matter in a Fair Housing dispute, and that the decision is Peter's to make. He offered three options: **Option A** (switch on as built, loosen the ordinary-word holds in parallel, and show the title when the description is held; Jarvis's recommendation), **Option B** (no screen at all) and **Option C** (as built); and a read-only count over Peter's roughly 160 real past work orders.
+4. Peter answered, verbatim: **"option b. no 160 scan"**.
+
+### How Asimov records each, in order
+
+1. **"yes to merge".** A yes to merging the work as it stood when he said it: the squash of the branch at `c781a1b`, already merged locally into his `reconcile/main-and-sally` as `4b89a11` (not pushed, not deployed). It is **not** a yes to merging the later switch commit (`33c08a3`, or the commit that replaces it after the fixes named in the governance review, Section 19), which did not exist when he said it. His standing rule is a fresh, separate, explicit yes before each of merge and deploy, and the switch is new code. So the switch commit needs its own yes to merge.
+2. **"i want the tool turned on not off like asimov suggested".** A clear statement of what he wants: the feature on. Asimov's reviews approved a deploy with the mode off and held ON behind conditions, which is what "off" refers to as I read it. I record it as his decision that the outcome he wants is ON. It is **not** the operational yes to deploy or to switch on: each of those is a fresh yes at its own moment (see "What Peter must still say"). It removes no condition that he did not override by name.
+3. **"1, 2, 4, 5 yes".**
+   - **(1) The quotations are accurate.** I read this as confirming the quotations and summaries of his later decisions of 2026-10-16 in this record (the Missive copy, the shadow week, the faster check), which his earlier "confirmed" did not cover. The relay does not list which quotations Jarvis put to him; if it was another set, Jarvis tells Asimov and the record is corrected. This closes the caveat in the "Later decisions" section.
+   - **(2) Still skip Mason's review.** The override of Mason's review (and with it attorney review under Rule 6) is re-affirmed for the switch-on, which my earlier rulings required as a fresh answer. The relay does not say whether the six items of the Mason checklist were in front of him with this question. They change in meaning with no screen (see "What the checklist means now"), so Jarvis restates them in one short paragraph at the switch-on question. The answer stands under rule 3.
+   - **(4) A miss is acceptable.** Said about the screened version, where a miss means a sensitive sentence that the word list failed to hold. Jarvis then told him that with no screen there is nothing to miss with, because everything goes through, and he chose that (Option B). What he has accepted, in the end, is **no content screen at all**, with the never-store mask doing a best-effort job on the numbers that his standing rule covers.
+   - **(5) Signed off the sample emails, the v4 word list and the two side effects.** This closes the open sign-off for the **screened** version. It does not cover the sample email of the block with no screen (a different last line, `[removed]` in place of some numbers). Jarvis shows him that one at the switch-on question.
+4. **Question 3 (the as-built version): not accepted.** Peter did not say yes to the screened version. He said: "i dont want anything held or anything to be told to go back to latchel". After Jarvis explained what no screen means, he chose Option B. So the as-built version is **not** what is being switched on. Nobody may later describe him as having accepted the as-built version or its hold rate (none was measured).
+5. **"option b".** The content screen is turned off. Nothing is held for what a title or description says, for any pod, and an unassigned property's text goes to both pod inboxes like any other. No reader is told to open Latchel because of what the text says. The text is still cleaned so that the email itself is safe (markup, hidden characters, line breaks, the 100 and 300 limits, links replaced, job text never reaching the subject, headers or recipients), and a never-store mask replaces Social Security, card, bank and password strings. He gave this decision **after** Jarvis told him the stakes in the words summarised above and after Jarvis recommended Option A.
+6. **"no 160 scan".** The read-only count over the real past work orders is declined, again. It was also the faster check he declined on 2026-10-16 ("skip the check"). Not done, never to be described as done. With no screen it would also have had nothing to count.
+
+### What this is, under CLAUDE.md rule 3
+
+An **owner override**, made explicitly, in the moment, after Jarvis showed Peter what the screen does, what no screen means and what the alternatives were (the review the rule asks Jarvis to surface), and after Jarvis recommended against it. Under rule 3 it stands. It is recorded here as an override of the **content screen itself**, which Asimov's rulings of 2026-10-16 treated as the core safeguard of the block. It is **not** a met condition, and nobody may later write that the block was screened, reviewed by counsel, shadow-tested, measured or checked against the real past work orders. GOVERNANCE.md says that an owner who asks to skip a gate hears Jarvis refuse and explain first; the relay says Jarvis explained, recommended against and offered a safer option, and does not say whether he used the word "refuse". Noted, not held against anyone.
+
+### Owner overrides now in force (never to be described as met)
+
+| What the owner overrode | When | Status |
+|---|---|---|
+| Mason's review, and with it attorney review (GOVERNANCE.md Rule 6) | 2026-10-16 ("skip this review"); re-affirmed 2026-10-17 ("yes", question 2) | **OVERRIDDEN. Not reviewed by counsel.** |
+| The 7-day shadow week and everything measured in it (Rule 6) | 2026-10-16 ("no shadow period. ship it and make it work right away") | **OVERRIDDEN. Not run, no measurement.** |
+| The 30 or 90 days of shadow (Rule 7) | never applied | **Not applied.** |
+| The faster real-work-order check over about 160 jobs | 2026-10-16 ("skip the check"); 2026-10-17 ("no 160 scan") | **Declined twice. Not done.** |
+| Asimov's condition that the repository be private before any push (O-4) | 2026-10-16 ("ignore and treat as normal") | **Accepted by the owner; one-sentence re-ask at any push.** |
+| **The content screen itself (the word-list screen, the holds, the fail-closed block)** | **2026-10-17 ("option b")** | **OVERRIDDEN. With the switch at exactly `off`, nothing is screened or held.** |
+| The as-built version put to him at ON, and the measured hold rate and miss rate | 2026-10-17 (question 3; "option b") | **Not accepted by him; superseded by Option B. No rate was ever measured.** |
+
+Nothing in this table is a gate that was passed.
+
+### What Peter did not override (no override removes these)
+
+- **Rule 9 and the Fair Housing Standard.** The text only decides what is displayed. It never reaches the recipients, routing, the subject, tasks, priority or anything about a tenant or a unit, and this feature makes no housing decision. Rule 9 is not engaged precisely because the text never enters a decision. **If anyone ever lets this text influence recipients, assignment, priority, an alert rule, or feed any AI, this override does not cover it and Rule 9 applies in full.**
+- **No AI of any kind** (his answer 1 of 2026-10-16). Nothing from the text is sent to Anthropic or anywhere else.
+- **Nothing from the text stored or logged** in any Hub table, log, subject, header or failure email. The audit row keeps its eleven keys plus the trace; no text, no length, no hash, no category name.
+- **No protected-class data and no category names in any table.**
+- **Peter's standing rule: no SSNs, bank account numbers or passwords stored.** Kept by the never-store mask, as a **best-effort** replacement, not a guarantee (see the residual list below).
+- **Internal recipients only.** The two pod shared inboxes (both, for a property with no pod). Never a tenant, owner or vendor.
+- **The limits he accepted:** title 100, description 300, block at most 733 characters over six lines. The last line is exactly as long as the old one or shorter.
+- **The Missive exclusion** (the Hub must not store these alert emails or their job text), seen working again on a real alert after the deploy, before the interlock is set.
+- **His separate, explicit yes to each of merge (of the switch commit), deploy and switching on.**
+- **The tripwire** (below).
+
+### What remains true with no screen, in plain words
+
+- **Every word of a tenant's (or vendor's) title and description goes to both shared pod inboxes, to Missive and to the noreply sent folder, word for word.** That includes health, family, immigration, violence and religion facts, a child's name, a person's name, phone numbers, e-mail addresses and gate or lockbox codes. The Hub does not store it, but the copies exist and **cannot be unsent**. Deleting one is a manual search of those places (and Latchel stays the source of truth).
+- **It puts protected information in writing in team inboxes.** If a tenant discloses a disability, a family circumstance, immigration status or an abuse situation in a job description, staff who never opened that job now have it in an inbox. That can matter in a Fair Housing dispute, and **it cuts both ways**: the copies may be evidence that staff were put on notice, and once a dispute or notice exists they may have to be kept, not deleted. So a hand cleanup after a report goes to Mason or counsel first when any complaint, dispute or request is connected (a legal question; Asimov does not answer it).
+- **Lawfulness and retention of such copies, and a tenant's access or deletion request (CCPA), were never reviewed by counsel.** A tenant's request would now include a manual search of the two inboxes, Missive and the sent folder for the alerts about that tenant's jobs (the audit rows give job ids). Peter's override of Mason leaves these as **accepted by owner, not reviewed by counsel**.
+- **The never-store mask is best effort, and the email says so.** *(Updated 2026-10-17 after the mask-only step, commit `c8e6c71`; governance review, Section 21.)* It blanks the common written forms of an SSN (with or without the word SSN, also when it is written next to a card number), a card number in any grouping (when its digits pass the card check digit, or after a card word) and its security code, a bank account or routing number introduced by its word, a SWIFT code, and a password introduced by its word (in most everyday sentences: "the password is ...", "password to ...", "password will be ...", up to four in a row). It does not catch an account number with no word in front, the last four digits of anything, a card in an unusual grouping written right next to another number, a card with spaced punctuation between its groups, text written right after an IBAN, other words for a secret or a login (wifi key, token, secret, login, access code, a security code), a password with no separator, a fifth password in a row, or a passphrase with no colon; the full list is in the SPEC. It also blanks harmless numbers: about 1 in 10 lists of unit, ticket or serial numbers written with spaces (their digits happen to pass the card check), and more for lists of five or more four-digit numbers (about 18% for five, 27% for six, 41% for eight). The two flaws the testers found at `c205631` (a bare Social Security number beside a card number left partly visible, and a password phrase that swallowed the next keyword) are fixed and re-tested. The email's last line is honest: "Not screened; some links, cards, SSNs, passwords removed" (101 characters), and it says nothing about names, phone numbers, e-mail addresses or gate codes beyond "Not screened".
+- **Instruction-like text inside a job description is just text, and it now reaches people and any tool that reads those inboxes.** The Hub's own archive passes are protected by the Missive exclusion, which is why that gate stays. Other tools that read the inboxes are not covered by it. Sentinel's findings S3-2 (job text in the webhook and raw payload fields) and S3-3 (instruction-like text reaching staff and AI readers) are for Jarvis to put to Peter in plain words, from Sentinel's report, before he says yes to switch on.
+- **One case still says "see Latchel".** If the text cannot be made safe to print (nested markup that will not settle, a value that is not text; about 1 string in 5,000 hostile strings, practically never for real text), or if the read-only Latchel lookup finds no description, the block is the neutral line "What the work order is: (could not be retrieved, see Latchel)". That is a safety fallback, not a content hold, but Peter said he does not want anything told to go back to Latchel, so Jarvis tells him this one case in a sentence.
+- **Nothing was measured and nothing was reviewed before live use.** No shadow week, no count over real past jobs, no counsel, no human second look. The first real blocks are the first test.
+
+### The tripwire and the first-day read
+
+- **Tripwire (required).** Any report that a title or description appeared in an alert and should not have (from staff, a tenant, an owner, anyone) sets `WORK_ORDER_ALERT_DESCRIPTION_MODE` to `off` **the same day** (a one-line change and a Hub restart; the procedure is in the governance review, Section 19.9). With no screen, "should not have been shown" is anything sensitive that appears, so the report is the only detection there is. After that: the already-sent copies are cleaned up by hand only as Peter decides (and, where a complaint or dispute is connected, after Mason or counsel), Asimov is told the same day, and switching back on needs Peter's fresh yes.
+- **Day-one human read (recommended, not required).** Peter or a pod lead reads the first 10 to 20 live "What the work order is" blocks on the first day (they arrive in the pod inbox anyway), looking for anything that surprises them. This is the nearest thing to a check that was declined, and it costs a few minutes. Asimov does not make it a gate.
+- **Counts (recommended).** Jarvis sends Peter the SPEC's counts at day 3 and day 7 (queries 1 to 5; query 5 is the unscreened rows).
+
+### What the Mason checklist means now (for the switch-on question)
+
+The six items Jarvis showed Peter when he skipped Mason's review, read for a block with no screen: (1) text about eviction or legal proceedings is **shown**, not withheld; (2) text about a criminal record or arrest is **shown**; (3) text about the death of a tenant is **shown**; (4) an English-only keyword layer for Spanish text is **moot**, because there is no keyword layer, and Spanish text is shown like English; (5) whether it is lawful to keep tenant-written text in the pod inboxes and in Missive is **still a legal question for counsel, and larger**, because now it is all the text, not only what the list let through; (6) retention of those copies is **likewise unreviewed and larger**. Peter can send items 5 and 6 to Mason or an attorney at any time; they do not block, by his instruction.
+
+### What Peter must still say (in order)
+
+Peter's messages of 2026-10-17 are **sufficient** as the informed override of the screen, as the fresh Mason answer, as the miss acceptance, as the confirmation of the later-decision quotations, and as the sign-off on the screened samples and word list. They are **not** sufficient as the actions themselves. His "yes to merge" covered the squash that already exists, and "i want the tool turned on" states the goal. His own standing rule asks for a fresh, separate, explicit yes before each of merge, deploy and going live, and switching on is the one step that cannot be taken back (an email cannot be unsent). **So Asimov needs exactly three more words from Peter, each at its own moment, each a plain yes to a one-sentence question that Jarvis asks:**
+
+1. **"Yes, merge"** the switch commit (squash), once the fixed commit exists and has passed its re-tests.
+2. **"Yes, deploy"** to the server with the mode off and the switch unset (dormant code; Scotty's checks first).
+3. **"Yes, switch on"**, asked after the Missive exclusion has been seen working on a real alert after the deploy, and **together with** these, in plain words, in the same message: the one sample email of the block with no screen, with its final last line; the mask is best effort (one sentence, naming the account number with no word in front, the last four digits of a number, and the lists of unit or ticket numbers that it blanks by mistake; the card grouping gap is closed, see the update after round 5 below); the Mason checklist as it reads above; the one "see Latchel" case; Sentinel's S3-2 and S3-3 in plain words; the tripwire and the optional first-day read; and the confirmation of this section (he confirms it or corrects it). Jarvis writes his answer, the date and the commit hash in the blanks under "Re-confirmation before ON".
+
+### Update after round 5 (commit `c205631`, 2026-10-17): the final list of what Peter must still say, in order, and the sample email he is shown (superseded by the update after round 6, below)
+
+**State.** Round 5 closed the card-grouping gap and made the email's last line honest. The testers then found two flaws that the round itself introduced or left, both in the never-store mask and both small (governance review, Section 20): a bare Social Security number written directly beside a card number can be left partly visible, and a password phrase followed by another keyword leaves the number after it visible. Asimov requires both fixed (a mask-only change), then TARS, Sentinel and Judge re-run. **Nothing is needed from Peter for that step.** If he would rather not wait, he can accept the two flaws by name in his own words; Asimov does not recommend it, because both are flaws with a cheap fix and one is a step backwards from the previous commit.
+
+**What he says, in this order, each at its own moment:**
+
+1. **"Yes, merge"** the switch commits (squash), when Jarvis asks after the fixed commit has passed its re-tests. (His "yes to merge" of 2026-10-17 covered the squash that already exists, `4b89a11`.)
+2. **"Yes, deploy"** to the server with the mode off and the switch unset (dormant code). Scotty's checks come first.
+3. **He hears, and need not answer:** Scotty's results; the Missive exclusion seen working on the first real alert after the deploy (checked by file hash and by that alert); which of the webhook and the hourly backstop are live (the backstop's first run is a separate decision with its own yes).
+4. **"Yes, switch on"**, asked in one message together with all of these in plain words: **(a)** the sample email below; **(b)** the mask is a best effort: it blanks the common written forms of Social Security numbers, card numbers, bank account and routing numbers and passwords, and it does not blank an account number with no word like "account" in front, the last four digits of a number, a password with no colon or "is", or a card with unusual punctuation, and it does not touch names, phone numbers, e-mail addresses or gate codes; **(c)** it also blanks harmless numbers by mistake, about one list in ten of unit, ticket or serial numbers written with spaces, and more for long lists of four-digit numbers; **(d)** the Mason checklist as it reads above, and his fresh answer on skipping Mason (the blank above); **(e)** the one case that still says "see Latchel"; **(f)** Sentinel's S3-2 and S3-3 in plain words; **(g)** the tripwire and the optional first-day read; **(h)** his confirmation or correction of the section "Peter's decisions of 2026-10-17" and of this update. Jarvis writes his answer, the date and the commit hash in the blanks above and in the change note below.
+
+**Not asked again:** the shadow week, the faster check and the 160-job count (declined, recorded as overrides), the as-built version (not accepted, superseded by Option B). **At any push:** the one sentence about the slur list and the vocabulary in the terms file, and his answer then.
+
+**The one sample email he is shown (screen off, as rendered by `test/render-samples-unscreened.js` at `c205631`; synthetic data; nothing sent).** The block in the middle is the new part; the last line is the final wording:
+
+```
+To:      solimar-pod@example.test
+Subject: Work Order Alert — 123 Test Street Unit A has special handling notes
+
+A new work order was just created for 123 Test Street Unit A (pod: Solimar).
+
+This property has maintenance notes on file:
+"Call the owner before any work over $500."
+
+Work order: Ticket #9002 (Latchel job 7002)
+Created: 2026-10-01T15:30:00Z
+
+What the work order is:
+  Title: Locks
+  Category (auto-sorted guess): Locks & Security
+  Description: "My husband hit me last night, I need the locks changed. I use a wheelchair and I am undocumented."
+  (Quoted from Latchel. Not screened; some links, cards, SSNs, passwords removed. Internal use only.)
+
+View this property: https://hub.test.invalid/property-360?property_id=prop-0001
+
+This inbox is not monitored — see Property 360 above for anything that needs follow-up.
+```
+
+And the block of a second sample, which shows what the mask does to numbers (the same renderer, sample "E2"):
+
+```
+What the work order is:
+  Title: Billing question for units 4521 4522 4523 4524
+  Description: "Tenant paid with [removed] last week. The password for the portal is [removed]. Wire via SWIFT: [removed], account [removed] or account 2026-10-17. Ticket 4421-5532-6643-7754."
+  (Quoted from Latchel. Not screened; some links, cards, SSNs, passwords removed. Internal use only.)
+```
+
+The first sample is the point of the decision: a sensitive sentence from a tenant goes to both shared pod inboxes word for word. Jarvis should show it as it is, without softening, and say that it cannot be unsent.
+
+### Update after round 6 (commit `c8e6c71`, 2026-10-17): the final list of what Peter must still say, in order, and the sample email he is shown
+
+*This replaces the update after round 5 above; where the two differ, this one governs.*
+
+**State.** The mask-only step is done (governance review, Section 21). The two flaws found at `c205631` are fixed: a bare Social Security number written next to a card number (or a list of 4-digit numbers) no longer shows a digit of either, and a password phrase can no longer swallow the keyword of another rule and leave its number visible. A password straight after "to", "now", "be" or "as", and up to four passwords in a row, are masked as well. The step touched only the never-store mask, its tests and the documents; Asimov read the diff to confirm that. TARS passes and Sentinel is clear (no S1, no S2) on the commit, and the whole test suite passes (292 of 292). **What is still open is not review but process and Peter's own words:** Judge's sign-off of the whole change since the version that is live, Scotty's checks and a file-by-file deploy, the Missive exclusion seen working on a real alert, and Peter's separate yeses. **Nothing is needed from Peter for the next step** (Judge's sign-off, and a documentation check of three small findings from Sentinel). If Jarvis quotes figures for the mask, he quotes the SPEC and this section, not the commit message's "0 changed", which refers to Q's own corpus (the SPEC states the 3 of 600 that TARS's older generator changes).
+
+**What he says, in this order, each at its own moment:**
+
+1. **"Yes, merge"** the switch commits (squash), when Jarvis asks after Judge has signed the delta. (His "yes to merge" of 2026-10-17 covered the squash that already exists, `4b89a11`.)
+2. **"Yes, deploy"** to the server with the mode off and the switch unset (dormant code). Scotty's checks come first, and the files deployed are exactly the six reviewed ones (sha-256 list in the governance review, 21.8).
+3. **He hears, and need not answer:** Scotty's results; the Missive exclusion seen working on the first real alert after the deploy (checked by file hash and by that alert); which of the webhook and the hourly backstop are live (the backstop's first run is a separate decision with its own yes).
+4. **"Yes, switch on"**, asked in one message together with all of these in plain words: **(a)** the sample email below; **(b)** the mask is a best effort. *What it blanks:* the common written forms of Social Security numbers (also when written next to a card number), card numbers in any grouping, bank account and routing numbers with a word like "account" or "routing" in front, SWIFT codes, and passwords after the word "password" in most everyday sentences. *What it misses:* an account number with no word in front, the last four digits of any number, a card in an unusual grouping written right next to another number, a card with spaced dashes or commas between its groups, anything written right after an IBAN, other words for a secret or a login (wifi key, token, secret, login, access code, a security code), a password with no colon or "is", a fifth password in a row. It does not touch names, phone numbers, e-mail addresses, gate or lockbox codes, driver's licence, passport or tax numbers; **(c)** it also blanks harmless numbers by mistake: about one list in ten of unit, ticket or serial numbers written with spaces, more for long lists of four-digit numbers (about 18% for five, 41% for eight), and the odd sentence like "password must be 8 characters"; **(d)** the Mason checklist as it reads above, and his fresh answer on skipping Mason (the blank below); **(e)** the one case that still says "see Latchel"; **(f)** Sentinel's S3-2 and S3-3 in plain words; **(g)** the tripwire and the optional first-day read; **(h)** his confirmation or correction of the section "Peter's decisions of 2026-10-17" and of this update. Jarvis writes his answer, the date and the commit hash in the blanks below and in the change note.
+
+**Not asked again:** the shadow week, the faster check and the 160-job count (declined, recorded as overrides), the as-built version (not accepted, superseded by Option B). **At any push:** the one sentence about the slur list and the vocabulary in the terms file, and his answer then.
+
+**The one sample email he is shown (screen off, as rendered by `test/render-samples-unscreened.js` at `c8e6c71`; synthetic data; nothing sent).** The block in the middle is the point of the decision; the last line is the final wording. This is word for word what was rendered at `c205631`, because the round-6 changes do not alter it:
+
+```
+To:      solimar-pod@example.test
+Subject: Work Order Alert — 123 Test Street Unit A has special handling notes
+
+A new work order was just created for 123 Test Street Unit A (pod: Solimar).
+
+This property has maintenance notes on file:
+"Call the owner before any work over $500."
+
+Work order: Ticket #9002 (Latchel job 7002)
+Created: 2026-10-01T15:30:00Z
+
+What the work order is:
+  Title: Locks
+  Category (auto-sorted guess): Locks & Security
+  Description: "My husband hit me last night, I need the locks changed. I use a wheelchair and I am undocumented."
+  (Quoted from Latchel. Not screened; some links, cards, SSNs, passwords removed. Internal use only.)
+
+View this property: https://hub.test.invalid/property-360?property_id=prop-0001
+
+This inbox is not monitored — see Property 360 above for anything that needs follow-up.
+```
+
+The second sample shows what the mask does to numbers (the same renderer, sample "E2"):
+
+```
+What the work order is:
+  Title: Billing question for units 4521 4522 4523 4524
+  Description: "Tenant paid with [removed] last week. The password for the portal is [removed]. Wire via SWIFT: [removed], account [removed] or account 2026-10-17. Ticket 4421-5532-6643-7754."
+  (Quoted from Latchel. Not screened; some links, cards, SSNs, passwords removed. Internal use only.)
+```
+
+And a third, four lines run through the real cleaner at `c8e6c71`, which show round 6 at work and, on the last line, two of the things the mask misses:
+
+```
+Tenant gave 123-45-6789 4111 1111 1111 1111 for the deposit.
+   becomes:  Tenant gave [removed] for the deposit.
+Changed the password to Rincon2026 and the portal password: Welcome1.
+   becomes:  Changed the password to [removed] and the portal password: [removed].
+Password reset: tenant account number 123456789012, routing 021000021.
+   becomes:  Password reset: tenant account number [removed], routing [removed].
+Wifi key: Summer2024. Refund to iban GB82WEST12345698765432 123-45-6789.
+   becomes:  Wifi key: Summer2024. Refund to iban [removed]-45-6789.
+```
+
+The first sample is the point of the decision: a sensitive sentence from a tenant goes to both shared pod inboxes word for word. Jarvis should show it as it is, without softening, and say that it cannot be unsent.
+
 ## What Peter was shown when he skipped Mason's review (the Mason checklist)
 
 As Jarvis surfaced it (CLAUDE.md rule 3: an override must be explicit, in the moment, and made with real information; see the caveat above):
@@ -117,17 +315,54 @@ Items 1 to 3 are answered by the word list, which withholds them (including a no
 
 Before the feature is switched ON, Jarvis shows Peter this checklist again, in plain words, and asks for a fresh yes or no on skipping Mason. The skip stands for building, deploying OFF and the shadow week. It is not a standing waiver for ON. Jarvis records the date and Peter's answer here:
 
-**Date and answer at the moment of switching ON (Mason skip):** ______________________ *(blank until then)*
+**Date and answer at the moment of switching ON (Mason skip):** **2026-10-17, "yes"** (Peter's answer to Jarvis's question 2, "1,2, 4,5 yes", as relayed): he still skips Mason's review. The relay does not say that the six items above were in front of him with that question, and with no screen they change in meaning ("What the Mason checklist means now", above). **Jarvis restates them at the switch-on question and Peter's answer there is written here:** ______________________ *(blank until then)*
 
 At the same moment Jarvis also asks, and records, Peter's fresh answer to two more questions:
 
-**The as-built version (word list only, no AI, ordinary words hold), put in plain words, together with the costs and the plain statement that no hold rate or miss rate has been measured (the shadow week and the faster check were declined):** ______________________ *(blank until then)*
+**The as-built version (word list only, no AI, ordinary words hold), put in plain words, together with the costs and the plain statement that no hold rate or miss rate has been measured (the shadow week and the faster check were declined):** **2026-10-17, NOT ACCEPTED, superseded.** For Jarvis's question 3 Peter said: "i dont want anything held or anything to be told to go back to latchel". After Jarvis explained what no screen means he chose "option b". The as-built version is not what is being switched on. Nothing further is needed here.
 
-**Whether a miss is acceptable, with the only figures that exist in front of him (the testers' probe sets, "Facts from the final reviews" item 7) and the plain statement that the real rate is unmeasured:** ______________________ *(blank until then)*
+**Whether a miss is acceptable, with the only figures that exist in front of him (the testers' probe sets, "Facts from the final reviews" item 7) and the plain statement that the real rate is unmeasured:** **2026-10-17, "yes"** (question 4, as relayed), about the screened version; he then chose a block with no screen at all ("option b"), so what he has accepted is no content screen, with the best-effort never-store mask. No rate exists to show him, because nothing was measured.
 
-**His confirmation (or correction) of the quotations and summaries in "Later decisions of 2026-10-16" (the Missive copy, the shadow week, the faster check), which he had not seen when he said "confirmed" on 2026-10-16:** ______________________ *(blank until then)*
+**His confirmation (or correction) of the quotations and summaries in "Later decisions of 2026-10-16" (the Missive copy, the shadow week, the faster check), which he had not seen when he said "confirmed" on 2026-10-16:** **2026-10-17, "yes"** (question 1, "quotes accurate", as relayed; I read it as this section). The new section above (his decisions of 2026-10-17) he has not yet seen; he confirms or corrects it at the switch-on question: ______________________ *(blank until then)*
 
-**Final commit and list version that was shown to him and is deployed (written by Jarvis at ON):** ______________________ *(blank until then)*
+**Final commit and list version that was shown to him and is deployed (written by Jarvis at ON):** ______________________ *(blank until then; the reviewed commit is `c8e6c71` (governance review, Section 21): TARS PASS and Sentinel CLEAR on it, after the mask-only fix of the two regressions found in round 5; `33c08a3` and `c205631` each failed a TARS check and neither is it. If any runtime file differs from `c8e6c71`'s by hash, it is a new commit and needs its own re-tests. The `screen_version` string in the audit rows is `unscreened-owner-override`. The word list `protected-class-terms-v2+wo-supp-v4` stays in the code as the screened version and is not what runs with the switch at `off`.)*
+
+### Change note for the moment of switching on (template; Jarvis or Scotty fills it in the same hour, Asimov keeps it)
+
+An edit of the environment file is not an audit-log event, so this note is the record GOVERNANCE.md Rule 6 asks for. It is filled in only when Peter has said "yes, switch on" and Asimov has given the written activation confirmation. **Blank on purpose until then; nothing below has happened.**
+
+```
+CHANGE NOTE: Work Order Alert description block switched ON with the content screen OFF (owner override, Option B)
+
+Date and time (local):                  ______________________
+Made by (name; relayed by Jarvis/Scotty): ______________________
+Peter's yes, in his own words, and the question he was asked: "______________________" / ______________________
+Sample email shown to him (date):       ______________________
+Commit deployed (hash):                 ______________________
+TARS PASS and Sentinel CLEAR on that commit: yes / no ; Judge's delta sign-off (D-2), date: ______________
+Sentinel S3-11 to S3-13 checked against the SPEC lists (documentation): yes / no
+The six files on the server (five runtime files and the comment-only router.js) equal that commit's by hash (sha-256 list: governance review, 21.8): yes / no   (hashes attached or listed: ____________)
+Missive exclusion (U-4): alert id ________ ; no new missive_message_intake row: yes / no ; audit event
+  email_intake.work_order_alert_excluded present: yes / no ; exclusion code present in the intake file by hash: yes / no
+Webhook and hourly backstop state (U-7):  ______________________  (backstop first-run decision, if any: ________)
+Environment file the running Hub reads:   ______________________  (path only; the file is never printed)
+
+The three lines (exact lowercase, no quotes, no spaces):
+  WORK_ORDER_ALERT_INGESTION_EXCLUSION_VERIFIED   old: ________   new: yes
+  WORK_ORDER_ALERT_DESCRIPTION_SCREEN             old: ________   new: off
+  WORK_ORDER_ALERT_DESCRIPTION_MODE               old: ________   new: on
+
+Restart (pm2 restart hub --update-env) at: ________ ; process online and health check answered: yes / no
+Staged start used (governance review 19.9 step 5a): yes / no
+Verification:
+  (a) no "interlock is not set" line in the logs: yes / no
+  (b) first alert after the restart (job id ________): block present with the final last line: yes / no ;
+      SPEC query 5 row: mode on, on_downgraded false, screen_version unscreened-owner-override, eleven keys, no category: yes / no
+  (c) Missive exclusion seen again on that alert: yes / no
+  (d) first 10 to 20 live blocks read by ________ on ________ ; anything that surprised them: ______________________
+Asimov's written activation confirmation (date, commit): ______________________
+Emergency stop, if needed: WORK_ORDER_ALERT_DESCRIPTION_MODE=off, then pm2 restart hub --update-env (the screen line is not a stop)
+```
 
 ## What Peter accepted (answer 2), in plain words
 
@@ -148,17 +383,21 @@ At the same moment Jarvis also asks, and records, Peter's fresh answer to two mo
 
 ## What Peter did NOT override
 
+*Amended 2026-10-17: this list is the position of 2026-10-16, for the screened version. Two bullets change with the owner's switch (marked below); the current list for the version with no screen is in "Peter's decisions of 2026-10-17", above, and governs where it differs.*
+
 - **Rule 9, the no-decisions firewall.** The text only decides what is displayed. It never influences recipients, routing, the subject, tasks, priority or anything about a tenant or unit.
 - **Internal recipients only.** The pod shared inboxes, never a tenant, owner or vendor.
-- **Fail closed.** Any error withholds the block; the alert still goes out.
+- **Fail closed.** Any error withholds the block; the alert still goes out. *(Changed 2026-10-17: with the owner's switch at exactly `off` the content screen no longer holds anything, so there is no content hold to fail closed on. What stays fail-soft: any error while building the block never stops the alert (it goes out in the old format), and text that cannot be made safe to print gets the neutral "could not be retrieved, see Latchel" line.)*
 - **Nothing stored in Hub tables or logs.** The only record is a counts-only audit row (job id, property id, a result, a cause, a yes/no, a version and flags). **After round 3 it carries no category names**, because Peter's own rule is that protected-class data is not stored in any table (see "Facts from the final reviews").
-- **Peter's own rule:** no SSNs, bank account numbers or passwords stored. The screen also withholds text that looks like an SSN or a card number.
+- **Peter's own rule:** no SSNs, bank account numbers or passwords stored. The screen also withholds text that looks like an SSN or a card number. *(Changed 2026-10-17: with the switch at `off` there is no screen; the never-store mask replaces such strings with "[removed]" instead of holding the block. It is best effort and says so; see "Peter's decisions of 2026-10-17".)*
 - **Fixes to real defects the testers find.** The overrides remove measurement, not repairs. Round 3 left a short list of cheap defects (governance review, Section 17.3); they are fixed and re-tested before ON. *(Done in round 4, commit `c781a1b`, and re-tested: governance review, Section 18.)*
 - **The ingestion exclusion:** Peter said yes ("yes stop copying them"). It is reported deployed. **It must be seen working on a real alert before the interlock is set**, and its code must still be on the server after the last deploy of this feature (the two are separate branches).
 - **Peter's confirmation of the later-decision quotations** (his "confirmed" of 2026-10-16 covers the four questions and answers only), his **sign-off on the sample emails and the word-list diff** (the block length is accepted, see "Peter's replies to Jarvis's three questions"), and the Mason checklist and the as-built version put to him again at ON.
 - **Peter's separate, explicit yes** for each of merge, deploy, and going live (CLAUDE.md "Things I Never Want"). Nothing here, and none of the later decisions, pre-authorises any of them. Changing the setting to `shadow` is no longer planned (he declined the week); if he ever wants it, it needs its own yes.
 
 ## What Peter has NOT yet decided
+
+*Amended 2026-10-17: Peter's answers "1,2, 4,5 yes" close the open sign-off on the sample emails, the v4 word list and the two side effects, for the screened version, and the confirmation of the later-decision quotations. The word-list diff and the screened samples matter only if the screen is ever switched back on. Still open: the sample email of the block with no screen (shown at the switch-on question), and the three yes words in "What Peter must still say".*
 
 - **Whether the Missive exclusion is really working.** *Decided; the evidence is now reported.* Peter said "yes stop copying them" (later decision 1). Jarvis verified read-only earlier that 153 of the 160 alerts sent so far (subject starts "Work Order Alert", from the company's noreply address; a domain-level count) were already copied; they predate the description, so they hold none. With the description in the email those copies would hold tenant-written text, searchable by every Archive Search user, and the archive's AI passes are built to send stored text to Anthropic, which would contradict answer 1. The exclusion (`feature/email-intake-exclude-work-order-alerts`, commit `3f6922e`) is live on the server. **Evidence reported by Jarvis for the fourth-round review (Asimov did not see it first-hand; Sentinel and TARS could not reach the server):** the exclusion was deployed about 15:10 local on 2026-10-16 and checked read-only on a real alert, #161, sent at 22:56Z: it was not stored (stored copies stayed at 153) and two audit events `email_intake.work_order_alert_excluded` were written at 23:00:11Z with reason `sender_and_subject`. Asimov accepts that as the gate's evidence, relayed. **Two parts of the gate remain at ON:** its code must **still be on the server after the last deploy of the description feature** (checked by file hash; it is not an ancestor of the description branch, so a whole-Hub deploy from the description branch could silently put the old intake code back), and the first real alert **after** that deploy is seen excluded again. Two costs for him to know: staff replies in an alert thread are also not archived, and the check trusts the sender shown by Missive. (Sentinel checked that sender, recipient and subject of the alert are identical in off, shadow and on, so the exclusion that keys on sender and subject applies unchanged when the description is in the body.)
 - **The real worst-case length of the block.** *Decided: accepted.* Peter replied "accept it" on 2026-10-16 (see "Peter's replies to Jarvis's three questions"): **733 characters over six lines at most**, typical about 330, soft target about 600 not met, no cut. Asked again only if a limit changes.
@@ -182,6 +421,8 @@ These were not part of the four questions. Several bear directly on his answers.
 9. **Round 4 was built (commit `c781a1b`, word list `wo-supp-v4`) and re-tested.** What it fixed, in plain words: a symbol such as the trademark or numero sign typed where a space belongs can no longer hide a protected phrase (Asimov's own sweep of 639,864 variants found none that slip, apart from circled and boxed single letters, which are letters and are left alone on purpose); a web-like word in front of an at-sign is replaced unless a real address follows; a web address followed by a superscript, a fraction or an accented letter is replaced; the third-round list is pinned by a test so that deleting a word fails it; and violence done to a named person ("hits his wife", English and Spanish), the first-person Spanish forms ("soy de Mexico", "no tengo papeles") and the Section 8 program's own names were added. Tests: 209 of 209 pass, 167 of 167 deliberate breakages are caught, the email with the mode off is byte-identical to today's in 3,784 comparisons (TARS), no AI is loaded. **What it did not fix, to put to Peter plainly:** violence written with the victim first and a passive verb (in the red team's set 6 of 14 such forms still pass and 8 are held; the class is named here and not an example, because the repository is public), the long tail of vocabulary, and the other classes named in Section 9 of the governance review; and these side effects: "brand spanking new" now holds, two Southern California place names (Costa Mesa, La Cañada) hold after "soy de" or "vengo de", and a Spanish word that begins with a web ending and continues with an accented letter, typed with no space after a full stop, reads as a cut web address ("[link removed]" plus the rest). None of this changes the four answers.
 
 ## What Peter must still do or hear (in order)
+
+*Superseded in part 2026-10-17: the list in "Peter's decisions of 2026-10-17" (section "What Peter must still say") is the current one. Items 1 and 4 below are answered for the screened version (the sign-off and the fresh answers), and item 4's "as-built version" was not accepted by him (superseded by Option B).*
 
 *Updated after the fourth fix round. Done already, on 2026-10-16: "confirmed" (the four questions and answers), "accept it" (the 733-character worst case), "ignore and treat as normal" (the repository caution, with the one-sentence re-ask at push time), and round 4 itself (built, re-tested, no step needed from him).*
 
@@ -208,3 +449,9 @@ These were not part of the four questions. Several bear directly on his answers.
 ## What this means for the build
 
 The build is done to Asimov's re-ruling and is OFF by default. Asimov's fourth final review (governance review, Section 18, commit `c781a1b`): deploy with the mode off **approved with conditions**; switch ON **approved with conditions** (no governance objection to the code or design; the activation confirmation is withheld until the gates in Section 18.5 are true). The shadow week is not a step: Peter declined it and the faster check, and that is recorded as an owner override, never as met. Round 4 is built and re-tested (TARS pass, Sentinel no S1 or S2, Viper none critical or high, Ralph resilient; Judge's sign-off on the final commit is outstanding). Done by Peter: "confirmed" (four questions and answers), "accept it" (733 characters), "ignore and treat as normal" (repository, with the push-time re-ask). The next steps, each needing Peter's separate yes where noted: Judge's sign-off and Scotty's checks; Peter's sign-off on the sample emails and the word-list diff; merge (Peter's yes, squash) in an order that keeps the Missive exclusion on the server; deploy of the feature OFF (Peter's yes); the Missive exclusion seen again on the first alert after the deploy, with its code confirmed by hash; Mason's checklist shown again with a fresh answer, together with the as-built version, the acceptance of misses and the later-decision quotations; Asimov's activation confirmation; Peter's final yes to switch ON; then the tripwire and the day-3 and day-7 look at the live counts.
+
+**Update, 2026-10-17.** Peter chose Option B: the content screen is off, by an owner switch (`WORK_ORDER_ALERT_DESCRIPTION_SCREEN`, exactly `off`), recorded above as an owner override and never as a met condition. The build (commit `33c08a3`) does what he chose, and keeps every standing rule that no override removes (governance review, Section 19), but it **fails one tester check on the never-store mask and its last line claims more than the mask delivers**; both are conditions to fix and re-test before switch-on. Deploying the dormant code (mode off, switch unset) and switching on each need his separate, explicit yes, plus the Missive exclusion seen working on a real alert after the deploy and Asimov's written activation confirmation. The tripwire and the exact switch-on and emergency switch-off steps are in the governance review, Section 19.
+
+**Update 2, 2026-10-17 (round 5, commit `c205631`).** Round 5 closed the card-grouping gap and made the email's last line honest ("Not screened; some links, cards, SSNs, passwords removed", 101 characters; the 733-character worst case Peter accepted is now 730 with the screen off). The testers found two small flaws in the never-store mask that round 5 introduced or left, so **`c205631` is not the commit to deploy**: Asimov requires a mask-only fix, then TARS, Sentinel and Judge re-run (governance review, Section 20). Every owner override above still stands and is still not a met condition. Peter's three words and the sample email he is shown are in "Update after round 5", above; the change note for the moment of switching on is the template above.
+
+**Update 3, 2026-10-17 (the mask-only step, commit `c8e6c71`).** The two mask flaws found at `c205631` are fixed (a bare SSN beside a card number; a password phrase that swallowed the next keyword), a password after "to", "now", "be" or "as" and up to four passwords in a row are masked, and Asimov confirmed that the step stayed inside the mask, its tests and the documents. TARS passes and Sentinel is clear on `c8e6c71`. Judge's delta sign-off, Scotty's checks and Peter's separate yeses are still to come; the activation confirmation is not given (governance review, Section 21). Every owner override above still stands and is still not a met condition. The final list of what Peter says and the sample emails are in "Update after round 6", above; the change note for the moment of switching on is the template above.

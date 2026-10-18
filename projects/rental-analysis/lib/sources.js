@@ -23,8 +23,9 @@ const { pullRentCastComps } = require('./rentcast');
 const { pullCrmlsComps } = require('./crmls');
 const { pullLeadSimpleComps } = require('./leadsimple');
 const { RADIUS_LADDER_MILES, MIN_COMPS_FOR_NARROW_RADIUS, MIN_LEASED_COMPS_FOR_NARROW_RADIUS } = require('./constants');
-const { exclusionReason } = require('./weighting');
-const { dedupeComps } = require('./property-matching');
+const { exclusionReason, subjectExtrasFrom } = require('./weighting');
+const { dedupeComps, dropSubjectsOwnListing } = require('./property-matching');
+const { mergeMlsFacts } = require('./mls-facts');
 
 const SOURCE_HANDLERS = {
   RentCast: pullRentCastComps,
@@ -50,7 +51,10 @@ const SOURCE_HANDLERS = {
  *
  * At each rung r, the candidates are the comps that are:
  *   - a genuine match on their own merits (exclusionReason() === null, the
- *     same check lib/weighting.js uses to zero-weight a comp), and
+ *     same check lib/weighting.js uses to zero-weight a comp, INCLUDING the
+ *     square-footage band and the furnished / short-term / 55+ rules: a comp
+ *     those rules leave out is not "genuine", so it does not count toward the
+ *     "at least 4 genuine and 2 leased" that lets the search stop at a rung), and
  *   - have a real numeric distance_miles <= r (exactly r counts).
  * Those candidates are then run through dedupeComps(), so the count is of
  * distinct addresses, not rows. That matters: the RentCast listings search
@@ -75,13 +79,14 @@ const SOURCE_HANDLERS = {
 function chooseRadiusRung(comps, subject) {
   let genuineCount = 0;
   let leasedCount = 0;
+  const extras = subjectExtrasFrom(subject);
   for (const rung of RADIUS_LADDER_MILES) {
     const candidates = comps.filter(c =>
-      exclusionReason(c, subject.bedrooms, subject.propertyType) === null &&
+      exclusionReason(c, subject.bedrooms, subject.propertyType, extras) === null &&
       typeof c.distance_miles === 'number' &&
       c.distance_miles <= rung
     );
-    const unique = dedupeComps(candidates, subject.bedrooms, subject.propertyType);
+    const unique = dedupeComps(candidates, subject.bedrooms, subject.propertyType, extras);
     genuineCount = unique.length;
     leasedCount = unique.filter(c => c.listing_status === 'leased').length;
     if (genuineCount >= MIN_COMPS_FOR_NARROW_RADIUS && leasedCount >= MIN_LEASED_COMPS_FOR_NARROW_RADIUS) {
@@ -161,13 +166,29 @@ function applyCombinedRadiusTiering(comps, subject) {
  * over it.
  *
  * @param {object[]} activeSources - rows from rental_comp_sources where is_active = true (need at least {id, name})
- * @param {object} subject - {address, propertyType, bedrooms, bathrooms, sqft}
- * @returns {Promise<{comps: object[], subjectEstimatedRent: number|null, subjectLatitude: number|null, subjectLongitude: number|null, subjectZip: string|null, sourcesUsed: string[], sourceErrors: {name: string, error: string}[]}>}
+ * @param {object} subject - {address, propertyType, bedrooms, bathrooms, sqft, furnished, leaseTermMonths, ageRestricted} — the last four feed the size and MLS-fact rules; any may be missing, which switches that rule off
+ * A source that answered but could not load part of what it searches (RentCast's listings
+ * search failing after its similar-rentals list worked, CRMLS losing its Closed or its Active
+ * half) reports it in its result's partialFailure; each one is collected as a sourceWarning
+ * ({name, what, message}). A warning is not an error: the comps that did come back are used.
+ * But "no comps at all" together with a warning is NOT "nothing nearby" (see
+ * lib/outcome.js classifySourceResult()).
+ *
+ * The geocoder's zip (RentCast's answer) is handed on to the sources still to run as
+ * subject.zip, so an address typed without a zip still gets its zip-scoped searches
+ * (Rincon's own move-in records).
+ *
+ * The subject's own current listing is never kept as a comp (see
+ * dropSubjectsOwnListing() in lib/property-matching.js for what is and is not dropped).
+ *
+ * @returns {Promise<{comps: object[], subjectEstimatedRent: number|null, subjectLatitude: number|null, subjectLongitude: number|null, subjectZip: string|null, sourcesUsed: string[], sourceErrors: {name: string, error: string}[], sourceWarnings: {name: string, what: string, message: string}[], sourcesSkipped: {name: string, reason: string}[]}>}
  */
 async function runActiveSources(activeSources, subject) {
   const allComps = [];
   const sourcesUsed = [];
   const sourceErrors = [];
+  const sourceWarnings = [];
+  const sourcesSkipped = [];
   let subjectEstimatedRent = null;
   let subjectLatitude = null;
   let subjectLongitude = null;
@@ -196,7 +217,10 @@ async function runActiveSources(activeSources, subject) {
         source_name: source.name, // stripped before insert — kept here only for logging/debugging
       }));
       allComps.push(...comps);
-      sourcesUsed.push(source.name);
+      // A source that did not search at all (no zip, no location) is not "used": it is reported as skipped, so a report with
+      // no comps never claims it checked it.
+      if (typeof result.skipped === 'string' && result.skipped) sourcesSkipped.push({ name: source.name, reason: result.skipped });
+      else sourcesUsed.push(source.name);
       if (subjectEstimatedRent === null && typeof result.subjectEstimatedRent === 'number') {
         subjectEstimatedRent = result.subjectEstimatedRent;
       }
@@ -216,13 +240,34 @@ async function runActiveSources(activeSources, subject) {
       if (enrichedSubject.longitude == null && typeof result.subjectLongitude === 'number') {
         enrichedSubject.longitude = result.subjectLongitude;
       }
+      if (!enrichedSubject.zip && typeof result.subjectZip === 'string') {
+        enrichedSubject.zip = result.subjectZip;
+      }
+      for (const part of asPartialFailureList(result.partialFailure)) {
+        console.warn(`[rental-analysis] Source "${source.name}" only partly worked (${part.what}): ${part.message}`);
+        sourceWarnings.push({ name: source.name, what: part.what, message: part.message });
+      }
     } catch (err) {
       console.error(`[rental-analysis] Source "${source.name}" failed:`, err.message);
       sourceErrors.push({ name: source.name, error: err.message });
     }
   }
 
-  return { comps: applyCombinedRadiusTiering(allComps, subject), subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors };
+  // Before the radius search: a comp from a non-MLS source (RentCast) that is
+  // the same listing as a CRMLS comp borrows the CRMLS copy's MLS facts, so the
+  // furnished / short-term / 55+ rules apply to it too. See lib/mls-facts.js.
+  const own = dropSubjectsOwnListing(allComps, subject.address);
+  if (own.dropped.length) {
+    console.log(`[rental-analysis] Dropped ${own.dropped.length} listing(s) of the subject's own address from the comps: ${own.dropped.map(c => `${c.address} (${c.source_name})`).join('; ')}`);
+  }
+  return { comps: applyCombinedRadiusTiering(mergeMlsFacts(own.kept), subject), subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors, sourceWarnings, sourcesSkipped };
+}
+
+// A handler's partialFailure may be a list of {what, message}, one such object, or just a message string.
+function asPartialFailureList(partialFailure) {
+  if (!partialFailure) return [];
+  const list = Array.isArray(partialFailure) ? partialFailure : [partialFailure];
+  return list.map(p => (typeof p === 'string' ? { what: 'part of what it searches', message: p } : { what: String((p && p.what) || 'part of what it searches'), message: String((p && p.message) || 'no details') }));
 }
 
 module.exports = { SOURCE_HANDLERS, chooseRadiusRung, applyCombinedRadiusTiering, runActiveSources };

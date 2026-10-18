@@ -78,6 +78,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 if (process.argv.includes('--help')) {
+  const { SQFT_BAND_PCT, HEADLINE_MIN_COMPS } = require('./lib/constants');
   console.log(`
 server.js — Rincon Rental Analysis Tool server
 
@@ -109,16 +110,39 @@ POST /api/rental-analysis/run
     subject_year_built     (number, optional)
     lease_term_months      (number, required)
     furnished              (boolean, optional — default false)
+    subject_age_restricted (boolean, optional — default false. True when the
+                             subject is in a 55+ community: 55+ comps then
+                             count. Otherwise 55+ comps are left out.)
+    subject_subdivision    (text, optional, up to 120 characters — the
+                             subject's neighborhood name, when known)
     run_by                 (string UUID, required — a real users.id)
     property_id            (string UUID, optional — only if you already know
                              this address matches an existing Rincon property)
 
-  Pulls comps from every active row in rental_comp_sources (today: RentCast
-  only — FlexMLS is seeded but pending real access, and Zillow has no
-  buildable API and won't be added), computes a weighted recommended rent
-  range, writes an AI-generated rationale and per-comp narrative, and
-  returns the full analysis + its comps + zip-level market data as JSON:
-  { analysis, comps, marketData }.
+  Comps whose square footage is more than ${SQFT_BAND_PCT}% larger or smaller than the
+  subject's (houses, townhomes, condos and manufactured homes only), furnished
+  or unfurnished comps that don't match the subject, month-to-month or other
+  short-term leases (when the subject's lease is 6 months or more) and 55+
+  community comps (unless the subject is in one) are still saved and shown,
+  but are left out of the rent numbers, each with its reason. A fact the MLS
+  did not give is unknown and never leaves a comp out.
+
+  Also accepted: owner_goal (optional: lease_quickly, balanced or maximize_rent;
+  empty means balanced) — which price inside the recommended range to suggest.
+
+  Pulls comps from every active row in rental_comp_sources (today: RentCast,
+  CRMLS and Rincon's own LeadSimple move-in leases; Zillow has no buildable
+  API and won't be added), works out the recommended range (exactly $200 wide)
+  with a suggested list price, a stretch price (Medium and High confidence
+  only) and a High / Medium / Low confidence label, writes an AI-generated
+  explanation and per-comp narrative, and returns the full analysis + its comps
+  + zip-level market data as JSON:
+  { analysis, comps, marketData, headline, confidence, counted, noRange,
+    sizeBand, sizeNote, accuracyLine, sourceNotes }.
+  With fewer than ${HEADLINE_MIN_COMPS} counted comps the report still finishes, with no range and no prices
+  (noRange says why). sourceNotes lists, in plain words, any source that did
+  not fully come back while others supplied comps (screen only, not saved).
+  The old wide computed range is saved for the audit trail but never sent.
 
   marketData is the subject zip's cached RentCast market stats (median/
   average rent, rent per sqft, days on market, month-by-month history) —
@@ -151,8 +175,13 @@ const { runActiveSources } = require('./lib/sources');
 const { lookupPropertyDetails } = require('./lib/rentcast');
 const { getMarketData } = require('./lib/market-data');
 const { suggestAddresses } = require('./lib/google-places');
-const { findBestPropertyMatch, hasParseableHouseNumber } = require('./lib/property-matching');
+const { findBestPropertyMatch, hasParseableHouseNumber, hasStreetName } = require('./lib/property-matching');
 const { computeNumbers } = require('./lib/analyze');
+const { buildCompRows } = require('./lib/comp-rows');
+const { parseAgeRestrictedInput, parseSubdivisionInput } = require('./lib/mls-facts');
+const { stripControlChars, checkSubjectLimits, parseFurnishedInput, MAX_ADDRESS_LENGTH } = require('./lib/subject-inputs');
+const { sizeBandPctFor } = require('./lib/weighting');
+const { parseOwnerGoalInput, classifySourceResult, noCompsRationale, buildCompletionPatch, headlineForDisplay, buildApiResponse, buildSourceNotes } = require('./lib/outcome');
 const { generateNarrative } = require('./lib/narrative');
 const { PROPERTY_TYPES } = require('./lib/constants');
 
@@ -302,6 +331,9 @@ app.get('/api/rental-analysis/property-lookup', async (req, res) => {
   if (!hasParseableHouseNumber(address)) {
     return validationError(res, 'address must include a street number (e.g. "123 Main St, Ventura, CA") — please include a street number so the lookup can trust the result.');
   }
+  if (!hasStreetName(address)) {
+    return validationError(res, 'address needs a street name.');
+  }
 
   try {
     const details = await lookupPropertyDetails(address);
@@ -350,6 +382,8 @@ app.get('/api/rental-analysis/address-suggest', async (req, res) => {
 app.post('/api/rental-analysis/run', async (req, res) => {
   const ts = new Date().toISOString();
   const body = req.body || {};
+  // a zero byte or other hidden control character in the typed address is dropped before anything uses it
+  if (typeof body.subject_address === 'string') body.subject_address = stripControlChars(body.subject_address);
   const {
     subject_address,
     subject_bedrooms,
@@ -359,6 +393,9 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     subject_year_built,
     lease_term_months,
     furnished,
+    subject_age_restricted,
+    subject_subdivision,
+    owner_goal,
     run_by,
     property_id,
   } = body;
@@ -373,8 +410,15 @@ app.post('/api/rental-analysis/run', async (req, res) => {
   // parseable street number here, before a single DB lookup or RentCast
   // call happens, rather than letting RentCast guess and paying for the
   // call (RentCast's free tier is 50 requests/month).
+  if (subject_address.length > MAX_ADDRESS_LENGTH) {
+    return validationError(res, `subject_address must be ${MAX_ADDRESS_LENGTH} characters or fewer.`);
+  }
   if (!hasParseableHouseNumber(subject_address)) {
     return validationError(res, 'subject_address must include a street number (e.g. "123 Main St, Ventura, CA") — please include a street number so the analysis can trust the result.');
+  }
+  // a bare number ("2461") has no street name to search by; refused before any lookup so no paid call is spent on it
+  if (!hasStreetName(subject_address)) {
+    return validationError(res, 'subject_address needs a street name.');
   }
   // subject_bedrooms, subject_sqft, subject_year_built, and lease_term_months
   // are all INTEGER columns in the schema (subject_bathrooms is the odd one
@@ -407,7 +451,25 @@ app.post('/api/rental-analysis/run', async (req, res) => {
   if (!Number.isInteger(leaseTermMonths) || leaseTermMonths <= 0) {
     return validationError(res, 'lease_term_months is required and must be a whole number > 0.');
   }
-  const isFurnished = !!furnished;
+  // Furnished must be a real true/false (the text "false" is not quietly read as yes), and no size may be absurd.
+  const furnishedInput = parseFurnishedInput(furnished);
+  if (furnishedInput.error) return validationError(res, furnishedInput.error);
+  const isFurnished = furnishedInput.value;
+  const limitError = checkSubjectLimits({ bedrooms, bathrooms, sqft, leaseTermMonths });
+  if (limitError) return validationError(res, limitError);
+  // "Subject is in a 55+ community" (optional, default no) and the subject's
+  // neighborhood name (optional). Both are checked here, before any RentCast
+  // call, like every other input.
+  const ageRestrictedInput = parseAgeRestrictedInput(subject_age_restricted);
+  if (ageRestrictedInput.error) return validationError(res, ageRestrictedInput.error);
+  const ageRestricted = ageRestrictedInput.value;
+  const subdivisionInput = parseSubdivisionInput(subject_subdivision);
+  if (subdivisionInput.error) return validationError(res, subdivisionInput.error);
+  const subjectSubdivision = subdivisionInput.value;
+  // "Owner goal" (optional): which price inside the recommended range to suggest. Empty means Balanced.
+  const ownerGoalInput = parseOwnerGoalInput(owner_goal);
+  if (ownerGoalInput.error) return validationError(res, ownerGoalInput.error);
+  const ownerGoal = ownerGoalInput.value;
   if (!run_by || typeof run_by !== 'string' || !UUID_RE.test(run_by)) {
     return validationError(res, 'run_by is required and must be a real users.id (UUID).');
   }
@@ -450,6 +512,21 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     return res.status(500).json({ error: 'No active comp sources are configured in rental_comp_sources.' });
   }
 
+  // The subject as the comp search and the numbers see it. The last four
+  // fields feed the size and MLS-fact rules (square footage within the size band, furnished,
+  // month-to-month, 55+); lib/weighting.js applies them, one shared decision.
+  const subject = {
+    address: subject_address.trim(),
+    propertyType: subject_property_type,
+    bedrooms,
+    bathrooms,
+    sqft,
+    furnished: isFurnished,
+    leaseTermMonths,
+    ageRestricted,
+    ownerGoal,
+  };
+
   // ── Create the analysis row ──────────────────────────────────────────────
   let analysis;
   try {
@@ -462,6 +539,10 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       subject_year_built: yearBuilt,
       lease_term_months: leaseTermMonths,
       furnished: isFurnished,
+      subject_age_restricted: ageRestricted, // always true or false, never blank (the database does not accept a blank here)
+      subject_subdivision: subjectSubdivision,
+      size_band_pct: sizeBandPctFor(subject_property_type, sqft), // 25, or null when the size rule does not apply to this property type
+      owner_goal: ownerGoal,
       property_id: resolvedPropertyId,
       run_by,
       status: 'running',
@@ -477,19 +558,21 @@ app.post('/api/rental-analysis/run', async (req, res) => {
   // ── Run the pipeline. Anything that throws from here on marks the row
   //    'failed' before responding, so it never sits at 'running' forever. ──
   try {
-    const { comps: rawComps, subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors } = await runActiveSources(
+    const { comps: rawComps, subjectEstimatedRent, subjectLatitude, subjectLongitude, subjectZip, sourcesUsed, sourceErrors, sourceWarnings, sourcesSkipped } = await runActiveSources(
       activeSources,
-      { address: subject_address.trim(), propertyType: subject_property_type, bedrooms, bathrooms, sqft }
+      subject
     );
 
-    if (!rawComps.length) {
-      const reason = sourceErrors.length
-        ? sourceErrors.map(e => `${e.name}: ${e.error}`).join(' | ')
-        : 'No comps were returned by any active source.';
+    // No comps at all. If any source broke (or none ran) we cannot say there are
+    // no comparable homes, so the analysis FAILS. If every source that ran came
+    // back fine with nothing, it is a finished report that says so, with no range
+    // and no prices (Peter, 2026-10-17). See lib/outcome.js.
+    const sourceOutcome = classifySourceResult({ comps: rawComps, sourcesUsed, sourceErrors, sourceWarnings });
+    if (sourceOutcome.kind === 'failed') {
       await update('rental_analyses', `id=eq.${analysis.id}`, { status: 'failed' });
-      console.error(`[${ts}] Analysis failed, no comps: id=${analysis.id} reason=${reason}`);
+      console.error(`[${ts}] Analysis failed, no comps: id=${analysis.id} reason=${sourceOutcome.reason}`);
       return res.status(500).json({
-        error: `Could not produce a recommendation for this address — ${reason}`,
+        error: `Could not produce a recommendation for this address — ${sourceOutcome.reason}`,
         analysis_id: analysis.id,
       });
     }
@@ -513,11 +596,12 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // narrative, the DB insert — runs on the deduped list. exclusionReasons is
     // a positional array, same order as compsWithMatch; narrativesByIndex/
     // compRows/responseComps below all rely on that same order.
-    const { compsWithMatch, matchedCount, recommended, raw, exclusionReasons } = computeNumbers({
+    const numbers = computeNumbers({
       comps: rawComps,
-      subject: { address: subject_address.trim(), propertyType: subject_property_type, bedrooms, bathrooms, sqft },
+      subject,
       properties,
     });
+    const { compsWithMatch, matchedCount, exclusionReasons } = numbers;
     if (compsWithMatch.length !== matchedCount) {
       console.log(`[${ts}] Deduped comps: id=${analysis.id} before=${matchedCount} after=${compsWithMatch.length}`);
     }
@@ -527,62 +611,54 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // are nullable by design for exactly this case (see migration notes).
     let rationale = null;
     let narrativesByIndex = compsWithMatch.map(() => null);
-    try {
-      const result = await generateNarrative({
-        subject: {
-          address: subject_address.trim(),
-          bedrooms, bathrooms, sqft,
-          propertyType: subject_property_type,
-          yearBuilt,
-          leaseTermMonths,
-          furnished: isFurnished,
-        },
-        // Each comp annotated with its exclusion_reason (or null) so
-        // describeComp()/buildPrompt() (lib/narrative.js) can tell Claude
-        // plainly which comps contributed zero weight — never done as a
-        // separate lookup, so it can't drift out of sync with the comp
-        // it describes. compsWithMatch itself is untouched (spread, not
-        // mutated) since it still needs to feed compRows below with only
-        // real DB columns.
-        comps: compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: exclusionReasons[i] })),
-        recommended,
-        raw,
-        subjectEstimatedRent,
-        sourcesUsed,
-      });
-      rationale = result.rationale;
-      narrativesByIndex = result.narrativesByIndex;
-    } catch (err) {
-      console.error(`[${ts}] Narrative generation failed (numbers still saved): id=${analysis.id}`, err.message);
+    if (sourceOutcome.kind === 'none_found') {
+      // Nothing comparable was found: a plain sentence says so, no AI call is needed.
+      rationale = noCompsRationale(sourcesUsed, sourcesSkipped);
+    } else {
+      try {
+        const result = await generateNarrative({
+          subject: {
+            address: subject_address.trim(),
+            bedrooms, bathrooms, sqft,
+            propertyType: subject_property_type,
+            yearBuilt,
+            leaseTermMonths,
+            furnished: isFurnished,
+          },
+          // Each comp annotated with its exclusion_reason (or null) so
+          // describeComp()/buildPrompt() (lib/narrative.js) can tell Claude
+          // plainly which comps contributed zero weight — never done as a
+          // separate lookup, so it can't drift out of sync with the comp
+          // it describes. compsWithMatch itself is untouched (spread, not
+          // mutated) since it still needs to feed compRows below with only
+          // real DB columns.
+          comps: compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: exclusionReasons[i] })),
+          // The write-up is told the recommended range, the suggested price, the stretch price (not on a
+          // Low report) and the label, and NOTHING about the old wide computed range.
+          headline: headlineForDisplay(numbers),
+          confidence: numbers.confidence,
+          subjectEstimatedRent,
+          // Only the sources that actually supplied a comp are named in the write-up. A source that ran fine but
+          // returned nothing (or was skipped) is not "where the comps came from".
+          sourcesUsed: [...new Set(compsWithMatch.map(c => c.source_name).filter(Boolean))],
+        });
+        rationale = result.rationale;
+        narrativesByIndex = result.narrativesByIndex;
+      } catch (err) {
+        console.error(`[${ts}] Narrative generation failed (numbers still saved): id=${analysis.id}`, err.message);
+      }
     }
 
     // One insert per comp, narrative already attached — avoids a wasteful
     // insert-then-update round trip.
-    const compRows = compsWithMatch.map((c, i) => ({
-      analysis_id: analysis.id,
-      source_id: c.source_id,
-      address: c.address,
-      property_type: c.property_type,
-      bedrooms: c.bedrooms,
-      bathrooms: c.bathrooms,
-      sqft: c.sqft,
-      distance_miles: c.distance_miles,
-      latitude: c.latitude,
-      longitude: c.longitude,
-      monthly_rent: c.monthly_rent,
-      is_estimated_price: c.is_estimated_price,
-      original_price: c.original_price,
-      had_price_cut: c.had_price_cut,
-      listing_status: c.listing_status,
-      days_on_market: c.days_on_market,
-      listed_date: c.listed_date,
-      leased_date: c.leased_date,
-      is_rincon_managed: c.is_rincon_managed,
-      comp_property_id: c.comp_property_id,
-      narrative: narrativesByIndex[i],
-    }));
+    // Every comp from every source becomes one row through the shared mapper
+    // (lib/comp-rows.js), so the two entry points cannot save different things and
+    // every row carries every column (a row missing its tag lists would make the
+    // database refuse the whole batch).
+    const compRows = buildCompRows(compsWithMatch, { analysisId: analysis.id, narratives: narrativesByIndex });
 
-    const insertedComps = await insert('rental_comps', compRows);
+    // A finished "no comparable homes" report has no comps to save.
+    const insertedComps = compRows.length ? await insert('rental_comps', compRows) : [];
 
     // rental_comps has no source_name column (source_name only exists in
     // memory, on compsWithMatch — see lib/sources.js's runActiveSources()
@@ -604,22 +680,22 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       exclusion_reason: exclusionReasons[i],
     }));
 
-    const [updatedAnalysis] = await update('rental_analyses', `id=eq.${analysis.id}`, {
-      status: 'complete',
-      property_id: resolvedPropertyId,
-      recommended_rent_low: recommended.low,
-      recommended_rent_mid: recommended.mid,
-      recommended_rent_high: recommended.high,
-      subject_estimated_rent: subjectEstimatedRent,
-      subject_latitude: subjectLatitude,
-      subject_longitude: subjectLongitude,
-      subject_zip: subjectZip,
-      raw_comp_rent_low: raw.low,
-      raw_comp_rent_high: raw.high,
+    // ONE update marks the analysis complete and carries the whole outcome with it:
+    // the recommended range, suggested and stretch prices, the label and the counts
+    // (the database checks them against each other, and allows a finished report
+    // with no numbers only when the count says fewer than 4 comps counted).
+    const [updatedAnalysis] = await update('rental_analyses', `id=eq.${analysis.id}`, buildCompletionPatch({
+      numbers,
+      ownerGoal,
+      propertyId: resolvedPropertyId,
+      subjectEstimatedRent,
+      subjectLatitude,
+      subjectLongitude,
+      subjectZip,
       rationale,
-    });
+    }));
 
-    console.log(`[${ts}] Analysis complete: id=${analysis.id} comps=${insertedComps.length} recommended=${recommended.low}-${recommended.high}`);
+    console.log(`[${ts}] Analysis complete: id=${analysis.id} comps=${insertedComps.length} counted=${numbers.counted.total} range=${numbers.headline ? `${numbers.headline.low}-${numbers.headline.high}` : 'none'} confidence=${numbers.confidence ? numbers.confidence.label : 'none'}`);
 
     // Zip-code-level market context (median/average rent, trend history) for
     // the report's area-context section — cached per zip, see
@@ -636,7 +712,11 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       }
     }
 
-    return res.json({ analysis: updatedAnalysis, comps: responseComps, marketData });
+    // The answer carries the recommended range, prices and label. It does NOT carry the old wide computed
+    // range (recommended_rent_*, raw_comp_rent_*): those are saved for the audit trail only.
+    // A source that did not fully come back (while others supplied comps) is said so on the screen, in plain words;
+    // nothing is saved for it and the numbers are unchanged.
+    return res.json(buildApiResponse({ analysis: updatedAnalysis, comps: responseComps, marketData, numbers, sourceNotes: buildSourceNotes({ sourceErrors, sourceWarnings }) }));
   } catch (err) {
     console.error(`[${ts}] Analysis pipeline error: id=${analysis.id}`, err.message);
     try {

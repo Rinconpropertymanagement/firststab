@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generatedAt": "2026-10-17T20:02:22.839Z",
+  "generatedAt": "2026-10-18T01:02:58.089Z",
   "testedOn": "2026-10-17",
   "dataPulledOn": "2026-10-17",
   "dataPulledAt": "2026-10-17T19:22:02.575Z",
@@ -8,7 +8,7 @@
   "trusted": true,
   "trustReasons": [],
   "methodVersion": "current-tool-2026-10",
-  "methodNote": "baseline = the production comp-matching code as it runs today (bedrooms and property type only); size25_item2 = the same code with the proposed Phase B rules simulated",
+  "methodNote": "baseline = the tool before Phase B (bedrooms and property type only; the size and MLS rules switched off); size25_item2 = the same tool with the Phase B rules on (size band 25% and the furnished / short-term / 55+ rules), run by the real lib/ code and proven identical, lease by lease, to the earlier simulation (backtest/phase-b-equivalence.js)",
   "scope": {
     "county": "the Ventura-area service box (Ventura, Oxnard, Camarillo, Simi Valley, Thousand Oaks and the Conejo Valley border); about 27% of the leases are in the Calabasas / Agoura Hills / Westlake Village / West Hills border area (by the old city list; also reported separately as \"LA-border cities\"); by the MLS county field about 21% are in counties other than Ventura (reported as \"Other counties (LA-border area)\")",
     "core": "the Ventura core box"

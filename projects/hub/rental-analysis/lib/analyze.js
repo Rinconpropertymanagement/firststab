@@ -19,6 +19,24 @@
  * (size band, MLS facts, recommended range, confidence) add their steps HERE,
  * once, for both entry points and the test.
  *
+ * Phase B (size band and MLS facts) added ONE thing here: the subject's
+ * extras (square footage, furnished, lease length, 55+) are read from `subject`
+ * once and handed to every step below, so the dedupe choice, both ranges and
+ * the per-comp verdict all apply the same four extra rules
+ * (lib/weighting.js, extraExclusionReason). A subject that leaves those fields
+ * out gets the old behavior exactly (this is how the accuracy test still runs
+ * "the tool before Phase B"). Nothing else about the steps changed.
+ *
+ * Phase C (recommended range, prices, confidence) added the last two things this
+ * returns: `headline` (the $200 recommended range, the suggested list price and
+ * the stretch price) and `confidence` (High / Medium / Low with its reasons),
+ * both built only from the comps that counted. They are null when fewer than 4
+ * comps counted: no range, no prices, no label. The old wide numbers
+ * (`recommended`, `raw`) are still returned, but ONLY for the audit columns in
+ * the database and for working out how well the comps agree; nothing shown to a
+ * reader may use them. The owner's goal comes in on `subject.ownerGoal` and only
+ * chooses which price inside the range is suggested.
+ *
  * Steps, in order:
  *   1. Match every comp's address against `properties` (best-effort) and tag
  *      it with comp_property_id / is_rincon_managed.
@@ -34,39 +52,51 @@
  *      by the narrative prompt and the API response, so they can never
  *      independently drift on which comps are excluded. Positional array,
  *      same order as compsWithMatch.
+ *   5. The counted comps (verdict null), how many of them are confirmed
+ *      leases, and from those the headline range and the confidence label.
  */
 
 const { findBestPropertyMatch, dedupeComps } = require('./property-matching');
-const { computeRecommendedRange, computeRawRange, exclusionReason } = require('./weighting');
+const { computeRecommendedRange, computeRawRange, exclusionReason, subjectExtrasFrom, computeHeadlineRange } = require('./weighting');
+const { computeConfidence } = require('./confidence');
 
 /**
  * @param {object} args
  * @param {object[]} args.comps - the comps runActiveSources() returned (each already has source_id/source_name)
- * @param {{bedrooms: number, propertyType: string}} args.subject - same subject runActiveSources() received (extra fields ignored)
+ * @param {{bedrooms: number, propertyType: string, sqft?: number, furnished?: boolean, leaseTermMonths?: number, ageRestricted?: boolean, ownerGoal?: string}} args.subject - same subject runActiveSources() received (other fields ignored)
  * @param {object[]} [args.properties] - rows from `properties` ({id, address, city, state, zip}); omitted/empty means no comp is Rincon-managed
  * @returns {{
  *   compsWithMatch: object[],
  *   matchedCount: number,
  *   recommended: {low: number|null, mid: number|null, high: number|null},
  *   raw: {low: number|null, high: number|null},
- *   exclusionReasons: (string|null)[]
+ *   exclusionReasons: (string|null)[],
+ *   counted: {total: number, leased: number},
+ *   headline: object|null,
+ *   confidence: object|null
  * }} matchedCount is the comp count BEFORE dedupe (callers log it against compsWithMatch.length)
  */
 function computeNumbers({ comps, subject, properties = [] }) {
   const { bedrooms, propertyType } = subject;
+  const extras = subjectExtrasFrom(subject);
 
   const matchedComps = comps.map(c => {
     const match = findBestPropertyMatch(c.address, properties);
     return { ...c, comp_property_id: match ? match.id : null, is_rincon_managed: !!match };
   });
-  const compsWithMatch = dedupeComps(matchedComps, bedrooms, propertyType);
+  const compsWithMatch = dedupeComps(matchedComps, bedrooms, propertyType, extras);
 
-  const recommended = computeRecommendedRange(compsWithMatch, bedrooms, propertyType);
-  const raw = computeRawRange(compsWithMatch, bedrooms, propertyType);
+  const recommended = computeRecommendedRange(compsWithMatch, bedrooms, propertyType, extras);
+  const raw = computeRawRange(compsWithMatch, bedrooms, propertyType, extras);
 
-  const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, propertyType));
+  const exclusionReasons = compsWithMatch.map(c => exclusionReason(c, bedrooms, propertyType, extras));
 
-  return { compsWithMatch, matchedCount: matchedComps.length, recommended, raw, exclusionReasons };
+  const countedComps = compsWithMatch.filter((c, i) => exclusionReasons[i] === null);
+  const counted = { total: countedComps.length, leased: countedComps.filter(c => c.listing_status === 'leased').length };
+  const headline = computeHeadlineRange(recommended, countedComps, subject.ownerGoal);
+  const confidence = computeConfidence(headline);
+
+  return { compsWithMatch, matchedCount: matchedComps.length, recommended, raw, exclusionReasons, counted, headline, confidence };
 }
 
 module.exports = { computeNumbers };

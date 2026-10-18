@@ -7,14 +7,25 @@
  * candidate list, the metric and the margins below are the pre-registration:
  * change them only before a hold-out is judged, and say so in the run report.
  *
- * A "method" is the tool's behaviour under test. The baseline is today's real
- * code. The other methods are the proposed rules (Phase B's size band and MLS
- * facts), simulated as a filter on the comps the replay hands the real tool.
- * Dropping a comp before the tool sees it gives the same numbers as Phase B's
- * "excluded but still shown" because an excluded comp contributes nothing to
- * the radius-ladder gate, the dedupe choice or the range math (the spec's
- * "coupled" design). When Phase B ships, these filters should be deleted and
- * the methods switched on by the real lib code instead.
+ * A "method" is the tool's behaviour under test.
+ *   baseline       the tool BEFORE Phase B: bedrooms and property type only. The
+ *                  engine gives the tool a subject with no square footage and no
+ *                  furnished / lease / 55+ facts, which switches the Phase B
+ *                  rules off in lib/ (lib/weighting.js, "new rules").
+ *   size25_item2   the tool WITH Phase B: the real lib code applies the size
+ *                  band (25%) and the furnished / short-term / 55+ rules. The
+ *                  engine gives the tool the full subject; nothing is filtered
+ *                  here. Flagged `shipped: true`.
+ *   size25_item2_sim  the same two rules as they were SIMULATED before Phase B was
+ *                  built, as a filter on the comps the replay hands the tool.
+ *                  Dropping a comp before the tool sees it gives the same numbers
+ *                  as "excluded but still shown" because an excluded comp
+ *                  contributes nothing to the radius-ladder gate, the dedupe
+ *                  choice or the range math (the spec's "coupled" design).
+ *                  Kept ONLY so backtest/phase-b-equivalence.js can prove the
+ *                  shipped code gives the same answer for every lease.
+ *   item2, size25, size15/20/30/35_item2  tuning variants. They still use the
+ *                  simulated filters (the shipped band is fixed at 25%).
  *
  * A "pool" says which data the replay rebuilds: MLS closed leases only (how
  * the spec's Appendix G was measured), plus as-of asking prices, plus Rincon's
@@ -57,7 +68,8 @@ const METHODS = {
   baseline: { id: 'baseline', label: 'Real code today (bedrooms + type)', keep: null },
   item2: { id: 'item2', label: '+ furnished / short-term / 55+ left out', keep: item2Keep },
   size25: { id: 'size25', label: '+ size band 25%', keep: sizeKeep(25) },
-  size25_item2: { id: 'size25_item2', label: '+ size band 25% + furnished / short-term / 55+', keep: both(sizeKeep(25), item2Keep) },
+  size25_item2: { id: 'size25_item2', label: '+ size band 25% + furnished / short-term / 55+', keep: null, shipped: true },
+  size25_item2_sim: { id: 'size25_item2_sim', label: 'size band 25% + furnished / short-term / 55+, simulated (equivalence check only)', keep: both(sizeKeep(25), item2Keep) },
 };
 for (const pct of [15, 20, 30, 35]) {
   METHODS[`size${pct}_item2`] = { id: `size${pct}_item2`, label: `+ size band ${pct}% + furnished / short-term / 55+`, keep: both(sizeKeep(pct), item2Keep) };
@@ -116,8 +128,14 @@ function evaluateAcceptance({ baseline, candidate, baselineGroups = {}, candidat
   const missBetter = b && c ? b.typicalMiss - c.typicalMiss : null;
   checks.push({ id: 'b', label: `typical miss better by at least $${ACCEPTANCE.minMissImprovementDollars}`, pass: missBetter !== null && missBetter >= ACCEPTANCE.minMissImprovementDollars, detail: missBetter === null ? 'no data' : `$${Math.round(missBetter)}` });
 
-  const covLoss = baseline.coverage !== null && candidate.coverage !== null ? (baseline.coverage - candidate.coverage) * 100 : null;
-  checks.push({ id: 'c', label: `coverage not down more than ${ACCEPTANCE.maxCoverageLossPoints} points`, pass: covLoss !== null && covLoss <= ACCEPTANCE.maxCoverageLossPoints, detail: covLoss === null ? 'no data' : `${covLoss.toFixed(1)} points lost` });
+  // Rule (c), as Peter rewrote it (2026-10-17): judged per 100 reports TRIED. A method that gives fewer reports a range
+  // is not penalised for that by itself; it must not lose RIGHT answers per 100 tried, and it must cut the BADLY WRONG
+  // ones per 100 tried. A report with no range is neither right nor wrong.
+  const hasRates = s => s && Number.isFinite(s.rightPer100) && Number.isFinite(s.badlyWrongPer100);
+  const rightChange = hasRates(baseline) && hasRates(candidate) ? candidate.rightPer100 - baseline.rightPer100 : null;
+  checks.push({ id: 'c', label: `right answers per 100 reports tried (within $${ACCEPTANCE.rightWithinDollars}) must not fall`, pass: rightChange !== null && rightChange >= -1e-9, detail: rightChange === null ? 'no data' : `${baseline.rightPer100.toFixed(1)} -> ${candidate.rightPer100.toFixed(1)} per 100` });
+  const wrongChange = hasRates(baseline) && hasRates(candidate) ? candidate.badlyWrongPer100 - baseline.badlyWrongPer100 : null;
+  checks.push({ id: 'c2', label: `badly wrong answers per 100 reports tried (off by more than $${ACCEPTANCE.badlyWrongOverDollars}) must fall`, pass: wrongChange !== null && wrongChange < -1e-9, detail: wrongChange === null ? 'no data' : `${baseline.badlyWrongPer100.toFixed(1)} -> ${candidate.badlyWrongPer100.toFixed(1)} per 100` });
 
   const worse = [];
   for (const [groupName, groups] of Object.entries(baselineGroups)) {

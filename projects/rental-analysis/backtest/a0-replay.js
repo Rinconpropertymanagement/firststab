@@ -17,6 +17,9 @@
  *   - stress:   the comps plus synthetic duplicates (same address, different
  *               status and source) and a few comps re-addressed to real
  *               Rincon-managed properties
+ * The subject is given WITHOUT square footage or the form's furnished / lease /
+ * 55+ facts, which switches the Phase B rules (size band, MLS facts) off in
+ * lib/, so the frozen old code and the new file can still be compared exactly.
  * Compared, field for field (assert.deepStrictEqual): the full comp rows
  * including is_rincon_managed and comp_property_id, which copy survived
  * dedupe, the exclusion reason of every comp, the recommended range
@@ -85,7 +88,11 @@ function stressInput(rawComps, properties) {
 function compare(label, input, subject, properties, tally) {
   const legacy = legacyNumbers({ rawComps: input, bedrooms: subject.bedrooms, subject_property_type: subject.propertyType, properties });
   const modern = computeNumbers({ comps: input, subject, properties });
-  assert.deepStrictEqual(modern, legacy, `${label}: computeNumbers() differs from the frozen old code`);
+  // computeNumbers() now also returns the counted totals, the headline range and the confidence label (Phase C).
+  // The frozen old code knows only the first five fields, so exactly those are compared; "no number changed in the
+  // old fields" is still what this proof says.
+  const sameFields = { compsWithMatch: modern.compsWithMatch, matchedCount: modern.matchedCount, recommended: modern.recommended, raw: modern.raw, exclusionReasons: modern.exclusionReasons };
+  assert.deepStrictEqual(sameFields, legacy, `${label}: computeNumbers() differs from the frozen old code`);
   tally.runs++;
   tally.compRows += modern.compsWithMatch.length;
   tally.rinconManagedRows += modern.compsWithMatch.filter(c => c.is_rincon_managed).length;
@@ -127,7 +134,11 @@ async function main() {
     const stored = compsByAnalysis.get(a.id) || [];
     if (!stored.length) { analysesWithNoComps++; continue; }
     const rawComps = stored.map(c => rebuildRawComp(c, sourceNameById));
-    const subject = { address: a.subject_address.trim(), propertyType: a.subject_property_type, bedrooms: a.subject_bedrooms, bathrooms: a.subject_bathrooms, sqft: a.subject_sqft };
+    // No square footage and none of the form's furnished / lease / 55+ facts: that switches the Phase B rules
+    // off in lib/, so this proof keeps meaning what it always did ("moving the pipeline into lib/analyze.js
+    // changed no number"). What the Phase B rules themselves change is proved separately, by
+    // backtest/phase-b-equivalence.js and the replay of saved reports shown in the Phase B report.
+    const subject = { address: a.subject_address.trim(), propertyType: a.subject_property_type, bedrooms: a.subject_bedrooms, bathrooms: a.subject_bathrooms };
     const label = `${a.id.slice(0, 8)}`;
 
     const asStored = compare(`${label} as-stored`, rawComps, subject, properties, tally);

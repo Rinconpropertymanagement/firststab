@@ -13,7 +13,8 @@ Plan: `../CMA-QUALITY-SPEC.md`, Phase A.
 | The monthly routine (publishes THIS run's scorecard only if it is trusted and the run was complete; otherwise it refuses and exits with an error) | `node backtest/run.js --refresh --publish` |
 | Re-check the replay against the live Recore feed (needed again whenever the product's comp-pulling code or the replay changes) | `node backtest/run.js --fidelity` |
 | Skip the second pass that re-runs the MLS leases as of the day each went on the market (on by default, about 15 seconds; the report states its effect) | `node backtest/run.js --no-asof-listing` |
-| Prove the `lib/analyze.js` refactor changed no number | `node backtest/a0-replay.js` |
+| Prove the `lib/analyze.js` refactor changed no number (the Phase B rules are switched off for this proof) | `node backtest/a0-replay.js` |
+| Prove the Phase B rules (size band 25% plus the furnished / short-term / 55+ rules), as the real `lib/` code applies them, give the same answer for every lease as the simulation the test used before they were built (about 75 seconds, saved data only, no network) | `node backtest/phase-b-equivalence.js` |
 | See all options | `node backtest/run.js --help` |
 | Check the building blocks | `node q-mapping-unit-test.js` |
 
@@ -24,7 +25,29 @@ Plan: `../CMA-QUALITY-SPEC.md`, Phase A.
 - `out/<date>/report.md`: the readable result. Percentages and counts only, safe to share.
 - `out/<date>/detail.csv`, `worst-misses.csv`, `outcomes.csv`: one row per lease WITH addresses. Local only.
 - `scorecard.json`: the committed summary. Aggregates only (every group has 20+ leases; a guard refuses to write an address, zip code, listing id or email).
-- The report opens with three checks. **Leak self-test**: the answer is put back into the pool on purpose and the error must collapse. **Fidelity check**: for 5 known properties the replay's MLS comps must be identical to a live call of the real `pullCrmlsComps()`. **No-peeking guard**: any comp dated on or after the lease's start date stops the run. The scorecard says `"trusted": true` only when all three held in the same run. The fidelity result is tied to the code it checked: it stores a content hash of the product's comp-pulling files (`lib/crmls.js`, `lib/leadsimple.js`, `lib/sources.js`, `lib/rentcast.js`, `lib/weighting.js`, `lib/property-matching.js`, `lib/analyze.js`, `lib/constants.js`) and of the replay itself (`asof-sources.js`, `candidates.js`, `engine.js`, `selftests.js`) and of the pull (`recore.js`, which says which MLS fields are fetched, the county field included), and it is invalid, so the scorecard is not trusted, as soon as any of them changes or the data is re-pulled, until `--fidelity` is run again. The lookbacks the replay uses (6 months of closed leases, 24 months of Rincon leases today) are read from the product's own modules, and the scorecard is also untrusted if any pool's setting differs from the product's. It is untrusted as well when the saved data is more than 45 days old, does not reach back far enough for the targets, or when the network guard saw anything other than Recore and Supabase (the guard blocks RentCast and Anthropic outright and counts every request; the counts are in the scorecard).
+- The report opens with three checks. **Leak self-test**: the answer is put back into the pool on purpose and the error must collapse. **Fidelity check**: for 5 known properties the replay's MLS comps must be identical to a live call of the real `pullCrmlsComps()`. **No-peeking guard**: any comp dated on or after the lease's start date stops the run. The scorecard says `"trusted": true` only when all three held in the same run. The fidelity result is tied to the code it checked: it stores a content hash of the product's comp-pulling files (`lib/crmls.js`, `lib/leadsimple.js`, `lib/sources.js`, `lib/rentcast.js`, `lib/weighting.js`, `lib/property-matching.js`, `lib/mls-facts.js`, `lib/analyze.js`, `lib/constants.js`) and of the replay itself (`asof-sources.js`, `candidates.js`, `engine.js`, `selftests.js`) and of the pull (`recore.js`, which says which MLS fields are fetched, the county field included), and it is invalid, so the scorecard is not trusted, as soon as any of them changes or the data is re-pulled, until `--fidelity` is run again. The lookbacks the replay uses (6 months of closed leases, 24 months of Rincon leases today) are read from the product's own modules, and the scorecard is also untrusted if any pool's setting differs from the product's. It is untrusted as well when the saved data is more than 45 days old, does not reach back far enough for the targets, or when the network guard saw anything other than Recore and Supabase (the guard blocks RentCast and Anthropic outright and counts every request; the counts are in the scorecard).
+
+## The two methods in the scorecard
+
+- **baseline** is the tool before Phase B: bedrooms and property type only. The engine gives the tool a subject with no square footage and none of the form's furnished / lease length / 55+ facts, and the rules in `lib/weighting.js` only switch on for a subject that carries them, so the real code behaves exactly as it did before Phase B.
+- **size25_item2** is the tool with Phase B: the real `lib/` code applies the 25% size band and the furnished, short-term and 55+ rules, because the engine gives it the full subject (square footage, unfurnished, a 12-month lease, not 55+, the form's defaults). Before Phase B was built this column was a simulation (the same rules as a filter on the comps, method `size25_item2_sim` in `candidates.js`). `node backtest/phase-b-equivalence.js` runs both on every lease in every pool and requires the identical estimate, range, comp count and list of counted rents; it passed on all of them, which is why the scorecard's numbers did not change when the simulation was replaced by the real code. The other tuning variants (`item2`, `size25`, bands 15/20/30/35) still use the simulated filter, because the shipped band is fixed at 25%.
+
+## The rule for adopting a change
+
+A tuning change ships only if, on the newest three months of leases that were not used to choose it, it passes ALL of these (`evaluateAcceptance` in `candidates.js`; the numbers are in `constants.js`):
+
+- (a) at least 4 points more leases within $300 of the estimate;
+- (b) the typical miss is better by at least $25;
+- (c) **right answers per 100 reports tried must not fall** (right = the suggested price is within $300 of the signed rent);
+- (c2) **badly wrong answers per 100 reports tried must fall** (badly wrong = off by more than $600);
+- (d) no large group (100 or more leases) is worse by more than 3 points;
+- (e) at least 300 hold-out leases (150 for Rincon-only changes).
+
+Rule (c) was rewritten by Peter on 2026-10-17. It used to say "no more than 5 points fewer reports may get a range"; that is gone, because the size rule is worth it even though fewer reports get a range. A report that gets no range counts as neither right nor wrong, so a method cannot look better by declining to answer, and cannot look worse just for being careful. On the saved data the Phase B rules go from 34.8 to 38.5 right answers per 100 tried and from 34.1 to 20.8 badly wrong ones per 100 tried (whole box), so they pass.
+
+## What the product reads from this test
+
+`node backtest/run.js --refresh --publish` (or `--fidelity --publish`) copies this run's scorecard into `lib/accuracy-scorecard.json` in both `lib/` folders, but only when the run is complete and trusted. The report page reads that file when the server starts and writes its staff sentences from it with `lib/accuracy-sentences.js`, the same code this test's report uses for its preview. If the file is missing, damaged or not trusted, those sentences are simply left out. The product's recommended range, suggested price and High / Medium / Low label (`lib/weighting.js`, `lib/confidence.js`) are checked against this folder's reference copy (`metrics.js`) on every lease by `phase-b-equivalence.js`, so the published hit rates describe the tool that really runs.
 
 ## Keep this data off the server and out of git
 
@@ -44,7 +67,8 @@ Plan: `../CMA-QUALITY-SPEC.md`, Phase A.
 - `candidates.js` the methods, pools, tuning candidates and the rule for adopting a change, written before any hold-out is looked at · `judging.js` the "judged once" lock: a candidate can be judged again only on a hold-out that starts after the end of the one it was last judged on, and the verdict text is stored
 - `provenance.js` the code hashes that tie the fidelity result to the code it checked · `publish.js` the rules for `--publish` · `netguard.js` counts and blocks outside network requests
 - `outcomes.js` matches saved reports to leases signed later · `selftests.js` leak and fidelity checks
-- `a0-replay.js` with `tests/a0-legacy-pipeline.js` (frozen copy of the pre-refactor code) the A0 proof
+- `a0-replay.js` with `tests/a0-legacy-pipeline.js` (frozen copy of the pre-refactor code) the A0 proof (run with the Phase B rules switched off, so it keeps proving that moving the pipeline changed no number)
+- `phase-b-equivalence.js` the Phase B proof (see "The two methods" below), which also checks the product's recommended range, prices and label against `metrics.js`
 - `appendix-g.js` the spec's reference numbers, printed beside each run
 
 ## What it cannot see

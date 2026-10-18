@@ -24,7 +24,7 @@
  * that does not exist yet, so reference copies live here; when lib/weighting.js
  * computeHeadlineRange / lib/confidence.js ship, switch these to the real ones.
  */
-const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH, LA_BORDER_CITIES, REGION_LABELS, COUNTY_LABELS } = require('./constants');
+const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH, LA_BORDER_CITIES, REGION_LABELS, COUNTY_LABELS, ACCEPTANCE } = require('./constants');
 
 // ── basic statistics ─────────────────────────────────────────────────────────
 function median(values) {
@@ -198,6 +198,21 @@ function summarize(rows) {
     all: estimated.length ? summarizeView(estimated) : null,
     ranged: null,
   };
+  // Per 100 reports TRIED (every target, including those that got no range, which are neither right nor wrong):
+  // how many got a suggested price within RIGHT_WITHIN of the signed rent, and how many were off by more than
+  // BADLY_WRONG_OVER. These are the two numbers rule (c) of the acceptance rule compares (candidates.js).
+  out.rightPer100 = 0;
+  out.badlyWrongPer100 = 0;
+  if (rows.length) {
+    let right = 0, badly = 0;
+    for (const r of ranged) {
+      const miss = Math.abs(r.rent - headlineRange(r).listPrice);
+      if (miss <= ACCEPTANCE.rightWithinDollars) right++;
+      else if (miss > ACCEPTANCE.badlyWrongOverDollars) badly++;
+    }
+    out.rightPer100 = (100 * right) / rows.length;
+    out.badlyWrongPer100 = (100 * badly) / rows.length;
+  }
   if (ranged.length) {
     const view = summarizeView(ranged);
     const heads = ranged.map(r => ({ r, h: headlineRange(r) }));

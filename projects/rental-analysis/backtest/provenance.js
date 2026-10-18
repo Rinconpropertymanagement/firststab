@@ -28,6 +28,8 @@ const TRACKED_FILES = [
   'lib/rentcast.js',
   'lib/weighting.js',
   'lib/property-matching.js',
+  'lib/mls-facts.js',   // what facts a comp carries (furnished, lease length, 55+) and how they are cleaned
+  'lib/confidence.js',  // the High / Medium / Low label worked out inside lib/analyze.js
   'lib/analyze.js',
   'lib/constants.js',
   'backtest/recore.js',     // what the pull selects (the county field is part of it)

@@ -11176,7 +11176,7 @@ async function main() {
         assert.match(phone, /\.hist-table thead \{ display: none; \}/);
         assert.match(phone, /\.hist-table tr \{[^}]*display|\.hist-table, \.hist-table tbody, \.hist-table tr, \.hist-table td \{ display: block; width: 100%; \}/);
         assert.match(phone, /\.hist-table td::before \{ content: attr\(data-label\)/);
-        assert.match(html, /\.history-view, \.saved-banner \{ display: none !important; \}/, 'the list and the saved banner are not printed');
+        assert.match(html, /\.history-view, \.saved-banner, \.owner-note \{ display: none !important; \}/, 'the list, the saved banner and the owner-view note are not printed');
       }
     });
 
@@ -11193,6 +11193,961 @@ async function main() {
       for (const html of [standalone, hub]) assert.match(html, /function detectPastReports\(\)/);
     });
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Owner view (one page): lib/owner-view.js, the two answers that carry it, and the page that formats it
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('--- Owner view (one page): selection, labels, sentences, wording check, both pages ---');
+  {
+    const fsO = require('node:fs');
+    const pathO = require('node:path');
+    const vmO = require('node:vm');
+    const OV = require('./lib/owner-view');
+    const OutO = require('./lib/outcome');
+    const HistO = require('./lib/history');
+    const { computeNumbers: computeNumbersO } = require('./lib/analyze');
+    const { buildCompRows: buildCompRowsO } = require('./lib/comp-rows');
+    const { computeRecommendedRange: recRangeO, computeRawRange: rawRangeO, computeHeadlineRange: headlineO } = require('./lib/weighting');
+    const { computeConfidence: confO } = require('./lib/confidence');
+    const { METHOD_VERSION: METHOD_O } = require('./lib/constants');
+    const hubDirO = pathO.join(__dirname, '..', 'hub', 'rental-analysis');
+    const hubExistsO = fsO.existsSync(hubDirO);
+    const pagesO = [pathO.join(__dirname, 'dashboard', 'index.html'), ...(hubExistsO ? [pathO.join(hubDirO, 'dashboard', 'index.html')] : [])];
+
+    // ── builders ──────────────────────────────────────────────────────────
+    const CREATED = '2026-10-16T18:00:00.000Z'; // the analysis day: October 16, 2026
+    let seqO = 0;
+    const compO = over => { seqO++; return Object.assign({ id: `oc-${seqO}`, address: `${100 + seqO} Oak St, Ventura, CA 93003`, property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.4, monthly_rent: 4000, listing_status: 'leased', leased_date: '2026-09-10', listed_date: null, exclusion_reason: null, mls_flags: [], is_rincon_managed: false, subdivision_name: null }, over); };
+    const leasedO = (rent, over = {}) => compO({ monthly_rent: rent, ...over });
+    const activeO = (rent, over = {}) => compO({ monthly_rent: rent, listing_status: 'active', listed_date: '2026-09-20', leased_date: null, ...over });
+    const offO = (rent, over = {}) => compO({ monthly_rent: rent, listing_status: 'off_market', listed_date: '2026-06-01', leased_date: '2026-08-20', ...over });
+    const HEAD = { low: 3900, high: 4100, listPrice: 4000, goal: 'balanced' };
+    const ANALYSIS = { id: 'a1', subject_address: '2461 Bunting Avenue, Ventura, CA 93003', subject_bedrooms: 4, subject_bathrooms: 2, subject_sqft: 1636, subject_property_type: 'single_family', created_at: CREATED };
+    const viewO = (comps, over = {}) => OV.buildOwnerView({ analysis: ANALYSIS, comps, headline: HEAD, confidenceLabel: 'medium', midpoint: 4000, ...over });
+    const rowsOf = r => r.ownerView.table.rows;
+    const addrsOf = r => rowsOf(r).map(x => x.address);
+    // the whole page as plain text, from the object (the page text is also checked from the real page, below)
+    const textOf = v => { const s = OV.ownerViewStrings(v); return [...s.template, ...s.addresses].join('\n'); };
+
+    // a full report through the REAL numbers and answer builders (the same calls both entry points make)
+    function reportO({ comps, subject = {}, created = CREATED, goal = 'balanced', properties = [] }) {
+      const sub = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false, ownerGoal: goal, ...subject };
+      const numbers = computeNumbersO({ comps, subject: sub, properties });
+      const rows = buildCompRowsO(numbers.compsWithMatch, { analysisId: 'a1' });
+      const responseComps = rows.map((r, k) => ({ ...r, id: `rc-${k}`, exclusion_reason: numbers.exclusionReasons[k] }));
+      const analysis = { id: 'a1', subject_address: sub.address, subject_bedrooms: sub.bedrooms, subject_bathrooms: sub.bathrooms, subject_sqft: sub.sqft, subject_property_type: sub.propertyType, subject_subdivision: sub.subdivision || null, lease_term_months: 12, furnished: false, subject_age_restricted: !!sub.ageRestricted, status: 'running', created_at: created, size_band_pct: 25, rationale: 'AI TEXT: the owner will love this' };
+      const patch = OutO.buildCompletionPatch({ numbers, ownerGoal: goal, propertyId: null, subjectEstimatedRent: 4999, subjectLatitude: 1, subjectLongitude: 2, subjectZip: '93003', rationale: analysis.rationale });
+      const updated = { ...analysis, ...patch };
+      const response = OutO.buildApiResponse({ analysis: updated, comps: responseComps, marketData: null, numbers });
+      return { numbers, responseComps, analysis: updated, response };
+    }
+    const rawComp = (over = {}) => ({ source_id: 'src-crmls', source_name: 'CRMLS', address: '9 Test St, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1600, distance_miles: 0.3, latitude: 34.2, longitude: -119.2, monthly_rent: 4300, is_estimated_price: false, original_price: null, had_price_cut: false, listing_status: 'leased', days_on_market: null, listed_date: null, leased_date: '2026-09-15', ...over });
+    // eight to ten raw comps that agree, so the report is High / Strong
+    const agreeingRaw = () => [4300, 4350, 4400, 4250, 4320, 4380, 4290, 4340].map((rent, i) => rawComp({ address: `${10 + i} Agree Ave, Ventura, CA 93003`, monthly_rent: rent, distance_miles: 0.1 + i / 20, leased_date: `2026-0${9 - (i % 4)}-1${i % 9}` }));
+
+    // seeded random reports (the same real functions), for the big scans
+    const rngO = seed => { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };
+    const STREETS_O = ['Oak', 'Maple', 'Cedar', 'Harbor', 'Mission', 'Telegraph', 'Victoria', 'Seaside', 'Camino', 'Heron', 'Tanager', 'Buffalo', 'Lemur', 'Ralston', 'Garden'];
+    const CITIES_O = ['Ventura', 'Oxnard', 'Camarillo', 'Newbury Park', 'Moorpark', 'Santa Paula', 'Port Hueneme', 'Simi Valley'];
+    function randomReportO(seed) {
+      const rand = rngO(seed), pick = a => a[Math.floor(rand() * a.length)];
+      const type = pick(['single_family', 'single_family', 'condo', 'townhouse']);
+      const base = 2200 + Math.floor(rand() * 30) * 100;
+      const n = 3 + Math.floor(rand() * 16);
+      const created = `2026-0${3 + Math.floor(rand() * 7)}-${10 + Math.floor(rand() * 18)}T${String(8 + Math.floor(rand() * 12)).padStart(2, '0')}:00:00.000Z`;
+      const day0 = Date.parse(created);
+      const dateBack = days => new Date(day0 - days * 86400000).toISOString().slice(0, 10);
+      const properties = [{ id: 'p1', address: '4 Rincon Way', city: 'Ventura', state: 'CA', zip: '93003' }];
+      const comps = [];
+      for (let i = 0; i < n; i++) {
+        const kind = pick(['leased', 'leased', 'active', 'off_market', 'rincon']);
+        const rent = Math.round((base + (rand() - 0.5) * (rand() < 0.1 ? 3000 : 700)) / 25) * 25;
+        const c = rawComp({
+          address: `${100 + Math.floor(rand() * 8000)} ${pick(STREETS_O)} ${pick(['St', 'Ave', 'Dr', 'Ln', 'Ct'])}${rand() < 0.2 ? ` Unit ${pick(['A', 'B', '12', '204'])}` : ''}, ${pick(CITIES_O)}, CA 9300${Math.floor(rand() * 9)}`,
+          property_type: rand() < 0.9 ? type : pick(['single_family', 'condo']), bedrooms: rand() < 0.9 ? 3 : 2, bathrooms: pick([1, 1.5, 2, 2.5, 3]), sqft: rand() < 0.1 ? null : 1100 + Math.floor(rand() * 600),
+          distance_miles: rand() < 0.1 ? null : Math.round(rand() * 190) / 100, monthly_rent: rent,
+          listing_status: kind === 'rincon' ? 'leased' : kind, source_name: kind === 'off_market' ? 'RentCast' : kind === 'rincon' ? 'LeadSimple Move-Ins' : 'CRMLS', source_id: `s-${kind}`,
+        });
+        if (c.listing_status === 'leased') c.leased_date = dateBack(5 + Math.floor(rand() * (kind === 'rincon' ? 600 : 170)));
+        else if (c.listing_status === 'active') { c.listed_date = dateBack(Math.floor(rand() * 90)); c.leased_date = null; }
+        else { c.listed_date = dateBack(60 + Math.floor(rand() * 100)); c.leased_date = dateBack(Math.floor(rand() * 59)); }
+        const flags = [];
+        for (const f of ['utilities_included', 'adu_or_guest_house', 'partly_furnished', 'new_construction', 'hoa', 'private_pool']) if (rand() < 0.06) flags.push(f);
+        c.mls_flags = flags;
+        if (rand() < 0.05) c.age_restricted = true;
+        if (rand() < 0.04) c.address = '4 Rincon Way, Ventura, CA 93003';
+        comps.push(c);
+      }
+      return reportO({ comps, properties, created, goal: pick(['lease_quickly', 'balanced', 'maximize_rent']), subject: { propertyType: type, address: `${200 + Math.floor(rand() * 900)} ${pick(STREETS_O)} Street, ${pick(CITIES_O)}, CA 93003`, bedrooms: 3, sqft: 1100 + Math.floor(rand() * 600) } });
+    }
+
+    // the page itself, run against a pretend page (the real script of both dashboards)
+    function loadPageO(file) {
+      const html = fsO.readFileSync(file, 'utf8');
+      const script = [...html.matchAll(/<script(?![^>]*src)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+      const els = {};
+      const mk = id => {
+        const classes = new Set();
+        const t = { id, style: {}, options: [], children: [], value: '', checked: false, dataset: {}, innerHTML: '', textContent: '', classes,
+          classList: { add: c => classes.add(c), remove: c => classes.delete(c), contains: c => classes.has(c), toggle: (c, on) => { if (on === undefined ? !classes.has(c) : on) classes.add(c); else classes.delete(c); } } };
+        return new Proxy(t, { get(o, k) { if (k in o) return o[k]; if (['addEventListener', 'appendChild', 'setAttribute', 'focus', 'scrollIntoView', 'removeChild', 'remove'].includes(k)) return () => {}; if (k === 'querySelector' || k === 'closest') return () => null; if (k === 'querySelectorAll') return () => []; return undefined; }, set(o, k, v) { o[k] = v; return true; } });
+      };
+      const body = mk('body');
+      const document = { getElementById: id => (els[id] = els[id] || mk(id)), querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, createElement: () => mk('x'), body };
+      const scrolls = [];
+      const ctx = vmO.createContext({ document, window: { scrollTo: o => scrolls.push(o), print() {}, addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: () => Promise.reject(new Error('no network')),
+        setTimeout: () => 0, clearTimeout() {}, console: { log() {}, error() {}, warn() {} }, URLSearchParams, Number, Math, Date, JSON, String, Array, Object, Set, Map, isNaN, parseInt, parseFloat, encodeURIComponent, L: undefined });
+      vmO.runInContext(script, ctx);
+      return { ctx, els, body, document, run: (code, vars = {}) => vmO.runInContext(code, Object.assign(ctx, vars)) };
+    }
+    const decodeO = s => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    const htmlToText = html => decodeO(html.replace(/<[^>]+>/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n')).trim();
+    // draws the owner view into a pretend page and returns the owner element's HTML
+    const renderedOwnerHtml = (page, response) => { page.run('renderOwnerView(__x)', { __x: response }); return page.els.ownerDoc.innerHTML; };
+
+    // the forbidden words, typed here on their own (not read from lib/owner-view.js), whole words, any capitals
+    const WORDS_O = ['families', 'child', 'children', 'kid', 'kids', 'school', 'schools', 'adult', 'adults', 'senior', 'seniors', 'retire', 'retiree', 'young', 'professionals', 'couple', 'couples', 'singles', 'bachelor', 'safe', 'safety', 'crime', 'quiet', 'desirable', 'exclusive', 'prestigious', 'walkable', 'church', 'voucher', '55'];
+    const PHRASES_O = ['empty nest', 'section 8', '55+', 'age-restricted', 'managed by', 'rincon-managed', 'perfect for a single professional', 'adult community', 'no children', 'empty nesters', 'mature tenant only', 'christian home', 'english speakers only', 'able-bodied', 'must be able to climb stairs', 'not suitable for wheelchairs', 'no emotional-support animals', 'ideal for a bachelor', 'great for a single woman', 'no section 8', 'no vouchers', 'will rent', 'stretch', 'midpoint', 'window'];
+    const ALLOWED_O = ['professional opinion', 'walkthrough', 'condition of your home'];
+    const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    function forbiddenIn(text) {
+      let t = text;
+      for (const p of [...ALLOWED_O, 'single family', 'single-family', 'multi-family', 'multifamily']) t = t.replace(new RegExp(reEsc(p), 'gi'), ' ');
+      const hits = [];
+      for (const w of [...WORDS_O, ...PHRASES_O, 'family']) if (new RegExp(`(?<![A-Za-z0-9])${reEsc(w)}(?![A-Za-z0-9])`, 'i').test(t)) hits.push(w);
+      return hits;
+    }
+
+    // ── fixed wording, constants ───────────────────────────────────────────
+    await check('Owner view / wording and facts: the template version, the office address (one constant, Peter\'s text), the three footer lines exactly, the placeholder wordmark, no website line', () => {
+      assert.equal(OV.OWNER_VIEW_TEMPLATE_VERSION, 'owner-2026-10-v1');
+      assert.equal(OV.OFFICE_ADDRESS, '1500 Palma Drive, Suite 280, Ventura, CA 93003');
+      assert.deepEqual(OV.FOOTER_LINES, ['Rincon Property Management | DRE License # 01951188', '1500 Palma Drive, Suite 280, Ventura, CA 93003', '805.288.1119 | info@rinconmanagement.com']);
+      const src = fsO.readFileSync(pathO.join(__dirname, 'lib', 'owner-view.js'), 'utf8');
+      assert.equal(src.split('1500 Palma Drive').length - 1, 1, 'the office address is typed in exactly one place');
+      assert.equal(OV.WORDMARK, 'RINCON PROPERTY MANAGEMENT');
+      const r = viewO([leasedO(3900), leasedO(4000), leasedO(4100), leasedO(4050)]);
+      assert.deepEqual(r.ownerView.footer, OV.FOOTER_LINES);
+      assert.equal(r.ownerView.title, 'RENTAL COMPARATIVE MARKET ANALYSIS');
+      assert.equal(r.ownerView.brand.wordmark, 'RINCON PROPERTY MANAGEMENT');
+      const all = textOf(r.ownerView);
+      assert.ok(!/www\.|\.com\/|https?:/i.test(all), 'no website line');
+      assert.equal((all.match(/rinconmanagement\.com/g) || []).length, 1, 'the only mention of the domain is the email address');
+    });
+
+    await check('Owner view / the accepted sentences, exactly: intro, home facts, range sentence, agreement line, the three goal sentences, the two-sentence "ends" line, the key, the disclaimer', () => {
+      const r = viewO([leasedO(3900), leasedO(4000), leasedO(4100), leasedO(4050)]);
+      const v = r.ownerView;
+      const flat = parts => parts.map(p => p.text).join('');
+      assert.equal(flat(v.intro), 'Below is a comparative analysis for 2461 Bunting Avenue, Ventura. We compared your home to similar homes nearby that have leased or have been listed for rent.');
+      assert.equal(flat(v.facts), 'Our records show your home as a 4 bedroom, 2 bath single family home of 1,636 square feet. If any of these details are wrong, please tell us, because they can change the result.');
+      assert.equal(flat(v.range), 'Based on the comparable homes we located, we recommend an asking rent of $3,900 - $4,100 per month for your home. This is our professional opinion, not a guarantee of the rent a tenant will pay.');
+      assert.equal(flat(v.agreement), 'How closely the comparable homes agree: Moderate. This describes how similar the comparable rents are to one another; it is not a prediction of the rent a tenant will pay.');
+      assert.equal(flat(viewO([leasedO(3900), leasedO(4000), leasedO(4100), leasedO(4050)], { confidenceLabel: 'high' }).ownerView.agreement), 'How closely the comparable homes agree: Strong. This describes how similar the comparable rents are to one another; it is not a prediction of the rent a tenant will pay.');
+      assert.equal(flat(v.ends), 'The lower end of the range is for owners who want to lease quickly. The upper end is for owners willing to wait for a higher rent, which may mean the home sits vacant longer.');
+      assert.equal(v.key, 'Leased = rent the tenant agreed to pay. Active = currently listed; the amount is the asking rent, not a leased rent. Off market = was listed and later removed; we could not confirm it leased, and the amount is the last asking rent.');
+      assert.equal(v.disclaimer, "This analysis is Rincon Property Management's opinion of a reasonable asking rent, based on the information shown and on information from third-party sources that we believe to be reliable but have not verified. It is not an appraisal and should not be used as one, or for lending, tax or insurance purposes. It is not a guarantee of the rent a tenant will pay or of how long the home will take to lease. It reflects market data as of the date above and does not account for the condition of your home or for any rent limits, program rules or emergency orders that may apply to it. Market conditions change.");
+      assert.deepEqual(v.table.heads, ['Property Address', 'Type', 'BR', 'BA', 'Sq. Ft.', 'Status', 'Amount'], 'exactly seven columns, headed Status (not "Active or Leased")');
+      assert.ok(!/will rent|will lease|we believe your home|is certain|guarantees/i.test(textOf(v)), 'no prediction wording');
+    });
+
+    await check('Owner view / the three goal sentences, exact, for every goal (and an unknown goal means Balanced)', () => {
+      const want = { lease_quickly: 'If your goal is leasing quickly, we suggest listing at $3,900.', balanced: 'If you prefer a balanced approach, we suggest listing at $4,000.', maximize_rent: 'If your goal is maximizing rent, we suggest listing at $4,100.' };
+      const price = { lease_quickly: 3900, balanced: 4000, maximize_rent: 4100 };
+      for (const g of Object.keys(want)) {
+        const v = viewO([leasedO(3900), leasedO(4000), leasedO(4100), leasedO(4050)], { headline: { ...HEAD, goal: g, listPrice: price[g] } }).ownerView;
+        assert.equal(v.goal.map(p => p.text).join(''), want[g]);
+        assert.equal(OV.goalSentence(g, price[g]), want[g]);
+      }
+      assert.equal(OV.goalSentence('nonsense', 4000), want.balanced);
+      assert.ok(!/your goal of|Based on your goal/.test(JSON.stringify(OV.TEXT)), 'the owner never "stated" a goal');
+    });
+
+    await check('Owner view / Strong, Moderate and Low wording: Low prints the starting-point wording, no agreement line, no suggested-price sentence and no "ends" line; High and Medium print all three', () => {
+      const four = () => [leasedO(3900), leasedO(4000), leasedO(4100), leasedO(4050)];
+      const hi = viewO(four(), { confidenceLabel: 'high' }).ownerView, mid = viewO(four(), { confidenceLabel: 'medium' }).ownerView, low = viewO(four(), { confidenceLabel: 'low' }).ownerView;
+      assert.equal(hi.level, 'strong'); assert.equal(mid.level, 'moderate'); assert.equal(low.level, 'low');
+      assert.match(textOf(hi), /How closely the comparable homes agree: Strong\./);
+      assert.match(textOf(mid), /How closely the comparable homes agree: Moderate\./);
+      for (const v of [hi, mid]) { assert.ok(v.goal && v.ends && v.agreement); assert.match(textOf(v), /we suggest listing at \$4,000/); assert.ok(!/starting point/i.test(textOf(v))); }
+      assert.equal(low.range.map(p => p.text).join(''), 'Based on the comparable homes we located, a starting point for your asking rent is $3,900 - $4,100 per month. We found few comparable homes, or their rents differ widely, so this is a starting point only. We recommend a walkthrough of your home before the rent is finalized.');
+      assert.equal(low.agreement, null); assert.equal(low.goal, null); assert.equal(low.ends, null);
+      const lowText = textOf(low);
+      assert.ok(!/suggest/i.test(lowText), 'no suggested price sentence on a Low page');
+      assert.ok(!/How closely/.test(lowText) && !/we recommend an asking rent/.test(lowText));
+      assert.ok(!/(Strong|Moderate)/.test(lowText));
+    });
+
+    // ── selection ──────────────────────────────────────────────────────────
+    await check('Owner view / selection: leased first; up to five leased plus the best active listing; more leased then more active fill to six; shown leased, then active, then off market', () => {
+      const comps = [...[3, 4, 5, 6, 7, 8, 9, 10].map(i => leasedO(3900 + i * 20, { address: `${i} Lease Ln, Ventura, CA`, distance_miles: i / 10 })), activeO(4000, { address: '50 Active Ave, Ventura, CA', distance_miles: 0.9 }), activeO(4010, { address: '51 Active Ave, Ventura, CA', distance_miles: 0.95 }), activeO(4020, { address: '52 Active Ave, Ventura, CA', distance_miles: 0.99 })];
+      const r = viewO(comps);
+      assert.deepEqual(addrsOf(r), ['3 Lease Ln', '4 Lease Ln', '5 Lease Ln', '6 Lease Ln', '7 Lease Ln', '50 Active Ave'], 'five nearest leased + the best active');
+      assert.deepEqual(rowsOf(r).map(x => x.status.split(' ')[0]), ['Leased', 'Leased', 'Leased', 'Leased', 'Leased', 'Active']);
+      // no active listing at all: six leased
+      assert.equal(rowsOf(viewO(comps.filter(c => c.listing_status === 'leased'))).length, 6);
+      // one leased, five active: the leased home, then the best active first, then the rest
+      const few = viewO([leasedO(4000, { address: '1 Only Lease Ln, Ventura, CA' }), ...[1, 2, 3, 4, 5].map(i => activeO(4000, { address: `${i} Act Ct, Ventura, CA`, distance_miles: i / 10 }))]);
+      assert.deepEqual(addrsOf(few), ['1 Only Lease Ln', '1 Act Ct', '2 Act Ct', '3 Act Ct', '4 Act Ct', '5 Act Ct']);
+      // order of display is leased, active, off market even when the ranking would say otherwise
+      const mixed = viewO([activeO(4000, { address: '1 A St, Ventura, CA', distance_miles: 0.01 }), leasedO(4000, { address: '2 L St, Ventura, CA', distance_miles: 0.9 }), leasedO(4010, { address: '3 L St, Ventura, CA', distance_miles: 0.8 }), leasedO(4020, { address: '4 L St, Ventura, CA', distance_miles: 0.7 })]);
+      assert.deepEqual(addrsOf(mixed), ['4 L St', '3 L St', '2 L St', '1 A St']);
+    });
+
+    await check('Owner view / off-market homes fill a slot ONLY to reach four rows, never beyond four, and are never labelled Leased', () => {
+      const off = n => Array.from({ length: n }, (_, i) => offO(4000 + i * 10, { address: `${i + 1} Off Ct, Ventura, CA`, distance_miles: 0.1 * (i + 1) }));
+      const count = (nL, nA, nO) => rowsOf(viewO([...Array.from({ length: nL }, (_, i) => leasedO(4000, { address: `${i + 1} L St, Ventura, CA`, distance_miles: 0.1 * (i + 1) })), ...Array.from({ length: nA }, (_, i) => activeO(4000, { address: `${i + 1} A St, Ventura, CA`, distance_miles: 0.1 * (i + 1) })), ...off(nO)]));
+      assert.equal(count(2, 1, 5).length, 4, '2 leased + 1 active + off-market: exactly one off-market row');
+      assert.deepEqual(count(2, 1, 5).map(r => r.status.split(' ')[0]), ['Leased', 'Leased', 'Active', 'Off']);
+      assert.equal(count(3, 1, 5).length, 4);
+      assert.ok(!count(3, 1, 5).some(r => /^Off/.test(r.status)), 'four already: no off-market row');
+      assert.equal(count(0, 0, 6).length, 4);
+      assert.equal(count(1, 0, 5).length, 4);
+      assert.equal(viewO(off(3)).ownerView, null, 'three off-market homes alone cannot make a page');
+      assert.equal(count(4, 0, 6).filter(r => /^Off/.test(r.status)).length, 0);
+      for (const r of count(0, 0, 6)) assert.ok(!/Leased/i.test(r.status) && /last asking$/.test(r.rent), JSON.stringify(r));
+    });
+
+    await check('Owner view / ranking inside a status: same community first (when both are known), then nearest (unknown last), then closest size, then newest; the same answer whatever order the homes arrive in', () => {
+      const comps = [
+        leasedO(4000, { address: '1 Far St, Ventura, CA', distance_miles: 0.9, subdivision_name: 'Seaside Tract' }),
+        leasedO(4000, { address: '2 Near St, Ventura, CA', distance_miles: 0.1 }),
+        leasedO(4000, { address: '3 Nodist St, Ventura, CA', distance_miles: null }),
+        leasedO(4000, { address: '4 Tie St, Ventura, CA', distance_miles: 0.5, sqft: 1640, leased_date: '2026-08-01' }),
+        leasedO(4000, { address: '5 Tie St, Ventura, CA', distance_miles: 0.5, sqft: 1300, leased_date: '2026-09-01' }),
+        leasedO(4000, { address: '6 Tie St, Ventura, CA', distance_miles: 0.5, sqft: 1640, leased_date: '2026-09-09' }),
+      ];
+      const analysis = { ...ANALYSIS, subject_subdivision: 'SEASIDE  tract' };
+      const build = list => OV.buildOwnerView({ analysis, comps: list, headline: HEAD, confidenceLabel: 'medium', midpoint: 4000 });
+      assert.deepEqual(addrsOf(build(comps)), ['1 Far St', '2 Near St', '6 Tie St', '4 Tie St', '5 Tie St', '3 Nodist St'], 'community, then miles, then size, then newest, unknown distance last');
+      // without a known subject community the far home is not first
+      assert.equal(addrsOf(viewO(comps))[0], '2 Near St');
+      const rand = rngO(9);
+      for (let t = 0; t < 40; t++) {
+        const shuffled = [...comps].sort(() => rand() - 0.5);
+        assert.deepEqual(addrsOf(build(shuffled)), addrsOf(build(comps)), 'order of arrival changes nothing');
+      }
+    });
+
+    await check('Owner view / left off the page: utilities-included, ADU or guest house, partly furnished, new construction (other tags such as HOA, pool and a 55+ tag do not leave a home off), and a rent more than 25% from the internal middle (exactly 25% stays)', () => {
+      const base = () => [leasedO(4000, { address: '1 A St, Ventura, CA' }), leasedO(4000, { address: '2 A St, Ventura, CA' }), leasedO(4000, { address: '3 A St, Ventura, CA' }), leasedO(4000, { address: '4 A St, Ventura, CA' })];
+      for (const flag of ['utilities_included', 'adu_or_guest_house', 'partly_furnished', 'new_construction']) {
+        const r = viewO([...base(), leasedO(4000, { address: '9 Flag St, Ventura, CA', mls_flags: [flag], distance_miles: 0.01 })]);
+        assert.deepEqual(addrsOf(r), ['1 A St', '2 A St', '3 A St', '4 A St'], flag);
+      }
+      for (const flag of ['hoa', 'private_pool', 'view_property', 'water_trash_included', 'age_restricted', 'furnished', 'short_term', 'gardener_included']) {
+        const r = viewO([...base(), leasedO(4000, { address: '9 Flag St, Ventura, CA', mls_flags: [flag], distance_miles: 0.01 })]);
+        assert.equal(addrsOf(r)[0], '9 Flag St', `${flag} does not leave a home off`);
+      }
+      // the 25% edge, middle $4,000
+      const edge = rent => addrsOf(viewO([...base(), leasedO(rent, { address: '9 Edge St, Ventura, CA', distance_miles: 0.01 })], { midpoint: 4000 })).includes('9 Edge St');
+      assert.equal(edge(5000), true, 'exactly 25% above stays');
+      assert.equal(edge(5001), false);
+      assert.equal(edge(3000), true, 'exactly 25% below stays');
+      assert.equal(edge(2999), false);
+      // no usable middle: the odd-price screen cannot be applied, so the page is WITHHELD (it used to be skipped silently)
+      for (const missing of [null, undefined, 0, -5, NaN, 'abc']) {
+        const r = viewO([...base(), leasedO(9000, { address: '9 Edge St, Ventura, CA', distance_miles: 0.01 })], { midpoint: missing });
+        assert.equal(r.ownerView, null, `midpoint ${String(missing)}`);
+        assert.equal(r.ownerViewNote, OV.NOTES.noMiddle);
+      }
+      assert.deepEqual(OV.printableComps(base(), { midpoint: null, analysisDay: OV.dayNumber('2026-10-16') }), [], 'printableComps itself never skips the screen either');
+      assert.match(OV.NOTES.noMiddle, /^The owner view is not available because/);
+    });
+
+    await check('Owner view / a home that is not counted can never be a printed row (every exclusion reason, including a 55+ home when the subject is not 55+), and dates must be real and not after the analysis day', () => {
+      const four = () => [leasedO(4000, { address: '1 A St, Ventura, CA' }), leasedO(4000, { address: '2 A St, Ventura, CA' }), leasedO(4000, { address: '3 A St, Ventura, CA' }), leasedO(4000, { address: '4 A St, Ventura, CA' })];
+      for (const reason of ['rincon_managed', 'implausible_rent', 'property_type_mismatch', 'size_mismatch', 'size_sqft', 'furnished_mismatch', 'short_term_lease', 'age_restricted']) {
+        const r = viewO([...four(), leasedO(4000, { address: '9 Out St, Ventura, CA', distance_miles: 0.01, exclusion_reason: reason })], { countedTotal: 4 });
+        assert.ok(!addrsOf(r).includes('9 Out St'), reason);
+      }
+      // through the real rules: a 55+ comp is not counted for a subject that is not 55+, and is for a 55+ subject (with no tag on its row)
+      const raws = () => [...[4300, 4350, 4400, 4320, 4380].map((rent, i) => rawComp({ address: `${10 + i} Plain Ave, Ventura, CA 93003`, monthly_rent: rent, distance_miles: 0.5 })), rawComp({ address: '77 Senior Ct, Ventura, CA 93003', monthly_rent: 4340, distance_miles: 0.01, age_restricted: true })];
+      const notAge = reportO({ comps: raws() }).response.ownerView;
+      assert.ok(notAge && !JSON.stringify(notAge).includes('77 Senior Ct'), 'a not-counted 55+ comp is never printed');
+      const ageSubject = reportO({ comps: raws(), subject: { ageRestricted: true } }).response.ownerView;
+      assert.ok(ageSubject.table.rows.some(x => x.address === '77 Senior Ct'), 'for a 55+ subject the 55+ comp counts and prints like any other row');
+      assert.ok(!/\b55\b|\bage\b|age-restricted|\bsenior|\badult|\bcommunity\b/i.test(JSON.stringify(ageSubject).replace('77 Senior Ct', '')), 'with no 55+ or age wording anywhere');
+      // dates
+      const dated = leasedList => rowsOf(viewO([leasedO(4000, { address: '1 A St, Ventura, CA' }), leasedO(4000, { address: '2 A St, Ventura, CA' }), leasedO(4000, { address: '3 A St, Ventura, CA' }), leasedO(4000, { address: '4 A St, Ventura, CA' }), ...leasedList])).map(x => x.address);
+      assert.ok(dated([leasedO(4000, { address: '5 Same St, Ventura, CA', leased_date: '2026-10-16', distance_miles: 0.01 })]).includes('5 Same St'), 'a lease on the analysis day is fine');
+      assert.ok(!dated([leasedO(4000, { address: '5 Future St, Ventura, CA', leased_date: '2026-10-17', distance_miles: 0.01 })]).includes('5 Future St'), 'a lease dated after the analysis day is not printed');
+      assert.ok(!dated([leasedO(4000, { address: '5 Nodate St, Ventura, CA', leased_date: null, distance_miles: 0.01 })]).includes('5 Nodate St'), 'a lease with no date is not printed');
+      assert.ok(!dated([leasedO(4000, { address: '5 Junk St, Ventura, CA', leased_date: '2026-13-45', distance_miles: 0.01 })]).includes('5 Junk St'), 'a lease with a date that is not real is not printed');
+      assert.ok(!dated([leasedO(0, { address: '5 Zero St, Ventura, CA', distance_miles: 0.01 })]).includes('5 Zero St') && !dated([leasedO(null, { address: '5 Null St, Ventura, CA', distance_miles: 0.01 })]).includes('5 Null St'), 'a home with no rent is not printed');
+    });
+
+    await check('Owner view / the owner\'s OWN address is never a printed row (the 2303 Otter Creek shape: its own Rincon lease counts in the math and in N, but is not shown), including abbreviation and unit variants; look-alike neighbors still print; the four-row minimum counts printable rows only', () => {
+      const subject = '2303 Otter Creek Ln, Oxnard, CA 93036';
+      const neighbors = ['2301 Otter Creek Ln, Oxnard, CA 93036', '2305 Otter Creek Ln, Oxnard, CA 93036', '2303 Otter Creek Ln Unit 2, Oxnard, CA 93036', '2303 Otter Creek Cir, Oxnard, CA 93036'];
+      const own = address => leasedO(3865, { address, sqft: 1652, bathrooms: 2.5, distance_miles: 0, leased_date: '2026-09-09' });
+      const build = (ownAddress, extra = []) => OV.buildOwnerView({ analysis: { ...ANALYSIS, subject_address: subject }, comps: [own(ownAddress), ...extra], headline: HEAD, confidenceLabel: 'medium', midpoint: 4000 });
+      const others = n => Array.from({ length: n }, (_, i) => leasedO(3900 + i * 20, { address: `${10 + i} Elm Ct, Oxnard, CA 93036`, distance_miles: 0.2 + i / 10 }));
+      for (const written of ['2303 Otter Creek Ln, Oxnard, CA 93036', '2303 Otter Creek Lane, Oxnard, CA 93036', '2303 otter creek ln oxnard ca', '2303 Otter Creek Ln., Oxnard', '2303 OTTER CREEK LANE']) {
+        const r = build(written, others(5));
+        assert.ok(r.ownerView, written);
+        assert.ok(!addrsOf(r).some(a => /2303 otter creek/i.test(a)), `${written} is the subject's own home and is not printed`);
+        assert.equal(rowsOf(r).length, 5, 'the other five homes are printed');
+        assert.match(r.ownerView.countLine, /^This analysis uses 6 comparable homes/, 'it still counts in N');
+        assert.match(r.ownerView.countLine, /Five of the 6 comparable homes are shown\.$/);
+      }
+      // look-alike neighbours still print (another house number, another unit, another street with the same number)
+      const withNeighbors = build('2303 Otter Creek Ln, Oxnard, CA 93036', [...neighbors.slice(0, 3).map((a, i) => leasedO(3900 + i * 10, { address: a, distance_miles: 0.1 + i / 10 })), leasedO(3950, { address: '2303 Otter Creek Cir, Oxnard, CA 93036', distance_miles: 0.5 })]);
+      assert.ok(withNeighbors.ownerView, 'four neighbours make a page');
+      assert.deepEqual(addrsOf(withNeighbors).sort(), ['2301 Otter Creek Ln', '2303 Otter Creek Cir', '2303 Otter Creek Ln Unit 2', '2305 Otter Creek Ln'].sort());
+      // a subject with a unit: "Unit 5" and "#5" are the same home, another unit is not
+      const unitSubject = '88 Harbor Blvd Unit 5, Oxnard, CA 93035';
+      const unitRun = ownAddress => OV.buildOwnerView({ analysis: { ...ANALYSIS, subject_address: unitSubject }, comps: [leasedO(3865, { address: ownAddress, distance_miles: 0 }), ...others(4), leasedO(3990, { address: '88 Harbor Blvd Unit 6, Oxnard, CA 93035', distance_miles: 0.01 })], headline: HEAD, confidenceLabel: 'medium', midpoint: 4000 });
+      for (const written of ['88 Harbor Blvd Unit 5, Oxnard, CA 93035', '88 Harbor Boulevard #5, Oxnard, CA 93035', '88 Harbor Blvd, Unit 5, Oxnard']) assert.ok(!addrsOf(unitRun(written)).some(a => /Unit 5|#5/.test(a)), written);
+      assert.ok(addrsOf(unitRun('88 Harbor Blvd Unit 6, Oxnard, CA 93035')).includes('88 Harbor Blvd Unit 6'), 'a different unit is a different home');
+      // the minimum: three other homes + the subject's own = still only three printable, so no page
+      const three = build('2303 Otter Creek Ln, Oxnard, CA 93036', others(3));
+      assert.equal(three.ownerView, null);
+      assert.equal(three.ownerViewNote, OV.notEnoughRows(3));
+      assert.ok(build('2303 Otter Creek Ln, Oxnard, CA 93036', others(4)).ownerView, 'four others are enough');
+      // through the real pipeline: a counted Rincon lease at the subject's own address is in N and not in the table
+      const props = [{ id: 'p9', address: '2303 Otter Creek Ln', city: 'Oxnard', state: 'CA', zip: '93036' }];
+      const raws = [...agreeingRaw(), rawComp({ source_id: 'src-ls', source_name: 'LeadSimple Move-Ins', address: '2303 Otter Creek Lane, Oxnard, CA 93036', monthly_rent: 4330, distance_miles: 0, leased_date: '2026-09-09', sqft: 1652, bathrooms: 2.5 })];
+      const { response, responseComps } = reportO({ comps: raws, properties: props, subject: { address: '2303 Otter Creek Ln, Oxnard, CA 93036', bedrooms: 4, sqft: 1636 } });
+      const ownComp = responseComps.find(c => /2303 Otter Creek/.test(c.address));
+      assert.equal(ownComp.exclusion_reason, null, 'the subject\'s own lease counts (the rules keep it as evidence for a re-lease)');
+      assert.ok(response.ownerView);
+      assert.ok(!JSON.stringify(response.ownerView.table.rows).includes('Otter Creek'), 'but it is not one of the table rows (the intro names the home, of course)');
+      assert.match(response.ownerView.countLine, new RegExp(`^This analysis uses ${response.counted.total} comparable homes`));
+    });
+
+    await check('Owner view / baths print the way they were entered: 1.75 and 1.25 come back from the database as 1.8 and 1.3 and are put back; a half stays a half; whole numbers stay whole (rows and the home facts sentence)', () => {
+      const cases = [[1, '1'], [2, '2'], [1.5, '1.5'], [2.5, '2.5'], [1.8, '1.75'], [2.8, '2.75'], [0.8, '0.75'], [1.3, '1.25'], [2.3, '2.25'], [1.75, '1.75'], [1.25, '1.25'], [3.5, '3.5'], [10, '10']];
+      for (const [input, want] of cases) {
+        const r = viewO([leasedO(4000, { bathrooms: input, address: '1 Bath St, Ventura, CA' }), leasedO(4000), leasedO(4000), leasedO(4000)]);
+        assert.equal(rowsOf(r).find(x => x.address === '1 Bath St') ? rowsOf(r).find(x => x.address === '1 Bath St').baths : rowsOf(r)[0].baths, want, String(input));
+        assert.match(OV.factsSentence({ subject_bedrooms: 3, subject_bathrooms: input, subject_sqft: 1500, subject_property_type: 'condo' }), new RegExp(`, ${want.replace('.', '\\.')} bath condo`), String(input));
+      }
+      // the staff screen shows the same quarters (one-line fix, both pages)
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        for (const [input, want] of cases) assert.equal(page.run('fmtBath(__n)', { __n: input }), want, `${pathO.basename(pathO.dirname(pathO.dirname(f)))} fmtBath(${input})`);
+        assert.equal(page.run('fmtBath(__n)', { __n: null }), '&#8212;');
+      }
+    });
+
+    await check('Owner view / thin sets: fewer than four printable rows means no owner view and a plain reason; exactly four makes a page; no range, no label, no date or no home details also mean no page', () => {
+      for (const n of [0, 1, 2, 3]) {
+        const r = viewO(Array.from({ length: n }, (_, i) => leasedO(4000, { address: `${i + 1} A St, Ventura, CA` })));
+        assert.equal(r.ownerView, null);
+        assert.equal(r.ownerViewNote, OV.notEnoughRows(n));
+        assert.match(r.ownerViewNote, /at least 4 are needed/);
+      }
+      assert.ok(viewO(Array.from({ length: 4 }, (_, i) => leasedO(4000, { address: `${i + 1} A St, Ventura, CA` }))).ownerView);
+      // five counted, but one is left off as an outlier: three printable
+      const outlier = viewO([leasedO(4000), leasedO(4000), leasedO(4000), leasedO(4000), leasedO(9000)]);
+      assert.ok(outlier.ownerView, 'four are still printable');
+      assert.equal(viewO([leasedO(4000), leasedO(4000), leasedO(4000), leasedO(9000)]).ownerView, null);
+      const four = Array.from({ length: 4 }, (_, i) => leasedO(4000, { address: `${i + 1} A St, Ventura, CA` }));
+      assert.equal(viewO(four, { headline: null }).ownerViewNote, OV.NOTES.noRange);
+      assert.equal(viewO(four, { confidenceLabel: null }).ownerViewNote, OV.NOTES.noLabel);
+      assert.equal(viewO(four, { analysis: { ...ANALYSIS, created_at: null } }).ownerViewNote, OV.NOTES.noDate);
+      assert.equal(viewO(four, { analysis: { ...ANALYSIS, created_at: 'not a date' } }).ownerViewNote, OV.NOTES.noDate);
+      assert.equal(viewO(four, { analysis: { ...ANALYSIS, subject_bedrooms: null } }).ownerViewNote, OV.NOTES.noFacts);
+      assert.equal(viewO(four, { headline: { ...HEAD, high: 4300 } }).ownerViewNote, OV.NOTES.badRange, 'a range that is not $200 wide is never printed');
+      assert.equal(viewO(four, { headline: { ...HEAD, listPrice: 4300 } }).ownerViewNote, OV.NOTES.badRange);
+      assert.equal(viewO(four, { countedTotal: 5 }).ownerViewNote, OV.NOTES.countsMismatch);
+      for (const note of [...Object.values(OV.NOTES), OV.notEnoughRows(2)]) assert.ok(typeof note === 'string' && note.length > 20 && !/undefined|null/.test(note));
+    });
+
+    // ── rows and labels ────────────────────────────────────────────────────
+    await check('Owner view / every row carries exactly seven things and every label is right: Leased M/YYYY, Active N days counted from the ANALYSIS date, Off market M/YYYY; amounts say leased, asking or last asking', () => {
+      const r = viewO([
+        leasedO(4000, { address: '1 L St, Ventura, CA 93003', leased_date: '2026-09-02' }),
+        leasedO(4010, { address: '2 L St, Ventura, CA 93003', leased_date: '2026-01-31' }),
+        activeO(4020, { address: '3 A St, Ventura, CA 93003', listed_date: '2026-10-01' }),
+        activeO(4030, { address: '4 A St, Ventura, CA 93003', listed_date: '2026-10-15' }),
+        activeO(4040, { address: '5 A St, Ventura, CA 93003', listed_date: '2026-10-16' }),
+        activeO(4050, { address: '6 A St, Ventura, CA 93003', listed_date: null }),
+      ]);
+      const rows = rowsOf(r);
+      for (const row of rows) assert.deepEqual(Object.keys(row).sort(), ['address', 'baths', 'beds', 'rent', 'sqft', 'status', 'type'], 'the row whitelist');
+      const byAddr = a => rows.find(x => x.address === a);
+      assert.equal(byAddr('1 L St').status, 'Leased 9/2026'); assert.equal(byAddr('1 L St').rent, '$4,000/mo leased');
+      assert.equal(byAddr('2 L St').status, 'Leased 1/2026');
+      // the analysis day is October 16, 2026 whatever today's date is
+      assert.equal(byAddr('3 A St').status, 'Active 15 days'); assert.equal(byAddr('3 A St').rent, '$4,020/mo asking');
+      assert.equal(byAddr('4 A St').status, 'Active 1 day');
+      assert.ok(rows.every(r => !/\b0 days\b/.test(r.status)), 'never "0 days"');
+      assert.equal(byAddr('5 A St').status, 'Active, newly listed', 'listed on the analysis day: true whenever the page is opened');
+      assert.ok(rows.every(r => !/today/i.test(r.status)), 'never "today" (it would read as the day the page is opened)');
+      assert.equal(byAddr('6 A St').status, 'Active');
+      assert.equal(byAddr('1 L St').beds, '3'); assert.equal(byAddr('1 L St').baths, '2'); assert.equal(byAddr('1 L St').sqft, '1,500'); assert.equal(byAddr('1 L St').type, 'SFR');
+      const off = rowsOf(viewO([leasedO(4000), activeO(4000), offO(4300, { address: '7 Off Ct, Ventura, CA 93003', leased_date: '2026-08-20' }), offO(4310, { address: '8 Off Ct, Ventura, CA 93003', leased_date: null })]));
+      const o7 = off.find(x => x.address === '7 Off Ct'), o8 = off.find(x => x.address === '8 Off Ct');
+      assert.equal(o7.status, 'Off market 8/2026'); assert.equal(o7.rent, '$4,300/mo last asking');
+      assert.equal(o8.status, 'Off market'); assert.equal(o8.rent, '$4,310/mo last asking');
+      assert.ok(![o7, o8].some(x => /leased/i.test(x.status) || / leased$/.test(x.rent)), 'an off-market home never says Leased, even though the date saved for it sits in the leased-date column');
+      // type words, fractional baths, unknown values
+      const odd = viewO([leasedO(4000, { property_type: 'townhouse', bathrooms: 2.5, sqft: null, bedrooms: null, address: '1 Odd St, Ventura, CA 93003' }), leasedO(4000, { property_type: 'condo' }), leasedO(4000, { property_type: 'apartment' }), leasedO(4000, { property_type: null })]);
+      assert.deepEqual(rowsOf(odd).map(x => x.type).sort(), ['-', 'Apt', 'Condo', 'Townhome']);
+      const townhome = rowsOf(odd).find(x => x.address === '1 Odd St');
+      assert.deepEqual([townhome.type, townhome.baths, townhome.sqft, townhome.beds], ['Townhome', '2.5', '-', '-']);
+      assert.equal(rowsOf(odd)[3].address, '1 Odd St', 'a home with no size is ranked after homes whose size is known');
+    });
+
+    await check('Owner view / a Rincon-managed home that counted is an ordinary row (no tag, no label, nothing about who manages it); a RentCast home at a Rincon address is not counted and so not printed', () => {
+      const props = [{ id: 'p1', address: '4 Rincon Way', city: 'Ventura', state: 'CA', zip: '93003' }, { id: 'p2', address: '6 Managed Ct', city: 'Ventura', state: 'CA', zip: '93003' }];
+      const raws = [...agreeingRaw(), rawComp({ source_id: 'src-ls', source_name: 'LeadSimple Move-Ins', address: '6 Managed Ct, Ventura, CA 93003', monthly_rent: 4330, distance_miles: 0.01, leased_date: '2026-10-01' }), rawComp({ source_id: 'src-rc', source_name: 'RentCast', address: '4 Rincon Way, Ventura, CA 93003', monthly_rent: 4310, distance_miles: 0.01, listing_status: 'active', listed_date: '2026-10-01', leased_date: null })];
+      const { response, responseComps } = reportO({ comps: raws, properties: props });
+      const managed = responseComps.find(c => c.address.startsWith('6 Managed Ct'));
+      assert.equal(managed.is_rincon_managed, true);
+      assert.equal(managed.exclusion_reason, null, 'counted: a Rincon lease from the move-in source');
+      const row = response.ownerView.table.rows.find(x => x.address === '6 Managed Ct');
+      assert.deepEqual(row, { address: '6 Managed Ct', type: 'SFR', beds: '4', baths: '2', sqft: '1,600', status: 'Leased 10/2026', rent: '$4,330/mo leased' });
+      assert.equal(responseComps.find(c => c.address.startsWith('4 Rincon Way')).exclusion_reason, 'rincon_managed');
+      assert.ok(!JSON.stringify(response.ownerView).includes('4 Rincon Way'), 'a home that did not count is not printed');
+      assert.ok(!/managed|rincon/i.test(JSON.stringify(response.ownerView.table.rows.map(({ address, ...rest }) => rest))), 'no label of any kind on any row');
+      assert.ok(!/managed by|rincon-managed/i.test(JSON.stringify(response.ownerView)));
+    });
+
+    await check('Owner view / addresses: street and unit only (a unit written as its own part stays), the city comes from the second part, a country and state/zip are dropped, and with no commas nothing is guessed', () => {
+      assert.deepEqual(OV.splitAddress('2461 Bunting Avenue, Ventura, CA 93003'), { street: '2461 Bunting Avenue', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('2461 Bunting Avenue, Ventura, CA, USA'), { street: '2461 Bunting Avenue', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('123 Main St, Unit 5, Ventura, CA 93003'), { street: '123 Main St Unit 5', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('123 Main St, #5, Ventura, CA 93003'), { street: '123 Main St #5', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('1300 Saratoga Ave unit 500, Ventura, CA 93004'), { street: '1300 Saratoga Ave unit 500', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('9831 Rio Grande St Ventura CA 93004'), { street: '9831 Rio Grande St Ventura CA 93004', city: null });
+      assert.deepEqual(OV.splitAddress('2221 lonsdale st'), { street: '2221 lonsdale st', city: null });
+      // a one-word city that STARTS with a unit keyword is a city, not a unit
+      for (const city of ['Lotus', 'Stewart', 'Floral', 'Lotta', 'Suitland', 'Space City', 'Floor Town', 'Building Heights', 'Space Coast', 'Lot Jackson', 'Ojai']) {
+        assert.deepEqual(OV.splitAddress(`12 Main St, ${city}, CA 93001`), { street: '12 Main St', city }, city);
+        assert.deepEqual(OV.splitAddress(`12 Main St, Unit 5, ${city}, CA 93001`), { street: '12 Main St Unit 5', city }, `${city} with a unit`);
+      }
+      // real units, in the ways they are written
+      for (const unit of ['Unit 5', 'Apt. B', 'Apt.5', 'Apt 12B', '#12', '# 12', 'Suite 280', 'Ste 100', 'Bldg C', 'Building 4', 'Floor 2', 'Lot 7', 'Space 14', 'Unit AB', 'Unit ADU', 'Apt ADU', 'Unit Rear', 'Unit Upper', 'Unit Lower', 'Unit Front', 'Unit Back', 'Unit Garage', 'Unit Studio']) {
+        assert.deepEqual(OV.splitAddress(`12 Main St, ${unit}, Ventura, CA 93001`), { street: `12 Main St ${unit}`, city: 'Ventura' }, unit);
+      }
+      // a state and/or zip typed on the end of the city part (or as its own part) is not the city
+      assert.deepEqual(OV.splitAddress('616 Main St, Santa Paula CA 93060'), { street: '616 Main St', city: 'Santa Paula' });
+      assert.deepEqual(OV.splitAddress('616 Main St, Santa Paula CA'), { street: '616 Main St', city: 'Santa Paula' });
+      assert.deepEqual(OV.splitAddress('616 Main St, Santa Paula 93060'), { street: '616 Main St', city: 'Santa Paula' });
+      assert.deepEqual(OV.splitAddress('616 Main St, Santa Paula, ca 93060-1234'), { street: '616 Main St', city: 'Santa Paula' });
+      assert.deepEqual(OV.splitAddress('1 A St, Ventura, California 93003'), { street: '1 A St', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('1 A St, Ventura, California, 93003'), { street: '1 A St', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('1 A St, Ventura, California, 93003, USA'), { street: '1 A St', city: 'Ventura' });
+      assert.deepEqual(OV.splitAddress('1 A St, Oak View, CA 93022'), { street: '1 A St', city: 'Oak View' }, 'a city that ends in a short word is left alone');
+      assert.deepEqual(OV.splitAddress('1 A St, Oak Park'), { street: '1 A St', city: 'Oak Park' });
+      assert.deepEqual(OV.splitAddress('1 A St, Los Osos CA'), { street: '1 A St', city: 'Los Osos' });
+      assert.deepEqual(OV.splitAddress(''), { street: '', city: null });
+      assert.deepEqual(OV.splitAddress(null), { street: '', city: null });
+      const noCity = viewO(Array.from({ length: 4 }, () => leasedO(4000)), { analysis: { ...ANALYSIS, subject_address: '2221 lonsdale st' } });
+      assert.equal(noCity.ownerView.intro.map(p => p.text).join('').slice(0, 55), 'Below is a comparative analysis for 2221 lonsdale st. W');
+    });
+
+    await check('Owner view / home facts sentence: "an 8 bedroom", a studio, half baths, a missing size, every property type word', () => {
+      const f = over => OV.factsSentence({ subject_bedrooms: 4, subject_bathrooms: 2, subject_sqft: 1636, subject_property_type: 'single_family', ...over });
+      assert.match(f({ subject_bedrooms: 8 }), /^Our records show your home as an 8 bedroom, 2 bath/);
+      assert.match(f({ subject_bedrooms: 11 }), /as an 11 bedroom/);
+      assert.match(f({ subject_bedrooms: 3 }), /as a 3 bedroom/);
+      assert.match(f({ subject_bedrooms: 0, subject_property_type: 'condo' }), /as a studio, 2 bath condo of 1,636 square feet\./);
+      assert.match(f({ subject_bathrooms: 2.5 }), /, 2\.5 bath single family home of/);
+      assert.match(f({ subject_sqft: null }), /single family home\. If any of these details/);
+      const words = { single_family: 'single family home', townhouse: 'townhouse', condo: 'condo', duplex: 'duplex', triplex: 'triplex', fourplex: 'fourplex', apartment: 'apartment', manufactured: 'manufactured home', other: 'home' };
+      for (const [k, w] of Object.entries(words)) assert.match(f({ subject_property_type: k }), new RegExp(`bath ${w} of 1,636`), k);
+    });
+
+    // ── the sentences built from the data ──────────────────────────────────
+    await check('Owner view / the count sentence is computed from the counted homes and the rows shown: 0, 1, 6 and 40 homes; the ring is the smallest search ring that holds them all; months come from the oldest counted home; unknown distances say "nearby"', () => {
+      const day = OV.dayNumber('2026-10-16');
+      const homes = (n, over = () => ({})) => Array.from({ length: n }, (_, i) => leasedO(4000, { leased_date: '2026-09-20', distance_miles: 0.3, ...over(i) }));
+      assert.equal(OV.countSentence([], 0, day), 'This analysis found no comparable homes.');
+      assert.equal(OV.countSentence(homes(1), 1, day), 'This analysis uses 1 comparable home within 0.5 miles of your home that leased or were listed for rent in roughly the last 1 month. That home is shown.'.replace('1 month', 'month'));
+      assert.equal(OV.countSentence(homes(1), 0, day), 'This analysis uses 1 comparable home within 0.5 miles of your home that leased or were listed for rent in roughly the last month. That home is not shown.');
+      assert.equal(OV.countSentence(homes(2), 2, day), 'This analysis uses 2 comparable homes within 0.5 miles of your home that leased or were listed for rent in roughly the last month. Both are shown.');
+      assert.equal(OV.countSentence(homes(6), 6, day), 'This analysis uses 6 comparable homes within 0.5 miles of your home that leased or were listed for rent in roughly the last month. All 6 are shown.');
+      assert.equal(OV.countSentence(homes(40), 6, day), 'This analysis uses 40 comparable homes within 0.5 miles of your home that leased or were listed for rent in roughly the last month. Six of the 40 comparable homes are shown.');
+      assert.equal(OV.countSentence(homes(40), 4, day).split('. ')[1], 'Four of the 40 comparable homes are shown.');
+      assert.equal(OV.countSentence(homes(9), 1, day).split('. ')[1], 'One of the 9 comparable homes is shown.');
+      assert.equal(OV.countSentence(homes(9), 0, day).split('. ')[1], 'None of them are shown.');
+      // the ring: 0.5, 1, 1.5, 2 (the search's own list), never a rounder guess
+      assert.equal(OV.ringMiles(homes(3, i => ({ distance_miles: [0.2, 0.5, 0.51][i] }))), 1);
+      assert.equal(OV.ringMiles(homes(3, i => ({ distance_miles: [0.2, 1.0, 1.01][i] }))), 1.5);
+      assert.equal(OV.ringMiles(homes(2, i => ({ distance_miles: [0.2, 2][i] }))), 2);
+      assert.equal(OV.ringMiles(homes(2, i => ({ distance_miles: [0.2, null][i] }))), null);
+      assert.match(OV.countSentence(homes(2, i => ({ distance_miles: [0.2, null][i] })), 2, day), /^This analysis uses 2 comparable homes nearby that leased/);
+      assert.match(OV.countSentence(homes(2, i => ({ distance_miles: [0.2, 1.2][i] })), 2, day), /within 1\.5 miles of your home/);
+      // months: from the OLDEST counted home, rounded up, never less than one, and never a typed-in "six"
+      const monthsFor = date => OV.monthsBack([leasedO(4000, { leased_date: date })], day);
+      assert.equal(monthsFor('2026-10-16'), 1);
+      assert.equal(monthsFor('2026-09-16'), 1);
+      assert.equal(monthsFor('2026-09-15'), 2);
+      assert.equal(monthsFor('2026-04-20'), 6);
+      assert.equal(monthsFor('2026-04-10'), 7);
+      assert.equal(monthsFor('2024-11-01'), 24);
+      assert.match(OV.countSentence([leasedO(4000, { leased_date: '2024-11-01' }), ...homes(2)], 3, day), /in roughly the last 24 months/);
+      assert.equal(OV.monthsBack([leasedO(4000, { leased_date: null })], day), null);
+      assert.ok(!/in roughly the last/.test(OV.countSentence([leasedO(4000, { leased_date: null })], 1, day)), 'no dated home: no time claim');
+      // one home with no usable date among dated ones: the "last N months" claim cannot be made for all of them, so it is dropped
+      for (const bad of [null, '', 'junk', '2026-13-40']) {
+        const mixed = [...homes(3), leasedO(4000, { leased_date: bad, distance_miles: 0.3 })];
+        assert.equal(OV.monthsBack(mixed, day), null, `date ${String(bad)}`);
+        assert.equal(OV.countSentence(mixed, 4, day), 'This analysis uses 4 comparable homes within 0.5 miles of your home that leased or were listed for rent. All 4 are shown.');
+      }
+      const undatedActive = [...homes(3), activeO(4000, { listed_date: null, leased_date: null, distance_miles: 0.3 })];
+      assert.ok(!/in roughly the last/.test(OV.countSentence(undatedActive, 4, day)));
+      assert.match(OV.countSentence(homes(4), 4, day), /in roughly the last month/, 'all dated: the claim stays');
+      assert.ok(!fsO.readFileSync(pathO.join(__dirname, 'lib', 'owner-view.js'), 'utf8').match(/last six months|six months/i), 'the time span is never typed in');
+    });
+
+    await check('Owner view / on a built page the count sentence matches the rows: N counted, rows shown, and the page says so (checked on 300 random reports)', () => {
+      let withView = 0;
+      for (let seed = 1; seed <= 300; seed++) {
+        const { response } = randomReportO(seed);
+        const v = response.ownerView;
+        if (!v) continue;
+        withView++;
+        const n = response.counted.total, shown = v.table.rows.length;
+        const m = v.countLine.match(/^This analysis uses (\d+) comparable homes? (?:within ([\d.]+) miles? of your home|nearby) that leased or were listed for rent(?: in roughly the last (?:month|(\d+) months))?\. (.+)$/);
+        assert.ok(m, v.countLine);
+        assert.equal(Number(m[1]), n, 'N is the counted total of the report');
+        const how = m[4];
+        if (shown === n) assert.match(how, n === 2 ? /^Both are shown\.$/ : new RegExp(`^All ${n} are shown\\.$`));
+        else assert.match(how, new RegExp(`^(One|Two|Three|Four|Five|Six) of the ${n} comparable homes (is|are) shown\\.$`));
+        assert.ok(shown >= 4 && shown <= 6);
+        assert.ok(v.table.rows.length <= n);
+      }
+      assert.ok(withView > 150, `most random reports have a page (${withView})`);
+    });
+
+    await check('Owner view / the analysis date is the saved date (California calendar day), never today: old and new reports, midnight edges, no saved date means no page', () => {
+      const day = created => OV.analysisDate(created);
+      assert.deepEqual(day('2026-10-16T18:00:00.000Z'), { iso: '2026-10-16', text: 'October 16, 2026' });
+      assert.deepEqual(day('2026-10-17T03:29:44.675Z'), { iso: '2026-10-16', text: 'October 16, 2026' }, '8:29 pm in California is still the 16th');
+      assert.deepEqual(day('2026-10-17T07:00:00.000Z'), { iso: '2026-10-17', text: 'October 17, 2026' });
+      assert.deepEqual(day('2026-01-05T09:00:00.000Z'), { iso: '2026-01-05', text: 'January 5, 2026' }, 'winter time');
+      assert.deepEqual(day('2020-03-05T10:00:00Z'), { iso: '2020-03-05', text: 'March 5, 2020' });
+      assert.equal(day(null), null); assert.equal(day(''), null); assert.equal(day(undefined), null); assert.equal(day('garbage'), null);
+      // a report from 2026-08-01 shows that date and counts Active days to it, whatever today is
+      const old = viewO([leasedO(4000, { leased_date: '2026-06-01' }), leasedO(4000, { leased_date: '2026-06-02' }), leasedO(4000, { leased_date: '2026-06-03' }), activeO(4000, { listed_date: '2026-07-01' })], { analysis: { ...ANALYSIS, created_at: '2026-08-01T20:00:00.000Z' } }).ownerView;
+      assert.equal(old.asOfLine, 'Market data as of: August 1, 2026');
+      assert.equal(old.table.rows.find(r => /^Active/.test(r.status)).status, 'Active 31 days');
+      assert.match(old.countLine, /in roughly the last 3 months/, 'June 1 to August 1 is 61 days: rounded up to 3 months');
+      // another run day gives another date and other day counts, with the same data
+      const later = viewO([leasedO(4000, { leased_date: '2026-06-01' }), leasedO(4000, { leased_date: '2026-06-02' }), leasedO(4000, { leased_date: '2026-06-03' }), activeO(4000, { listed_date: '2026-07-01' })], { analysis: { ...ANALYSIS, created_at: '2026-08-15T20:00:00.000Z' } }).ownerView;
+      assert.equal(later.asOfLine, 'Market data as of: August 15, 2026'); assert.ok(later.table.rows.some(r => r.status === 'Active 45 days'));
+      const srcText = fsO.readFileSync(pathO.join(__dirname, 'lib', 'owner-view.js'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      assert.ok(!/new Date\(\s*\)|Date\.now\(/.test(srcText), 'the module never reads the clock');
+    });
+
+    // ── nothing but the allowed figures and fields ─────────────────────────
+    await check('Owner view / the only dollar figures on a page are the range (two ends), the suggested price (not on Low) and the rows\' own rents: no stretch price, no middle, no second range, no span (400 random reports and 5 hand-made ones, from the object and from the page)', () => {
+      const page = pagesO.length ? loadPageO(pagesO[0]) : null;
+      let checked = 0, lowPages = 0;
+      const all = [];
+      for (let seed = 1; seed <= 400; seed++) all.push(randomReportO(seed));
+      const low = reportO({ comps: [4300, 4350, 4400, 4250, 4320, 4000, 4900, 3900].map((rent, i) => rawComp({ address: `${10 + i} Low Ave, Ventura, CA 93003`, monthly_rent: rent, distance_miles: 0.2 + i / 20, leased_date: i < 1 ? '2026-09-15' : null, listing_status: i < 1 ? 'leased' : 'active', listed_date: '2026-09-20' })) });
+      all.push(low, reportO({ comps: agreeingRaw() }), reportO({ comps: agreeingRaw(), goal: 'lease_quickly' }), reportO({ comps: agreeingRaw(), goal: 'maximize_rent' }));
+      for (const { response, numbers } of all) {
+        const v = response.ownerView;
+        if (!v) continue;
+        checked++;
+        const h = response.headline;
+        if (v.level === 'low') lowPages++;
+        const allowed = new Set([`$${h.low.toLocaleString('en-US')}`, `$${h.high.toLocaleString('en-US')}`]);
+        if (v.level !== 'low') allowed.add(`$${h.listPrice.toLocaleString('en-US')}`);
+        for (const row of v.table.rows) allowed.add(row.rent.split('/')[0]);
+        const text = htmlToText(renderedOwnerHtml(page, response));
+        const found = text.match(/\$[\d,]+/g) || [];
+        for (const f of found) assert.ok(allowed.has(f), `${f} is not an allowed figure on the page`);
+        // the range appears once, as "$A - $B", and no other pair of figures is joined by a dash or "to" or "between"
+        assert.equal((text.match(/\$[\d,]+ - \$[\d,]+/g) || []).length, 1);
+        assert.ok(!/\$[\d,]+\s*(?:-|–|—|to|through|and)\s*\$[\d,]+/.test(text.replace(/\$[\d,]+ - \$[\d,]+/, '')), 'no second range');
+        // the stretch price (range high + 200), the internal middle and the old wide figures are absent
+        const stretch = `$${(h.high + 200).toLocaleString('en-US')}`;
+        assert.ok(!text.includes(stretch) || allowed.has(stretch), 'no stretch price (unless a home\'s own rent happens to be that figure)');
+        assert.ok(!/stretch/i.test(text));
+        const mid = numbers.recommended.mid;
+        if (mid !== null && !allowed.has(`$${Math.round(mid).toLocaleString('en-US')}`)) assert.ok(!text.includes(`$${Math.round(mid).toLocaleString('en-US')}`), 'no midpoint');
+        assert.ok(!text.includes(`$${numbers.raw.low.toLocaleString('en-US')} `) || allowed.has(`$${numbers.raw.low.toLocaleString('en-US')}`), 'no raw low');
+      }
+      assert.ok(checked > 200, `enough pages checked (${checked})`);
+      assert.ok(lowPages > 0, 'some of them are Low pages');
+    });
+
+    await check('Owner view / forbidden-terms scan on the RENDERED page text of 400 random reports (whole words, the full list, the company\'s own "language to avoid" phrases word for word; "professional opinion", "walkthrough" and "condition of your home" allowed): no hit; "will rent", "stretch", "midpoint" and "window" absent; the disclaimer is on every page', () => {
+      const page = loadPageO(pagesO[0]);
+      let checked = 0;
+      const hits = [];
+      for (let seed = 1; seed <= 400; seed++) {
+        const { response } = randomReportO(seed);
+        if (!response.ownerView) continue;
+        checked++;
+        const text = htmlToText(renderedOwnerHtml(page, response));
+        // the page text with the numbers it computed and the street addresses of its homes taken out: nothing else may trip a word
+        const addresses = [response.ownerView.intro[1].text, ...response.ownerView.table.rows.map(r => r.address)];
+        let scanned = text;
+        for (const a of addresses) scanned = scanned.split(a).join(' ');
+        scanned = scanned.replace(/\d[\d,]*(?:\.\d+)?/g, '#');
+        const h = forbiddenIn(scanned);
+        if (h.length) hits.push({ seed, h });
+        assert.ok(text.includes(response.ownerView.disclaimer), 'the disclaimer is printed');
+        assert.ok(text.includes('This is our professional opinion, not a guarantee') || response.ownerView.level === 'low');
+      }
+      assert.deepEqual(hits, [], JSON.stringify(hits.slice(0, 3)));
+      assert.ok(checked > 200);
+      // the fixed wording alone is clean, with the numbers still in it (a typed "55" would show)
+      assert.deepEqual(forbiddenIn(OV.fixedWording().join('\n')), []);
+      assert.deepEqual(OV.findForbiddenTerms(OV.fixedWording().join('\n'), { includePagePhrases: true }), []);
+    });
+
+    await check('Owner view / the wording check: every listed word and phrase is caught (any capitals), the three allowed phrases are not, "family" is allowed only inside a property-type name, numbers like "Active 55 days" are not a 55+ tag, and a street called "Church Street" never blocks a page', () => {
+      for (const w of [...WORDS_O, ...PHRASES_O.filter(p => !['will rent', 'stretch', 'midpoint', 'window'].includes(p))]) {
+        assert.ok(OV.findForbiddenTerms(`Nice ${w.toUpperCase()} here`).length > 0, `${w} is caught`);
+        assert.ok(OV.findForbiddenTerms(`xx${w}yy`).length === 0 || /\W/.test(w), `${w} inside a longer word is not a hit (${w})`);
+      }
+      for (const p of ['will rent', 'will lease', 'stretch', 'midpoint', 'window']) {
+        assert.deepEqual(OV.findForbiddenTerms(`It ${p} soon`, { includePagePhrases: true }).includes(p), true, p);
+        assert.deepEqual(OV.findForbiddenTerms(`It ${p} soon`), [], `${p} is a page phrase, not a word-list term`);
+      }
+      assert.deepEqual(OV.findForbiddenTerms('This is our professional opinion. A walkthrough of the condition of your home.'), []);
+      assert.deepEqual(OV.findForbiddenTerms('Perfect for young professionals'), ['young', 'professionals']);
+      assert.deepEqual(OV.findForbiddenTerms('A single family home or a Multi-Family or multifamily or single-family property'), []);
+      assert.deepEqual(OV.findForbiddenTerms('Great for a family'), ['family']);
+      assert.deepEqual(OV.findForbiddenTerms('Great for families'), ['families']);
+      assert.deepEqual(OV.findForbiddenTerms('Active 55 days'), ['55'], 'the plain word list sees the number; the page check masks computed numbers first');
+      assert.deepEqual(OV.findForbiddenTerms(OV.maskNumbers('Active 55 days, uses 55 comparable homes, $1,550/mo')), []);
+      assert.deepEqual(OV.findForbiddenTerms('a 55+ community'), ['55', '55+']);
+      // a street named like a forbidden word: the page is still built, and says nothing but the address
+      const churchy = viewO([leasedO(4000, { address: '12 Church Street, Ventura, CA' }), leasedO(4000, { address: '14 Young Wolf Drive, Ventura, CA' }), leasedO(4000), leasedO(4000)]);
+      assert.ok(churchy.ownerView, 'addresses never block a page');
+      assert.deepEqual(OV.findForbiddenTerms(OV.ownerViewStrings(churchy.ownerView).template.join('\n')), [], 'and the sentences themselves are clean');
+      // a forbidden phrase typed into the wording would block the page (the self-check)
+      const view = viewO(Array.from({ length: 4 }, () => leasedO(4000))).ownerView;
+      view.range = [{ text: 'This home will rent for ' }, { text: '$3,900 - $4,100', bold: true }, { text: ' per month.' }];
+      assert.ok(OV.selfCheck(view, { rangeLow: 3900, rangeHigh: 4100, listPrice: 4000 }).some(p => /forbidden wording: will rent/.test(p)));
+      const view2 = viewO(Array.from({ length: 4 }, () => leasedO(4000))).ownerView;
+      view2.countLine = 'Ideal for a bachelor, only $9,999.';
+      const problems = OV.selfCheck(view2, { rangeLow: 3900, rangeHigh: 4100, listPrice: 4000 });
+      assert.ok(problems.some(p => /forbidden wording/.test(p)) && problems.some(p => /unexpected dollar figures: \$9,999/.test(p)), problems.join(' | '));
+    });
+
+    await check('Owner view / staff-only fields are ABSENT from the owner element (not hidden): no source names, exclusion reasons, ids, tags, narratives, AI text, distances, coordinates, listing-status codes, subdivision, estimates; the object has exactly the printable keys', () => {
+      const props = [{ id: 'p2', address: '6 Managed Ct', city: 'Ventura', state: 'CA', zip: '93003' }];
+      const raws = [...agreeingRaw().map((c, i) => ({ ...c, distance_miles: 0.4321 + i / 100, subdivision_name: 'Hidden Tract Estates', mls_condition: 'Turnkey', mls_flags: i === 0 ? ['hoa', 'private_pool'] : [] })),
+        rawComp({ source_id: 'src-ls', source_name: 'LeadSimple Move-Ins', address: '6 Managed Ct, Ventura, CA 93003', monthly_rent: 4330, distance_miles: 0.77, leased_date: '2026-10-01' }),
+        rawComp({ source_id: 'src-rc', source_name: 'RentCast', address: '30 Gone Ave, Ventura, CA 93003', monthly_rent: 4310, distance_miles: 0.66, listing_status: 'off_market', listed_date: '2026-06-01', leased_date: '2026-08-20' })];
+      const { response, analysis } = reportO({ comps: raws, properties: props });
+      response.comps.forEach(c => { c.narrative = 'STAFF NARRATIVE ZZZ'; });
+      const v = response.ownerView;
+      assert.ok(v);
+      assert.deepEqual(Object.keys(v).sort(), ['agreement', 'asOfDate', 'brand', 'countLine', 'disclaimer', 'ends', 'facts', 'footer', 'goal', 'intro', 'key', 'level', 'range', 'table', 'templateVersion', 'title', 'asOfLine'].sort());
+      assert.deepEqual(Object.keys(v.table).sort(), ['heads', 'rows']);
+      const objectText = JSON.stringify(v);
+      const bad = [/STAFF NARRATIVE ZZZ/, /AI TEXT/, /RentCast/i, /CRMLS/, /LeadSimple/i, /Move-Ins/, /rincon_managed|is_rincon_managed|rincon-managed/i, /exclusion/i, /size_sqft|size_mismatch|property_type_mismatch|implausible/, /listing_status|off_market|"leased"|"active"/, /Hidden Tract/, /Turnkey/, /\bhoa\b|private_pool|mls_flags/, /distance|0\.4321|0\.77|0\.66/, /latitude|longitude|34\.2|-119\.2/, /rc-\d|src-|"id"/, /4999/, /stretch/i, /narrative|rationale|subject_estimated/i, /confidence|reasonText|trackRecord|accuracy/i];
+      for (const re of bad) assert.ok(!re.test(objectText), `${re} must not be anywhere in the owner view object`);
+      for (const f of pagesO) {
+        const html = renderedOwnerHtml(loadPageO(f), response);
+        const text = htmlToText(html);
+        for (const re of bad) assert.ok(!re.test(html) && !re.test(text), `${re} must not be anywhere in the owner element of ${pathO.basename(pathO.dirname(pathO.dirname(f)))}`);
+        assert.ok(!/<a |href=|<img|<script|<input|<form|<button/i.test(html), 'no link, image, script or form in the owner element');
+      }
+    });
+
+    // ── the answers: live run and reopened report ──────────────────────────
+    await check('Owner view / the answer carries ownerView and ownerViewNote (exactly one of them set); a Low report prints the starting-point page; no range gives the plain reason', () => {
+      const { response } = reportO({ comps: agreeingRaw() });
+      assert.ok(response.ownerView && response.ownerViewNote === null);
+      assert.equal(response.ownerView.level, 'strong');
+      const thin = reportO({ comps: agreeingRaw().slice(0, 2) }).response;
+      assert.equal(thin.ownerView, null);
+      assert.equal(thin.ownerViewNote, OV.NOTES.noRange);
+      assert.equal(thin.headline, null);
+      const few = reportO({ comps: [...agreeingRaw().slice(0, 4)].map((c, i) => ({ ...c, monthly_rent: [3000, 4400, 3300, 4800][i], listing_status: 'active', listed_date: '2026-10-01', leased_date: null })) }).response;
+      assert.equal(few.confidence.label, 'low');
+      assert.equal(few.ownerView.level, 'low');
+      assert.match(textOf(few.ownerView), /starting point only/);
+      assert.ok(!/suggest/i.test(textOf(few.ownerView)));
+      assert.equal(few.headline.stretchPrice, null, 'no stretch price on a Low report, anywhere');
+    });
+
+    // a saved report, the way the database holds it: the analysis row and its comp rows
+    function savedFrom({ comps, subject = {}, created = CREATED, goal = 'balanced', properties = [], tweak = {} }) {
+      const r = reportO({ comps, subject, created, goal, properties });
+      const analysisRow = { ...r.analysis, run_by: 'u1', ...tweak };
+      for (const k of ['stretch_price']) if (analysisRow[k] === undefined) analysisRow[k] = null;
+      analysisRow.recommended_rent_mid = r.numbers.recommended.mid; analysisRow.recommended_rent_low = r.numbers.recommended.low; analysisRow.recommended_rent_high = r.numbers.recommended.high;
+      const compRows = r.responseComps.map(c => { const { exclusion_reason, property_type_source, ...row } = c; return row; });
+      return { ...r, analysisRow, compRows };
+    }
+    const sourcesO = { 'src-crmls': 'CRMLS', 'src-ls': 'LeadSimple Move-Ins', 'src-rc': 'RentCast', 'src-leased': 'CRMLS', 'src-active': 'CRMLS', 'src-off_market': 'RentCast', 'src-rincon': 'LeadSimple Move-Ins' };
+
+    await check('Owner view / a saved NEW-format report reopened gives the SAME owner view as the live run (same rows, same text, the saved analysis date), whatever order its comps come back in', () => {
+      for (const goal of ['lease_quickly', 'balanced', 'maximize_rent']) {
+        const props = [{ id: 'p2', address: '6 Managed Ct', city: 'Ventura', state: 'CA', zip: '93003' }];
+        const raws = [...agreeingRaw(), rawComp({ source_id: 'src-ls', source_name: 'LeadSimple Move-Ins', address: '6 Managed Ct, Ventura, CA 93003', monthly_rent: 4330, distance_miles: 0.01, leased_date: '2026-10-01' }), rawComp({ source_id: 'src-rc', source_name: 'RentCast', address: '30 Gone Ave, Ventura, CA 93003', monthly_rent: 4310, distance_miles: 0.66, listing_status: 'active', listed_date: '2026-09-01', leased_date: null })];
+        const saved = savedFrom({ comps: raws, goal, properties: props });
+        const live = saved.response;
+        assert.ok(live.ownerView);
+        for (const order of [saved.compRows, [...saved.compRows].reverse(), [...saved.compRows].sort(() => 0.5 - Math.random())]) {
+          const { report, flags } = HistO.rebuildReport({ analysis: saved.analysisRow, comps: order, sourceNamesById: sourcesO });
+          assert.deepEqual(flags, []);
+          assert.equal(report.format, 'new');
+          assert.deepEqual(report.ownerView, live.ownerView, `reopened == live (${goal})`);
+          assert.equal(report.ownerViewNote, null);
+        }
+      }
+    });
+
+    await check('Owner view / a reopened report uses its SAVED analysis date, not today: an old report says its own date and counts Active days to it', () => {
+      const raws = agreeingRaw().map((c, i) => (i === 0 ? { ...c, listing_status: 'active', listed_date: '2026-03-01', leased_date: null, monthly_rent: 4300 } : { ...c, leased_date: `2026-02-1${i}` }));
+      const saved = savedFrom({ comps: raws, created: '2026-03-20T19:00:00.000Z' });
+      const row = { ...saved.analysisRow };
+      const rebuilt = HistO.rebuildReport({ analysis: row, comps: saved.compRows, sourceNamesById: sourcesO }).report.ownerView;
+      assert.ok(rebuilt);
+      assert.equal(rebuilt.asOfLine, 'Market data as of: March 20, 2026');
+      assert.equal(rebuilt.asOfDate, '2026-03-20');
+      assert.ok(rebuilt.table.rows.some(r => r.status === 'Active 19 days'), rebuilt.table.rows.map(r => r.status).join(' | '));
+    });
+
+    await check('Owner view / past-reports rebuild: OLDER-format, UNFINISHED, no-range and bad-range reports get NO owner view (and a plain reason); only a new-format report with a range gets one', () => {
+      const good = savedFrom({ comps: agreeingRaw() });
+      const rebuild = (analysis, comps = good.compRows) => HistO.rebuildReport({ analysis, comps, sourceNamesById: sourcesO }).report;
+      assert.ok(rebuild(good.analysisRow).ownerView);
+      // older format: only the old wide range saved, none of the new columns
+      const olderRow = { ...good.analysisRow, method_version: null, headline_range_low: null, headline_range_high: null, suggested_list_price: null, stretch_price: null, owner_goal: null, confidence_label: null, confidence_spread: null, counted_comp_count: null, counted_leased_count: null };
+      const older = rebuild(olderRow);
+      assert.equal(older.format, 'older'); assert.equal(older.ownerView, null); assert.equal(older.ownerViewNote, OV.NOTES.older);
+      // unfinished / failed
+      for (const status of ['failed', 'running', 'pending']) {
+        const un = rebuild({ ...olderRow, status, recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null });
+        assert.equal(un.format, 'unfinished'); assert.equal(un.ownerView, null); assert.equal(un.ownerViewNote, OV.NOTES.unfinished);
+      }
+      // a new-format report with fewer than four counted homes: no range, no page
+      const thin = savedFrom({ comps: agreeingRaw().slice(0, 3) });
+      const thinReport = rebuild(thin.analysisRow, thin.compRows);
+      assert.equal(thinReport.format, 'new'); assert.equal(thinReport.ownerView, null); assert.equal(thinReport.ownerViewNote, OV.NOTES.noRange);
+      // a saved range that is not $200 wide is not shown, so no page either
+      const wide = rebuild({ ...good.analysisRow, headline_range_high: good.analysisRow.headline_range_high + 100 });
+      assert.equal(wide.headline, null); assert.equal(wide.ownerView, null); assert.ok(typeof wide.ownerViewNote === 'string');
+      // no saved label: no page
+      const unlabeled = rebuild({ ...good.analysisRow, confidence_label: null });
+      assert.equal(unlabeled.ownerView, null); assert.equal(unlabeled.ownerViewNote, OV.NOTES.noLabel);
+      // the recount of the saved homes no longer matches the saved count: no page (the page would not add up)
+      const off = rebuild({ ...good.analysisRow, counted_comp_count: good.analysisRow.counted_comp_count + 1 });
+      assert.equal(off.ownerView, null); assert.equal(off.ownerViewNote, OV.NOTES.countsMismatch);
+      // no saved date: no page, never today's date
+      const nodate = rebuild({ ...good.analysisRow, created_at: null });
+      assert.equal(nodate.ownerView, null); assert.equal(nodate.ownerViewNote, OV.NOTES.noDate);
+    });
+
+    await check('Owner view / a Low report rebuilt from the database keeps the starting-point page and no suggested-price sentence', () => {
+      const raws = agreeingRaw().slice(0, 4).map((c, i) => ({ ...c, monthly_rent: [3000, 4400, 3300, 4800][i] }));
+      const saved = savedFrom({ comps: raws });
+      const report = HistO.rebuildReport({ analysis: saved.analysisRow, comps: saved.compRows, sourceNamesById: sourcesO }).report;
+      assert.equal(report.confidence.label, 'low');
+      assert.equal(report.ownerView.level, 'low');
+      assert.deepEqual(report.ownerView, saved.response.ownerView);
+      assert.ok(!/suggest|stretch/i.test(textOf(report.ownerView)));
+    });
+
+    await check('Owner view / a reopened report with no saved middle: it is worked out from the saved homes; when that is impossible (a damaged saved home) or the middle is missing, there is no owner view and a plain line, and the reopened report itself is never lost', () => {
+      const good = savedFrom({ comps: agreeingRaw() });
+      const rebuild = (analysis, comps = good.compRows) => HistO.rebuildReport({ analysis, comps, sourceNamesById: sourcesO }).report;
+      // no saved middle: worked out again from the saved homes, and the page is the same as with it saved
+      const worked = rebuild({ ...good.analysisRow, recommended_rent_mid: null });
+      assert.deepEqual(worked.ownerView, good.response.ownerView);
+      // a saved home whose rent cannot be read: the middle cannot be worked out, so no owner view, but the report comes back whole
+      const damaged = good.compRows.map((c, i) => (i === 0 ? { ...c, monthly_rent: { valueOf() { throw new Error('unreadable rent'); } } } : c));
+      const warnings = [];
+      const originalError = console.error;
+      console.error = (...a) => warnings.push(a.join(' '));
+      let report;
+      try { report = rebuild({ ...good.analysisRow, recommended_rent_mid: null }, damaged); } finally { console.error = originalError; }
+      assert.equal(report.ownerView, null);
+      assert.equal(report.ownerViewNote, OV.NOTES.noMiddle);
+      assert.equal(report.format, 'new');
+      assert.equal(report.comps.length, good.compRows.length, 'every saved home is still on the reopened report');
+      assert.ok(report.headline && report.confidence && report.analysis, 'and so is the headline');
+      assert.ok(warnings.some(w => /could not be worked out, so there is no owner view: unreadable rent/.test(w)), warnings.join(' | '));
+      // with the saved middle present the damaged home is still read while the page is built: the catch in buildApiResponse() applies,
+      // again with a plain line and the whole report intact
+      const withMiddle = (() => { console.error = () => {}; try { return rebuild(good.analysisRow, damaged); } finally { console.error = originalError; } })();
+      assert.equal(withMiddle.ownerView, null);
+      assert.equal(withMiddle.ownerViewNote, OV.NOTES.error);
+      assert.equal(withMiddle.comps.length, good.compRows.length);
+    });
+
+    await check('Owner view / both entry points include it: server.js and the Hub router answer through buildApiResponse (which sets ownerView and ownerViewNote), the Hub history answer goes through rebuildReport, and the owner view is never saved or sent anywhere else', () => {
+      const srcs = { 'server.js': fsO.readFileSync(pathO.join(__dirname, 'server.js'), 'utf8'), ...(hubExistsO ? { 'router.js': fsO.readFileSync(pathO.join(hubDirO, 'router.js'), 'utf8') } : {}) };
+      for (const [name, src] of Object.entries(srcs)) {
+        assert.match(src, /return res\.json\(buildApiResponse\(\{ analysis: updatedAnalysis, comps: responseComps, marketData, numbers/, `${name}: the run answer goes through buildApiResponse`);
+        assert.match(src, /require\('\.\/lib\/outcome'\)/);
+        assert.ok(!/owner_?view/i.test(src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')), `${name}: no second copy of the owner view logic`);
+      }
+      if (hubExistsO) assert.match(srcs['router.js'], /rebuildReport\(\{/);
+      const out = fsO.readFileSync(pathO.join(__dirname, 'lib', 'outcome.js'), 'utf8');
+      assert.match(out, /ownerView: owner\.ownerView/); assert.match(out, /ownerViewNote: owner\.ownerViewNote/);
+      assert.ok(!OutO.AUDIT_ONLY_COLUMNS.includes('ownerView'));
+      // nothing about the owner view is saved: the completion patch has no field for it
+      const r = reportO({ comps: agreeingRaw() });
+      assert.ok(!Object.keys(OutO.buildCompletionPatch({ numbers: r.numbers, ownerGoal: 'balanced', propertyId: null, subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null, rationale: null })).some(k => /owner_?view/i.test(k)));
+      // the shared module is the same file in both lib folders
+      if (hubExistsO) for (const f of ['owner-view.js', 'outcome.js', 'history.js']) assert.equal(fsO.readFileSync(pathO.join(hubDirO, 'lib', f), 'utf8'), fsO.readFileSync(pathO.join(__dirname, 'lib', f), 'utf8'), `${f} is identical in both lib folders`);
+    });
+
+    await check('Owner view / a fault while building the owner view never costs the report: the answer still comes back, with no owner view and a plain reason', () => {
+      const good = reportO({ comps: agreeingRaw() });
+      const boom = { ...good.responseComps[0] };
+      Object.defineProperty(boom, 'monthly_rent', { get() { throw new Error('boom from a bad comp'); }, enumerable: true });
+      const comps = [boom, ...good.responseComps.slice(1)];
+      const warnings = [];
+      const originalError = console.error;
+      console.error = (...a) => warnings.push(a.join(' '));
+      let answer;
+      try { answer = OutO.buildApiResponse({ analysis: good.analysis, comps, marketData: null, numbers: good.numbers }); } finally { console.error = originalError; }
+      assert.equal(answer.ownerView, null);
+      assert.equal(answer.ownerViewNote, OV.NOTES.error);
+      assert.ok(answer.headline && answer.confidence, 'the rest of the answer is untouched');
+      assert.ok(warnings.some(w => /owner view could not be built: boom from a bad comp/.test(w)));
+    });
+
+    await check('Owner view / no send path of any kind: nothing in lib/owner-view.js or in the page\'s owner code can email, text, share, schedule, open a link, call the network or read a web address', () => {
+      const lib = fsO.readFileSync(pathO.join(__dirname, 'lib', 'owner-view.js'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      for (const re of [/require\('(?:node:)?(?:http|https|net|child_process|fs|nodemailer)'\)/, /\bfetch\s*\(/, /mailto:/i, /sendmail|smtp|twilio|sms/i, /https?:\/\//i, /navigator\.share/i, /setTimeout|setInterval|cron/i, /process\.env/]) assert.ok(!re.test(lib), `lib/owner-view.js: ${re}`);
+      for (const f of pagesO) {
+        const html = fsO.readFileSync(f, 'utf8');
+        const block = html.slice(html.indexOf('// ── Owner view (one page)'), html.indexOf('// ── Past reports'));
+        assert.ok(block.length > 2500);
+        const code = block.replace(/\/\/.*$/gm, '');
+        for (const re of [/\bfetch\s*\(/, /XMLHttpRequest/, /mailto:/i, /navigator\./, /window\.open/, /location\s*[.=]/, /href\s*=/, /sendBeacon/, /setTimeout|setInterval/, /localStorage/]) assert.ok(!re.test(code), `${f}: owner code must not use ${re}`);
+      }
+    });
+
+    // ── the page ───────────────────────────────────────────────────────────
+    await check('Owner view / the page: "Owner view (one page)" button shown only when the answer carries a view; the plain reason shows when it does not; the next report never inherits the last one\'s page; leaving the report leaves owner mode', () => {
+      const { response } = reportO({ comps: agreeingRaw() });
+      const none = reportO({ comps: agreeingRaw().slice(0, 2) }).response;
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        page.run('renderOwnerView(__x)', { __x: response });
+        assert.equal(page.els.ownerViewBtn.style.display, '');
+        assert.equal(page.els.ownerViewBtn.textContent, 'Owner view (one page)');
+        assert.ok(page.els.ownerDoc.innerHTML.includes('RENTAL COMPARATIVE MARKET ANALYSIS'));
+        assert.equal(page.els.ownerViewNote.classList.contains('visible'), false);
+        assert.equal(page.els.ownerViewNote.textContent, '');
+        // switch on
+        page.run('setOwnerMode(true)');
+        assert.equal(page.body.classes.has('owner-mode'), true);
+        assert.equal(page.els.reportDoc.style.display, 'none');
+        assert.equal(page.els.ownerDoc.style.display, '');
+        assert.equal(page.els.ownerViewBtn.textContent, 'Back to full report');
+        // the unnamed Letter page rule is in place while the owner view shows (for browsers that ignore the named page) ...
+        assert.equal(page.els.ownerPageRule.textContent, '@page { size: 8.5in 11in; margin: 0; }');
+        page.run('setOwnerMode(false)');
+        // ... and gone again when it is off, so the full report prints exactly as before
+        assert.equal(page.els.ownerPageRule.textContent, '');
+        assert.equal(page.body.classes.has('owner-mode'), false);
+        assert.equal(page.els.reportDoc.style.display, '');
+        assert.equal(page.els.ownerDoc.style.display, 'none');
+        assert.equal(page.els.ownerViewBtn.textContent, 'Owner view (one page)');
+        // on, then leave the report: owner mode is off again
+        page.run('setOwnerMode(true)');
+        assert.equal(page.els.ownerPageRule.textContent, '@page { size: 8.5in 11in; margin: 0; }');
+        page.run("showView('form')");
+        assert.equal(page.body.classes.has('owner-mode'), false);
+        assert.equal(page.els.ownerPageRule.textContent, '', 'leaving the report removes the page rule too');
+        assert.equal(page.els.ownerDoc.innerHTML, '', 'and no old owner page stays behind in the page');
+        // every way out of a report clears it; going to (or staying on) the report does not
+        for (const view of ['history', 'loading', 'form']) {
+          page.run('renderOwnerView(__x)', { __x: response });
+          assert.ok(page.els.ownerDoc.innerHTML.length > 500);
+          page.run(`showView('${view}')`);
+          assert.equal(page.els.ownerDoc.innerHTML, '', `showView('${view}')`);
+        }
+        page.run('renderOwnerView(__x)', { __x: response });
+        page.run("showView('report')");
+        assert.ok(page.els.ownerDoc.innerHTML.includes('RENTAL COMPARATIVE MARKET ANALYSIS'), 'showing the report keeps the page that renderReport() just drew');
+        // the next report has no view: no button, the old page is gone, the reason is shown (as plain text)
+        page.run('setOwnerMode(true)');
+        page.run('renderOwnerView(__x)', { __x: none });
+        assert.equal(page.els.ownerPageRule.textContent, '', 'no page, no page rule');
+        assert.equal(page.els.ownerViewBtn.style.display, 'none');
+        assert.equal(page.els.ownerDoc.innerHTML, '');
+        assert.equal(page.body.classes.has('owner-mode'), false, 'owner mode cannot stay on with no page');
+        assert.equal(page.els.ownerViewNote.textContent, OV.NOTES.noRange);
+        assert.equal(page.els.ownerViewNote.classList.contains('visible'), true);
+        // an old answer with no owner keys at all (a cached or older server): no button, no note, nothing breaks
+        page.run('renderOwnerView(__x)', { __x: { headline: null } });
+        assert.equal(page.els.ownerViewBtn.style.display, 'none'); assert.equal(page.els.ownerDoc.innerHTML, ''); assert.equal(page.els.ownerViewNote.classList.contains('visible'), false);
+        // wired into renderReport: drawing a whole report draws the owner view too
+        const analysis = { id: 'a', subject_address: '2461 Bunting Avenue, Ventura, CA 93003', subject_bedrooms: 4, subject_bathrooms: 2, subject_sqft: 1636, lease_term_months: 12, furnished: false, created_at: CREATED, rationale: null };
+        page.run('renderReport(__a, __c, null, __x)', { __a: analysis, __c: [], __x: response });
+        assert.ok(page.els.ownerDoc.innerHTML.includes('Market data as of: October 16, 2026'));
+        assert.equal(page.els.ownerViewBtn.style.display, '');
+      }
+    });
+
+    await check('Owner view / XSS: every string goes through esc() in the page code: hostile addresses, labels, notes and sentences add no markup to the owner element', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'<script>alert(2)</script>&amp;';
+      const { response } = reportO({ comps: agreeingRaw() });
+      const v = JSON.parse(JSON.stringify(response.ownerView));
+      v.title = evil; v.asOfLine = evil; v.brand = { wordmark: evil, dre: evil }; v.key = evil; v.countLine = evil; v.disclaimer = evil; v.footer = [evil, evil, evil];
+      for (const k of ['intro', 'facts', 'range', 'agreement', 'goal', 'ends']) v[k] = [{ text: evil }, { text: evil, bold: true }];
+      v.table.heads = [evil, evil, evil, evil, evil, evil, evil];
+      v.table.rows = v.table.rows.map(r => ({ address: evil, type: evil, beds: evil, baths: evil, sqft: evil, status: evil, rent: `${evil} ${evil}` }));
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        const html = renderedOwnerHtml(page, { ownerView: v, ownerViewNote: evil });
+        assert.ok(!/<img|<script|onerror=\w/.test(html.replace(/&lt;[^]*?&gt;/g, '')), 'no tag from the data survives');
+        assert.ok(!html.includes('<img') && !html.includes('<script'));
+        assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;&quot;'), 'shown as plain text');
+        assert.equal((html.match(/<tr>/g) || []).length, 1 + v.table.rows.length, 'one <tr> per home plus the heading row');
+        // the reason text is set as text, never as HTML
+        const src = fsO.readFileSync(f, 'utf8');
+        const block = src.slice(src.indexOf('function renderOwnerView'), src.indexOf('// ── Past reports'));
+        assert.match(block, /note\.textContent = reason/);
+        assert.doesNotMatch(block, /note\.innerHTML/);
+      }
+    });
+
+    await check('Owner view / print rules in both dashboards: one Letter sheet (named page 8.5in x 11in, no margin), colors kept, the full report hidden in owner mode, no external font or script for the page, Lato then Helvetica Neue and Arial; the existing Print button prints whichever view is showing', () => {
+      for (const f of pagesO) {
+        const html = fsO.readFileSync(f, 'utf8');
+        assert.match(html, /@page owner \{ size: 8\.5in 11in; margin: 0; \}/);
+        assert.match(html, /\.owner-doc \{ page: owner;/);
+        const print = html.slice(html.indexOf('@media print'));
+        // the staff-only line ("The owner view is not available because ...") and the owner page are NOT in the full report's print
+        assert.match(print, /\.header, \.report-toolbar, \.form-view, \.history-view, \.saved-banner, \.owner-note \{ display: none !important; \}/, 'the owner-view note is hidden in print');
+        assert.match(print, /body:not\(\.owner-mode\) \.owner-doc \{ display: none !important; \}/, 'outside owner mode the owner page is not printed');
+        assert.match(html, /<div class="owner-doc" id="ownerDoc" style="display:none"><\/div>/);
+        assert.match(html, /<div class="owner-note" id="ownerViewNote" role="status"><\/div>/);
+        assert.match(html, /<button class="btn-secondary" id="ownerViewBtn" style="display:none">/);
+        // the unnamed page rule element is empty in the file (it is filled only while the owner view shows)
+        assert.match(html, /<style id="ownerPageRule"><\/style>\n<\/head>/);
+        assert.match(html, /getElementById\('ownerPageRule'\)\.textContent = active \? '@page \{ size: 8\.5in 11in; margin: 0; \}' : ''/);
+        assert.doesNotMatch(html.slice(0, html.indexOf('<style id="ownerPageRule">')).replace(/@page owner \{[^}]*\}/, ''), /@page\s*\{/, 'no always-on unnamed @page rule: the full report keeps its normal page');
+        assert.match(print, /body\.owner-mode #reportDoc[^{]*\{ display: none !important; \}/);
+        assert.match(print, /body\.owner-mode \.owner-doc \{ display: block !important;/);
+        assert.match(print, /print-color-adjust: exact/); assert.match(print, /-webkit-print-color-adjust: exact/);
+        assert.match(print, /body\.owner-mode \.owner-page \{ width: 8\.5in;[^}]*min-height: 10\.96in;[^}]*overflow: visible;/, 'a sheet at least one page high that is never clipped');
+        assert.doesNotMatch(print.slice(print.indexOf('body.owner-mode .owner-page {')), /^[^}]*overflow: hidden/);
+        assert.match(html, /\.owner-page \{\s*font-family: Lato, "Helvetica Neue", Helvetica, Arial, sans-serif;/);
+        const ownerCss = html.slice(html.indexOf('OWNER VIEW — the one-page'), html.indexOf('/* ── Responsive ── */'));
+        assert.ok(!/@import|url\(|fonts\.googleapis|cdn/i.test(ownerCss), 'no external font or file');
+        assert.match(html, /id="printBtn">Print \/ Save as PDF<\/button>/);
+        assert.match(html, /id="ownerViewBtn" style="display:none">Owner view \(one page\)<\/button>/);
+        assert.match(html, /getElementById\('printBtn'\)\.addEventListener\('click', \(\) => window\.print\(\)\)/);
+        // colors from the existing palette, the wordmark is plain text (no logo file yet)
+        for (const c of ['#41486F', '#DF8C41', '#F1DCCD', '#F8ECE6', '#FBEEDF']) assert.ok(ownerCss.toUpperCase().includes(c.toUpperCase()), c);
+        assert.ok(!/<img/i.test(ownerCss));
+      }
+    });
+
+    await check('Owner view / both dashboards still differ only in the Leaflet lines in the head, and both carry the owner view code', () => {
+      if (!hubExistsO) return;
+      const [standalone, hub] = pagesO.map(f => fsO.readFileSync(f, 'utf8'));
+      const strip = html => html.slice(0, html.indexOf('</title>')) + html.slice(html.indexOf('<style>'));
+      assert.equal(strip(hub), strip(standalone));
+      for (const html of [standalone, hub]) for (const piece of ['function buildOwnerHtml(', 'function setOwnerMode(', 'function renderOwnerView(', 'id="ownerDoc"', 'id="ownerViewNote"', 'renderOwnerView(extras);']) assert.ok(html.includes(piece), piece);
+    });
+  }
+
 
   console.log(`\n${passed} check(s) passed.${process.exitCode ? ' SOME CHECKS FAILED — see FAIL lines above.' : ''}`);
 }

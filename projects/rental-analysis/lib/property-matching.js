@@ -40,7 +40,7 @@
  * disagree with.
  */
 
-const { weightFor, SELF_SOURCED_TRUSTED_SOURCE_NAMES, exclusionReason } = require('./weighting');
+const { weightFor, SELF_SOURCED_TRUSTED_SOURCE_NAMES, exclusionReason, hasExclusionFacts } = require('./weighting');
 
 function normalizeAddress(addr) {
   if (!addr) return '';
@@ -83,6 +83,17 @@ function houseNumber(normalized) {
 function hasParseableHouseNumber(address) {
   const hn = houseNumber(normalizeAddress(address));
   return !!(hn && /\d/.test(hn));
+}
+
+// An address needs a street NAME, not only a number: "2461" alone (or "2461, Ventura, CA") is not an address a lookup can use.
+// True when, after the house number(s) and any unit words, the first part of the address has a word of two or more letters.
+function hasStreetName(address) {
+  const first = String(address || '').split(',')[0].toLowerCase();
+  const tokens = first.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < tokens.length && (/^\d/.test(tokens[i]) && !/^\d+(?:st|nd|rd|th)$/.test(tokens[i]) || (tokens[i] === 'and' && i > 0))) i++;
+  const unitWords = new Set(['unit', 'apt', 'apartment', 'ste', 'suite', 'bldg', 'building', 'space', 'spc', 'no']);
+  return tokens.slice(i).some(t => /\p{L}{2,}/u.test(t) && !unitWords.has(t.replace(/[.#]/g, '')));
 }
 
 // A unit/apartment/suite/# identifier anywhere in the address — e.g. "1411"
@@ -130,7 +141,13 @@ function addressesMatch(addressA, addressB) {
   const unitA = unitIdentifier(addressA);
   const unitB = unitIdentifier(addressB);
   if ((unitA || unitB) && unitA !== unitB) return false;
-  return addressWordScore(normA, normB) >= 0.6;
+  // Only the street part is compared for the word score. The unit already had to
+  // match above, and a unit typed without commas ("1300 Saratoga Ave unit 500
+  // Ventura, CA") would otherwise add words the other spelling ("1300 Saratoga
+  // Ave, Unit 500, Ventura, CA") loses, so the subject's own listing scored below
+  // the cut-off and was counted as one of its own comps.
+  const stripUnit = s => s.replace(/\b(?:unit|apt|apartment|ste|suite)\b.*$/, '').trim();
+  return addressWordScore(stripUnit(normA), stripUnit(normB)) >= 0.6;
 }
 
 // `properties` stores address/city/state/zip as separate columns (unlike
@@ -220,9 +237,14 @@ function findBestPropertyMatch(targetAddress, properties) {
 //      excludeRinconManaged() (it's Rincon-managed but not from a trusted
 //      source), silently losing a comp that should have counted. See
 //      LEADSIMPLE-COMP-SOURCE-SPEC.md, "What Could Go Wrong."
-//   3. Still tied (both or neither trusted) -> prefer a real (non-null)
-//      distance_miles over a missing one.
-//   4. Still tied -> keep whichever was already kept (first-seen wins).
+//   3. Still tied (both or neither trusted) -> prefer the copy that carries
+//      the MLS facts (furnished, lease length, 55+ — see lib/mls-facts.js)
+//      over one that doesn't, so an MLS-listed home can't lose its facts to a
+//      RentCast copy of itself and then slip through as "counted" when it
+//      should have been left out. (mergeMlsFacts() normally lends the facts to
+//      the RentCast copy first; this covers whatever it could not match.)
+//   4. Still tied -> prefer a real (non-null) distance_miles over a missing one.
+//   5. Still tied -> keep whichever was already kept (first-seen wins).
 // The loser is dropped entirely — not inserted, not returned, not shown.
 //
 // @param {object[]} comps
@@ -240,8 +262,13 @@ function findBestPropertyMatch(targetAddress, properties) {
 //   omits both parameters gets provably identical behavior, not just
 //   "usually" identical behavior.
 // @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
-function dedupeComps(comps, subjectBedrooms, subjectPropertyType) {
-  const checkExclusion = typeof subjectBedrooms === 'number' || typeof subjectPropertyType === 'string';
+// @param {object} [subjectExtras] - optional; { sqft, furnished, leaseTermMonths, ageRestricted }, see
+//   lib/weighting.js. Step 0 then also knows about the size and MLS-fact
+//   exclusions, so a RentCast copy with no square footage can't beat a CRMLS
+//   copy that is out of the size band (or the reverse). Omitted, nothing changes.
+function dedupeComps(comps, subjectBedrooms, subjectPropertyType, subjectExtras) {
+  const checkExclusion = typeof subjectBedrooms === 'number' || typeof subjectPropertyType === 'string'
+    || (!!subjectExtras && typeof subjectExtras === 'object' && Object.values(subjectExtras).some(v => v !== undefined));
   const kept = [];
   for (const comp of (comps || [])) {
     const matchIndex = kept.findIndex(k => addressesMatch(k.address, comp.address));
@@ -252,8 +279,8 @@ function dedupeComps(comps, subjectBedrooms, subjectPropertyType) {
     const existing = kept[matchIndex];
 
     if (checkExclusion) {
-      const existingExcluded = !!exclusionReason(existing, subjectBedrooms, subjectPropertyType);
-      const compExcluded = !!exclusionReason(comp, subjectBedrooms, subjectPropertyType);
+      const existingExcluded = !!exclusionReason(existing, subjectBedrooms, subjectPropertyType, subjectExtras);
+      const compExcluded = !!exclusionReason(comp, subjectBedrooms, subjectPropertyType, subjectExtras);
       if (existingExcluded !== compExcluded) {
         // Exactly one of the two would count toward the range -> keep that
         // one, full stop. Skips the status-weight/trusted-source/distance/
@@ -275,10 +302,17 @@ function dedupeComps(comps, subjectBedrooms, subjectPropertyType) {
       if (compTrusted && !existingTrusted) {
         kept[matchIndex] = comp;
       } else if (existingTrusted === compTrusted) {
-        const existingHasDistance = existing.distance_miles !== null && existing.distance_miles !== undefined;
-        const compHasDistance = comp.distance_miles !== null && comp.distance_miles !== undefined;
-        if (!existingHasDistance && compHasDistance) kept[matchIndex] = comp;
-        // else: still tied -> first-seen wins, keep existing.
+        const existingFacts = hasExclusionFacts(existing);
+        const compFacts = hasExclusionFacts(comp);
+        if (compFacts && !existingFacts) {
+          kept[matchIndex] = comp;
+        } else if (existingFacts === compFacts) {
+          const existingHasDistance = existing.distance_miles !== null && existing.distance_miles !== undefined;
+          const compHasDistance = comp.distance_miles !== null && comp.distance_miles !== undefined;
+          if (!existingHasDistance && compHasDistance) kept[matchIndex] = comp;
+          // else: still tied -> first-seen wins, keep existing.
+        }
+        // else: existing carries the MLS facts and comp doesn't -> keep existing.
       }
       // else: existing is the trusted one -> keep existing.
     }
@@ -287,7 +321,115 @@ function dedupeComps(comps, subjectBedrooms, subjectPropertyType) {
   return kept;
 }
 
+// ── Is this the very same street? (used only to decide that a comp IS the subject's own listing) ──
+// addressesMatch() accepts any two addresses with the same house number and 60% of their words in common, which is right
+// for lining up two spellings of one address but too loose to say "this comp IS the subject": "123 Maple St", "123 Elm St",
+// "123 Maine St", "123 Main Ave", "123 S Main St" (for "123 N Main St") and "Oak Hill Dr" (for "Oak Park Dr") all pass it
+// for the subject "123 Main St". Before a comp is dropped as the subject's own listing the street itself must agree too:
+// the same street NAME, the same direction when both have one, and the same suffix when both have one.
+const STREET_SUFFIX = {
+  st: 'st', street: 'st', ave: 'ave', av: 'ave', avenue: 'ave', blvd: 'blvd', boulevard: 'blvd', dr: 'dr', drive: 'dr', rd: 'rd', road: 'rd',
+  ln: 'ln', lane: 'ln', ct: 'ct', court: 'ct', pl: 'pl', place: 'pl', cir: 'cir', circle: 'cir', ter: 'ter', terr: 'ter', terrace: 'ter',
+  pkwy: 'pkwy', parkway: 'pkwy', hwy: 'hwy', highway: 'hwy', way: 'way', trl: 'trl', trail: 'trl', loop: 'loop', aly: 'aly', alley: 'aly',
+  plz: 'plz', plaza: 'plz', sq: 'sq', square: 'sq',
+};
+const STREET_DIRECTION = {
+  n: 'n', north: 'n', s: 's', south: 's', e: 'e', east: 'e', w: 'w', west: 'w',
+  ne: 'ne', northeast: 'ne', nw: 'nw', northwest: 'nw', se: 'se', southeast: 'se', sw: 'sw', southwest: 'sw',
+};
+
+// A leading token is a house number when it starts with a digit, but "1st", "2nd", "10th" are street names ("500 1st St").
+const isHouseNumberToken = token => /^\d/.test(token || '') && !/^\d+(?:st|nd|rd|th)$/.test(token);
+// Spellings of one street name that must read the same: "First" / "1st" ... "Twentieth" / "20th", "Mount" / "Mt", "Saint" / "St", "Fort" / "Ft", "Point" / "Pt".
+const STREET_NAME_SYNONYM = {
+  first: '1st', second: '2nd', third: '3rd', fourth: '4th', fifth: '5th', sixth: '6th', seventh: '7th', eighth: '8th', ninth: '9th', tenth: '10th',
+  eleventh: '11th', twelfth: '12th', thirteenth: '13th', fourteenth: '14th', fifteenth: '15th', sixteenth: '16th', seventeenth: '17th', eighteenth: '18th', nineteenth: '19th', twentieth: '20th',
+  mount: 'mt', saint: 'st', fort: 'ft', point: 'pt',
+};
+
+/**
+ * The street part of an address: its name, its direction (N, S, E, W, ...) and its suffix (St, Ave, ...), without the house number,
+ * the unit, or (when the address was typed without commas) the city and zip that follow the suffix.
+ * @returns {{name: string, direction: string|null, suffix: string|null}}
+ */
+function streetParts(address) {
+  const first = String(address || '').split(',')[0].toLowerCase().replace(/['’]/g, '').replace(/\./g, ' ');
+  const withoutUnit = first.replace(/#\s*\S+/g, ' ').replace(/\b(?:unit|apt|apartment|ste|suite|bldg|building|space|spc)\b.*$/, ' ');
+  const tokens = withoutUnit.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < tokens.length && (isHouseNumberToken(tokens[i]) || (tokens[i] === 'and' && i > 0 && isHouseNumberToken(tokens[i + 1])))) i++;
+  // the first suffix word after at least one name word ends the street ("100 Court St" is the street "court", suffix "st")
+  let suffixAt = -1;
+  for (let j = i + 1; j < tokens.length; j++) if (STREET_SUFFIX[tokens[j]]) { suffixAt = j; break; }
+  const end = suffixAt === -1 ? tokens.length : suffixAt;
+  const suffix = suffixAt === -1 ? null : STREET_SUFFIX[tokens[suffixAt]];
+  let direction = null;
+  if (STREET_DIRECTION[tokens[i]] && end - i >= 2) { direction = STREET_DIRECTION[tokens[i]]; i++; }
+  return { name: tokens.slice(i, end).map(t => STREET_NAME_SYNONYM[t] || t).join(' '), direction, suffix };
+}
+
+function sameStreet(addressA, addressB) {
+  const a = streetParts(addressA);
+  const b = streetParts(addressB);
+  if (!a.name || !b.name) return true;   // a street that cannot be read is left to addressesMatch() alone
+  if (a.name !== b.name) return false;
+  if (a.direction && b.direction && a.direction !== b.direction) return false;
+  if (a.suffix && b.suffix && a.suffix !== b.suffix) return false;
+  return true;
+}
+
+/**
+ * Do these two addresses name the very same home? The same house number, the same unit (when either has one) and the same
+ * street (see streetParts()). The 60%-of-the-words score addressesMatch() uses is NOT enough here, and is not needed: it
+ * lets "123 Maple St" pass for "123 Main St" and scores an address typed without commas (city and zip in the same breath)
+ * too low. Used to take the subject's own listing out of the comps; dedupeComps() keeps the looser test.
+ */
+function isSameHome(addressA, addressB) {
+  if (!addressA || !addressB) return false;
+  const normA = normalizeAddress(addressA);
+  const normB = normalizeAddress(addressB);
+  if (!normA || !normB) return false;
+  const houseA = houseNumber(normA);
+  const houseB = houseNumber(normB);
+  if (houseA && houseB && houseA !== houseB) return false;
+  const unitA = unitIdentifier(addressA);
+  const unitB = unitIdentifier(addressB);
+  if ((unitA || unitB) && unitA !== unitB) return false;
+  const a = streetParts(addressA);
+  const b = streetParts(addressB);
+  if (!a.name || !b.name) return addressesMatch(addressA, addressB);   // a street that cannot be read is left to the looser test
+  return sameStreet(addressA, addressB);
+}
+
+/**
+ * Takes the subject's OWN current listing out of a list of comps. A comp must never be the home being priced: a
+ * listing site's copy of the subject (an Active or Inactive listing at the same address, in RentCast's similar-rentals
+ * list or its listings search, or an MLS Active record) would otherwise be counted as proof of the subject's own
+ * rent. What is NOT dropped, because it was never dropped before and is real evidence for a re-lease:
+ *   - a lease from Rincon's own move-in records (source "LeadSimple Move-Ins"), and
+ *   - a confirmed lease ('leased'), such as an MLS Closed record, even at the same address.
+ * Another unit in the same building is kept (Unit 502 is not Unit 500), and so is a home on a similar street
+ * (123 Maple St, 123 Main Ave and 123 S Main St are not 123 Main St).
+ * @param {object[]} comps - each with {address, listing_status, source_name}
+ * @param {string} subjectAddress
+ * @returns {{kept: object[], dropped: object[]}}
+ */
+function dropSubjectsOwnListing(comps, subjectAddress) {
+  const kept = [];
+  const dropped = [];
+  for (const comp of comps || []) {
+    const isOwnListing = isSameHome(subjectAddress, comp && comp.address)
+      && comp.source_name !== 'LeadSimple Move-Ins'
+      && comp.listing_status !== 'leased';
+    (isOwnListing ? dropped : kept).push(comp);
+  }
+  return { kept, dropped };
+}
+
 module.exports = {
+  isSameHome,
+  streetParts,
+  dropSubjectsOwnListing,
   normalizeAddress,
   addressWordScore,
   addressesMatch,
@@ -296,5 +438,6 @@ module.exports = {
   fullAddress,
   houseNumber,
   hasParseableHouseNumber,
+  hasStreetName,
   unitIdentifier,
 };

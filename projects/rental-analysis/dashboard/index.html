@@ -308,12 +308,52 @@
     }
     .rent-headline .amount .permo { font-size: 18px; font-weight: 600; color: #9ca3af; }
 
+    /* Recommended range block (headline). Plain and functional; a full design pass comes later. */
+    .rent-headline.low-confidence .amount { color: #9ca3af; }
+    .rent-headline .range-ends {
+      display: flex; justify-content: space-between;
+      max-width: 340px; margin: 0 auto;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: #6b7280;
+    }
+    .rent-headline .starting-point { font-size: 12px; font-weight: 600; color: #b45309; margin-top: 6px; }
+    .goal-line { text-align: center; font-size: 15px; color: #111827; margin: 0 0 12px; }
+    .stretch-line {
+      text-align: center; font-size: 13px; color: #6b21a8;
+      background: #faf5ff; border: 1px solid #e9d5ff; border-radius: 8px;
+      padding: 8px 12px; margin: 0 auto 16px; max-width: 520px;
+    }
+    .stretch-line .stretch-label { font-weight: 700; margin-right: 6px; }
+    .stretch-line .stretch-price { font-weight: 800; font-size: 15px; margin-right: 8px; }
+    .conf-line { text-align: center; font-size: 13px; color: #374151; margin: 0 auto 6px; max-width: 640px; }
+    .conf-line .conf-label { font-weight: 700; }
+    .conf-line.conf-high .conf-label { color: #15803d; }
+    .conf-line.conf-medium .conf-label { color: #b45309; }
+    .conf-line.conf-low .conf-label { color: #b91c1c; }
+    .conf-note { text-align: center; font-size: 12px; color: #6b7280; margin: 0 auto 6px; max-width: 640px; }
+    .no-range-box {
+      background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+      padding: 16px; margin-bottom: 24px; font-size: 14px; color: #92400e; text-align: center;
+    }
+    .accuracy-line { text-align: center; font-size: 11px; color: #9ca3af; margin: 8px auto 0; max-width: 640px; }
+    .agree-wrap { margin: 12px auto 24px; max-width: 640px; }
+    .agree-strip { position: relative; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; background: #fafafa; }
+    .agree-band { position: absolute; top: 0; bottom: 0; background: rgba(223,140,65,0.18); border-left: 1px dashed var(--sienna); border-right: 1px dashed var(--sienna); }
+    .agree-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #111827; }
+    .agree-dot { position: absolute; border-radius: 50%; box-sizing: border-box; transform: translate(-50%, 0); }
+    .agree-dot.dot-leased { width: 11px; height: 11px; background: #16a34a; }
+    .agree-dot.dot-active { width: 11px; height: 11px; background: #fff; border: 2px solid #3b82f6; }
+    .agree-dot.dot-off_market { width: 7px; height: 7px; background: #9ca3af; margin-top: 2px; }
+    .agree-caption { font-size: 11px; color: #6b7280; text-align: center; margin-top: 6px; }
+    .chart-gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid #f3f4f6; }
+    .chart-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #111827; }
+
     .stat-row {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
       gap: 16px;
       margin-bottom: 28px;
     }
+    .stat-row.two-up { grid-template-columns: 1fr 1fr; }
     .stat-box {
       background: #f9fafb;
       border: 1px solid #e5e7eb;
@@ -329,6 +369,8 @@
       color: #6b7280;
       margin-bottom: 4px;
     }
+    .stat-box .stat-label .stat-label-note { display: block; font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; color: #9ca3af; margin-top: 1px; }
+    .source-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 9px 14px; font-size: 12.5px; line-height: 1.5; margin: -14px 0 18px; }
     .stat-box .stat-value {
       font-size: 20px;
       font-weight: 700;
@@ -374,9 +416,17 @@
       min-width: 480px;
       position: relative;
     }
+    /* The overlays (the shaded recommended range, its tick and gridlines, the dashed
+       estimate line) sit over the bar column: absolutely placed so they have a height of
+       their own (as plain grid items they had none and showed as 0 px tall). The left edge
+       is the end of the label column plus the column gap; the bottom leaves room for the
+       axis row. */
     .chart-overlay {
-      grid-column: 2;
-      position: relative;
+      position: absolute;
+      top: 0;
+      bottom: 26px;
+      left: calc(40% + 12px);
+      right: 0;
       pointer-events: none;
     }
     .chart-band {
@@ -421,14 +471,14 @@
     .chart-bar.managed-ring { box-shadow: 0 0 0 2px var(--violet); }
     .chart-axis {
       grid-column: 2;
-      display: flex;
-      justify-content: space-between;
+      position: relative;
+      height: 18px;
       font-size: 10px;
       color: #9ca3af;
-      padding-top: 4px;
       margin-top: 2px;
       border-top: 1px solid #f3f4f6;
     }
+    .chart-axis span { position: absolute; top: 4px; transform: translateX(-50%); }
 
     /* ── Comp map ── */
     .map-wrap {
@@ -486,6 +536,9 @@
     .comp-badge.b-off_market   { background: #f3f4f6; color: #4b5563; }
     .comp-badge.b-managed      { background: var(--violet); color: #fff; }
     .comp-badge.b-cut          { background: #fef3c7; color: #92400e; }
+    /* facts from the MLS shown on a comp card (display only: they never change a number) */
+    .comp-badge.b-flag         { background: #f3f4f6; color: #374151; font-weight: 600; }
+    .size-band-note { text-align: center; font-size: 12px; color: #6b7280; margin: -14px 0 24px; }
     .comp-card .comp-narrative {
       font-size: 12.5px;
       color: #4b5563;
@@ -495,7 +548,7 @@
       border-top: 1px solid #f3f4f6;
     }
 
-    /* ── Comps Used / Not Used split (see buildNotUsedRow()) ──
+    /* ── Comps Counted / Not Used split (see buildNotUsedRow()) ──
        This report gets printed/emailed as a static document — no click-to-
        expand, nothing interactive. Both sections are always fully rendered;
        "not used" is just visually secondary/compact (smaller, muted,
@@ -652,7 +705,7 @@
     /* ── Responsive ── */
     @media (max-width: 640px) {
       .field-grid { grid-template-columns: 1fr; }
-      .stat-row { grid-template-columns: 1fr; }
+      .stat-row, .stat-row.two-up { grid-template-columns: 1fr; }
       .rent-headline .amount { font-size: 30px; }
       .report-band, .report-body { padding: 18px 16px; }
       .report-footer { padding: 16px; }
@@ -759,6 +812,23 @@
             <input type="checkbox" id="f_furnished" name="furnished">
             <label for="f_furnished">Furnished</label>
           </div>
+        </div>
+
+        <div class="field span-2">
+          <div class="checkbox-row">
+            <input type="checkbox" id="f_age_restricted" name="subject_age_restricted">
+            <label for="f_age_restricted">Subject is in a 55+ community</label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="f_owner_goal">Owner goal <span class="hint">(optional)</span></label>
+          <select id="f_owner_goal" name="owner_goal">
+            <option value="lease_quickly">Lease quickly</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="maximize_rent">Maximize rent</option>
+          </select>
+          <span class="hint">Sets which price inside the range we suggest listing at.</span>
         </div>
 
         <div class="field span-2">
@@ -1170,6 +1240,8 @@
       subject_property_type: form.subject_property_type.value,
       lease_term_months: Number(form.lease_term_months.value),
       furnished: form.furnished.checked,
+      subject_age_restricted: form.subject_age_restricted.checked,
+      owner_goal: form.owner_goal.value,
       run_by: runBy,
     };
 
@@ -1196,7 +1268,7 @@
         return;
       }
 
-      renderReport(data.analysis, data.comps || [], data.marketData || null);
+      renderReport(data.analysis, data.comps || [], data.marketData || null, data);
       showView('report');
     } catch (err) {
       console.error(err);
@@ -1221,31 +1293,42 @@
     return map[status] || { cls: 'off_market', label: (status || 'UNKNOWN').toUpperCase() };
   }
 
-  function buildChart(analysis, comps) {
+  // Round dollar marks for the chart's bottom edge (never the padded ends of the data).
+  function niceTicks(min, max) {
+    const span = max - min;
+    const step = span > 6000 ? 1000 : span > 2500 ? 500 : span > 1000 ? 250 : 100;
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max; v += step) ticks.push(v);
+    return ticks;
+  }
+
+  // The bars are the evidence. The shaded band is the recommended range and the tick is the
+  // suggested list price (when a range exists). The domain comes from the comp rents and the
+  // range only. The stretch price is deliberately NOT drawn here.
+  function buildChart(analysis, comps, headline) {
     const priced = comps.filter(c => c.monthly_rent != null);
     const values = [];
     priced.forEach(c => values.push(c.monthly_rent));
     if (analysis.subject_estimated_rent != null) values.push(analysis.subject_estimated_rent);
-    if (analysis.recommended_rent_low != null)  values.push(analysis.recommended_rent_low);
-    if (analysis.recommended_rent_high != null) values.push(analysis.recommended_rent_high);
-    if (analysis.raw_comp_rent_low != null)  values.push(analysis.raw_comp_rent_low);
-    if (analysis.raw_comp_rent_high != null) values.push(analysis.raw_comp_rent_high);
+    if (headline) { values.push(headline.low); values.push(headline.high); }
 
     if (!values.length) return '';
 
     let domainMin = Math.min(...values);
     let domainMax = Math.max(...values);
-    const pad = Math.max((domainMax - domainMin) * 0.15, 150);
-    domainMin = Math.max(0, Math.floor((domainMin - pad) / 50) * 50);
-    domainMax = Math.ceil((domainMax + pad) / 50) * 50;
+    const pad = Math.max((domainMax - domainMin) * 0.05, 100);
+    domainMin = Math.max(0, domainMin - pad);
+    domainMax = domainMax + pad;
     const span = domainMax - domainMin || 1;
     const pct = (v) => ((v - domainMin) / span) * 100;
 
-    let overlayHtml = '';
-    if (analysis.recommended_rent_low != null && analysis.recommended_rent_high != null) {
-      const left = pct(analysis.recommended_rent_low);
-      const width = pct(analysis.recommended_rent_high) - left;
+    const ticks = niceTicks(domainMin, domainMax);
+    let overlayHtml = ticks.map(v => '<div class="chart-gridline" style="left:' + pct(v) + '%"></div>').join('');
+    if (headline) {
+      const left = pct(headline.low);
+      const width = pct(headline.high) - left;
       overlayHtml += '<div class="chart-band" style="left:' + left + '%;width:' + width + '%"></div>';
+      overlayHtml += '<div class="chart-tick" style="left:' + pct(headline.listPrice) + '%"></div>';
     }
 
     let rows = '';
@@ -1276,15 +1359,54 @@
         '<span class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span>Just leased</span>' +
         '<span class="legend-item"><span class="legend-swatch" style="background:#9ca3af"></span>Off market</span>' +
         '<span class="legend-item"><span class="legend-ring"></span>Rincon-managed</span>' +
-        '<span class="legend-item"><span class="legend-swatch band"></span>Recommended range</span>' +
-        '<span class="legend-item"><span class="legend-swatch line"></span>Estimated market rent</span>' +
+        (headline ? '<span class="legend-item"><span class="legend-swatch band"></span>Recommended range</span>' : '') +
+        (headline ? '<span class="legend-item"><span class="legend-swatch" style="background:#111827"></span>Suggested list price</span>' : '') +
+        (analysis.subject_estimated_rent != null ? '<span class="legend-item"><span class="legend-swatch line"></span>RentCast\'s automated estimate</span>' : '') +
       '</div>' +
       '<div class="chart-scroll"><div class="chart-grid">' +
         '<div class="chart-overlay">' + overlayHtml + '</div>' +
         rows +
         '<div class="chart-overlay">' + lineHtml + '</div>' +
-        '<div class="chart-axis"><span>' + fmtMoney(domainMin) + '</span><span>' + fmtMoney(domainMax) + '</span></div>' +
+        '<div class="chart-axis">' + ticks.map(v => '<span style="left:' + pct(v) + '%">' + fmtMoney(v) + '</span>').join('') + '</div>' +
       '</div></div>'
+    );
+  }
+
+  // One dot per counted comp, placed by its rent on a single line. Green filled = leased, blue
+  // hollow = active listing, small gray = off market. The shaded part is the recommended range and
+  // the dark tick is the suggested list price. No minimum or maximum is written out, and the
+  // stretch price is not on it. Hover a dot for the address and rent.
+  function buildAgreementStrip(headline, comps) {
+    const counted = comps.filter(c => !c.exclusion_reason && c.monthly_rent != null);
+    if (!headline || !counted.length) return '';
+    const rents = counted.map(c => Number(c.monthly_rent)).concat([headline.low, headline.high]);
+    const lo = Math.min(...rents), hi = Math.max(...rents);
+    const pad = Math.max((hi - lo) * 0.04, 50);
+    const min = lo - pad, span = (hi + pad) - min || 1;
+    const pct = (v) => ((v - min) / span) * 100;
+
+    const ordered = counted.slice().sort((a, b) => a.monthly_rent - b.monthly_rent);
+    const rowEnds = [];
+    let dots = '';
+    ordered.forEach((c) => {
+      const x = pct(Number(c.monthly_rent));
+      let r = rowEnds.findIndex(end => x - end >= 2.2);
+      if (r === -1) { r = rowEnds.length; rowEnds.push(-100); }
+      rowEnds[r] = x;
+      const status = ['leased', 'active', 'off_market'].includes(c.listing_status) ? c.listing_status : 'off_market';
+      dots += '<div class="agree-dot dot-' + status + '" style="left:' + x + '%;top:' + (6 + r * 15) + 'px" title="' +
+        esc((c.address || 'Unknown address') + ' ' + '$' + Number(c.monthly_rent).toLocaleString('en-US')) + '"></div>';
+    });
+    const height = 12 + Math.max(rowEnds.length, 1) * 15;
+    return (
+      '<div class="agree-wrap">' +
+        '<div class="agree-strip" style="height:' + height + 'px">' +
+          '<div class="agree-band" style="left:' + pct(headline.low) + '%;width:' + (pct(headline.high) - pct(headline.low)) + '%"></div>' +
+          '<div class="agree-tick" style="left:' + pct(headline.listPrice) + '%"></div>' +
+          dots +
+        '</div>' +
+        '<div class="agree-caption">Counted comps (each dot is one comp&rsquo;s rent): filled green = leased, hollow blue = active listing, small gray = off market. Shaded = recommended range; dark tick = suggested list price.</div>' +
+      '</div>'
     );
   }
 
@@ -1387,7 +1509,6 @@
     if (!marketData) return '';
 
     const zip = marketData.zip || analysis.subject_zip || '';
-    const daysOnMarket = marketData.median_days_on_market;
 
     const trendChartHtml = buildTrendChart(marketData.history);
     const bedroomHtml = buildBedroomBreakdown(marketData, analysis.subject_bedrooms);
@@ -1396,7 +1517,7 @@
       '<div class="section-heading">Market Trends' + (zip ? ' &mdash; ZIP ' + esc(zip) : '') + '</div>' +
       '<div class="market-trends-note">Area-wide data for this zip code as a whole &mdash; not specific to the subject property above. Use this for broader market context, not as a substitute for the comps.</div>' +
 
-      '<div class="stat-row">' +
+      '<div class="stat-row two-up">' +
         '<div class="stat-box">' +
           '<div class="stat-label">Zip Median Rent</div>' +
           '<div class="stat-value">' + fmtMoney(marketData.median_rent) + (marketData.median_rent != null ? '/mo' : '') + '</div>' +
@@ -1404,10 +1525,6 @@
         '<div class="stat-box">' +
           '<div class="stat-label">Zip Rent per Sqft</div>' +
           '<div class="stat-value">' + fmtPerSqft(marketData.median_rent_per_sqft) + '</div>' +
-        '</div>' +
-        '<div class="stat-box">' +
-          '<div class="stat-label">Median Days on Market</div>' +
-          '<div class="stat-value">' + (daysOnMarket != null ? fmtNum(daysOnMarket) + ' days' : '&#8212;') + '</div>' +
         '</div>' +
       '</div>' +
 
@@ -1585,6 +1702,22 @@
   // weight) — the RINCON MANAGED badge below stays for that real case, it's
   // just no longer paired with any "internal reference only" caveat, since
   // a comp that reaches this function was never excluded to begin with.
+  // The MLS facts saved with a comp (mls_flags), in plain words. Display only.
+  const MLS_FLAG_LABELS = {
+    hoa: 'HOA',
+    private_pool: 'Private pool',
+    utilities_included: 'Utilities included',
+    water_trash_included: 'Water/trash included',
+    gardener_included: 'Gardener included',
+    new_construction: 'New construction',
+    furnished: 'Furnished',
+    partly_furnished: 'Partly furnished',
+    short_term: 'Short-term lease',
+    age_restricted: '55+ community',
+    adu_or_guest_house: 'ADU or guest house',
+    view_property: 'View',
+  };
+
   function buildCompCard(c) {
     const sm = statusMeta(c.listing_status);
     let badges = '<span class="comp-badge b-' + sm.cls + '">' +
@@ -1592,6 +1725,9 @@
       '</span>';
     if (c.is_rincon_managed) badges += '<span class="comp-badge b-managed">RINCON MANAGED</span>';
     if (c.had_price_cut) badges += '<span class="comp-badge b-cut">PRICE CUT</span>';
+    (Array.isArray(c.mls_flags) ? c.mls_flags : []).forEach(function (flag) {
+      if (MLS_FLAG_LABELS[flag]) badges += '<span class="comp-badge b-flag">' + esc(MLS_FLAG_LABELS[flag]) + '</span>';
+    });
 
     const priceHtml = fmtMoney(c.monthly_rent) +
       (c.is_estimated_price ? '<span class="est-flag">*est.</span>' : '') +
@@ -1620,6 +1756,10 @@
     rincon_managed: 'Rincon-managed property',
     property_type_mismatch: 'different property type',
     size_mismatch: 'different size',
+    size_sqft: 'size outside the size band',
+    furnished_mismatch: 'furnished status differs',
+    short_term_lease: 'short-term lease',
+    age_restricted: '55+ community',
   };
 
   // Compact single-line row for a comp that contributed zero weight to
@@ -1628,8 +1768,15 @@
   // emailed as a static document — no expand/collapse is possible once
   // that happens), just visually secondary next to buildCompCard()'s full
   // detail cards above it.
-  function buildNotUsedRow(c) {
-    const reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
+  function buildNotUsedRow(c, analysis) {
+    let reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
+    // the band's percent is the one the server used (saved with the analysis), never typed here
+    if (c.exclusion_reason === 'size_sqft' && analysis && analysis.size_band_pct) reasonLabel = 'size outside the ' + analysis.size_band_pct + '% band';
+    // A size exclusion says which way it is off and by what size, when both
+    // sizes are known: "too large (2,467 sq ft)".
+    if (c.exclusion_reason === 'size_sqft' && c.sqft && analysis && analysis.subject_sqft) {
+      reasonLabel = (c.sqft > analysis.subject_sqft ? 'too large (' : 'too small (') + fmtNum(c.sqft) + ' sq ft)';
+    }
     const priceLabel = c.monthly_rent != null ? fmtMoney(c.monthly_rent) + '/mo' : 'Price unavailable';
     return (
       '<div class="comp-notused-row">' +
@@ -1640,7 +1787,64 @@
     );
   }
 
-  function renderReport(analysis, comps, marketData) {
+  // The goal sentence with the suggested price in bold. The sentence comes from the server,
+  // so both pages and the owner page use the same words.
+  function goalSentenceHtml(headline) {
+    const price = '$' + Number(headline.listPrice).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const safe = esc(headline.goalSentence || '');
+    const at = safe.indexOf(esc(price));
+    if (at === -1) return safe;
+    return safe.slice(0, at) + '<strong>' + esc(price) + '</strong>' + safe.slice(at + esc(price).length);
+  }
+
+  // The headline block, top to bottom: the recommended range with its two end labels, the
+  // goal sentence with the suggested price, the stretch price on its own line (Medium and High
+  // reports only), the confidence label with its reasons and track record, and the accuracy line.
+  // With no range, one plain message says why. `extras` is the part of the server's answer that
+  // is not the analysis row: headline, confidence, counted, noRange, sizeNote, accuracyLine, sourceNotes.
+  function buildHeadlineBlock(extras) {
+    const x = extras || {};
+    const h = x.headline;
+    if (!h) {
+      return '<div class="no-range-box">' +
+        esc(x.noRange || 'This report was made before the recommended-range format, so only the comparable homes are shown.') +
+      '</div>';
+    }
+    const c = x.confidence || null;
+    const low = !!(c && c.label === 'low');
+    let html =
+      '<div class="rent-headline' + (low ? ' low-confidence' : '') + '">' +
+        '<div class="label">Recommended range' + (low ? ' &middot; Starting point, Low confidence' : '') + '</div>' +
+        '<div class="amount">' + fmtMoney(h.low) + '&ndash;' + fmtMoney(h.high) + '<span class="permo">/mo</span></div>' +
+        '<div class="range-ends"><span>' + esc(h.lowLabel || 'Lease quickly') + '</span><span>' + esc(h.highLabel || 'Hold out for more') + '</span></div>' +
+      '</div>' +
+      '<div class="goal-line">' + goalSentenceHtml(h) + '</div>';
+    if (h.stretchPrice != null) {
+      html += '<div class="stretch-line"><span class="stretch-label">Stretch price</span>' +
+        '<span class="stretch-price">' + fmtMoney(h.stretchPrice) + '</span>' +
+        '<span class="stretch-words">' + esc(h.stretchWords || '') + '</span></div>';
+    }
+    if (c) {
+      html += '<div class="conf-line conf-' + esc(c.label) + '"><span class="conf-label">' + esc(c.label.charAt(0).toUpperCase() + c.label.slice(1)) + ' confidence</span>: ' + esc(c.reasonText || '') + '</div>';
+      if (c.trackRecord) {
+        // the label already stands in front of this line, so the sentence's own opening label is dropped
+        const record = c.trackRecord.replace(/^(?:High|Medium|Low) confidence[.:]\s*/, '');
+        html += '<div class="conf-note">' + esc(record.charAt(0).toUpperCase() + record.slice(1)) + '</div>';
+      }
+      if (c.firmUp) html += '<div class="conf-note">' + esc(c.firmUp) + '</div>';
+    }
+    if (x.accuracyLine) html += '<div class="accuracy-line">' + esc(x.accuracyLine) + '</div>';
+    return html;
+  }
+
+  // A source that did not fully come back while the others supplied comps: said in plain words, right under the
+  // counted-comps box. The words come from the server (nothing is saved for them and no number changes).
+  function sourceNotesHtml(extras) {
+    const notes = extras && Array.isArray(extras.sourceNotes) ? extras.sourceNotes.filter(n => typeof n === 'string' && n.trim()) : [];
+    return notes.map(n => '<div class="source-note">' + esc(n) + '</div>').join('');
+  }
+
+  function renderReport(analysis, comps, marketData, extras) {
     const subjectMeta = [
       analysis.subject_bedrooms + ' bed',
       fmtBath(analysis.subject_bathrooms) + ' bath',
@@ -1649,9 +1853,20 @@
       analysis.lease_term_months + '-mo ' + (analysis.furnished ? 'furnished' : 'unfurnished') + ' lease',
     ].filter(Boolean).join(' &middot; ');
 
-    const hasRecommendation = analysis.recommended_rent_low != null && analysis.recommended_rent_high != null;
+    const headline = extras && extras.headline ? extras.headline : null;
+    const counted = extras && extras.counted ? extras.counted : null;
 
-    const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(analysis, comps) : '';
+    // RentCast's own automated estimate is shown only beside a recommended range, and labelled as not part of it.
+    // With no range it is not shown anywhere (the box, the map pin's popup and the chart's dashed line all get a copy
+    // of the analysis without it), so a report that says "no range, no prices" never shows a rent figure beside it.
+    const shown = headline ? analysis : Object.assign({}, analysis, { subject_estimated_rent: null });
+    const estimateBox = shown.subject_estimated_rent != null
+      ? '<div class="stat-box">' +
+          '<div class="stat-label">RentCast\'s automated estimate<span class="stat-label-note">(not used in our range)</span></div>' +
+          '<div class="stat-value">' + fmtMoney(shown.subject_estimated_rent) + '/mo</div>' +
+        '</div>'
+      : '';
+    const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(shown, comps, headline) : '';
 
     // Two always-visible, statically-rendered parts (this report gets
     // printed/emailed — no click-to-expand is possible once that happens):
@@ -1667,10 +1882,10 @@
       ? usedComps.map(buildCompCard).join('')
       : '<div style="grid-column:1/-1;color:#9ca3af;font-size:13px;padding:12px 0">' +
           (comps.length
-            ? 'None of the comps found contributed to this range — see reviewed-but-not-used properties below.'
+            ? 'None of the comps found were counted — see the reviewed-but-not-used properties below.'
             : 'No comparable properties were returned for this analysis.') +
         '</div>';
-    const notUsedRowsHtml = notUsedComps.map(buildNotUsedRow).join('');
+    const notUsedRowsHtml = notUsedComps.map(c => buildNotUsedRow(c, analysis)).join('');
 
     const html =
       '<div class="report-band">' +
@@ -1680,33 +1895,31 @@
       '</div>' +
       '<div class="report-body">' +
 
-        (hasRecommendation ?
-          '<div class="rent-headline">' +
-            '<div class="label">Recommended Asking Rent</div>' +
-            '<div class="amount">' + fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '<span class="permo">/mo</span></div>' +
-          '</div>'
-        : '') +
+        buildHeadlineBlock(extras) +
 
-        '<div class="stat-row">' +
+        buildAgreementStrip(headline, comps) +
+
+        '<div class="stat-row' + (estimateBox ? '' : ' two-up') + '">' +
+          estimateBox +
           '<div class="stat-box">' +
-            '<div class="stat-label">Estimated Market Rent</div>' +
-            '<div class="stat-value">' + fmtMoney(analysis.subject_estimated_rent) + (analysis.subject_estimated_rent != null ? '/mo' : '') + '</div>' +
-          '</div>' +
-          '<div class="stat-box">' +
-            '<div class="stat-label">Comp Rent Range</div>' +
-            '<div class="stat-value">' + fmtMoney(analysis.raw_comp_rent_low) + '&ndash;' + fmtMoney(analysis.raw_comp_rent_high) + '</div>' +
+            '<div class="stat-label">Comps Counted</div>' +
+            '<div class="stat-value">' + (counted ? counted.total + ' <span style="font-size:12px;font-weight:500;color:#6b7280">(' + counted.leased + ' leased, ' + counted.active + ' active' + (counted.offMarket ? ', ' + counted.offMarket + ' off market' : '') + ')</span>' : '&#8212;') + '</div>' +
           '</div>' +
           '<div class="stat-box">' +
             '<div class="stat-label">Price per Sqft</div>' +
-            '<div class="stat-value">' + pricePerSqft(analysis.recommended_rent_mid, analysis.subject_sqft) + '</div>' +
+            '<div class="stat-value">' + (headline ? pricePerSqft(headline.listPrice, analysis.subject_sqft) : '&#8212;') + '</div>' +
           '</div>' +
         '</div>' +
+
+        sourceNotesHtml(extras) +
+
+        (extras && extras.sizeNote ? '<div class="size-band-note">' + esc(extras.sizeNote) + '</div>' : '') +
 
         buildMapSection(analysis, comps) +
 
         (chartHtml ? '<div class="section-heading">Comparable Rentals</div>' + chartHtml : '') +
 
-        '<div class="comp-subheading">Comps Used in This Range</div>' +
+        '<div class="comp-subheading">Comps Counted</div>' +
         '<div class="comp-cards">' + usedCardsHtml + '</div>' +
 
         (notUsedComps.length ?
@@ -1717,7 +1930,7 @@
         buildMarketTrendsSection(marketData, analysis) +
 
         (analysis.rationale ?
-          '<div class="section-heading">Why ' + (hasRecommendation ? fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '/mo' : 'This Range') + '</div>' +
+          '<div class="section-heading">Why ' + (headline ? fmtMoney(headline.low) + '&ndash;' + fmtMoney(headline.high) + '/mo' : 'There Is No Recommended Range') + '</div>' +
           '<div class="rationale-box">' + esc(analysis.rationale) + '</div>'
         : '') +
 
@@ -1731,7 +1944,7 @@
 
     // Deferred so it runs after showView('report') makes the container
     // visible — see the comment in initMap() for why that matters.
-    setTimeout(() => initMap(analysis, comps), 0);
+    setTimeout(() => initMap(shown, comps), 0);
   }
 
   // ── Init ──────────────────────────────────────────────────────────────

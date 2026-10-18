@@ -1,11 +1,15 @@
 /**
  * backtest/mls-facts-ref.js
  * Reference copy of the MLS-field rules from CMA-QUALITY-SPEC.md Item 2
- * (furnished, lease term, 55+). The product does not have these yet (they are
- * Phase B, lib/mls-facts.js); the accuracy test needs them now to (a) screen
- * out targets that are not like-for-like (spec protocol) and (b) measure what
- * the Item 2 exclusions would do. When Phase B ships, this file should be
- * replaced by imports from lib/mls-facts.js so the test uses the real rules.
+ * (furnished, lease term, 55+), written BEFORE the product had them. The
+ * product now has the real rules (lib/mls-facts.js, lib/weighting.js). This copy
+ * is kept on purpose, for two jobs: (a) it screens out targets that are not
+ * like-for-like (spec protocol) and drives the simulated tuning variants, and
+ * (b) it is an independent second writing of the same rules, so
+ * backtest/phase-b-equivalence.js comparing the simulation with the shipped
+ * code is a real cross-check, not the same code agreeing with itself.
+ * Once Peter has accepted Phase B, the simulation can be retired and this file
+ * replaced by imports from lib/mls-facts.js.
  *
  * Unknown (null) is never a mismatch.
  */

@@ -208,7 +208,7 @@ function buildScorecard(r) {
     trusted: trustReasons.length === 0,
     trustReasons,
     methodVersion: 'current-tool-2026-10',
-    methodNote: 'baseline = the production comp-matching code as it runs today (bedrooms and property type only); size25_item2 = the same code with the proposed Phase B rules simulated',
+    methodNote: 'baseline = the tool before Phase B (bedrooms and property type only; the size and MLS rules switched off); size25_item2 = the same tool with the Phase B rules on (size band 25% and the furnished / short-term / 55+ rules), run by the real lib/ code and proven identical, lease by lease, to the earlier simulation (backtest/phase-b-equivalence.js)',
     scope: {
       county: `the Ventura-area service box (Ventura, Oxnard, Camarillo, Simi Valley, Thousand Oaks and the Conejo Valley border); about ${wholePercent(laShare)}% of the leases are in the Calabasas / Agoura Hills / Westlake Village / West Hills border area (by the old city list; also reported separately as "${REGION_LABELS.laBorder}"); by the MLS county field about ${wholePercent(otherCountyShare)}% are in counties other than Ventura (reported as "${COUNTY_LABELS.other}")`,
       core: 'the Ventura core box',
@@ -292,87 +292,9 @@ function buildScorecard(r) {
 }
 
 // ── staff-facing sentences generated from the scorecard ──────────────────────
-// Rules: a rate is rounded ONCE, from the raw count (k of n), to a whole "N in
-// 10" with a tie going DOWN (so 75% is "7 in 10", 73% is "7 in 10", 35% is "3
-// in 10"); an interval is widened outward (low floored, high ceilinged) so the
-// words never claim more than the data; a label needs TRACK_RECORD_MIN_LEASES
-// leases behind it or the sentence says "too few tests to say yet"; the test did
-// not include RentCast listings and the sentence says so. No "accurate to", no
-// promises, no time statistic.
-function inTen(k, n) {
-  return Math.max(0, Math.ceil((k / n) * 10 - 0.5 - 1e-9));
-}
-function inTenRange(low, high) {
-  return [Math.max(0, Math.floor(low / 10 + 1e-9)), Math.min(10, Math.ceil(high / 10 - 1e-9))];
-}
-function rentcastNote(scorecard) {
-  const excluded = !scorecard.pool || !scorecard.pool.rentcast || /not included/.test(scorecard.pool.rentcast);
-  return excluded ? `RentCast listings, about ${RENTCAST_SHARE_PERCENT}% of the comps staff see, were not part of this test.` : '';
-}
-function timesInTen(k, n, ciPct) {
-  const main = inTen(k, n);
-  const head = `about ${main} ${main === 1 ? 'time' : 'times'} in 10`;
-  if (!ciPct) return head;
-  const [lo, hi] = inTenRange(ciPct[0], ciPct[1]);
-  return `${head} (roughly ${lo} to ${hi} times in 10)`;
-}
-
-const AREA_LABELS = { county: 'Ventura-area', core: 'Ventura core' };
-const leaseWord = n => (n === 1 ? 'lease' : 'leases');
-const dataDatePhrase = scorecard => (scorecard.dataPulledOn ? `data pulled ${scorecard.dataPulledOn}` : 'data date unknown');
-
-// The Ventura side of the county blocks, when it can carry a staff sentence: at least TRACK_RECORD_MIN_LEASES
-// leases with a range behind it, and the county really known for the leases (fewer than COUNTY_UNKNOWN_LIMIT_PERCENT
-// without one), because that county label is only true when it comes from the MLS county. Otherwise null,
-// and the caller uses the whole-box figures and the "Ventura-area" wording.
-function countySide(scorecard, method) {
-  const c = scorecard && scorecard.counties;
-  if (!c) return null;
-  // Fails closed: the scorecard's own exact-share flag (overLimit) must say "not over", and the rounded percent must agree.
-  // A missing or malformed unknown block means we cannot show the county is known, so the whole box is quoted.
-  if (!c.unknown || c.unknown.overLimit !== false || typeof c.unknown.sharePct !== 'number' || !Number.isFinite(c.unknown.sharePct) || c.unknown.sharePct > COUNTY_UNKNOWN_LIMIT_PERCENT) return null;
-  const side = c[method] && c[method].venturaCounty;
-  if (!side || !side.ranged || side.ranged.n < TRACK_RECORD_MIN_LEASES) return null;
-  return side;
-}
-const LA_BORDER_NOTE = 'Figures for homes in the LA-border area (other counties) are reported separately.';
-
-function accuracyLine(scorecard, { method = 'baseline', area = 'county', areaLabel } = {}) {
-  const side = !areaLabel && area === 'county' ? countySide(scorecard, method) : null;
-  const label = side ? COUNTY_LABELS.ventura : (areaLabel || AREA_LABELS[area] || AREA_LABELS.county);
-  const block = side || scorecard.overall[method][area];
-  if (!block || !block.ranged) return null;
-  const rg = block.ranged;
-  const note = rentcastNote(scorecard);
-  if (rg.n < TRACK_RECORD_MIN_LEASES) return `Blind-tested on only ${rg.n} past ${label} ${leaseWord(rg.n)}: too few tests to say yet (${dataDatePhrase(scorecard)}).${note ? ` ${note}` : ''}`;
-  const miss = Math.ceil(rg.typicalMiss / 50) * 50; // rounded UP: never claims a smaller miss than measured
-  const hit = timesInTen(rg.within300OfSuggestedCount, rg.n, rg.within300OfSuggestedCiPct);
-  // Coverage next to accuracy: some homes get no range at all, and the sentence must not hide that. Rounded down.
-  const coverage = block.coveragePct === null || block.coveragePct === undefined ? '' : `; a recommended range could be shown for ${Math.floor(block.coveragePct + 1e-9)}% of the homes tried`;
-  return `Blind-tested on ${rg.n} past ${label} ${leaseWord(rg.n)}: typical miss about $${miss.toLocaleString('en-US')}; the suggested price landed within $300 of the signed rent ${hit}${coverage} (${dataDatePhrase(scorecard)}).${side ? ` ${LA_BORDER_NOTE}` : ''}${note ? ` ${note}` : ''}`;
-}
-
-function labelHitRates(scorecard, label, { method = 'size25_item2', area = 'county', areaLabel } = {}) {
-  const side = !areaLabel && area === 'county' ? countySide(scorecard, method) : null;
-  const g = side ? side.confidence : (scorecard.groups[method] && scorecard.groups[method][area] && scorecard.groups[method][area].confidence);
-  const b = g && g[label];
-  if (!b || !b.ranged) return { n: 0, enough: false, county: !!side };
-  const rg = b.ranged;
-  return {
-    county: !!side,
-    n: rg.n, enough: rg.n >= TRACK_RECORD_MIN_LEASES,
-    rangeHitCount: rg.rangeHit200Count, rangeHitCiPct: rg.rangeHit200CiPct,
-    within300Count: rg.within300OfSuggestedCount, within300CiPct: rg.within300OfSuggestedCiPct,
-  };
-}
-
-function trackRecordSentence(scorecard, label, opts = {}) {
-  const h = labelHitRates(scorecard, label, opts);
-  if (!h.enough) return `${label} confidence: too few tests to say yet.`;
-  const where = h.county ? COUNTY_LABELS.ventura : (opts.areaLabel || AREA_LABELS[opts.area || 'county'] || AREA_LABELS.county);
-  const note = rentcastNote(scorecard);
-  return `${label} confidence. In blind tests on ${h.n} past ${where} ${leaseWord(h.n)}, reports like this held the signed rent inside the recommended range ${timesInTen(h.rangeHitCount, h.n, h.rangeHitCiPct)} and landed within $300 of the suggested price ${timesInTen(h.within300Count, h.n, h.within300CiPct)}.${h.county ? ` ${LA_BORDER_NOTE}` : ''}${note ? ` ${note}` : ''}`;
-}
+// The staff sentences (accuracy line, per-label track record) are written by lib/accuracy-sentences.js,
+// which the product itself reads, so this report's preview and the report staff see are the same words.
+const { inTen, inTenRange, countySide, accuracyLine, labelHitRates, trackRecordSentence } = require('../lib/accuracy-sentences');
 
 // ── detail files (local only) ────────────────────────────────────────────────
 function csvCell(v) {
@@ -503,7 +425,7 @@ function renderReport(r, previousScorecard, scorecard) {
   L.push('- **Thin**: fewer than 4 counted comps, so no range would be shown. Thin leases are still counted in the accuracy columns, except where a column says "ranged only".');
   L.push('- **Coverage**: the share of all homes tried that get a recommended range at all.');
   L.push('- **Tune and hold-out**: older leases (used to choose a rule) and the newest three months (kept aside and judged once).');
-  L.push('- **baseline** is today\'s tool; **size25_item2** is the same tool with the proposed size and MLS rules simulated.');
+  L.push('- **baseline** is today\'s tool; **size25_item2** is the same tool with the Phase B size and MLS rules on (run by the real lib/ code; backtest/phase-b-equivalence.js proves it matches the earlier simulation lease by lease).');
   L.push(`- **${COUNTY_LABELS.ventura}** and **${COUNTY_LABELS.other}**: the test area also takes in the Los Angeles side of the Conejo Valley border (Calabasas, Agoura Hills, most of West Hills and others), and the town of Westlake Village straddles the county line. Each lease is grouped by the county the MLS records for that home, so Westlake Village homes on the Ventura side count as ${COUNTY_LABELS.ventura}. The two groups are reported separately below, and the staff sentences quote ${COUNTY_LABELS.ventura} when that group is big enough.`);
   L.push('');
   if (scorecard) {
@@ -584,7 +506,7 @@ function renderReport(r, previousScorecard, scorecard) {
   L.push('');
 
   // size rule
-  L.push('## The size-rule effect (Item 1 simulated on the real code)');
+  L.push('## The size-rule effect (Item 1, run by the real code)');
   L.push('');
   const sizeRows = [];
   for (const [lab, pick] of [['Ventura-area', x => x], ['Ventura core', core]]) {
@@ -723,7 +645,7 @@ function renderReport(r, previousScorecard, scorecard) {
   // calibration
   L.push('## Confidence labels (spec 4.3 calibration, Phase C will use these)');
   L.push('');
-  L.push('Method size25_item2 (what Phase B would ship), MLS pool, only reports with a recommended range. "Simple" = the Appendix G starting definition (spread and comp count). "Full" = spec 4.3 including fewer than 5 comps, no confirmed lease, no comp near the range.');
+  L.push('Method size25_item2 (the Phase B rules), MLS pool, only reports with a recommended range. "Simple" = the Appendix G starting definition (spread and comp count). "Full" = spec 4.3 including fewer than 5 comps, no confirmed lease, no comp near the range.');
   L.push('');
   for (const [lab, pick, key] of [['Ventura-area', x => x, 'county'], ['Ventura core', core, 'core']]) {
     const rows = pick(mls.mls.size25_item2);

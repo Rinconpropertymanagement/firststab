@@ -25,7 +25,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 
 const assert = require('node:assert/strict');
 
-const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, exclusionReason, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier } = require('./lib/weighting');
+const { percentile, computeRecommendedRange, computeRawRange, buildWeightedSample, excludeRinconManaged, isExcludedRinconManaged, exclusionReason, SELF_SOURCED_TRUSTED_SOURCE_NAMES, sizeSimilarityMultiplier, propertyTypeMultiplier, computeHeadlineRange } = require('./lib/weighting');
 const { mapComparable, mapListingStatus, assessPlausibility, pullRentCastComps, lookupPropertyDetails, pullRentCastListings, mapListing, LISTINGS_DAYS_OLD, LISTINGS_LIMIT, LISTINGS_MAX_INACTIVE } = require('./lib/rentcast');
 const {
   mapComparable: mapCrmlsComparable,
@@ -1108,8 +1108,8 @@ async function main() {
       { address: '2 Comp St', bedrooms: 3, bathrooms: 2, sqft: 1450, monthly_rent: 3000, listing_status: 'leased' },
       { address: '3 Comp St', bedrooms: 3, bathrooms: 2, sqft: 1480, monthly_rent: 3100, listing_status: 'off_market' },
     ],
-    recommended: { low: 2900, high: 3200, mid: 3050 },
-    raw: { low: 2900, high: 3200 },
+    headline: { low: 2900, high: 3100, listPrice: 3000, goal: 'balanced', stretchPrice: 3300 },
+    confidence: { label: 'medium', reasons: ['2 comps counted, 1 of them confirmed lease'], reasonText: '2 comps counted, 1 of them confirmed lease.' },
     subjectEstimatedRent: 3050,
     sourcesUsed: ['RentCast', 'CRMLS'],
   };
@@ -1194,9 +1194,12 @@ async function main() {
   //    a "townhouse" and the NOT COUNTED group was described as "mostly
   //    2bd/1ba apartments" when the real mix was mostly single-family/condo). ──
   await check('describeComp() includes the stored property type on the comp line, for every stored value', () => {
+    // Round 6: the type is shown in words ("single-family", "manufactured home"), not as the stored code ("single_family")
+    const words = { single_family: 'single-family', manufactured: 'manufactured home' };
     for (const t of ['single_family', 'condo', 'townhouse', 'duplex', 'triplex', 'fourplex', 'apartment', 'manufactured', 'other']) {
       const desc = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'active', bedrooms: 3, property_type: t }, 0);
-      assert.match(desc, new RegExp(`\\| type: ${t} \\|`), `${t} missing from: ${desc}`);
+      assert.match(desc, new RegExp(`\\| type: ${words[t] || t} \\|`), `${t} missing from: ${desc}`);
+      assert.doesNotMatch(desc, /_/, 'no stored code with an underscore on the comp line');
     }
   });
 
@@ -1479,12 +1482,12 @@ async function main() {
     assert.equal(lines[5], '- Counted leased comps by property type and bedrooms: none.');
   });
 
-  await check('buildPrompt() carries the facts block after the COMPS list and before COMPUTED NUMBERS, for the 130-comp run (19 NOT COUNTED, all 111 counted comps type-unknown)', () => {
+  await check('buildPrompt() carries the facts block after the COMPS list and before THE RECOMMENDATION block, for the 130-comp run (19 NOT COUNTED, all 111 counted comps type-unknown)', () => {
     const prompt = buildPrompt(bigInput);
     const at = n => prompt.indexOf(n);
     const header = 'COMPUTED COMP FACTS (counted by code';
     assert.equal(prompt.split(header).length - 1, 1, 'the block appears exactly once');
-    assert.ok(at('COMPS (130 total):') < at(header) && at(header) < at('COMPUTED NUMBERS'));
+    assert.ok(at('COMPS (130 total):') < at(header) && at(header) < at('THE RECOMMENDATION'));
     assert.match(prompt, /- Total comps: 130\. Counted in the range: 111\. NOT COUNTED: 19\./);
     assert.match(prompt, /- NOT COUNTED by reason: property type differs from the subject's 19\./);
     assert.match(prompt, /- Counted comps by property type: unknown 111\./);
@@ -1653,19 +1656,19 @@ async function main() {
       { address: '105 Echo St, Ventura, CA 93003', bedrooms: 3, bathrooms: 2, sqft: 1500, property_type: 'townhouse', monthly_rent: 3295, listing_status: 'off_market', distance_miles: 0.9, exclusion_reason: null },
       { address: '106 Far St, Ventura, CA 93003', bedrooms: 5, bathrooms: 3, sqft: 2500, property_type: 'townhouse', monthly_rent: 5600, listing_status: 'active', distance_miles: 1.1, exclusion_reason: 'size_mismatch' },
     ],
-    recommended: { low: 3495, mid: 3750, high: 4000 },
-    raw: { low: 3295, high: 4085 },
+    headline: { low: 3600, high: 3800, listPrice: 3750, goal: 'balanced', stretchPrice: 4000 },
+    confidence: { label: 'medium', reasons: ['5 comps counted, 3 of them confirmed leases', 'they agree only moderately'], reasonText: '5 comps counted, 3 of them confirmed leases; they agree only moderately.' },
     subjectEstimatedRent: 3850,
     sourcesUsed: ['RentCast', 'CRMLS'],
   };
-  const GOOD = '103 Gamma St leased at $3,700 and 104 Delta St leased at $4,085 (it was first asked at $4200), so leases sit between the $3,495 low and the $4,000 high of the recommended range, with a $3,750 midpoint. 105 Echo St is off-market at $3295, and 102 Beta St asks $3,795, $500 above it, while RentCast estimates $3,850. The raw range is $3,295-$4,085, so a $150 spread either way is normal, and 3 of 5 comps are leased or asked within 5% of the midpoint.';
+  const GOOD = '103 Gamma St leased at $3,700 and 104 Delta St leased at $4,085 (it was first asked at $4200), so leases sit around the recommended range of $3,600-$3,800, and the suggested list price is $3,750. 105 Echo St is off-market at $3295, $505 below the recommended high, and 102 Beta St asks $3,795, while RentCast estimates $3,850. A $150 spread either way is normal, and 3 of 5 comps are leased or asked within 5% of the middle.';
   const rationaleOnly = rationale => `RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale, comp_narratives: {} })}`;
   const gateReply = (rationale, narratives = { 0: 'Alpha narrative.', 1: 'Beta narrative.', 2: 'Gamma narrative.', 3: 'Delta narrative.', 4: 'Echo narrative.' }) =>
     textReply(`RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale, comp_narratives: narratives })}`);
 
-  await check('validateRationale() accepts a clean rationale: every figure from the data in any format ($3,495 / $3495 / $4200 / a raw-range dash), a "$500 above" difference, a "$150" aside, and percent / plain counts', () => {
+  await check('validateRationale() accepts a clean rationale: every figure from the data in any format ($3,495 / $3495 / $4200 / the recommended range as a dash), a "$505 below the recommended high" distance (exactly a comp rent minus the range end), a "$150" aside, and percent / plain counts', () => {
     const r = validateRationale(GOOD, gateInput);
-    assert.deepEqual(r, { ok: true, problems: [], labels: [], badFigures: [], badAddresses: [], badClaims: [] });
+    assert.deepEqual(r, { ok: true, problems: [], labels: [], badFigures: [], badAddresses: [], badClaims: [], badStatements: [], badSources: [] });
   });
 
   await check('extractDollarFigures() normalizes $3,495 / $3495 / $3,495.00 / $3.5k to one value, reads the second end of "$3,495-4,500", ignores percents and bare numbers', () => {
@@ -1681,7 +1684,8 @@ async function main() {
       assert.equal(r.ok, false, `should flag: ${text}`);
       assert.ok(r.labels.length >= 1, `labels for: ${text}`);
     }
-    for (const text of ['a comp 0.4 miles away leased', 'a comp 2 bedrooms off the subject', 'a comp 12 days on market', '3 comps leased', 'comps within 2 miles', 'the comp, 12 days on market, leased', 'Compton 93001 is nearby', 'comp 4bd/2ba']) {
+    // (a bare "12 days" in a sentence with no comp address is now a time statistic of its own, so the day counts below name a comp)
+    for (const text of ['a comp 0.4 miles away leased', 'a comp 2 bedrooms off the subject', '103 Gamma St is a comp 12 days on market', '3 comps leased', 'comps within 2 miles', '103 Gamma St is the comp, 12 days on market, leased', 'Compton 93001 is nearby', 'comp 4bd/2ba']) {
       assert.equal(validateRationale(text, gateInput).ok, true, `should NOT flag: ${text}`);
     }
     assert.deepEqual(findCompLabels('COMP 63 and COMP 63 and comp #7'), ['COMP 63', 'comp #7']);
@@ -1694,15 +1698,21 @@ async function main() {
     assert.equal(r.labels.length, 0);
     assert.match(r.problems[0], /dollar figure that is not in the data you were given \(\$4,250, \$3,900, \$4,150, \$4\.3k, \$3,816\)/);
     assert.equal(validateRationale('A range of $3,495-4,500 fits.', gateInput).ok, false, 'the unmarked second end of a range is read: 4,500 is not in the data');
-    assert.equal(validateRationale('A range of $3,495-4,085 fits.', gateInput).ok, true, '4,085 is a real comp rent');
+    const realRents = validateRationale('A range of $3,495-4,085 fits.', gateInput);
+    assert.deepEqual(realRents.badFigures, [], '3,495 and 4,085 are real comp rents, so neither is an invented figure');
+    assert.equal(realRents.ok, false, 'but two comps\' rents written as a range are not the recommended range');
   });
 
-  await check('validateRationale() is not punishing arithmetic: a difference of two data figures ($500 = 3,795-3,295; $1,100 = 4,085-3,295... ) and any amount under half the lowest rent pass; a rent-scale number that is neither a data figure nor a difference does not', () => {
-    assert.equal(validateRationale('102 Beta St asks $500 above 105 Echo St.', gateInput).ok, true, '$500 = 3795 - 3295');
-    assert.equal(validateRationale('104 Delta St is $790 above 105 Echo St.', gateInput).ok, true, '$790 = 4085 - 3295 (a difference, not a rent)');
-    assert.equal(validateRationale('A $75 or $250 or $1,000 premium is typical.', gateInput).ok, true, 'amounts under half the lowest provided rent are arithmetic, never a rent');
+  await check('validateRationale() is not punishing arithmetic: a difference of two data figures ($300 = 3,795-3,495; $290 = 4,085-3,795) and any amount under half the lowest rent pass; a rent-scale number that is neither a data figure nor a difference does not', () => {
+    // (these two used to be $500 and $790; a difference of $500 or more between two comps is now a spread and is refused, see the Round 3 block)
+    assert.equal(validateRationale('102 Beta St asks $300 above 101 Alpha St.', gateInput).ok, true, '$300 = 3795 - 3495');
+    assert.equal(validateRationale('104 Delta St is $290 above 102 Beta St.', gateInput).ok, true, '$290 = 4085 - 3795 (a difference, not a rent)');
+    // Round 6: under $500 is arithmetic; $500 or more must be a data figure or exactly a comp's distance from a range end / price / the estimate
+    assert.equal(validateRationale('A $75 or $250 or $450 premium is typical.', gateInput).ok, true, 'amounts under $500 are arithmetic, never a rent');
+    assert.equal(validateRationale('A $75 or $250 or $1,000 premium is typical.', gateInput).ok, false, '$1,000 is not under $500, not a data figure and not a distance from a range end');
+    assert.equal(validateRationale('102 Beta St asks $3,795, about $995 above 101 Alpha St at $3,495 and 104 Delta St at $4,085.', gateInput).ok, false, 'the difference of two comps rents is not an allowed figure');
     assert.equal(validateRationale('The midpoint is $3,810.', gateInput).ok, false, '3,810 is not a data figure and not a difference');
-    assert.equal(validateRationale('Rent them at $2,000 a month.', gateInput).ok, false, '2,000 is above half the lowest rent (1,647) and is not a data figure');
+    assert.equal(validateRationale('Rent them at $2,100 a month.', gateInput).ok, false, '2,100 is not a data figure and not a distance from a range end');
   });
 
   await check('validateRationale() allows only figures the model was shown: an original price counts only when the comp line shows it (had_price_cut), and a figure from the NOT COUNTED comp lines is still a shown figure', () => {
@@ -1712,16 +1722,16 @@ async function main() {
     assert.equal(validateRationale('106 Far St asks $5,600 but is not counted.', gateInput).ok, true, 'it is on a comp line the model saw');
   });
 
-  await check('buildPrompt() carries the new rules: refer to a comp only by street address (never COMP n), the within-about-$150 rule for low/high anchoring, the "around the top/bottom/middle" rule with the side-by-side instruction, and the figures-only-from-the-data rule', () => {
+  await check('buildPrompt() carries the new rules: refer to a comp only by street address (never COMP n), the within-about-$100 rule for low/high anchoring, the "around the top/bottom/middle" rule with the side-by-side instruction, and the figures-only-from-the-data rule', () => {
     const prompt = buildPrompt(gateInput);
     const rules = prompt.slice(prompt.indexOf('HARD RULES:'), prompt.indexOf('SUBJECT PROPERTY:'));
     assert.match(rules, /Refer to every comp ONLY by its street address, in the rationale AND in every per-comp narrative\./);
     assert.match(rules, /never write "COMP 12", "Comp 12", "comp #12", or any other numeric label for a comp anywhere in your output text/);
     assert.match(rules, /The "COMP 12" labels at the start of the comp lines exist only so you can key the JSON comp_narratives/);
-    assert.match(rules, /Describe a comp as setting, anchoring, supporting, or bracketing the LOW or HIGH end of the recommended range ONLY if that comp's own rent is within about \$150 of that end's figure/);
-    assert.match(rules, /"around", "near", or "at" the top, bottom, or middle of the range ONLY if its rent is actually near that point/);
+    assert.match(rules, /Describe a comp as setting, anchoring, supporting, or bracketing the LOW or HIGH end of the recommended range ONLY if that comp's own rent is within about \$100 of that end of the range/);
+    assert.match(rules, /"around", "near", or "at" the top, bottom, or middle of the range, or as near the suggested list price, ONLY if its rent is actually near that point/);
     assert.match(rules, /When you are not sure, do not characterize: state the comp's rent and the range figure side by side and let the reader compare\./);
-    assert.match(rules, /Do not average, round, or invent a rent or a range figure\. A plain difference between two of those figures \(such as "\$500 below the midpoint"\) is fine\./);
+    assert.match(rules, /Do not average, round, or invent a rent or a range figure\. A plain difference between two of those figures \(such as "\$500 below the suggested price"\) is fine\./);
     assert.match(prompt, /referencing specific comps by street address only \(never by a COMP number\)/);
     assert.doesNotMatch(prompt, /by address or number/);
     assert.match(prompt, /Refer to the comp by its street address, never by its number \(the number only keys the JSON\)\./);
@@ -1885,27 +1895,44 @@ async function main() {
       { address: "1568 E Thompson Boulevard, Ventura, CA 93001", property_type: "townhouse", bedrooms: 4, monthly_rent: 4695, listing_status: "active", original_price: 4695, had_price_cut: false, days_on_market: 3, exclusion_reason: null },
       { address: "3495 Somis Road, Somis, CA 93066", property_type: null, bedrooms: 3, monthly_rent: 4300, listing_status: "active", original_price: 4500, had_price_cut: true, days_on_market: 46, exclusion_reason: null },
     ],
-    recommended: { low: 3495, mid: 3750, high: 4000 },
-    raw: { low: 2200, high: 4850 },
+    headline: { low: 3600, high: 3800, listPrice: 3750, goal: 'balanced', stretchPrice: 4000 },
+    confidence: { label: 'low', reasons: ['21 comps counted, 8 of them confirmed leases'], reasonText: '21 comps counted, 8 of them confirmed leases.' },
     subjectEstimatedRent: 4110,
     sourcesUsed: ['RentCast', 'CRMLS', 'LeadSimple Move-Ins'],
   };
   const LIVE_RUN1 = "The recommended range of $3,495-$4,000 (midpoint $3,750) rests on the 21 comps that actually counted — 9 townhouses and 12 unknown-type — while 80 comps were excluded: 72 for a property type that differs from the subject's townhouse, 5 for a bedroom count 2+ off, and 3 as Rincon-managed internal references. The strongest evidence comes from the 8 leased comps: 102 Hoover Ave. leased at $3,700 and 3677 Willowick Dr at $4,085 are both confirmed Rincon transactions, and 5383 Paseo Ricoso leased at $4,000 after a cut from $4,200, which supports the top of the range; 2585/2587 Warbler Ave. leased at $3,540 and 404 Arcade Drive leased at $3,475 in just 11 days help anchor the low end. The high end is held down because the two highest counted asking prices — 1121 Pittsfield Ln at $4,850, which has sat off-market 239 days, and 2378 Channel Dr, Unit 103 at $4,100, off-market after 1 day — are unconfirmed delistings that carry less weight than the leases, and the raw range top of $4,850 comes from that long-sitting Pittsfield listing. Current active townhouse asking prices like 435 S Seaward Avenue at $3,495, 935 Goodman Avenue at $3,600, and 1085 Mchugh Court at $3,795 cluster below $4,000 and reinforce the midpoint. Note the subject's own RentCast estimate of $4,110 sits above this comp-based range, and that 436 S Seaward Avenue, 1085 Mchugh Court and others are active asking prices not yet confirmed by a transaction, so treat the top of the range as achievable but not guaranteed.";
   const LIVE_RUN2 = "The subject is a 3bd/2.5ba, 1424 sqft townhouse, and of the 101 comps pulled from RentCast, CRMLS, and LeadSimple Move-Ins, only 21 counted toward the range; 80 were excluded (72 for a property type that differs from the subject's, 5 for a bedroom count 2+ off, and 3 as Rincon-managed internal references). The raw rent spread across the counted comps runs $2,200-$4,850, but that is pulled wide on the low end by small 2-bedroom units like 2437 E Main St at $2,200 and on the high end by 1121 Pittsfield Ln, which sat off-market at $4,850 for 239 days with no confirmed lease. The recommended range of $3,495-$4,000 (midpoint $3,750) leans on the confirmed leases, which carry the most weight: 5383 Paseo Ricoso actually leased at $4,000 after a cut from $4,200, 102 Hoover Ave. leased at $3,700, 3677 Willowick Dr leased at $4,085, and 2585/2587 Warbler Ave. leased at $3,540, with 404 Arcade Drive leasing at $3,475 in just 11 days. Current asking prices support the same band — 4577 Calle Argolla is active at $3,850, 1085 Mchugh Court at $3,795, 935 Goodman Avenue at $3,600, and 436 S Seaward Avenue at $3,495. Note that the counted comps are a mix of 9 townhouses and 12 unknown-type properties, and none is a confirmed-leased 3bd townhouse, so this should be read as a reasonable estimate rather than a tightly confirmed one.";
 
+  // Both live rationales were written under the OLD rules, with the wide computed range in them ("$2,200-$4,850",
+  // "$3,495-$4,000"). Today's rule refuses that range, so the address checks below use these copies, which have only
+  // those range sentences swapped for the recommended range. Every address, rent and word about the comps is unchanged.
+  const modernize = text => text
+    .replace('The raw rent spread across the counted comps runs $2,200-$4,850, but that is pulled wide on the low end by small 2-bedroom units like 2437 E Main St at $2,200 and on the high end by 1121 Pittsfield Ln, which sat off-market at $4,850 for 239 days with no confirmed lease.',
+      'The counted rents include small 2-bedroom units like 2437 E Main St at $2,200 and 1121 Pittsfield Ln, which sat off-market at $4,850 for 239 days with no confirmed lease.')
+    .replace('The recommended range of $3,495-$4,000 (midpoint $3,750)', 'The recommended range of $3,600-$3,800 (suggested list price $3,750)')
+    .replace('the raw range top of $4,850 comes from', 'the highest counted rent of $4,850 comes from');
+  const LIVE_RUN1_NOW = modernize(LIVE_RUN1);
+  const LIVE_RUN2_NOW = modernize(LIVE_RUN2);
+
   await check('findBadAddresses(): the real live Run 2 rationale and Run 1 (with its one wrong house number repaired) have NO flagged addresses, and validateRationale() accepts both in full', () => {
     assert.deepEqual(findBadAddresses(LIVE_RUN2, haleyInput), []);
     const run1Fixed = LIVE_RUN1.replace('435 S Seaward Avenue', '436 S Seaward Avenue');
     assert.notEqual(run1Fixed, LIVE_RUN1);
     assert.deepEqual(findBadAddresses(run1Fixed, haleyInput), []);
-    for (const text of [LIVE_RUN2, run1Fixed]) assert.deepEqual(validateRationale(text, haleyInput), { ok: true, problems: [], labels: [], badFigures: [], badAddresses: [], badClaims: [] });
+    for (const text of [LIVE_RUN2_NOW, modernize(run1Fixed)]) assert.deepEqual(validateRationale(text, haleyInput), { ok: true, problems: [], labels: [], badFigures: [], badAddresses: [], badClaims: [], badStatements: [], badSources: [] });
+    // the original live texts still pass the ADDRESS check, but today's range rule refuses their wide computed range
+    for (const text of [LIVE_RUN2, run1Fixed]) {
+      const v = validateRationale(text, haleyInput);
+      assert.deepEqual(v.badAddresses, []);
+      assert.ok(v.badStatements.some(b => /^(span|stretch): /.test(b)), 'the old wide range "$2,200-$4,850" / "$3,495-$4,000" is now flagged');
+    }
   });
 
   await check('findBadAddresses(): live Run 1\'s "435 S Seaward Avenue" (the real address is 436) is flagged, alone, with the street\'s real addresses as the hint, and validateRationale() names it for the retry', () => {
     const bad = findBadAddresses(LIVE_RUN1, haleyInput);
     assert.deepEqual(bad.map(b => b.shown), ['435 S Seaward Avenue']);
     assert.deepEqual(bad[0].hint, ['436 S Seaward Avenue', '1078 S Seaward Avenue', '514 S Seaward Ave']);
-    const v = validateRationale(LIVE_RUN1, haleyInput);
+    const v = validateRationale(LIVE_RUN1_NOW, haleyInput);
     assert.equal(v.ok, false);
     assert.deepEqual(v.badAddresses, ['435 S Seaward Avenue']);
     assert.deepEqual(v.badFigures, []);
@@ -1948,8 +1975,8 @@ async function main() {
   });
 
   await check('generateNarrative() rationale with a wrong house number: rejected, ONE retry names the address and the real one, the clean retry is accepted, narratives kept; two wrong in a row gives rationale null', async () => {
-    const bad = LIVE_RUN1;
-    const fixed = LIVE_RUN2;
+    const bad = LIVE_RUN1_NOW;
+    const fixed = LIVE_RUN2_NOW;
     const mock = mockClaude([gateReply(bad, { 2: 'Active ask.' }), textReply(rationaleOnly(fixed))]);
     const result = await withCapturedWarnings(warnings => generateNarrative(haleyInput, { client: mock.client })
       .then(r => { assert.ok(warnings.some(w => /Rationale rejected/.test(w) && /435 S Seaward Avenue/.test(w))); return r; }));
@@ -1960,11 +1987,15 @@ async function main() {
     assert.equal(result.narrativesByIndex[2], 'Active ask.', 'narratives from the first response are kept');
     assert.equal(result.meta.anthropicCalls, 2);
 
+    // two wrong drafts in a row: the second draft is no longer thrown away whole. The sentence with the wrong address is
+    // taken out and the rest is saved because it passes the same checks (changed from "rationale null"; see the Round 3 block).
     const twice = mockClaude([gateReply(bad), textReply(rationaleOnly(bad))]);
     const dropped = await withCapturedWarnings(() => generateNarrative(haleyInput, { client: twice.client }));
-    assert.equal(dropped.rationale, null);
     assert.equal(twice.calls.length, 2);
-    assert.equal(dropped.meta.rationaleDropped, true);
+    assert.equal(dropped.meta.rationaleTrimmed, true);
+    assert.equal(dropped.meta.rationaleDropped, false);
+    assert.ok(dropped.rationale && !/435 S Seaward/.test(dropped.rationale), 'the sentence with the wrong address is gone');
+    assert.equal(validateRationale(dropped.rationale, haleyInput).ok, true, 'what is saved passes every check');
   });
 
   await check('describeComp(): an off-market comp\'s days_on_market is labelled so it cannot be read as time spent off-market; active and leased comps keep "N days on market"; no days field when there is none', () => {
@@ -2079,13 +2110,13 @@ async function main() {
     assert.deepEqual(findBadAddresses('1407 Oak Park Ave leased.', addrInput).map(b => b.shown), ['1407 Oak Park Ave']);
   });
 
-  const dollarInput = (rents, recommended = { low: 3495, mid: 3750, high: 4000 }, raw = { low: 3295, high: 4085 }, est = 3850) => ({
-    subject: { address: '1 Test St, Ventura, CA 93001' }, comps: rents.map((monthly_rent, i) => ({ address: `${i + 1} Money St, Ventura, CA 93001`, monthly_rent, listing_status: 'leased', exclusion_reason: null })), recommended, raw, subjectEstimatedRent: est,
+  const dollarInput = (rents, headline = { low: 3600, high: 3800, listPrice: 3750, goal: 'balanced', stretchPrice: 4000 }, est = 3850) => ({
+    subject: { address: '1 Test St, Ventura, CA 93001' }, comps: rents.map((monthly_rent, i) => ({ address: `${i + 1} Money St, Ventura, CA 93001`, monthly_rent, listing_status: 'leased', exclusion_reason: null })), headline, subjectEstimatedRent: est,
   });
 
   await check('validateRationale() accepts a provided FRACTIONAL figure written as a whole dollar (rounded to the nearest dollar or floored): $2,571 / $2,913 / ~$3,998 for 2571.25 / 2912.5 / 3997.5; still flags a different rounding and an invented figure', () => {
-    const inp = dollarInput([2600, 3997.5], { low: 2571.25, mid: 2695, high: 2912.5 }, { low: 2200, high: 4085 }, 2540);
-    for (const ok of ['The range is $2,571-$2,913 with a $2,695 midpoint.', 'A midpoint of ~$3,998 for one comp.', 'It asked $3,997 and then $2,912.', 'Exactly $2,571.25 to $2,912.50.']) {
+    const inp = dollarInput([2600, 3997.5, 2571.25, 2695, 2912.5], null, 2540);
+    for (const ok of ['The comps are $2,571 and $2,913 with a $2,695 one between them.', 'A midpoint of ~$3,998 for one comp.', 'It asked $3,997 and then $2,912.', 'Exactly $2,571.25 to $2,912.50.']) {
       assert.deepEqual(validateRationale(ok, inp).badFigures, [], ok);
     }
     assert.deepEqual(validateRationale('A high of $2,914 and a low of $2,570.', inp).badFigures, ['$2,914', '$2,570'], 'neither is the provided figure rounded to a dollar or floored');
@@ -2093,7 +2124,7 @@ async function main() {
   });
 
   await check('validateRationale() accepts the idiom "mid-$4,000s" / "high-$3,000s" / "$4,000s" only when a provided rent lies in that thousand-dollar band, and "$2,600s" only when one lies in 2,600-2,699', () => {
-    const inp = dollarInput([3495, 3700, 4300, 4695], { low: 3495, mid: 3750, high: 4300 }, { low: 3495, high: 4695 });
+    const inp = dollarInput([3495, 3700, 4300, 4695], null);
     for (const ok of ['asks sit in the mid-$4,000s', 'leases in the high-$3,000s', 'a few in the $4,000s', "comps in the low $3,000's", 'the $3,000s and the $4,000s']) assert.deepEqual(validateRationale(ok, inp).badFigures, [], ok);
     assert.deepEqual(validateRationale('asks in the mid-$5,000s', inp).badFigures, ['$5,000s'], 'no provided rent is in 5,000-5,999');
     assert.deepEqual(validateRationale('asks in the $2,000s', inp).badFigures, ['$2,000s'], 'no provided rent is in 2,000-2,999');
@@ -2110,7 +2141,8 @@ async function main() {
     const wide = dollarInput([3000, 7400, 5000]);
     assert.deepEqual(validateRationale('That is $4,400 above the lowest.', wide).badFigures, ['$4,400'], '7,400 - 3,000 = 4,400 is a difference but is rent-sized, so it cannot pass for a rent');
     const small = dollarInput([2000, 3800]);
-    assert.deepEqual(validateRationale('$3,800 is $1,800 above $2,000.', small).badFigures, [], '3,800 - 2,000 = 1,800 is smaller than the lowest rent');
+    // Round 7: a distance that is only arithmetic must sit next to the comp it is about (the bare "$3,800 is $1,800 above $2,000." is now refused; see the Round 7 block)
+    assert.deepEqual(validateRationale('1 Money St asks $2,000, $1,800 below the recommended high of $3,800.', small).badFigures, [], '3,800 - 2,000 = 1,800 is exactly that comp\'s distance from the recommended high');
     assert.deepEqual(validateRationale('$3,800 is $1,700 above $2,000.', small).badFigures, ['$1,700']);
   });
 
@@ -2127,64 +2159,73 @@ async function main() {
     { address: '18 Tiny Ct, Ventura, CA 93001', monthly_rent: 800, listing_status: 'leased', exclusion_reason: 'size_mismatch' },
     { address: '19 Unit Way, Unit 4, Ventura, CA 93001', monthly_rent: 2995, listing_status: 'leased', exclusion_reason: null },
   ];
-  const factLines = (comps, rec, raw) => compFactsBlock(comps, { recommended: rec, raw }).split('\n').slice(7);
+  const factLines = (comps, headline, confidence) => compFactsBlock(comps, { headline, confidence, withRange: !headline }).split('\n').slice(7);
 
-  await check('compFactsBlock() with recommended/raw adds exact lowest/highest, raw-range setters, above/below-the-range and lowest/highest LEASE lines (NOT COUNTED comps never appear; ties list every address; unit addresses keep their unit)', () => {
-    const lines = factLines(factComps, { low: 3495, mid: 3750, high: 4000 }, { low: 2995, high: 7990 });
+  await check('compFactsBlock() with the recommended range adds exact lowest/highest (as two SEPARATE facts, never a pair), above/below-the-recommended-range and lowest/highest LEASE lines (NOT COUNTED comps never appear; ties list every address; unit addresses keep their unit), and no raw-range line', () => {
+    const lines = factLines(factComps, { low: 3600, high: 3800 });
     assert.deepEqual(lines, [
-      '- Lowest counted rent: $2,995 (10 Low St; 19 Unit Way, Unit 4). Highest counted rent: $7,990 (16 Giant Ave).',
-      '- Raw range $2,995-$7,990: the low is set by 10 Low St; 19 Unit Way, Unit 4; the high is set by 16 Giant Ave.',
-      '- Counted comps with rent ABOVE the recommended high ($4,000): 3: 16 Giant Ave $7,990 (active); 15 Outlier Ave $6,500 (off_market); 14 High Lease St $4,100 (leased).',
-      '- Counted comps with rent BELOW the recommended low ($3,495): 2: 10 Low St $2,995 (active); 19 Unit Way, Unit 4 $2,995 (leased).',
-      '- Highest counted LEASE: $4,100 (14 High Lease St). Lowest counted LEASE: $2,995 (19 Unit Way, Unit 4).',
+      '- Lowest counted rent: $2,995 (10 Low St; 19 Unit Way, Unit 4).',
+      '- Highest counted rent: $7,990 (16 Giant Ave).',
+      '- Counted comps with rent ABOVE the recommended range (above $3,800): 3: 16 Giant Ave $7,990 (active); 15 Outlier Ave $6,500 (off_market); 14 High Lease St $4,100 (leased).',
+      '- Counted comps with rent BELOW the recommended range (below $3,600): 2: 10 Low St $2,995 (active); 19 Unit Way, Unit 4 $2,995 (leased).',
+      '- Highest counted LEASE: $4,100 (14 High Lease St).',
+      '- Lowest counted LEASE: $2,995 (19 Unit Way, Unit 4).',
     ]);
+    assert.ok(!/raw range|Raw range/i.test(lines.join('\n')), 'the old wide computed range is not in the facts');
+    const withLabel = factLines(factComps, { low: 3600, high: 3800 }, { label: 'low', reasonText: '10 comps counted, 3 of them confirmed leases; their rents are spread widely.' });
+    assert.equal(withLabel[withLabel.length - 1], '- Confidence in the recommended range: low (10 comps counted, 3 of them confirmed leases; their rents are spread widely.).');
     assert.ok(!lines.join('\n').includes('Condo Ct') && !lines.join('\n').includes('Tiny Ct'), 'NOT COUNTED comps are outside the math and outside these lines');
   });
 
-  await check('compFactsBlock() range lines: "none" when nothing is above/below, a no-lease run says so, ties at the top list every address, nothing is added without recommended/raw, and a long list is capped with the true count', () => {
+  await check('compFactsBlock() range lines: "none" when nothing is above/below, a no-lease run says so, ties at the top list every address, nothing is added without a range or the withRange switch, a thin report says there is no range, and a long list is capped with the true count', () => {
     const inside = [{ address: '1 A St', monthly_rent: 3600, listing_status: 'active' }, { address: '2 B St', monthly_rent: 3900, listing_status: 'active' }];
-    const lines = factLines(inside, { low: 3500, mid: 3700, high: 4000 }, { low: 3600, high: 3900 });
-    assert.equal(lines[2], '- Counted comps with rent ABOVE the recommended high ($4,000): none.');
-    assert.equal(lines[3], '- Counted comps with rent BELOW the recommended low ($3,500): none.');
+    const lines = factLines(inside, { low: 3500, high: 4000 });
+    assert.equal(lines[2], '- Counted comps with rent ABOVE the recommended range (above $4,000): none.');
+    assert.equal(lines[3], '- Counted comps with rent BELOW the recommended range (below $3,500): none.');
     assert.equal(lines[4], '- Highest and lowest counted LEASE: none (no counted comp is leased).');
-    assert.equal(compFactsBlock(inside).split('\n').length, 7, 'without recommended/raw the block is unchanged');
+    assert.equal(compFactsBlock(inside).split('\n').length, 7, 'without a range the block is unchanged');
+    const thin = factLines(inside, null);
+    assert.equal(thin[2], '- No recommended range: only 2 counted comps (at least 4 are needed).');
+    assert.ok(!thin.some(l => /ABOVE|BELOW/.test(l)), 'a thin report names no range, so no above/below lines');
+    assert.match(factLines([{ address: '1 A St', monthly_rent: 3000, listing_status: 'active' }], null)[2], /only 1 counted comp \(at least 4 are needed\)/);
     const many = Array.from({ length: 20 }, (_, i) => ({ address: `${100 + i} Big St`, monthly_rent: 5000 + i * 10, listing_status: 'off_market' }));
-    const capped = factLines(many, { low: 3000, mid: 3500, high: 4000 }, { low: 5000, high: 5190 })[2];
-    assert.match(capped, /ABOVE the recommended high \(\$4,000\): 20: 119 Big St \$5,190 \(off_market\); /);
+    const capped = factLines(many, { low: 3800, high: 4000 })[2];
+    assert.match(capped, /ABOVE the recommended range \(above \$4,000\): 20: 119 Big St \$5,190 \(off_market\); /);
     assert.match(capped, /; and 5 more\.$/);
     assert.equal(capped.split(';').length, 16, '15 listed + the "and 5 more" part');
-    assert.match(factLines(many, { low: 3000, mid: 3500, high: 4000 }, { low: 5000, high: 5190 })[1], /^- Raw range \$5,000-\$5,190: the low is set by 100 Big St; the high is set by 119 Big St\.$/);
-    assert.match(factLines([{ address: '1 A St', monthly_rent: 3000, listing_status: 'active' }], { low: 1, mid: 2, high: 3 }, { low: 3100, high: 3200 })[1], /the low is set by no counted comp has exactly this rent/);
   });
 
-  await check('range facts support leave-one-out reasoning: a counted outlier far above the range really does move the recommended high (computed with lib/weighting.js), and the facts list it as a counted comp above the high so it cannot be called "not used"', () => {
+  await check('range facts support leave-one-out reasoning: a counted outlier far above the range really does move the recommended high (computed with lib/weighting.js), and the facts list it as a counted comp above the recommended range so it cannot be called "not used"', () => {
     const counted = factComps.filter(c => !c.exclusion_reason).map(c => ({ ...c, bedrooms: 3, property_type: 'single_family' }));
     const withAll = computeRecommendedRange(counted, 3, 'single_family');
     const withoutOutliers = computeRecommendedRange(counted.filter(c => c.monthly_rent < 6000), 3, 'single_family');
     const withoutOne = computeRecommendedRange(counted.filter(c => c.monthly_rent !== 6500), 3, 'single_family');
     assert.ok(withAll.high > withoutOutliers.high, `the $6,500 and $7,990 comps lift the recommended high (${withAll.high} vs ${withoutOutliers.high})`);
     assert.ok(withAll.high > withoutOne.high || withAll.mid > withoutOne.mid || withAll.low > withoutOne.low, 'removing even one counted outlier changes the range');
-    const raw = computeRawRange(counted, 3, 'single_family');
-    const facts = factLines(counted.map(c => ({ ...c })), withAll, raw).join('\n');
-    assert.match(facts, /ABOVE the recommended high.*16 Giant Ave \$7,990 \(active\)/);
-    assert.match(facts, new RegExp(`Raw range \\$2,995-\\$7,990: the low is set by 10 Low St; 19 Unit Way, Unit 4; the high is set by 16 Giant Ave`));
+    const headline = computeHeadlineRange(withAll, counted, 'balanced');
+    const facts = factLines(counted.map(c => ({ ...c })), headline).join('\n');
+    assert.match(facts, /ABOVE the recommended range.*16 Giant Ave \$7,990 \(active\)/);
+    assert.match(facts, /Highest counted rent: \$7,990 \(16 Giant Ave\)/);
   });
 
-  await check('buildPrompt() carries the range facts with the real figures, the widened facts header, and the two accuracy rules (counted comps always contributed; lowest/highest/pulls/anchors only from the facts, percentile direction)', () => {
+  await check('buildPrompt() carries the range facts with the real figures, the widened facts header, and the two accuracy rules (counted comps always contributed; lowest/highest/pulls/anchors only from the facts, direction of the pull on the centre of the range)', () => {
     const prompt = buildPrompt({ ...gateInput, comps: gateInput.comps });
     assert.match(prompt, /COMPUTED COMP FACTS \(counted by code from the comp lines above; the only figures you may use for any count or makeup statement, and for any statement about which comp is the lowest or highest or sits above or below the range\):/);
-    assert.match(prompt, /- Lowest counted rent: \$3,295 \(105 Echo St\)\. Highest counted rent: \$4,085 \(104 Delta St\)\./);
-    assert.match(prompt, /- Raw range \$3,295-\$4,085: the low is set by 105 Echo St; the high is set by 104 Delta St\./);
-    assert.match(prompt, /- Counted comps with rent ABOVE the recommended high \(\$4,000\): 1: 104 Delta St \$4,085 \(leased\)\./);
-    assert.match(prompt, /- Counted comps with rent BELOW the recommended low \(\$3,495\): 1: 105 Echo St \$3,295 \(off_market\)\./);
-    assert.match(prompt, /- Highest counted LEASE: \$4,085 \(104 Delta St\)\. Lowest counted LEASE: \$3,495 \(101 Alpha St\)\./);
-    const facts = prompt.indexOf('COMPUTED COMP FACTS (counted by code'), numbers = prompt.indexOf('COMPUTED NUMBERS (');
-    assert.ok(prompt.indexOf('COMPS (') < facts && facts < numbers, 'facts sit after the comp list and before COMPUTED NUMBERS');
+    assert.match(prompt, /- Lowest counted rent: \$3,295 \(105 Echo St\)\.\n- Highest counted rent: \$4,085 \(104 Delta St\)\./);
+    assert.doesNotMatch(prompt, /Lowest counted rent[^\n]*Highest counted rent/, 'the lowest and highest rents are on two separate lines, never side by side');
+    assert.doesNotMatch(prompt, /Raw range|raw range/);
+    assert.match(prompt, /- Counted comps with rent ABOVE the recommended range \(above \$3,800\): 1: 104 Delta St \$4,085 \(leased\)\./);
+    assert.match(prompt, /- Counted comps with rent BELOW the recommended range \(below \$3,600\): 2: 105 Echo St \$3,295 \(off_market\); 101 Alpha St \$3,495 \(leased\)\./);
+    assert.match(prompt, /- Confidence in the recommended range: medium \(5 comps counted, 3 of them confirmed leases; they agree only moderately\.\)\./);
+    assert.match(prompt, /- Highest counted LEASE: \$4,085 \(104 Delta St\)\.\n- Lowest counted LEASE: \$3,495 \(101 Alpha St\)\./);
+    assert.doesNotMatch(prompt, /^[^\n]*(?:Highest|Lowest) counted (?:rent|LEASE)[^\n]*(?:Highest|Lowest) counted (?:rent|LEASE)/m, 'no line of the facts carries the lowest and the highest figure together');
+    const facts = prompt.indexOf('COMPUTED COMP FACTS (counted by code'), numbers = prompt.indexOf('THE RECOMMENDATION (');
+    assert.ok(prompt.indexOf('COMPS (') < facts && facts < numbers, 'facts sit after the comp list and before THE RECOMMENDATION');
     const rules = prompt.slice(prompt.indexOf('HARD RULES:'), prompt.indexOf('SUBJECT PROPERTY:'));
     assert.match(rules, /Every comp that is not marked NOT COUNTED contributed to the recommended range, including outliers and off-market comps/);
     assert.match(rules, /Never say a counted comp is "not used", "carries no weight", "anchors nothing", or "did not lift" or "did not affect" the range; you may say it is unconfirmed \(off-market\) or an outlier\. Only NOT COUNTED comps are outside the math\./);
-    assert.match(rules, /must rest only on the lowest\/highest, raw-range, above\/below-the-range and lease lines of COMPUTED COMP FACTS and on the comp lines/);
-    assert.match(rules, /are the 25th, 50th and 75th percentiles of the counted rents weighted by status, so a counted comp whose rent is above the recommended midpoint can only pull the range up \(never "the middle or bottom down"\), and a counted comp below the midpoint can only pull it down \(never the top up\)\./);
+    assert.match(rules, /must rest only on the lowest\/highest, above\/below-the-recommended-range and lease lines of COMPUTED COMP FACTS and on the comp lines/);
+    assert.match(rules, /The recommended range is centred on the weighted middle of the counted rents, so a counted comp priced above the recommended range can only pull the centre of the range up \(never down\), and a counted comp priced below it can only pull the centre down \(never up\)\./);
     assert.match(rules, /Only use facts given below\./, 'the earlier rules are all still there');
   });
 
@@ -4770,10 +4811,13 @@ async function main() {
   ];
   const a0Subject = { address: '1 Test St, Ventura, CA 93001', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family' };
   const a0Legacy = (comps, properties) => legacyNumbers({ rawComps: comps, bedrooms: a0Subject.bedrooms, subject_property_type: a0Subject.propertyType, properties });
+  // computeNumbers() now also returns the counted totals, the headline range and the confidence label (Phase C); the
+  // frozen legacy code knows only the first five fields, so the identity checks compare exactly those.
+  const legacyFieldsOf = r => ({ compsWithMatch: r.compsWithMatch, matchedCount: r.matchedCount, recommended: r.recommended, raw: r.raw, exclusionReasons: r.exclusionReasons });
 
   await check('A0: computeNumbers() is identical to the frozen pre-refactor inline code on a fixture with duplicates, Rincon-managed, other-type and off-size comps', () => {
     const modern = computeNumbers({ comps: a0Comps, subject: a0Subject, properties: a0Props });
-    assert.deepStrictEqual(modern, a0Legacy(a0Comps, a0Props));
+    assert.deepStrictEqual(legacyFieldsOf(modern), a0Legacy(a0Comps, a0Props));
     // the fixture really exercises every branch, so "identical" means something
     assert.ok(modern.compsWithMatch.length < a0Comps.length, 'dedupe collapsed at least one duplicate');
     assert.ok(modern.matchedCount === a0Comps.length);
@@ -4784,7 +4828,7 @@ async function main() {
 
   await check('A0: still identical with the comps reversed, with no properties, with one comp, and with none', () => {
     for (const [comps, props] of [[[...a0Comps].reverse(), a0Props], [a0Comps, []], [a0Comps.slice(0, 1), a0Props], [[], a0Props]]) {
-      assert.deepStrictEqual(computeNumbers({ comps, subject: a0Subject, properties: props }), a0Legacy(comps, props));
+      assert.deepStrictEqual(legacyFieldsOf(computeNumbers({ comps, subject: a0Subject, properties: props })), a0Legacy(comps, props));
     }
     const none = computeNumbers({ comps: [], subject: a0Subject, properties: a0Props });
     assert.deepStrictEqual(none.recommended, { low: null, mid: null, high: null });
@@ -4795,7 +4839,8 @@ async function main() {
 
   await check('A0: computeNumbers() does not modify its inputs, ignores extra subject fields, and keeps exclusionReasons aligned with compsWithMatch', () => {
     const before = JSON.stringify([a0Comps, a0Props, a0Subject]);
-    const r = computeNumbers({ comps: a0Comps, subject: { ...a0Subject, sqft: 99999, address: 'ignored' }, properties: a0Props });
+    // (Phase B: square footage is no longer an "ignored" subject field, it drives the size band, so this check now uses bathrooms, which still are.)
+    const r = computeNumbers({ comps: a0Comps, subject: { ...a0Subject, bathrooms: 9, address: 'ignored' }, properties: a0Props });
     assert.equal(JSON.stringify([a0Comps, a0Props, a0Subject]), before);
     assert.equal(r.exclusionReasons.length, r.compsWithMatch.length);
     r.compsWithMatch.forEach((c, i) => assert.equal(r.exclusionReasons[i], exclusionReason(c, a0Subject.bedrooms, a0Subject.propertyType)));
@@ -4817,12 +4862,12 @@ async function main() {
     }
   });
 
-  await check('A0: lib/analyze.js is byte-identical in the standalone and Hub lib folders and pulls in only property-matching and weighting', () => {
+  await check('A0: lib/analyze.js is byte-identical in the standalone and Hub lib folders and pulls in only property-matching, weighting and confidence', () => {
     const a = fsA.readFileSync(pathA.join(__dirname, 'lib', 'analyze.js'), 'utf8');
     const hub = pathA.join(__dirname, '..', 'hub', 'rental-analysis', 'lib', 'analyze.js');
     if (fsA.existsSync(hub)) assert.equal(fsA.readFileSync(hub, 'utf8'), a);
     const requires = [...a.matchAll(/require\('([^']+)'\)/g)].map(m => m[1]).sort();
-    assert.deepEqual(requires, ['./property-matching', './weighting'], 'no import cycle possible: analyze.js sits above sources.js, not below it');
+    assert.deepEqual(requires, ['./confidence', './property-matching', './weighting'], 'no import cycle possible: analyze.js sits above sources.js, not below it (confidence.js needs only constants.js)');
   });
 
   console.log('--- backtest/: reference rules, targets, metrics ---');
@@ -5285,21 +5330,31 @@ async function main() {
 
   console.log('--- backtest/: tuning rules, outcomes, output files ---');
 
-  await check('Acceptance rule (Decision 4): all five conditions must hold; each one can fail the change on its own', () => {
-    const summary = (w300, miss, cov, est) => ({ all: { within300: w300, typicalMiss: miss }, coverage: cov, estimated: est });
-    const base = summary(0.50, 300, 0.80, 400);
-    const good = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400) });
+  await check('Acceptance rule (Decision 4, rule (c) as Peter rewrote it): all six conditions must hold; each one can fail the change on its own; a method that gives fewer reports a range is not failed for that if right answers per 100 tried hold and badly wrong ones fall', () => {
+    // right / wrong = right answers and badly wrong answers per 100 reports TRIED
+    const summary = (w300, miss, right, wrong, est) => ({ all: { within300: w300, typicalMiss: miss }, rightPer100: right, badlyWrongPer100: wrong, coverage: 0.5, estimated: est });
+    const base = summary(0.50, 300, 38, 20, 400);
+    const good = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 15, 400) });
     assert.equal(good.pass, true);
-    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.53, 250, 0.78, 400) }).checks.find(c => c.id === 'a').pass, false);
-    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 290, 0.78, 400) }).checks.find(c => c.id === 'b').pass, false);
-    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.74, 400) }).checks.find(c => c.id === 'c').pass, false);
-    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 299) }).checks.find(c => c.id === 'e').pass, false);
-    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 150), rinconOnly: true }).checks.find(c => c.id === 'e').pass, true);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.53, 250, 40, 15, 400) }).checks.find(c => c.id === 'a').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 290, 40, 15, 400) }).checks.find(c => c.id === 'b').pass, false);
+    // (c) right answers per 100 tried must not fall: equal passes, lower fails, and coverage alone no longer matters
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 38, 15, 400) }).checks.find(c => c.id === 'c').pass, true, 'equal is not a fall');
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 37.9, 15, 400) }).checks.find(c => c.id === 'c').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: { ...base, coverage: 0.91 }, candidate: { ...summary(0.55, 250, 40, 15, 400), coverage: 0.76 } }).pass, true, 'about 15 points fewer reports with a range is fine when the answers per 100 tried improve');
+    // (c2) badly wrong answers per 100 tried must fall: equal or higher fails
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 20, 400) }).checks.find(c => c.id === 'c2').pass, false, 'equal is not a fall');
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 21, 400) }).checks.find(c => c.id === 'c2').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 19.9, 400) }).checks.find(c => c.id === 'c2').pass, true);
+    // a summary without the new numbers cannot pass (no data is never a pass)
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: { all: base.all, coverage: 0.8, estimated: 400 }, candidate: summary(0.55, 250, 40, 15, 400) }).checks.find(c => c.id === 'c').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 15, 299) }).checks.find(c => c.id === 'e').pass, false);
+    assert.equal(btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 15, 150), rinconOnly: true }).checks.find(c => c.id === 'e').pass, true);
     const g = (w, est) => ({ all: { within300: w }, estimated: est });
-    const worse = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400), baselineGroups: { propertyType: { condo: g(0.60, 120) } }, candidateGroups: { propertyType: { condo: g(0.55, 120) } } });
+    const worse = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 15, 400), baselineGroups: { propertyType: { condo: g(0.60, 120) } }, candidateGroups: { propertyType: { condo: g(0.55, 120) } } });
     assert.equal(worse.checks.find(c => c.id === 'd').pass, false);
     assert.equal(worse.pass, false);
-    const smallGroup = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 0.78, 400), baselineGroups: { propertyType: { condo: g(0.60, 40) } }, candidateGroups: { propertyType: { condo: g(0.40, 40) } } });
+    const smallGroup = btA.cand.evaluateAcceptance({ baseline: base, candidate: summary(0.55, 250, 40, 15, 400), baselineGroups: { propertyType: { condo: g(0.60, 40) } }, candidateGroups: { propertyType: { condo: g(0.40, 40) } } });
     assert.equal(smallGroup.checks.find(c => c.id === 'd').pass, true, 'groups under 100 leases are not "large"');
   });
 
@@ -5308,7 +5363,9 @@ async function main() {
     btA.cand.CANDIDATES.forEach((c, i) => { assert.equal(c.id, i + 1); assert.match(c.status, /^(runnable|runnable-post-hoc|needs-phase-[A-F]|needs-A2)$/); });
     assert.equal(btA.K.ACCEPTANCE.minGainWithin300Points, 4);
     assert.equal(btA.K.ACCEPTANCE.minMissImprovementDollars, 25);
-    assert.equal(btA.K.ACCEPTANCE.maxCoverageLossPoints, 5);
+    assert.equal(btA.K.ACCEPTANCE.maxCoverageLossPoints, undefined, 'the old "coverage down at most 5 points" rule is gone (Peter, 2026-10-17)');
+    assert.equal(btA.K.ACCEPTANCE.rightWithinDollars, 300);
+    assert.equal(btA.K.ACCEPTANCE.badlyWrongOverDollars, 600);
     assert.equal(btA.K.ACCEPTANCE.maxLargeGroupWorsePoints, 3);
     assert.equal(btA.K.ACCEPTANCE.minHoldoutLeases, 300);
     assert.equal(btA.K.ACCEPTANCE.minHoldoutLeasesRinconOnly, 150);
@@ -6170,7 +6227,9 @@ async function main() {
     // The county groups (grouped by the MLS county field) are called "Ventura County"; that label lives in constants.js
     // (and is explained in the README) and nowhere else, so no other file can hard-code it.
     for (const f of files.filter(f => f !== 'constants.js' && f !== 'README.md')) assert.doesNotMatch(fsA.readFileSync(pathA.join(__dirname, 'backtest', f), 'utf8'), /Ventura[ -]County/, `${f} still says Ventura County`);
-    assert.match(fsA.readFileSync(pathA.join(__dirname, 'backtest', 'constants.js'), 'utf8'), /ventura: 'Ventura County'/, 'the county label is defined once, in constants.js');
+    // (Phase C: the label moved to lib/accuracy-sentences.js, which the product reads to write the same sentences; backtest/constants.js re-exports it.)
+    assert.match(fsA.readFileSync(pathA.join(__dirname, 'lib', 'accuracy-sentences.js'), 'utf8'), /ventura: 'Ventura County'/, 'the county label is defined once, in lib/accuracy-sentences.js');
+    assert.equal(require('./backtest/constants').COUNTY_LABELS.ventura, 'Ventura County');
   });
 
   console.log('--- backtest/: grouping by the MLS county (Ventura County vs the LA-border area) ---');
@@ -6496,6 +6555,3108 @@ async function main() {
     const readme = fsA.readFileSync(pathA.join(__dirname, 'backtest', 'README.md'), 'utf8');
     assert.doesNotMatch(readme, /almost entirely Los Angeles/);
     assert.match(readme, /in the current pull every other-county lease is Los Angeles County, so the label is exact today/);
+  });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase B (CMA-QUALITY-SPEC.md Items 1 and 2): the square-footage band, the
+  // MLS facts (furnished, lease length, 55+), the shared comp-row mapper.
+  // Everything runs offline on small fixtures.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Phase B: size band (Item 1) ---');
+  const Wb = require('./lib/weighting');
+  const Fb = require('./lib/mls-facts');
+  const Kb = require('./lib/constants');
+  const { buildCompRow, buildCompRows, COMP_ROW_COLUMNS } = require('./lib/comp-rows');
+  const { computeNumbers: computeNumbersB } = require('./lib/analyze');
+  const { legacyNumbers: legacyNumbersB } = require('./backtest/tests/a0-legacy-pipeline');
+  const fsB = require('node:fs');
+  const pathB = require('node:path');
+
+  const bComp = (o = {}) => ({
+    address: '1 Test St, Ventura, CA 93001', property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.4,
+    latitude: null, longitude: null, monthly_rent: 3000, is_estimated_price: false, original_price: null, had_price_cut: false,
+    listing_status: 'leased', days_on_market: null, listed_date: null, leased_date: '2026-09-01', source_id: 's-crmls', source_name: 'CRMLS',
+    is_rincon_managed: false, comp_property_id: null, ...o,
+  });
+  const bFull = { sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false };
+  const bSubject = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false };
+  const bNow = new Date('2026-10-17T12:00:00Z');
+
+  await check('Size band: exactly 25.0% off still counts and 25.1% off does not, above and below, for a small and a large subject (whole-number maths, no rounding)', () => {
+    const out = (comp, subj) => Wb.sqftOutsideBand(comp, subj, 'single_family');
+    assert.equal(out(1250, 1000), false, '+25.0%');
+    assert.equal(out(1251, 1000), true, '+25.1%');
+    assert.equal(out(750, 1000), false, '-25.0%');
+    assert.equal(out(749, 1000), true, '-25.1%');
+    assert.equal(out(2045, 1636), false, 'Bunting: 1,636 x 1.25 = 2,045 exactly');
+    assert.equal(out(2046, 1636), true);
+    assert.equal(out(1227, 1636), false, 'Bunting: 1,636 x 0.75 = 1,227 exactly');
+    assert.equal(out(1226, 1636), true);
+    assert.equal(out(2467, 1636), true, '6349 Condor Court (+51%)');
+    assert.equal(out(1145, 1636), true, '6602 Swan St (-30%)');
+    assert.equal(out(1636, 1636), false);
+    assert.equal(Kb.SQFT_BAND_PCT, 25);
+  });
+
+  await check('Size band: a comp with no usable square footage (null, undefined, 0, negative, NaN, fractional, text) is unknown and never excluded', () => {
+    for (const bad of [null, undefined, 0, -1500, NaN, 1500.5, '2467', Infinity]) {
+      assert.equal(Wb.sqftOutsideBand(bad, 1636, 'single_family'), false, `comp sqft ${String(bad)}`);
+      assert.equal(exclusionReason(bComp({ sqft: bad }), 4, 'single_family', bFull), null, `exclusionReason with comp sqft ${String(bad)}`);
+    }
+  });
+
+  await check('Size band: a missing, zero, negative or fractional subject size turns the rule off', () => {
+    for (const bad of [undefined, null, 0, -1636, NaN, 1636.5, '1636']) {
+      assert.equal(Wb.sqftOutsideBand(2467, bad, 'single_family'), false, `subject sqft ${String(bad)}`);
+      assert.equal(Wb.sizeBandPctFor('single_family', bad), null);
+      assert.equal(Wb.sqftBandFor('single_family', bad), null);
+    }
+    assert.equal(Wb.extraExclusionReason(bComp({ sqft: 2467 }), 'single_family', {}), null, 'no extras at all');
+    assert.equal(Wb.extraExclusionReason(bComp({ sqft: 2467 }), 'single_family', undefined), null);
+    assert.equal(Wb.extraExclusionReason(bComp({ sqft: 2467 }), 'single_family', null), null);
+  });
+
+  await check('Size band: duplex, triplex, fourplex, apartment, other and unknown subject types turn the rule off; house, townhouse, condo and manufactured turn it on', () => {
+    for (const type of ['duplex', 'triplex', 'fourplex', 'apartment', 'other', null, undefined, 'castle']) {
+      assert.equal(Wb.sqftOutsideBand(2467, 1636, type), false, `type ${String(type)}`);
+      assert.equal(Wb.sizeBandPctFor(type, 1636), null);
+    }
+    for (const type of ['single_family', 'townhouse', 'condo', 'manufactured']) {
+      assert.equal(Wb.sqftOutsideBand(2467, 1636, type), true, `type ${type}`);
+      assert.equal(Wb.sizeBandPctFor(type, 1636), 25);
+    }
+    assert.deepEqual(Kb.SQFT_BAND_PROPERTY_TYPES, ['single_family', 'townhouse', 'condo', 'manufactured']);
+  });
+
+  await check('Size band: sizeBandPctFor() is 25 or null, and sqftBandFor() gives the 1,227-2,045 band for a 1,636 sq ft house (rounded in, never out, on odd sizes)', () => {
+    assert.deepEqual(Wb.sqftBandFor('single_family', 1636), { pct: 25, low: 1227, high: 2045 });
+    assert.deepEqual(Wb.sqftBandFor('condo', 1001), { pct: 25, low: 751, high: 1251 }, '750.75 rounds up to 751, 1,251.25 rounds down to 1,251');
+    assert.deepEqual(Wb.sqftBandFor('condo', 1000), { pct: 25, low: 750, high: 1250 });
+    assert.equal(Wb.sqftBandFor('duplex', 1636), null);
+    // the written band agrees with the rule itself, for every size from 400 to 4,000
+    for (let s = 400; s <= 4000; s += 37) {
+      const band = Wb.sqftBandFor('single_family', s);
+      assert.equal(Wb.sqftOutsideBand(band.low, s, 'single_family'), false, `low end of ${s}`);
+      assert.equal(Wb.sqftOutsideBand(band.low - 1, s, 'single_family'), true, `just under the low end of ${s}`);
+      assert.equal(Wb.sqftOutsideBand(band.high, s, 'single_family'), false, `high end of ${s}`);
+      assert.equal(Wb.sqftOutsideBand(band.high + 1, s, 'single_family'), true, `just over the high end of ${s}`);
+    }
+  });
+
+  await check('exclusionReason(): reports each new reason, and when several apply reports exactly one in the spec order (rincon_managed, property_type_mismatch, size_mismatch, size_sqft, furnished_mismatch, short_term_lease, age_restricted)', () => {
+    const bad = o => bComp({ sqft: 2467, furnished_status: 'furnished', lease_term_class: 'short', age_restricted: true, ...o });
+    assert.equal(exclusionReason(bad({ is_rincon_managed: true, source_name: 'RentCast', property_type: 'condo', bedrooms: 6 }), 4, 'single_family', bFull), 'rincon_managed');
+    assert.equal(exclusionReason(bad({ property_type: 'condo', bedrooms: 6 }), 4, 'single_family', bFull), 'property_type_mismatch');
+    assert.equal(exclusionReason(bad({ bedrooms: 6 }), 4, 'single_family', bFull), 'size_mismatch');
+    assert.equal(exclusionReason(bad({}), 4, 'single_family', bFull), 'size_sqft');
+    assert.equal(exclusionReason(bad({ sqft: 1700 }), 4, 'single_family', bFull), 'furnished_mismatch');
+    assert.equal(exclusionReason(bad({ sqft: 1700, furnished_status: 'unfurnished' }), 4, 'single_family', bFull), 'short_term_lease');
+    assert.equal(exclusionReason(bad({ sqft: 1700, furnished_status: null, lease_term_class: 'long' }), 4, 'single_family', bFull), 'age_restricted');
+    assert.equal(exclusionReason(bad({ sqft: 1700, furnished_status: null, lease_term_class: 'long', age_restricted: false }), 4, 'single_family', bFull), null);
+    // the same order in the narrative and dashboards' label tables: every code the function can return has a label
+    const narrativeSrc = fsB.readFileSync(pathB.join(__dirname, 'lib', 'narrative.js'), 'utf8');
+    for (const code of ['size_sqft', 'furnished_mismatch', 'short_term_lease', 'age_restricted']) assert.match(narrativeSrc, new RegExp(`${code}:`), `narrative.js labels ${code}`);
+  });
+
+  await check('The new rules are OFF unless the caller passes the matching subject fact: with no extras every comp that carries every new fact still counts, in exclusionReason() and in both range functions', () => {
+    const loaded = bComp({ sqft: 2467, furnished_status: 'furnished', lease_term_class: 'short', age_restricted: true });
+    for (const extras of [undefined, null, {}, { sqft: undefined, furnished: undefined, leaseTermMonths: undefined, ageRestricted: undefined }]) {
+      assert.equal(exclusionReason(loaded, 3, 'single_family', extras), null);
+    }
+    const comps = [bComp({ monthly_rent: 4000 }), loaded, bComp({ address: '2 Test St', monthly_rent: 4400, sqft: 3300, furnished_status: 'furnished' })];
+    assert.deepEqual(computeRecommendedRange(comps, 3, 'single_family'), computeRecommendedRange(comps, 3, 'single_family', {}));
+    assert.deepEqual(computeRawRange(comps, 3, 'single_family'), computeRawRange(comps, 3, 'single_family', undefined));
+    assert.equal(computeRawRange(comps, 3, 'single_family').high, 4400, 'nothing dropped');
+    // each rule turns on by its own fact alone
+    assert.equal(exclusionReason(loaded, 3, 'single_family', { sqft: 1500 }), 'size_sqft');
+    assert.equal(exclusionReason({ ...loaded, sqft: 1500 }, 3, 'single_family', { furnished: false }), 'furnished_mismatch');
+    assert.equal(exclusionReason({ ...loaded, sqft: 1500, furnished_status: null }, 3, 'single_family', { leaseTermMonths: 12 }), 'short_term_lease');
+    assert.equal(exclusionReason({ ...loaded, sqft: 1500, furnished_status: null, lease_term_class: null }, 3, 'single_family', { ageRestricted: false }), 'age_restricted');
+  });
+
+  await check('computeRecommendedRange() and computeRawRange() drop size_sqft comps (2461 Bunting Avenue shape: 6349 Condor Court 2,467 sq ft and 6602 Swan St 1,145 sq ft fall out of a 1,636 sq ft subject)', () => {
+    const inBand = [3900, 4100, 4300, 4500].map((rent, i) => bComp({ address: `${10 + i} Bunting Ave, Ventura, CA 93003`, monthly_rent: rent, sqft: 1500 + i * 60, bedrooms: 4 }));
+    const condor = bComp({ address: '6349 Condor Court, Ventura, CA 93003', monthly_rent: 6200, sqft: 2467, bedrooms: 4 });
+    const swan = bComp({ address: '6602 Swan St, Ventura, CA 93003', monthly_rent: 2500, sqft: 1145, bedrooms: 4 });
+    const all = [condor, ...inBand, swan];
+    const x = Wb.subjectExtrasFrom(bSubject);
+    assert.deepEqual(computeRecommendedRange(all, 4, 'single_family', x), computeRecommendedRange(inBand, 4, 'single_family'));
+    assert.deepEqual(computeRawRange(all, 4, 'single_family', x), { low: 3900, high: 4500 });
+    assert.deepEqual(computeRawRange(all, 4, 'single_family'), { low: 2500, high: 6200 }, 'without the subject size nothing is dropped');
+    assert.equal(exclusionReason(condor, 4, 'single_family', x), 'size_sqft');
+    assert.equal(exclusionReason(swan, 4, 'single_family', x), 'size_sqft');
+    // a comp with no square footage listed still counts
+    const noSize = bComp({ address: '99 Mystery Ln, Ventura, CA 93003', monthly_rent: 4700, sqft: null, bedrooms: 4 });
+    assert.equal(computeRawRange([...inBand, noSize], 4, 'single_family', x).high, 4700);
+    // all comps out of band: no range at all
+    assert.deepEqual(computeRecommendedRange([condor, swan], 4, 'single_family', x), { low: null, mid: null, high: null });
+    assert.deepEqual(computeRawRange([condor, swan], 4, 'single_family', x), { low: null, high: null });
+  });
+
+  await check('Radius search: a comp the size band leaves out is not "genuine", so 3 in-band comps plus 1 out-of-band comp inside 0.5 mi do NOT let the search stop at 0.5 mi (without the subject size it would stop there)', () => {
+    const at = (n, miles, o = {}) => bComp({ address: `${n} Gate St, Ventura, CA 93003`, distance_miles: miles, bedrooms: 4, sqft: 1600, monthly_rent: 4000 + n, ...o });
+    const comps = [at(1, 0.3), at(2, 0.3), at(3, 0.4), at(4, 0.4, { sqft: 2467 }), at(5, 0.9), at(6, 0.9)];
+    const old = chooseRadiusRung(comps, { bedrooms: 4, propertyType: 'single_family' });
+    assert.equal(old.rung, 0.5);
+    assert.equal(old.genuineCount, 4);
+    const now = chooseRadiusRung(comps, bSubject);
+    assert.equal(now.rung, 1, 'stops at 1 mile instead');
+    assert.equal(now.genuineCount, 5);
+    assert.equal(now.leasedCount, 5);
+    // the comps themselves are all kept inside the chosen rung, the out-of-band one shown as "not used"
+    const kept = applyCombinedRadiusTiering(comps, bSubject);
+    assert.equal(kept.length, 6);
+    assert.equal(exclusionReason(kept.find(c => c.sqft === 2467), 4, 'single_family', Wb.subjectExtrasFrom(bSubject)), 'size_sqft');
+  });
+
+  await check('dedupeComps() step 0 knows about the new rules: a leased CRMLS copy that is out of the size band loses to an in-band RentCast copy of the same home (and wins as before when the subject size is not passed)', () => {
+    const crmlsCopy = bComp({ address: '10 Alpha St, Ventura, CA 93001', listing_status: 'leased', sqft: 2467, monthly_rent: 4300, bedrooms: 4 });
+    const rentcastCopy = bComp({ address: '10 Alpha Street, Ventura, CA 93001', listing_status: 'off_market', source_name: 'RentCast', sqft: 1640, monthly_rent: 4200, bedrooms: 4 });
+    assert.deepEqual(dedupeComps([crmlsCopy, rentcastCopy], 4, 'single_family', Wb.subjectExtrasFrom(bSubject)), [rentcastCopy]);
+    assert.deepEqual(dedupeComps([rentcastCopy, crmlsCopy], 4, 'single_family', Wb.subjectExtrasFrom(bSubject)), [rentcastCopy]);
+    assert.deepEqual(dedupeComps([crmlsCopy, rentcastCopy], 4, 'single_family'), [crmlsCopy], 'old behavior: higher status weight');
+    assert.deepEqual(dedupeComps([crmlsCopy, rentcastCopy], 4, 'single_family', {}), [crmlsCopy]);
+    // a RentCast copy with no square footage listed is unknown, so it counts and beats the out-of-band copy too
+    assert.deepEqual(dedupeComps([crmlsCopy, { ...rentcastCopy, sqft: null }], 4, 'single_family', Wb.subjectExtrasFrom(bSubject)), [{ ...rentcastCopy, sqft: null }]);
+  });
+
+  await check('subjectExtrasFrom() reads the four facts from a subject (any may be missing) and hasExclusionFacts() sees the three MLS facts', () => {
+    assert.deepEqual(Wb.subjectExtrasFrom(bSubject), { sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false });
+    assert.deepEqual(Wb.subjectExtrasFrom({ address: 'x', sqft: 900 }), { sqft: 900, furnished: undefined, leaseTermMonths: undefined, ageRestricted: undefined });
+    assert.deepEqual(Wb.subjectExtrasFrom(undefined), { sqft: undefined, furnished: undefined, leaseTermMonths: undefined, ageRestricted: undefined });
+    assert.equal(Wb.hasExclusionFacts({}), false);
+    assert.equal(Wb.hasExclusionFacts({ furnished_status: null, lease_term_class: null, age_restricted: null }), false);
+    assert.equal(Wb.hasExclusionFacts({ age_restricted: false }), true, 'a known "no" is a fact');
+    assert.equal(Wb.hasExclusionFacts({ furnished_status: 'either' }), true);
+    assert.equal(Wb.hasExclusionFacts({ lease_term_class: 'six_month' }), true);
+    assert.equal(Wb.hasExclusionFacts(null), false);
+  });
+
+  await check('computeNumbers(): a full subject leaves the out-of-band comps out with the reason size_sqft; a subject without square footage gives exactly the old (frozen legacy) answer on the same comps', () => {
+    const comps = [
+      bComp({ address: '11 Bunting Ave, Ventura, CA 93003', monthly_rent: 4000, sqft: 1600, bedrooms: 4 }),
+      bComp({ address: '12 Bunting Ave, Ventura, CA 93003', monthly_rent: 4200, sqft: 1700, bedrooms: 4 }),
+      bComp({ address: '13 Bunting Ave, Ventura, CA 93003', monthly_rent: 6200, sqft: 2467, bedrooms: 4 }),
+      bComp({ address: '14 Bunting Ave, Ventura, CA 93003', monthly_rent: 2500, sqft: 1145, bedrooms: 4 }),
+      bComp({ address: '15 Bunting Ave, Ventura, CA 93003', monthly_rent: 4400, sqft: null, bedrooms: 4 }),
+    ];
+    const withSize = computeNumbersB({ comps, subject: bSubject });
+    assert.deepEqual(withSize.exclusionReasons, [null, null, 'size_sqft', 'size_sqft', null]);
+    assert.deepEqual(withSize.raw, { low: 4000, high: 4400 });
+    const noSize = { address: bSubject.address, propertyType: 'single_family', bedrooms: 4, bathrooms: 2 };
+    const old = computeNumbersB({ comps, subject: noSize });
+    assert.deepStrictEqual({ compsWithMatch: old.compsWithMatch, matchedCount: old.matchedCount, recommended: old.recommended, raw: old.raw, exclusionReasons: old.exclusionReasons },
+      legacyNumbersB({ rawComps: comps, bedrooms: 4, subject_property_type: 'single_family', properties: [] }), 'the five fields the frozen legacy code produces are identical');
+    assert.deepEqual(old.exclusionReasons, [null, null, null, null, null]);
+    assert.deepEqual(old.raw, { low: 2500, high: 6200 });
+    // a duplex subject: the size rule is off even with a size on file
+    const duplex = computeNumbersB({ comps: comps.map(c => ({ ...c, property_type: 'duplex' })), subject: { ...bSubject, propertyType: 'duplex' } });
+    assert.ok(duplex.exclusionReasons.every(r => r === null));
+  });
+
+  console.log('--- Phase B: MLS facts (Item 2) ---');
+
+  await check('Furnished: every real MLS value maps to the right status, and nothing (or anything unrecognised) is unknown, never a guess', () => {
+    const table = [
+      ['Unfurnished', 'unfurnished'], ['Furnished', 'furnished'], ['Partially', 'partial'], ['Partially Furnished', 'partial'],
+      ['Furnished Or Unfurnished', 'either'], ['Negotiable', 'either'], [' FURNISHED ', 'furnished'], ['unfurnished', 'unfurnished'],
+      [null, null], [undefined, null], ['', null], ['Semi', null], [true, null], [['Furnished'], null], [42, null],
+    ];
+    for (const [input, expected] of table) assert.equal(Fb.normalizeFurnished(input), expected, `Furnished ${JSON.stringify(input)}`);
+  });
+
+  await check('LeaseTerm: 30 real or spec-listed strings map to long / short / six_month / unknown by the spec rule, including "Month To Month,12 Months" = long and "Month To Month,Negotiable" = unknown', () => {
+    const table = [
+      ['12 Months', 'long'], ['12 Months,24 Months', 'long'], ['Negotiable,12 Months', 'long'], ['Negotiable,12 Months,24 Months', 'long'],
+      ['24 Months', 'long'], ['Month To Month,12 Months', 'long'], ['12 Months,6 Months', 'long'], ['12 Months,Month To Month', 'long'],
+      ['Negotiable,12 Months,Short Term Lease', 'long'], ['12 Months,Vacation Rental,Short Term Lease,6 Months', 'long'], ['Month To Month,Negotiable,12 Months', 'long'],
+      ['Month To Month', 'short'], ['Month To Month,Vacation Rental,Short Term Lease', 'short'], ['Month To Month,Vacation Rental', 'short'],
+      ['Month To Month,Short Term Lease', 'short'], ['Short Term Lease', 'short'], ['Vacation Rental', 'short'], ['Month To Month,Seasonal,Vacation Rental,Short Term Lease', 'short'],
+      ['Month To Month,Negotiable,Seasonal,Vacation Rental,Short Term Lease,6 Months', 'short'], ['Month To Month,Month To Month', 'short'],
+      ['6 Months,Daily,Month To Month,Negotiable,Seasonal,Short Term Lease', 'short'],
+      ['6 Months', 'six_month'], ['6 Months,Negotiable', 'six_month'], ['Negotiable,6 Months', 'six_month'], ['Month To Month,6 Months', 'six_month'],
+      ['Negotiable', null], ['Month To Month,Negotiable', null], ['Daily', null], ['Weekly,Daily', null], ['Negotiable,Month To Month', null],
+    ];
+    assert.ok(table.length >= 23);
+    for (const [input, expected] of table) assert.equal(Fb.classifyLeaseTerm(input), expected, `LeaseTerm "${input}"`);
+  });
+
+  await check('LeaseTerm: nothing, blank, odd types and a real list instead of a comma string are handled; capital letters and spacing do not matter', () => {
+    for (const input of [null, undefined, '', '   ', ',', 12, {}, true]) assert.equal(Fb.classifyLeaseTerm(input), null, `LeaseTerm ${JSON.stringify(input)}`);
+    assert.equal(Fb.classifyLeaseTerm(['12 Months', 'Month To Month']), 'long');
+    assert.equal(Fb.classifyLeaseTerm(['Month To Month']), 'short');
+    assert.equal(Fb.classifyLeaseTerm(' month to month , vacation rental '), 'short');
+    assert.equal(Fb.classifyLeaseTerm('12 MONTHS'), 'long');
+    assert.equal(Fb.classifyLeaseTerm([null, 7, '6 Months']), 'six_month');
+  });
+
+  await check('55+ community: a true or false stays as it is; anything else is unknown (null), which never excludes', () => {
+    assert.equal(Fb.normalizeAgeRestricted(true), true);
+    assert.equal(Fb.normalizeAgeRestricted(false), false);
+    for (const input of [null, undefined, 'true', 'Y', 1, 0, {}]) assert.equal(Fb.normalizeAgeRestricted(input), null);
+  });
+
+  await check('Subdivision: real MLS strings lose their tract code, placeholders become unknown, real names with a colon are kept; "same community" needs two real, equal names', () => {
+    const table = [
+      ['Bird IIID - 144804', 'Bird IIID'], ['Hueneme Bay 4 (148804)', 'Hueneme Bay 4'], ['Hueneme Bay 1 - 148801', 'Hueneme Bay 1'],
+      ['Marina Village - 2121', 'Marina Village'], ['Cal-Gisler - 0351', 'Cal-Gisler'], ['Ondulando 05 - 1205', 'Ondulando 05'],
+      ['Oxnard Shores: Driftwood 7 - 2477', 'Oxnard Shores: Driftwood 7'], ['Ventura Mutual', 'Ventura Mutual'], ['River Ridge', 'River Ridge'], ['  Seabridge   - 5266 ', 'Seabridge'],
+      ['Not Applicable', null], ['Other (OTHR)', null], ['Ventura: Other', null], ['Ventura: Other - 0027', null], ['Oxnard: Other - 0031', null],
+      ['Camarillo Central: Other - 41', null], ['Ventura Beach North: Other - 0022', null], ['N/A', null], ['None', null], ['Unknown', null], ['12345', null],
+      [null, null], [undefined, null], ['', null], ['   ', null], [42, null], ['x'.repeat(121), null],
+    ];
+    for (const [input, expected] of table) assert.equal(Fb.cleanSubdivisionName(input), expected, `SubdivisionName ${JSON.stringify(input)}`);
+    assert.equal(Fb.cleanSubdivisionName('A'.repeat(120)), 'A'.repeat(120), 'exactly 120 characters is allowed');
+    assert.equal(Fb.sameSubdivision('Hueneme Bay 1', 'hueneme bay 1 - 148801'), true);
+    assert.equal(Fb.sameSubdivision('Hueneme Bay 1', 'Hueneme Bay 4 (148804)'), false);
+    assert.equal(Fb.sameSubdivision(null, 'Hueneme Bay 1'), false);
+    assert.equal(Fb.sameSubdivision('Not Applicable', 'Not Applicable'), false, 'two placeholders are not the same neighborhood');
+    assert.equal(Fb.sameSubdivision(undefined, undefined), false);
+  });
+
+  await check('Display tags: HOA, private pool (houses and townhomes only), utilities, water/trash, gardener, new construction (built within 2 years), and the tags that come from the cleaned facts; never anything outside the allowed list, never twice', () => {
+    const none = { furnished_status: null, lease_term_class: null, age_restricted: null, year_built: null };
+    const flags = (rec, type = 'single_family', facts = {}) => Fb.deriveMlsFlags({ ...none, ...facts }, rec, type, bNow);
+    assert.deepEqual(flags({}), []);
+    assert.deepEqual(flags(null), []);
+    assert.deepEqual(flags({ AssociationYN: true }), ['hoa']);
+    assert.deepEqual(flags({ AssociationYN: false, RentIncludes: ['Association Dues'] }), ['hoa'], 'dues in the rent also mean an HOA');
+    assert.deepEqual(flags({ AssociationYN: null, RentIncludes: [] }), []);
+    assert.deepEqual(flags({ PoolPrivateYN: true }, 'single_family'), ['private_pool']);
+    assert.deepEqual(flags({ PoolPrivateYN: true }, 'townhouse'), ['private_pool']);
+    assert.deepEqual(flags({ PoolPrivateYN: true }, 'condo'), [], 'for a condo it means the shared pool');
+    assert.deepEqual(flags({ PoolPrivateYN: true }, 'manufactured'), []);
+    assert.deepEqual(flags({ PoolPrivateYN: true }, null), []);
+    assert.deepEqual(flags({ PoolPrivateYN: false }), []);
+    assert.deepEqual(flags({ RentIncludes: ['All Utilities'] }), ['utilities_included']);
+    assert.deepEqual(flags({ RentIncludes: ['Electricity'] }), ['utilities_included']);
+    assert.deepEqual(flags({ RentIncludes: ['Gas'] }), ['utilities_included']);
+    assert.deepEqual(flags({ RentIncludes: ['Trash Collection', 'Water', 'Sewer'] }), ['water_trash_included']);
+    assert.deepEqual(flags({ RentIncludes: ['Water'] }), ['water_trash_included']);
+    assert.deepEqual(flags({ RentIncludes: 'Sewer' }), ['water_trash_included'], 'a comma string works as well as a list');
+    assert.deepEqual(flags({ RentIncludes: ['Gardener'] }), ['gardener_included']);
+    assert.deepEqual(flags({ RentIncludes: ['None'] }), []);
+    assert.deepEqual(flags({ RentIncludes: ['See Remarks'] }), []);
+    assert.deepEqual(flags({ RentIncludes: ['Gardener', 'Trash Collection', 'Water', 'Sewer', 'All Utilities', 'Gas', 'Electricity'] }), ['utilities_included', 'gardener_included'], '639 Skyview Terrace: the fuller tag replaces the water/trash one');
+    // new construction: built in the current year or the two before it (2024 or later when it is 2026)
+    for (const [year, expected] of [[2027, true], [2026, true], [2025, true], [2024, true], [2023, false], [1978, false], [null, false]]) {
+      assert.deepEqual(flags({}, 'single_family', { year_built: year }), expected ? ['new_construction'] : [], `built ${year}`);
+    }
+    assert.deepEqual(flags({}, 'single_family', { furnished_status: 'furnished' }), ['furnished']);
+    assert.deepEqual(flags({}, 'single_family', { furnished_status: 'partial' }), ['partly_furnished']);
+    assert.deepEqual(flags({}, 'single_family', { furnished_status: 'either' }), ['partly_furnished']);
+    assert.deepEqual(flags({}, 'single_family', { furnished_status: 'unfurnished' }), []);
+    assert.deepEqual(flags({}, 'single_family', { lease_term_class: 'short' }), ['short_term']);
+    assert.deepEqual(flags({}, 'single_family', { lease_term_class: 'six_month' }), []);
+    assert.deepEqual(flags({}, 'single_family', { age_restricted: true }), ['age_restricted']);
+    assert.deepEqual(flags({}, 'single_family', { age_restricted: false }), []);
+    const everything = flags({ AssociationYN: true, PoolPrivateYN: true, RentIncludes: ['Gardener', 'Gas', 'Association Dues', 'Association Dues'] }, 'single_family',
+      { furnished_status: 'partial', lease_term_class: 'short', age_restricted: true, year_built: 2025 });
+    assert.ok(everything.every(f => Kb.MLS_FLAGS.includes(f)), 'only allowed words');
+    assert.equal(new Set(everything).size, everything.length, 'each tag once');
+    assert.equal(everything.length, 8, 'water/trash is left off because utilities are included');
+  });
+
+  await check('mlsFactsFromRecord(): a full real-shaped record (639 Skyview Terrace) gives exactly the facts and tags the spec describes; an empty record gives unknowns and an empty tag list', () => {
+    const rec = {
+      ListingId: 'V1-39044', StandardStatus: 'Closed', YearBuilt: 2020, SubdivisionName: 'Ondulando 1 - 1021', Furnished: 'Unfurnished', LeaseTerm: '12 Months',
+      SeniorCommunityYN: false, PropertyCondition: ['Turnkey', 'Updated/Remodeled'], AssociationYN: true, PoolPrivateYN: false,
+      RentIncludes: ['Gardener', 'Trash Collection', 'Water', 'Sewer', 'All Utilities', 'Gas', 'Electricity'],
+    };
+    assert.deepStrictEqual(Fb.mlsFactsFromRecord(rec, { propertyType: 'single_family', now: bNow }), {
+      mls_listing_id: 'V1-39044', year_built: 2020, subdivision_name: 'Ondulando 1', furnished_status: 'unfurnished', lease_term_class: 'long',
+      age_restricted: false, mls_condition: 'Turnkey, Updated/Remodeled', mls_flags: ['hoa', 'utilities_included', 'gardener_included'],
+    });
+    assert.deepStrictEqual(Fb.mlsFactsFromRecord({}, { now: bNow }), {
+      mls_listing_id: null, year_built: null, subdivision_name: null, furnished_status: null, lease_term_class: null, age_restricted: null, mls_condition: null, mls_flags: [],
+    });
+    assert.deepStrictEqual(Fb.mlsFactsFromRecord(null), Fb.mlsFactsFromRecord({}), 'a missing record is the same as an empty one');
+  });
+
+  await check('mlsFactsFromRecord(): a value the database would refuse becomes unknown instead (year built out of range or not whole, text too long, list instead of text, wrong types)', () => {
+    const f = o => Fb.mlsFactsFromRecord(o, { now: bNow });
+    for (const year of [1799, 2101, 1990.5, '1990', NaN, null]) assert.equal(f({ YearBuilt: year }).year_built, null, `YearBuilt ${String(year)}`);
+    assert.equal(f({ YearBuilt: 1800 }).year_built, 1800);
+    assert.equal(f({ YearBuilt: 2100 }).year_built, 2100);
+    assert.equal(f({ ListingId: 'L'.repeat(41) }).mls_listing_id, null);
+    assert.equal(f({ ListingId: 'L'.repeat(40) }).mls_listing_id, 'L'.repeat(40));
+    assert.equal(f({ ListingId: 123456 }).mls_listing_id, '123456');
+    assert.equal(f({ ListingId: '' }).mls_listing_id, null);
+    assert.equal(f({ ListingId: {} }).mls_listing_id, null);
+    assert.equal(f({ PropertyCondition: [] }).mls_condition, null);
+    assert.equal(f({ PropertyCondition: ['Turnkey'] }).mls_condition, 'Turnkey');
+    assert.equal(f({ PropertyCondition: 'Turnkey' }).mls_condition, 'Turnkey');
+    assert.equal(f({ PropertyCondition: ['x'.repeat(81)] }).mls_condition, null);
+    assert.equal(f({ PropertyCondition: [null, 7, ' Repairs Cosmetic '] }).mls_condition, 'Repairs Cosmetic');
+    assert.equal(f({ SeniorCommunityYN: 'yes' }).age_restricted, null);
+    assert.equal(f({ SubdivisionName: ['a'] }).subdivision_name, null);
+  });
+
+  await check('CRMLS mapComparable(): a real-shaped record carries the new columns; the old columns are unchanged; an absent field is null and a record never carries listing text', () => {
+    const rec = {
+      ListingKey: 'k1', ListingId: 'V1-39044', StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', StreetNumberNumeric: 639, StreetName: 'Skyview', StreetSuffix: 'Terrace',
+      City: 'Ventura', StateOrProvince: 'CA', PostalCode: '93001', BedroomsTotal: 3, BathroomsTotalDecimal: 2, ListPrice: 6500, ClosePrice: 6500, OriginalListPrice: 6500,
+      CloseDate: '2026-08-01', OnMarketDate: '2026-07-01', LivingArea: 2000, Latitude: 34.28, Longitude: -119.29, DaysOnMarket: 30,
+      Furnished: 'Unfurnished', LeaseTerm: '12 Months', SeniorCommunityYN: false, SubdivisionName: 'Ondulando 1 - 1021', YearBuilt: 2020,
+      PropertyCondition: ['Turnkey'], AssociationYN: null, PoolPrivateYN: true, RentIncludes: ['All Utilities'],
+      PublicRemarks: 'SECRET LISTING TEXT about the kitchen',
+    };
+    const m = mapCrmlsComparable(rec, 0.8, bNow);
+    assert.equal(m.monthly_rent, 6500);
+    assert.equal(m.listing_status, 'leased');
+    assert.equal(m.sqft, 2000);
+    assert.equal(m.mls_listing_id, 'V1-39044');
+    assert.equal(m.year_built, 2020);
+    assert.equal(m.subdivision_name, 'Ondulando 1');
+    assert.equal(m.furnished_status, 'unfurnished');
+    assert.equal(m.lease_term_class, 'long');
+    assert.equal(m.age_restricted, false);
+    assert.equal(m.mls_condition, 'Turnkey');
+    assert.deepEqual(m.mls_flags, ['private_pool', 'utilities_included']);
+    assert.ok(!JSON.stringify(m).includes('SECRET LISTING TEXT'), 'listing text is never carried on a comp');
+    assert.ok(!Object.keys(m).some(k => /remark/i.test(k)), 'no remarks field of any kind');
+    // a bare record (no MLS fact fields at all): unknowns and an empty tag list, never a guess
+    const bare = mapCrmlsComparable({ StandardStatus: 'Active', PropertySubType: 'Condominium', ListPrice: 2500 }, null, bNow);
+    assert.equal(bare.furnished_status, null);
+    assert.equal(bare.lease_term_class, null);
+    assert.equal(bare.age_restricted, null);
+    assert.equal(bare.mls_listing_id, null);
+    assert.deepEqual(bare.mls_flags, []);
+    // the pool tag follows OUR property type: a condo with PoolPrivateYN true gets none
+    assert.deepEqual(mapCrmlsComparable({ ...rec, PropertySubType: 'Condominium', RentIncludes: [] }, 0.8, bNow).mls_flags, []);
+  });
+
+  await check('CRMLS: a Closed record with a close date after today is dropped (the real 7376 Impala Drive typo, closed "2026-11-15"); today and yesterday are kept; an Active record or a Closed one with no close date is never touched', () => {
+    const closed = o => ({ StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', ClosePrice: 4000, ListPrice: 4000, CloseDate: '2026-10-17', StreetNumberNumeric: 7376, StreetName: 'Impala', StreetSuffix: 'Drive', ...o });
+    assert.equal(mapCrmlsComparable(closed({ CloseDate: '2026-11-15' }), null, bNow), null);
+    assert.equal(mapCrmlsComparable(closed({ CloseDate: '2026-10-18' }), null, bNow), null, 'tomorrow');
+    assert.ok(mapCrmlsComparable(closed({ CloseDate: '2026-10-17' }), null, bNow), 'today');
+    assert.ok(mapCrmlsComparable(closed({ CloseDate: '2026-10-16' }), null, bNow), 'yesterday');
+    assert.ok(mapCrmlsComparable(closed({ CloseDate: null }), null, bNow), 'no close date');
+    assert.ok(mapCrmlsComparable({ ...closed({ CloseDate: '2027-01-01' }), StandardStatus: 'Active' }, null, bNow), 'an Active record is not checked');
+    const { isFutureDatedClosedRecord } = require('./lib/crmls');
+    assert.equal(isFutureDatedClosedRecord(closed({ CloseDate: '2026-11-15' }), bNow), true);
+    assert.equal(isFutureDatedClosedRecord(null, bNow), false);
+  });
+
+  await check('CRMLS: the query asks for each new field exactly once, never for listing text, and the filter strings are unchanged', () => {
+    const { SELECT_FIELDS } = require('./lib/crmls');
+    const fields = SELECT_FIELDS.split(',');
+    assert.equal(new Set(fields).size, fields.length, 'no field twice');
+    for (const f of ['ListingId', 'Furnished', 'LeaseTerm', 'SeniorCommunityYN', 'SubdivisionName', 'YearBuilt', 'PropertyCondition', 'AssociationYN', 'PoolPrivateYN', 'RentIncludes']) {
+      assert.equal(fields.filter(x => x === f).length, 1, `${f} selected once`);
+    }
+    for (const f of fields) assert.ok(!/remark|agent|office|owner/i.test(f), `${f}: no listing text, agent or office field`);
+    assert.equal(
+      buildCrmlsFilter('Closed', { type: 'zip', zip: '93003' }, { propertyType: 'single_family', bedrooms: 3, closedSince: '2026-04-17' }),
+      "StandardStatus eq 'Closed' and PropertyType eq 'Residential Lease' and PostalCode eq '93003' and (PropertySubType eq 'Single Family Residence' or PropertySubType eq null) and ((BedroomsTotal ge 2 and BedroomsTotal le 4) or BedroomsTotal eq null) and CloseDate ge 2026-04-17"
+    );
+    assert.equal(buildCrmlsFilter('Active', { type: 'zip', zip: '93003' }), "StandardStatus eq 'Active' and PropertyType eq 'Residential Lease' and PostalCode eq '93003'");
+  });
+
+  await check('pullCrmlsComps() drops a Closed record dated in the future, logs one line saying so, and keeps the facts of the others', async () => {
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    const originalWarn = console.warn;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    const warnings = [];
+    console.warn = (...a) => { warnings.push(a.join(' ')); };
+    const base = { StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', StreetSuffix: 'St', City: 'Ventura', StateOrProvince: 'CA', PostalCode: '93003', ClosePrice: 4300, BedroomsTotal: 3, Furnished: 'Furnished', LeaseTerm: 'Month To Month', SeniorCommunityYN: true };
+    const good = { ...base, StreetNumberNumeric: 100, StreetName: 'Real', CloseDate: '2026-09-01' };
+    const typo = { ...base, StreetNumberNumeric: 7376, StreetName: 'Impala', CloseDate: '2099-11-15' };
+    global.fetch = async (url) => ({ ok: true, json: async () => ({ value: new URL(String(url)).searchParams.get('$orderby') === 'CloseDate desc' ? [good, typo] : [] }) });
+    try {
+      const result = await pullCrmlsComps({ address: '1 Test St, Ventura, CA 93003' });
+      assert.equal(result.comps.length, 1);
+      assert.ok(result.comps[0].address.startsWith('100 Real St'));
+      assert.equal(result.comps[0].furnished_status, 'furnished');
+      assert.equal(result.comps[0].lease_term_class, 'short');
+      assert.equal(result.comps[0].age_restricted, true);
+      assert.equal(warnings.filter(w => /close date in the future/.test(w)).length, 1);
+    } finally {
+      global.fetch = originalFetch;
+      console.warn = originalWarn;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  await check('RentCast mapComparable()/mapListing(): carry the MLS number (only when RentCast says the listing is from CRMLS) and the year built, nothing else about the MLS', () => {
+    const base = { formattedAddress: '12 Beta Avenue, Ventura, CA 93001', propertyType: 'Single Family', bedrooms: 3, bathrooms: 2, squareFootage: 1500, price: 3000, status: 'Active', listedDate: '2026-09-01T00:00:00.000Z', latitude: 34.2, longitude: -119.2 };
+    const crmls = mapComparable({ ...base, mlsName: 'CRMLS', mlsNumber: 'V1-39044', yearBuilt: 1978 });
+    assert.equal(crmls.mls_listing_id, 'V1-39044');
+    assert.equal(crmls.year_built, 1978);
+    assert.equal(mapComparable({ ...base, mlsName: 'Other MLS', mlsNumber: 'X-1' }).mls_listing_id, null, 'another MLS\'s number is not a CRMLS id');
+    assert.equal(mapComparable({ ...base, mlsNumber: 'X-1' }).mls_listing_id, null, 'no MLS name');
+    assert.equal(mapComparable(base).mls_listing_id, null);
+    assert.equal(mapComparable({ ...base, mlsName: 'CRMLS', mlsNumber: 'N'.repeat(41) }).mls_listing_id, null, 'too long for the column');
+    for (const year of [1700, 2200, 1978.5, '1978', null]) assert.equal(mapComparable({ ...base, yearBuilt: year }).year_built, null, `yearBuilt ${String(year)}`);
+    const listing = mapListing({ ...base, mlsName: 'CRMLS', mlsNumber: 'V1-39044', yearBuilt: 1978 }, 34.2, -119.2);
+    assert.equal(listing.mls_listing_id, 'V1-39044');
+    assert.equal(listing.year_built, 1978);
+    for (const key of ['furnished_status', 'lease_term_class', 'age_restricted', 'subdivision_name', 'mls_condition']) assert.ok(!(key in crmls) || crmls[key] === null, `RentCast does not invent ${key}`);
+  });
+
+  console.log('--- Phase B: keeping the MLS facts through de-duplication ---');
+
+  const bMls = (o = {}) => bComp({
+    source_name: 'CRMLS', address: '12 Beta Ave, Ventura, CA 93001', monthly_rent: 3000, mls_listing_id: 'V1-111', furnished_status: 'furnished', lease_term_class: 'long',
+    age_restricted: false, mls_flags: ['furnished'], year_built: 1990, subdivision_name: 'Seabridge', mls_condition: 'Turnkey', ...o,
+  });
+  const bRc = (o = {}) => bComp({ source_name: 'RentCast', listing_status: 'off_market', address: '12 Beta Avenue, Ventura, CA 93001', monthly_rent: 2900, leased_date: null, ...o });
+
+  await check('mergeMlsFacts(): a RentCast comp borrows the MLS facts of the CRMLS comp that is the same listing, matched by MLS number first, then by address plus a rent within 5%; its own price, size and status are untouched', () => {
+    const donor = bMls();
+    const byAddress = Fb.mergeMlsFacts([donor, bRc()])[1];
+    assert.equal(byAddress.furnished_status, 'furnished');
+    assert.equal(byAddress.lease_term_class, 'long');
+    assert.equal(byAddress.age_restricted, false);
+    assert.equal(byAddress.mls_listing_id, 'V1-111');
+    assert.equal(byAddress.year_built, 1990);
+    assert.equal(byAddress.subdivision_name, 'Seabridge');
+    assert.equal(byAddress.mls_condition, 'Turnkey');
+    assert.deepEqual(byAddress.mls_flags, ['furnished']);
+    assert.equal(byAddress.monthly_rent, 2900);
+    assert.equal(byAddress.listing_status, 'off_market');
+    assert.equal(byAddress.source_name, 'RentCast');
+    // by MLS number: a different address spelling and a very different rent still merge
+    const byId = Fb.mergeMlsFacts([donor, bRc({ address: '12 Beta Ave Apt 2, Ventura', monthly_rent: 1900, mls_listing_id: 'V1-111' })])[1];
+    assert.equal(byId.furnished_status, 'furnished');
+    // an id that matches nothing falls back to address plus rent
+    assert.equal(Fb.mergeMlsFacts([donor, bRc({ mls_listing_id: 'V1-999' })])[1].furnished_status, 'furnished');
+    // rent gap: 4.8% merges, 7% does not
+    assert.equal(Fb.mergeMlsFacts([donor, bRc({ monthly_rent: 3150 })])[1].furnished_status, 'furnished');
+    const sevenPct = bRc({ monthly_rent: 3225 });
+    assert.equal(Fb.mergeMlsFacts([donor, sevenPct])[1], sevenPct, 'no merge at a 7% rent gap: the very same object comes back');
+    assert.equal(Fb.mergeMlsFacts([donor, sevenPct])[1].furnished_status, undefined);
+    // another home at a different address never merges
+    const other = bRc({ address: '99 Gamma Ct, Ventura, CA 93001' });
+    assert.equal(Fb.mergeMlsFacts([donor, other])[1], other);
+    // two different units of one building never merge
+    const unitDonor = bMls({ address: '130 N Garden St, Unit 1411, Ventura, CA 93001' });
+    const unitOther = bRc({ address: '130 N Garden St, Unit 1207, Ventura, CA 93001' });
+    assert.equal(Fb.mergeMlsFacts([unitDonor, unitOther])[1], unitOther);
+  });
+
+  await check('mergeMlsFacts(): leaves alone comps that already have MLS facts, CRMLS\'s own comps and Rincon\'s own leases (LeadSimple Move-Ins); does not change its input; keeps order; picks the closest rent among several twins; tags are joined', () => {
+    const donor = bMls();
+    const hasFacts = bRc({ furnished_status: 'unfurnished', lease_term_class: 'long', age_restricted: false });
+    const ownLease = bComp({ source_name: 'LeadSimple Move-Ins', address: '12 Beta Ave, Ventura, CA 93001', monthly_rent: 3000 });
+    const otherCrmls = bMls({ address: '40 Delta Dr, Ventura, CA 93001', mls_listing_id: 'V1-222' });
+    const input = [hasFacts, donor, ownLease, otherCrmls, bRc()];
+    const before = JSON.stringify(input);
+    const out = Fb.mergeMlsFacts(input);
+    assert.equal(JSON.stringify(input), before, 'input not modified');
+    assert.equal(out.length, input.length);
+    assert.equal(out[0], hasFacts);
+    assert.equal(out[1], donor);
+    assert.equal(out[2], ownLease, 'Rincon\'s own lease keeps no MLS facts');
+    assert.equal(out[3], otherCrmls);
+    assert.equal(out[4].furnished_status, 'furnished');
+    assert.notEqual(out[4], input[4], 'a merged comp is a new object');
+    // nothing to merge from: the very same list comes back
+    const noDonor = [bRc(), bComp({ source_name: 'LeadSimple Move-Ins' })];
+    assert.equal(Fb.mergeMlsFacts(noDonor), noDonor);
+    assert.deepEqual(Fb.mergeMlsFacts([]), []);
+    assert.deepEqual(Fb.mergeMlsFacts(null), []);
+    // two CRMLS twins at the same address: the closer rent wins
+    const near = bMls({ monthly_rent: 3100, furnished_status: 'unfurnished', mls_listing_id: 'V1-333' });
+    assert.equal(Fb.mergeMlsFacts([donor, near, bRc({ monthly_rent: 3090 })])[2].furnished_status, 'unfurnished');
+    // tags the RentCast comp already had are kept, joined with the donor's, each once and only allowed words
+    const joined = Fb.mergeMlsFacts([bMls({ mls_flags: ['hoa', 'furnished'] }), bRc({ mls_flags: ['hoa', 'made_up_word'] })])[1];
+    assert.deepEqual(joined.mls_flags, ['hoa', 'furnished']);
+  });
+
+  await check('dedupeComps(): when two copies of one listing tie on status and trust, the copy that carries the MLS facts is kept, whichever came first; a higher status weight still wins; with facts on both or neither the old tie-break (distance, then first seen) is unchanged', () => {
+    const withFacts = bComp({ source_name: 'CRMLS', listing_status: 'active', address: '5 Tie St, Ventura, CA 93001', monthly_rent: 3000, furnished_status: 'unfurnished', lease_term_class: 'long', age_restricted: false, distance_miles: 0.5 });
+    const noFacts = bComp({ source_name: 'RentCast', listing_status: 'active', address: '5 Tie Street, Ventura, CA 93001', monthly_rent: 3010, distance_miles: 0.5 });
+    assert.deepEqual(dedupeComps([noFacts, withFacts]), [withFacts]);
+    assert.deepEqual(dedupeComps([withFacts, noFacts]), [withFacts]);
+    assert.deepEqual(dedupeComps([noFacts, withFacts], 3, 'single_family', bFull), [withFacts]);
+    // a higher status weight beats facts
+    const leasedNoFacts = { ...noFacts, listing_status: 'leased' };
+    assert.deepEqual(dedupeComps([withFacts, leasedNoFacts]), [leasedNoFacts]);
+    // both without facts: first seen still wins, and a real distance still beats a missing one
+    const a = bComp({ source_name: 'RentCast', listing_status: 'active', address: '6 Same St, Ventura, CA 93001', distance_miles: 0.6 });
+    const b = { ...a, address: '6 Same Street, Ventura, CA 93001', monthly_rent: 3333 };
+    assert.deepEqual(dedupeComps([a, b]), [a]);
+    assert.deepEqual(dedupeComps([{ ...a, distance_miles: null }, b]), [b]);
+    // both WITH facts: first seen
+    const f1 = { ...a, age_restricted: false }, f2 = { ...b, age_restricted: false };
+    assert.deepEqual(dedupeComps([f1, f2]), [f1]);
+  });
+
+  await check('End to end: the RentCast copy of a furnished CRMLS listing no longer slips through as "counted" for an unfurnished subject, because runActiveSources() lends it the CRMLS facts first (without that step the numbers would count it)', async () => {
+    const original = { RentCast: sourcesLib.SOURCE_HANDLERS.RentCast, CRMLS: sourcesLib.SOURCE_HANDLERS.CRMLS };
+    const rentcastCopy = { address: '12 Beta Avenue, Ventura, CA 93001', property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.3, latitude: null, longitude: null, monthly_rent: 2900, is_estimated_price: false, original_price: null, had_price_cut: false, listing_status: 'active', days_on_market: 10, listed_date: '2026-09-20', leased_date: null, mls_listing_id: 'V1-111', year_built: 1990 };
+    const crmlsCopy = { ...rentcastCopy, address: '12 Beta Ave, Ventura, CA 93001', monthly_rent: 3000, listing_status: 'active', mls_listing_id: 'V1-111', furnished_status: 'furnished', lease_term_class: 'long', age_restricted: false, mls_flags: ['furnished'] };
+    const plain = i => ({ ...rentcastCopy, address: `${20 + i} Plain Ln, Ventura, CA 93001`, mls_listing_id: null, year_built: null, monthly_rent: 3100 + i * 20, listing_status: 'leased', leased_date: '2026-09-01', listed_date: null, distance_miles: 0.35 });
+    sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ comps: [rentcastCopy, plain(0), plain(1)], subjectEstimatedRent: null });
+    sourcesLib.SOURCE_HANDLERS.CRMLS = async () => ({ comps: [crmlsCopy, plain(2), plain(3)], subjectEstimatedRent: null });
+    try {
+      const subj = { ...bSubject, bedrooms: 3, sqft: 1500 };
+      const sourced = await runActiveSources([{ id: 'r', name: 'RentCast' }, { id: 'c', name: 'CRMLS' }], subj);
+      const rc = sourced.comps.find(c => c.source_name === 'RentCast' && c.address.startsWith('12 '));
+      assert.equal(rc.furnished_status, 'furnished', 'the RentCast copy was lent the CRMLS facts');
+      const nums = computeNumbersB({ comps: sourced.comps, subject: subj });
+      const beta = nums.compsWithMatch.findIndex(c => c.address.includes('12 Beta'));
+      assert.equal(nums.compsWithMatch.filter(c => c.address.includes('12 Beta')).length, 1, 'one comp for the one listing');
+      assert.equal(nums.exclusionReasons[beta], 'furnished_mismatch');
+      // the trap this prevents: the same two copies WITHOUT the merge step, the RentCast copy is the one that counts
+      const unmerged = computeNumbersB({ comps: [{ ...rentcastCopy, source_name: 'RentCast' }, { ...crmlsCopy, source_name: 'CRMLS' }], subject: subj });
+      assert.equal(unmerged.exclusionReasons[0], null, 'without lending the facts, a furnished comp counts');
+      // a furnished subject keeps the furnished comp
+      const furnishedSubject = computeNumbersB({ comps: sourced.comps, subject: { ...subj, furnished: true } });
+      assert.equal(furnishedSubject.exclusionReasons[furnishedSubject.compsWithMatch.findIndex(c => c.address.includes('12 Beta'))], null);
+    } finally {
+      sourcesLib.SOURCE_HANDLERS.RentCast = original.RentCast;
+      sourcesLib.SOURCE_HANDLERS.CRMLS = original.CRMLS;
+    }
+  });
+
+  await check('Subject-side exceptions: a furnished subject keeps furnished comps and leaves out unfurnished ones; a lease under 6 months keeps short-term comps; a 55+ subject keeps 55+ comps; partly furnished, either, six-month and unknown never leave a comp out', () => {
+    const r = (comp, extras) => Wb.extraExclusionReason(bComp(comp), 'single_family', extras);
+    const unf = { furnished: false, leaseTermMonths: 12, ageRestricted: false };
+    // furnished
+    assert.equal(r({ furnished_status: 'furnished' }, unf), 'furnished_mismatch');
+    assert.equal(r({ furnished_status: 'furnished' }, { ...unf, furnished: true }), null);
+    assert.equal(r({ furnished_status: 'unfurnished' }, { ...unf, furnished: true }), 'furnished_mismatch');
+    assert.equal(r({ furnished_status: 'unfurnished' }, unf), null);
+    for (const status of ['partial', 'either', null, undefined]) {
+      assert.equal(r({ furnished_status: status }, unf), null, `status ${String(status)} vs unfurnished`);
+      assert.equal(r({ furnished_status: status }, { ...unf, furnished: true }), null, `status ${String(status)} vs furnished`);
+    }
+    // lease length: 6 months or more leaves short-term comps out; under 6 keeps them
+    for (const months of [6, 7, 12, 24]) assert.equal(r({ lease_term_class: 'short' }, { ...unf, leaseTermMonths: months }), 'short_term_lease', `${months}-month subject`);
+    for (const months of [1, 3, 5]) assert.equal(r({ lease_term_class: 'short' }, { ...unf, leaseTermMonths: months }), null, `${months}-month subject`);
+    for (const cls of ['long', 'six_month', null, undefined]) assert.equal(r({ lease_term_class: cls }, unf), null, `class ${String(cls)}`);
+    // 55+
+    assert.equal(r({ age_restricted: true }, unf), 'age_restricted');
+    assert.equal(r({ age_restricted: true }, { ...unf, ageRestricted: true }), null);
+    assert.equal(r({ age_restricted: false }, unf), null);
+    assert.equal(r({ age_restricted: false }, { ...unf, ageRestricted: true }), null, 'a non-55+ comp is only flagged for a 55+ subject, never left out');
+    assert.equal(r({ age_restricted: null }, unf), null);
+    assert.equal(r({ age_restricted: undefined }, unf), null);
+  });
+
+  console.log('--- Phase B: the shared comp-row mapper (every source, every column) ---');
+
+  await check('Comp rows: a mixed batch from RentCast, CRMLS and LeadSimple (the real mappers\' output) gives every row every column, with mls_flags and condition_tags as lists on EVERY row, so a bulk insert can never send a NULL for a NOT NULL column', () => {
+    const rentcast = mapComparable({ formattedAddress: '12 Beta Avenue, Ventura, CA 93001', propertyType: 'Single Family', bedrooms: 3, bathrooms: 2, squareFootage: 1500, price: 3000, status: 'Inactive', listedDate: '2026-08-01T00:00:00.000Z', removedDate: '2026-09-01T00:00:00.000Z', distance: 0.4 });
+    const crmls = mapCrmlsComparable({ StandardStatus: 'Closed', PropertySubType: 'Condominium', ClosePrice: 2800, CloseDate: '2026-09-01', StreetNumberNumeric: 5, StreetName: 'Oak', StreetSuffix: 'St', City: 'Ventura', StateOrProvince: 'CA', PostalCode: '93001', Furnished: 'Partially', LeaseTerm: '12 Months', SeniorCommunityYN: true, RentIncludes: ['Water'] }, 0.7, bNow);
+    const leadsimple = mapLeadSimpleComparable({ id: 'r1', address: '200 Rincon St', city: 'Ventura', state: 'CA', zip_code: '93001', property_type: 'Single Home', bedrooms: 3, bathrooms: 2, sqft: 1500, rent: 3300, lease_start_date: '2026-06-01' }, 0.5);
+    const comps = [rentcast, crmls, leadsimple].map((c, i) => ({ ...c, source_id: `src-${i}`, source_name: ['RentCast', 'CRMLS', 'LeadSimple Move-Ins'][i], is_rincon_managed: i === 2, comp_property_id: i === 2 ? 'p-1' : null }));
+    const rows = buildCompRows(comps, { analysisId: 'a-1', narratives: ['n0', null, 'n2'] });
+    assert.equal(rows.length, 3);
+    for (const row of rows) {
+      assert.deepEqual(Object.keys(row), COMP_ROW_COLUMNS, 'every row has every column, in the same order');
+      assert.ok(Array.isArray(row.mls_flags), 'mls_flags is a list');
+      assert.ok(Array.isArray(row.condition_tags), 'condition_tags is a list');
+      assert.equal(row.analysis_id, 'a-1');
+    }
+    // sent as JSON, no key vanishes from any row (undefined would be dropped; null and [] are kept)
+    const wire = JSON.parse(JSON.stringify(rows));
+    const union = new Set(wire.flatMap(r => Object.keys(r)));
+    for (const row of wire) assert.deepEqual(Object.keys(row).sort(), [...union].sort(), 'identical key set on every row, which is what the bulk insert needs');
+    assert.deepEqual(wire[0].mls_flags, []);
+    assert.deepEqual(wire[0].condition_tags, []);
+    assert.deepEqual(wire[2].mls_flags, []);
+    assert.deepEqual(wire[1].mls_flags, ['partly_furnished', 'age_restricted', 'water_trash_included']);
+    assert.equal(wire[1].furnished_status, 'partial');
+    assert.equal(wire[1].age_restricted, true);
+    assert.equal(wire[0].narrative, 'n0');
+    assert.equal(wire[1].narrative, null);
+    assert.equal(wire[2].is_rincon_managed, true);
+    assert.equal(wire[2].comp_property_id, 'p-1');
+    assert.equal(wire[0].condition_rating, null);
+    assert.equal(wire[0].condition_basis, null);
+    // the old columns come through unchanged
+    assert.equal(wire[1].monthly_rent, 2800);
+    assert.equal(wire[1].listing_status, 'leased');
+    assert.equal(wire[1].leased_date, '2026-09-01');
+    assert.equal(wire[0].listing_status, 'off_market');
+    for (const k of ['is_estimated_price', 'had_price_cut', 'is_rincon_managed']) for (const row of wire) assert.equal(typeof row[k], 'boolean', `${k} is true/false on every row`);
+  });
+
+  await check('Comp rows: every value is forced into what the database accepts (closed lists, lengths, a rating only with listing-text basis), so one bad value can never fail the whole batch', () => {
+    const row = o => buildCompRow(bComp({ source_id: 's', ...o }), { analysisId: 'a' });
+    assert.equal(row({ furnished_status: 'sometimes' }).furnished_status, null);
+    assert.equal(row({ furnished_status: 'either' }).furnished_status, 'either');
+    assert.equal(row({ lease_term_class: 'weekly' }).lease_term_class, null);
+    assert.equal(row({ lease_term_class: 'six_month' }).lease_term_class, 'six_month');
+    assert.equal(row({ age_restricted: 'yes' }).age_restricted, null);
+    assert.equal(row({ age_restricted: false }).age_restricted, false);
+    assert.equal(row({ year_built: 1500 }).year_built, null);
+    assert.equal(row({ year_built: 2020 }).year_built, 2020);
+    assert.equal(row({ mls_listing_id: 'x'.repeat(41) }).mls_listing_id, null);
+    assert.equal(row({ subdivision_name: 'x'.repeat(121) }).subdivision_name, null);
+    assert.equal(row({ mls_condition: 'x'.repeat(81) }).mls_condition, null);
+    assert.deepEqual(row({ mls_flags: ['hoa', 'bogus', 'hoa', 7, null, 'private_pool'] }).mls_flags, ['hoa', 'private_pool']);
+    assert.deepEqual(row({ mls_flags: 'hoa' }).mls_flags, []);
+    assert.deepEqual(row({ mls_flags: null }).mls_flags, []);
+    assert.deepEqual(row({ mls_flags: undefined }).mls_flags, []);
+    assert.deepEqual(row({ condition_tags: ['remodeled', 'haunted', 'remodeled'] }).condition_tags, ['remodeled']);
+    assert.deepEqual(row({ condition_tags: undefined }).condition_tags, []);
+    // a rating is only kept with the listing-text basis (the database refuses any other)
+    assert.equal(row({ condition_rating: 'A', condition_basis: 'listing_text' }).condition_rating, 'A');
+    assert.equal(row({ condition_rating: 'A', condition_basis: 'unclear' }).condition_rating, null);
+    assert.equal(row({ condition_rating: 'A', condition_basis: null }).condition_rating, null);
+    assert.equal(row({ condition_rating: 'A' }).condition_rating, null);
+    assert.equal(row({ condition_rating: 'Z', condition_basis: 'listing_text' }).condition_rating, null);
+    assert.equal(row({ condition_basis: 'made_up' }).condition_basis, null);
+    assert.equal(row({ condition_basis: 'not_available' }).condition_basis, 'not_available');
+    // the whole row is accepted by every list in constants.js
+    const ok = row({ mls_flags: Kb.MLS_FLAGS, condition_tags: Kb.CONDITION_TAGS, furnished_status: 'partial', lease_term_class: 'short' });
+    assert.deepEqual(ok.mls_flags, Kb.MLS_FLAGS);
+    assert.deepEqual(ok.condition_tags, Kb.CONDITION_TAGS);
+  });
+
+  await check('Comp rows: only the named columns are ever sent; working fields and listing text on a comp (source_name, exclusion_reason, _mls, _remarks, PublicRemarks) never reach a row', () => {
+    const dirty = bComp({
+      source_id: 's', source_name: 'CRMLS', exclusion_reason: 'size_sqft', _mls: { furnished: 'furnished' }, _remarks: 'SECRET LISTING TEXT', PublicRemarks: 'SECRET LISTING TEXT',
+      _distanceMiles: 0.5, _planted: true, id: 'should-not-copy', created_at: 'x',
+    });
+    const r = buildCompRow(dirty, { analysisId: 'a', narrative: 'ok' });
+    assert.deepEqual(Object.keys(r), COMP_ROW_COLUMNS);
+    assert.ok(!JSON.stringify(r).includes('SECRET LISTING TEXT'));
+    assert.equal(COMP_ROW_COLUMNS.length, 32, '21 old columns + 11 new ones');
+    for (const key of ['source_name', 'exclusion_reason', '_mls', '_remarks', 'PublicRemarks', '_distanceMiles', 'id', 'created_at']) assert.ok(!COMP_ROW_COLUMNS.includes(key), `${key} is not a column`);
+    assert.deepEqual(buildCompRows(null, { analysisId: 'a' }), []);
+    assert.deepEqual(buildCompRows([], { analysisId: 'a' }), []);
+    assert.equal(buildCompRows([dirty, dirty], { analysisId: 'a', narratives: ['x'] })[1].narrative, null, 'a missing narrative is null');
+  });
+
+  await check('The new optional request inputs: subject_age_restricted is always true or false (never null) and subject_subdivision is cleaned text or null; bad values are refused with a clear message', () => {
+    // changed in Round 3: the text forms ('', 'true', 'FALSE', ' true ') are no longer accepted, like Furnished; the screen sends a real true or false
+    for (const [input, value] of [[undefined, false], [null, false], [false, false], [true, true]]) {
+      assert.deepEqual(Fb.parseAgeRestrictedInput(input), { value }, `age_restricted ${JSON.stringify(input)}`);
+    }
+    for (const bad of ['yes', 1, 0, 'on', {}, [], '', 'true', 'FALSE', ' true ']) assert.match(Fb.parseAgeRestrictedInput(bad).error, /subject_age_restricted must be true or false/, `age_restricted ${JSON.stringify(bad)}`);
+    assert.deepEqual(Fb.parseSubdivisionInput(undefined), { value: null });
+    assert.deepEqual(Fb.parseSubdivisionInput(''), { value: null });
+    assert.deepEqual(Fb.parseSubdivisionInput('Bird IIID - 144804'), { value: 'Bird IIID' });
+    assert.deepEqual(Fb.parseSubdivisionInput('Not Applicable'), { value: null });
+    assert.deepEqual(Fb.parseSubdivisionInput('A'.repeat(120)), { value: 'A'.repeat(120) });
+    assert.match(Fb.parseSubdivisionInput('A'.repeat(121)).error, /120 characters/);
+    assert.match(Fb.parseSubdivisionInput(5).error, /must be text/);
+    assert.match(Fb.parseSubdivisionInput({}).error, /must be text/);
+  });
+
+  await check('server.js and router.js do the same thing with the new inputs: validate both before any lookup, build ONE subject for the sources and the numbers, save the analysis columns (age restricted never null) and build every comp row through buildCompRows()', () => {
+    const strip = raw => raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const sources = {};
+    for (const file of ['server.js', pathB.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathB.join(__dirname, file);
+      if (!fsB.existsSync(p)) continue;
+      const src = strip(fsB.readFileSync(p, 'utf8'));
+      sources[file] = src;
+      assert.match(src, /parseAgeRestrictedInput\(subject_age_restricted\)/, `${file} validates subject_age_restricted`);
+      assert.match(src, /parseSubdivisionInput\(subject_subdivision\)/, `${file} validates subject_subdivision`);
+      assert.match(src, /subject_age_restricted: ageRestricted,/, `${file} saves a true/false`);
+      assert.doesNotMatch(src, /subject_age_restricted:\s*null/, `${file} never sends a null age flag`);
+      assert.match(src, /subject_subdivision: subjectSubdivision,/);
+      assert.match(src, /size_band_pct: sizeBandPctFor\(subject_property_type, sqft\),/);
+      assert.match(src, /runActiveSources\(\s*activeSources,\s*subject\s*\)/, `${file} gives the sources the one subject`);
+      assert.match(src, /computeNumbers\(\{\s*comps: rawComps,\s*subject,\s*properties,?\s*\}\)/, `${file} gives the numbers the same subject`);
+      assert.match(src, /buildCompRows\(compsWithMatch, \{ analysisId: analysis\.id, narratives: narrativesByIndex \}\)/, `${file} builds rows through the shared mapper`);
+      assert.doesNotMatch(src, /compsWithMatch\.map\(\(c, i\) => \(\{\s*analysis_id/, `${file} no longer builds rows by hand`);
+      for (const field of ['furnished: isFurnished', 'leaseTermMonths', 'ageRestricted', 'sqft']) assert.ok(new RegExp(`const subject = \\{[^}]*${field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(src), `${file}: subject carries ${field}`);
+      // validated before the first database lookup
+      assert.ok(src.indexOf('parseAgeRestrictedInput(subject_age_restricted)') < src.indexOf('const userRows = await select('), `${file}: validation comes before any database lookup`);
+      // no comps at all: a failed analysis ONLY when a source broke; otherwise a finished "none found" report (Phase C)
+      // Round 3: the call also carries sourceWarnings (a source that only partly worked)
+      assert.match(src, /classifySourceResult\(\{ comps: rawComps, sourcesUsed, sourceErrors, sourceWarnings \}\)/);
+      assert.match(src, /sourceOutcome\.kind === 'failed'/);
+    }
+    const names = Object.keys(sources);
+    if (names.length === 2) {
+      const norm = s => s.replace(/\s+/g, ' ');
+      for (const piece of ['parseAgeRestrictedInput(subject_age_restricted)', 'subject_age_restricted: ageRestricted,', 'size_band_pct: sizeBandPctFor(subject_property_type, sqft),', 'buildCompRows(compsWithMatch, { analysisId: analysis.id, narratives: narrativesByIndex })']) {
+        assert.equal(norm(sources[names[0]]).includes(norm(piece)), norm(sources[names[1]]).includes(norm(piece)), piece);
+      }
+    }
+  });
+
+  await check('Both lib folders are identical, file for file (the standalone app and the Hub run the same comp logic)', () => {
+    const a = pathB.join(__dirname, 'lib');
+    const b = pathB.join(__dirname, '..', 'hub', 'rental-analysis', 'lib');
+    if (!fsB.existsSync(b)) return; // the Hub tree may be absent on a deployed copy
+    const listA = fsB.readdirSync(a).sort(), listB = fsB.readdirSync(b).sort();
+    assert.deepEqual(listB, listA, 'same files in both folders');
+    for (const f of listA) assert.equal(fsB.readFileSync(pathB.join(b, f), 'utf8'), fsB.readFileSync(pathB.join(a, f), 'utf8'), `${f} is identical`);
+    for (const f of ['mls-facts.js', 'comp-rows.js']) assert.ok(listA.includes(f), `${f} exists`);
+  });
+
+  console.log('--- Phase B: how the new reasons read in the written explanation and the dashboards ---');
+
+  await check('Narrative: each new reason is labelled "NOT COUNTED in the range" with its own words, the facts block names them, the size band is stated for a house but not for a duplex or when no subject is given, and the hard rule lists them', () => {
+    const codes = { size_sqft: /more than 25% larger or smaller/, furnished_mismatch: /furnished status does not match/, short_term_lease: /short-term lease/, age_restricted: /55\+ community/ };
+    for (const [code, words] of Object.entries(codes)) {
+      const d = describeComp({ address: '1 Test St', monthly_rent: 4000, listing_status: 'leased', bedrooms: 4, exclusion_reason: code }, 0);
+      assert.match(d, /NOT COUNTED in the range/, code);
+      assert.match(d, words, code);
+    }
+    const comps = [
+      { address: 'A', listing_status: 'leased', bedrooms: 4, property_type: 'single_family', monthly_rent: 4000 },
+      { address: 'B', listing_status: 'leased', bedrooms: 4, property_type: 'single_family', monthly_rent: 6000, exclusion_reason: 'size_sqft' },
+      { address: 'C', listing_status: 'leased', bedrooms: 4, property_type: 'single_family', monthly_rent: 6100, exclusion_reason: 'size_sqft' },
+      { address: 'D', listing_status: 'active', bedrooms: 4, property_type: 'single_family', monthly_rent: 4100, exclusion_reason: 'furnished_mismatch' },
+      { address: 'E', listing_status: 'active', bedrooms: 4, property_type: 'single_family', monthly_rent: 4100, exclusion_reason: 'short_term_lease' },
+      { address: 'F', listing_status: 'active', bedrooms: 4, property_type: 'single_family', monthly_rent: 4100, exclusion_reason: 'age_restricted' },
+    ];
+    const lines = compFactsBlock(comps).split('\n');
+    assert.match(lines[2], /NOT COUNTED by reason: square footage more than 25% off the subject's 2, 55\+ community 1, furnished status differs from the subject's 1, short-term lease 1\./);
+    assert.equal(compFactsBlock(comps).split('\n').length, 7, 'without a subject the block has no size line');
+    const withBand = compFactsBlock(comps, { subject: { propertyType: 'single_family', sqft: 1636 } }).split('\n');
+    assert.equal(withBand.length, 8);
+    assert.equal(withBand[7], "- Size band: counted comps must be within 25% of the subject's 1,636 sq ft (1,227-2,045 sq ft); a comp with no square footage listed counts as unknown and is not left out for size.");
+    assert.equal(compFactsBlock(comps, { subject: { propertyType: 'duplex', sqft: 1636 } }).split('\n').length, 7);
+    assert.equal(compFactsBlock(comps, { subject: { propertyType: 'single_family' } }).split('\n').length, 7);
+    const prompt = buildPrompt({ subject: { address: '2461 Bunting Avenue', bedrooms: 4, bathrooms: 2, sqft: 1636, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps, recommended: { low: 4000, mid: 4050, high: 4100 }, raw: { low: 4000, high: 4100 }, subjectEstimatedRent: null, sourcesUsed: ['CRMLS'] });
+    assert.match(prompt, /Size band: counted comps must be within 25% of the subject's 1,636 sq ft \(1,227-2,045 sq ft\)/);
+    assert.match(prompt, /a 55\+ community when the subject is not in one/);
+    assert.match(prompt, /a square footage more than 25% larger or smaller than the subject's/);
+    // none of the four is ever picked for a written narrative
+    assert.deepEqual(pickNarratedIndexes(comps), [0]);
+  });
+
+  await check('Dashboards: both pages label the four new reasons in the "not used" list, say "too large (2,467 sq ft)" or "too small" for a size exclusion, and still differ from each other only in the Leaflet lines', () => {
+    const standalone = fsB.readFileSync(pathB.join(__dirname, 'dashboard', 'index.html'), 'utf8');
+    const hubPath = pathB.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html');
+    for (const html of [standalone, ...(fsB.existsSync(hubPath) ? [fsB.readFileSync(hubPath, 'utf8')] : [])]) {
+      const labels = html.slice(html.indexOf('const EXCLUSION_REASON_LABELS'), html.indexOf('function buildNotUsedRow'));
+      for (const code of ['size_sqft', 'furnished_mismatch', 'short_term_lease', 'age_restricted']) assert.match(labels, new RegExp(`${code}:`), `label for ${code}`);
+      const row = html.slice(html.indexOf('function buildNotUsedRow'), html.indexOf('function renderReport'));
+      assert.match(row, /too large \(/);
+      assert.match(row, /too small \(/);
+      assert.match(row, /analysis\.subject_sqft/);
+      assert.match(html, /notUsedComps\.map\(c => buildNotUsedRow\(c, analysis\)\)/);
+    }
+    if (fsB.existsSync(hubPath)) {
+      const bodyOf = html => html.slice(html.indexOf('</title>'));
+      const hub = fsB.readFileSync(hubPath, 'utf8');
+      const strip = html => bodyOf(html).replace(/<link[^>]*leaflet[^>]*>|<script[^>]*leaflet[^>]*><\/script>/g, '').replace(/<!--[\s\S]*?-->/g, '').replace(/\s+/g, ' ');
+      assert.equal(strip(hub), strip(standalone), 'identical apart from the Leaflet tags');
+    }
+  });
+
+  console.log('--- Phase B: the accuracy test runs the shipped rules ---');
+
+  const btB = {
+    asof: require('./backtest/asof-sources'),
+    targets: require('./backtest/targets'),
+    cand: require('./backtest/candidates'),
+    engine: require('./backtest/engine'),
+    prov: require('./backtest/provenance'),
+  };
+  const bRec = o => ({
+    ListingKey: 'k0', ListingId: 'L0', StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', StreetNumberNumeric: 100, StreetDirPrefix: null,
+    StreetName: 'Oak', StreetSuffix: 'Street', StreetDirSuffix: null, UnitNumber: null, City: 'Ventura', StateOrProvince: 'CA', PostalCode: '93001',
+    BedroomsTotal: 3, BathroomsTotalDecimal: 2, ListPrice: 3000, ClosePrice: 3000, OriginalListPrice: 3000, CloseDate: '2026-08-01', OnMarketDate: '2026-07-10',
+    ListingContractDate: '2026-07-10', Latitude: 34.2, Longitude: -119.2, LivingArea: 1500, DaysOnMarket: 21, Furnished: 'Unfurnished', LeaseTerm: '12 Months',
+    SeniorCommunityYN: false, ...o,
+  });
+  // 4 comps that fit a 1,500 sq ft subject, 3 far too large, plus one furnished, one month-to-month and one 55+ lease: 4 count after the rules, 10 before.
+  const bClosed = [
+    ...[3000, 3100, 3200, 3300].map((rent, i) => bRec({ ListingKey: `in${i}`, ListingId: `IN${i}`, StreetNumberNumeric: 200 + i * 2, ClosePrice: rent, ListPrice: rent, LivingArea: 1400 + i * 50, CloseDate: `2026-08-0${i + 1}` })),
+    ...[5200, 5400, 5600].map((rent, i) => bRec({ ListingKey: `big${i}`, ListingId: `BIG${i}`, StreetNumberNumeric: 300 + i * 2, ClosePrice: rent, ListPrice: rent, LivingArea: 2400 + i * 50, CloseDate: `2026-08-1${i}` })),
+    bRec({ ListingKey: 'furn', ListingId: 'FURN', StreetNumberNumeric: 400, ClosePrice: 7900, ListPrice: 7900, Furnished: 'Furnished', CloseDate: '2026-08-15' }),
+    bRec({ ListingKey: 'mtm', ListingId: 'MTM', StreetNumberNumeric: 402, ClosePrice: 6800, ListPrice: 6800, LeaseTerm: 'Month To Month', CloseDate: '2026-08-16' }),
+    bRec({ ListingKey: 'old55', ListingId: 'OLD55', StreetNumberNumeric: 404, ClosePrice: 2100, ListPrice: 2100, SeniorCommunityYN: true, CloseDate: '2026-08-17' }),
+  ];
+  const bTargetRec = bRec({ ListingKey: 'tgt', ListingId: 'TGT', StreetNumberNumeric: 500, StreetName: 'Target', CloseDate: '2026-09-01', ClosePrice: 3400, ListPrice: 3400, OnMarketDate: '2026-08-15', ListingContractDate: '2026-08-15' });
+  const bWorld = btB.asof.createWorld({ closed: [...bClosed, bTargetRec], leadsimple: [], properties: [] });
+  const bTarget = btB.targets.mlsTargetFromRecord(bTargetRec);
+
+  await check('Accuracy test: the baseline is the tool before Phase B (it counts every home), the Phase B method applies the real rules inside lib/ (4 of 10 count), and the earlier simulation gives the identical answer', async () => {
+    const run = async id => (await btB.engine.runTargets(bWorld, [bTarget], btB.cand.METHODS[id], btB.cand.POOLS.mls))[0];
+    const base = await run('baseline');
+    const real = await run('size25_item2');
+    const sim = await run('size25_item2_sim');
+    assert.equal(base.n, 10, 'before Phase B every comp counts (subject given without a size or the form facts)');
+    assert.equal(real.n, 4, '3 too large + furnished + month-to-month + 55+ are left out');
+    assert.equal(sim.n, 4);
+    const answer = r => ({ est: r.est, low: r.low, high: r.high, rawLow: r.rawLow, rawHigh: r.rawHigh, n: r.n, leased: r.leased, rents: [...r.rents].sort((a, b) => a - b) });
+    assert.deepStrictEqual(answer(real), answer(sim));
+    assert.deepEqual(answer(real).rents, [3000, 3100, 3200, 3300]);
+    assert.ok(real.pooled > sim.pooled, 'the real code is handed the left-out comps too (shown as "not used"); the simulation never sees them');
+    assert.equal(real.rent, 3400);
+    assert.ok(real.rents.every(r => r !== 3400), 'the lease being predicted is never a comp');
+    assert.equal(btB.cand.METHODS.size25_item2.shipped, true);
+    assert.equal(btB.cand.METHODS.size25_item2.keep, null);
+    assert.equal(btB.cand.METHODS.baseline.shipped, undefined);
+    assert.deepEqual(btB.engine.FORM_DEFAULTS, { furnished: false, leaseTermMonths: 12, ageRestricted: false });
+  });
+
+  await check('Accuracy test: the code hash that ties the fidelity check to the code it checked now includes lib/mls-facts.js', () => {
+    assert.ok(btB.prov.TRACKED_FILES.includes('lib/mls-facts.js'));
+    assert.equal(typeof btB.prov.trackedFilesHash().files['lib/mls-facts.js'], 'string');
+    assert.notEqual(btB.prov.trackedFilesHash().files['lib/mls-facts.js'], 'missing');
+  });
+
+  await check('The A0 proof still compares like with like: backtest/a0-replay.js gives the subject no square footage, so the Phase B rules are off and the frozen legacy code is still the thing compared', () => {
+    const src = fsB.readFileSync(pathB.join(__dirname, 'backtest', 'a0-replay.js'), 'utf8');
+    assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'), /sqft: a\.subject_sqft/, 'the subject carries no sqft');
+    assert.ok(fsB.existsSync(pathB.join(__dirname, 'backtest', 'phase-b-equivalence.js')));
+    assert.match(fsB.readFileSync(pathB.join(__dirname, 'backtest', 'README.md'), 'utf8'), /phase-b-equivalence\.js/);
+  });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase C (CMA-QUALITY-SPEC.md Item 4): the recommended range, the suggested and
+  // stretch prices, the confidence label, thin and empty reports, the narrative
+  // rule for ranges. Everything runs offline on small fixtures.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Phase C: the recommended range, suggested price and stretch price (Item 4.2) ---');
+  const Wc = require('./lib/weighting');
+  const Kc = require('./lib/constants');
+  const { computeConfidence } = require('./lib/confidence');
+  const Oc = require('./lib/outcome');
+  const AS = require('./lib/accuracy-sentences');
+  const { computeNumbers: computeNumbersC } = require('./lib/analyze');
+  const { validateRationale: validateC, findWideRangeStatements, guardWideRanges, allowedDollarFigures: allowedC } = require('./lib/narrative');
+  const fsC = require('node:fs');
+  const pathC = require('node:path');
+  const osC = require('node:os');
+  const { spawnSync } = require('node:child_process');
+
+  const cComps = (rents, o = {}) => rents.map((monthly_rent, i) => ({
+    address: `${10 + i} Money St, Ventura, CA 93001`, monthly_rent, listing_status: 'leased', ...o,
+  }));
+  const rec = (low, mid, high) => ({ low, mid, high });
+  // lcg: a small repeatable random-number maker, so the "1,000 random inputs" are the same every run
+  let seedC = 20261017;
+  const rndC = () => (seedC = (seedC * 1664525 + 1013904223) % 4294967296) / 4294967296;
+
+  await check('Recommended range: always exactly $200 wide with both ends on a round $100; a middle exactly on a $100 mark centres on it (2,700 gives 2,600-2,800)', () => {
+    const h = Wc.computeHeadlineRange(rec(2500, 2700, 2900), cComps([2500, 2600, 2700, 2800, 2900]), 'balanced');
+    assert.equal(h.low, 2600);
+    assert.equal(h.high, 2800);
+    assert.equal(h.high - h.low, Kc.HEADLINE_RANGE_WIDTH);
+    assert.equal(h.centre, 2700);
+    // rounds to the nearest $100 otherwise
+    assert.equal(Wc.computeHeadlineRange(rec(4000, 4349.99, 4600), cComps([1, 2, 3, 4]), 'balanced').low, 4200);
+    assert.equal(Wc.computeHeadlineRange(rec(4000, 4350.01, 4600), cComps([1, 2, 3, 4]), 'balanced').low, 4300);
+    assert.equal(Kc.HEADLINE_RANGE_WIDTH, 200);
+  });
+
+  await check('Recommended range: a middle exactly halfway ($x50) takes the candidate closer to the middle of the computed range, and the lower one if still tied (Bunting: 4,350 gives 4,200-4,400)', () => {
+    const four = cComps([1, 2, 3, 4]);
+    assert.deepEqual([Wc.computeHeadlineRange(rec(4200, 4350, 4500), four).low, Wc.computeHeadlineRange(rec(4200, 4350, 4500), four).high], [4200, 4400], 'exact tie: the lower');
+    assert.equal(Wc.computeHeadlineRange(rec(4300, 4350, 4600), four).low, 4300, 'computed range sits above: the higher candidate (4,400) is closer, so 4,300-4,500');
+    assert.equal(Wc.computeHeadlineRange(rec(4000, 4350, 4400), four).low, 4200, 'computed range sits below: the lower candidate (4,300) is closer');
+    // roundToStep itself, both steps, both directions
+    assert.equal(Wc.roundToStep(4350, 100, 4300, 4600), 4400);
+    assert.equal(Wc.roundToStep(4350, 100, 4000, 4400), 4300);
+    assert.equal(Wc.roundToStep(4325, 50, 4300, 4400), 4350, '$25 past a $50 mark: the closer candidate is the higher one');
+    assert.equal(Wc.roundToStep(4325, 50, 4000, 4300), 4300);
+    assert.equal(Wc.roundToStep(4325, 50, 4150, 4500), 4300, 'an exact tie takes the lower');
+    assert.equal(Wc.roundToStep(4300, 50, 1, 2), 4300);
+  });
+
+  await check('Recommended range: 1,000 random inputs always give width 200, both ends multiples of $100, a suggested price that is a multiple of $50 and inside the range for every goal, and a stretch price of range high + 200 that is a multiple of $50 and never inside the range', () => {
+    const four = cComps([1, 2, 3, 4]);
+    for (let i = 0; i < 1000; i++) {
+      const mid = Math.round((900 + rndC() * 9000) * 100) / 100;
+      const low = mid - rndC() * 900, high = mid + rndC() * 900;
+      for (const goal of Kc.OWNER_GOALS) {
+        const h = Wc.computeHeadlineRange(rec(low, mid, high), four, goal);
+        assert.equal(h.high - h.low, 200, `width for mid ${mid}`);
+        assert.equal(h.low % 100, 0);
+        assert.equal(h.high % 100, 0);
+        assert.equal(h.listPrice % 50, 0);
+        assert.ok(h.listPrice >= h.low && h.listPrice <= h.high, `list price ${h.listPrice} inside ${h.low}-${h.high}`);
+        assert.equal(h.stretchPrice, h.high + 200);
+        assert.equal(h.stretchPrice % 50, 0);
+        assert.ok(h.stretchPrice > h.high);
+        assert.ok(h.low >= 0);
+      }
+    }
+    // never below $0, even for an absurd middle
+    const tiny = Wc.computeHeadlineRange(rec(10, 40, 80), cComps([1, 2, 3, 4]), 'lease_quickly');
+    assert.equal(tiny.low, 0);
+    assert.equal(tiny.high, 200);
+  });
+
+  await check('Fewer than 4 counted comps (or no middle) gives no range, no prices and no label: 0, 1, 2 and 3 comps all return null; exactly 4 returns a range', () => {
+    for (let n = 0; n <= 3; n++) assert.equal(Wc.computeHeadlineRange(rec(4000, 4300, 4500), cComps(new Array(n).fill(4300)), 'balanced'), null, `${n} comps`);
+    assert.ok(Wc.computeHeadlineRange(rec(4000, 4300, 4500), cComps([1, 2, 3, 4]), 'balanced'));
+    assert.equal(Wc.computeHeadlineRange(rec(null, null, null), cComps([1, 2, 3, 4, 5]), 'balanced'), null, 'no middle');
+    assert.equal(Wc.computeHeadlineRange(null, cComps([1, 2, 3, 4]), 'balanced'), null);
+    assert.equal(Wc.computeHeadlineRange(rec(4000, 4300, 4500), null, 'balanced'), null);
+    assert.equal(Kc.HEADLINE_MIN_COMPS, 4);
+    assert.equal(computeConfidence(null), null, 'no range means no label');
+  });
+
+  await check('Owner goal sets ONLY the suggested price: Lease quickly = range low, Balanced = the middle rounded to $50, Maximize rent = range high; a missing or unrecognised goal means Balanced; the range, the stretch price and the label never change with the goal', () => {
+    const comps = cComps([3900, 4100, 4300, 4500, 4700, 4900], { listing_status: 'leased' });
+    const r = rec(4150, 4350, 4550);
+    const byGoal = Object.fromEntries(Kc.OWNER_GOALS.map(g => [g, Wc.computeHeadlineRange(r, comps, g)]));
+    assert.equal(byGoal.lease_quickly.listPrice, 4200);
+    assert.equal(byGoal.balanced.listPrice, 4350);
+    assert.equal(byGoal.maximize_rent.listPrice, 4400);
+    for (const bad of [undefined, null, '', 'maximize', 'BALANCED', 7, {}]) assert.equal(Wc.computeHeadlineRange(r, comps, bad).goal, 'balanced', `goal ${JSON.stringify(bad)}`);
+    assert.equal(Wc.computeHeadlineRange(r, comps, undefined).listPrice, 4350);
+    for (const g of ['lease_quickly', 'maximize_rent']) {
+      assert.equal(byGoal[g].low, byGoal.balanced.low);
+      assert.equal(byGoal[g].high, byGoal.balanced.high);
+      assert.equal(byGoal[g].stretchPrice, byGoal.balanced.stretchPrice);
+      assert.deepEqual(computeConfidence(byGoal[g]), computeConfidence(byGoal.balanced));
+    }
+    assert.deepEqual(Kc.OWNER_GOALS, ['lease_quickly', 'balanced', 'maximize_rent']);
+    assert.equal(Kc.DEFAULT_OWNER_GOAL, 'balanced');
+  });
+
+  await check('The three goal sentences are exact, carry the price once, and mention no time, speed or chance', () => {
+    assert.equal(Wc.goalSentenceFor('lease_quickly', 4200), 'Based on your goal of leasing quickly, we suggest listing at $4,200.');
+    assert.equal(Wc.goalSentenceFor('balanced', 4350), 'Based on your goal of a balanced approach, we suggest listing at $4,350.');
+    assert.equal(Wc.goalSentenceFor('maximize_rent', 4400), 'Based on your goal of maximizing rent, we suggest listing at $4,400.');
+    assert.equal(Wc.goalSentenceFor('nonsense', 4350), 'Based on your goal of a balanced approach, we suggest listing at $4,350.');
+    for (const g of Kc.OWNER_GOALS) assert.doesNotMatch(Wc.goalSentenceFor(g, 4350), /\b(days?|weeks?|months?|chance|odds|probab|likel|window)\b/i);
+  });
+
+  await check('Bunting replay: a middle of 4,350 gives the range $4,200-$4,400, list price $4,200 / $4,350 / $4,400 by goal, stretch price $4,600, and its sentence reads as the spec says', () => {
+    const comps = cComps([4100, 4250, 4350, 4450, 4600], { listing_status: 'leased' });
+    const r = rec(4200, 4350, 4500);
+    const h = Wc.computeHeadlineRange(r, comps, 'balanced');
+    assert.deepEqual([h.low, h.high, h.listPrice, h.stretchPrice], [4200, 4400, 4350, 4600]);
+    assert.equal(h.goalSentence, 'Based on your goal of a balanced approach, we suggest listing at $4,350.');
+    assert.deepEqual(['lease_quickly', 'maximize_rent'].map(g => Wc.computeHeadlineRange(r, comps, g).listPrice), [4200, 4400]);
+    assert.equal(h.countedTotal, 5);
+    assert.equal(h.leasedCounted, 5);
+    assert.equal(h.spread, 300, 'the internal spread is the computed 25th-to-75th gap');
+    assert.equal(h.compsInside, 2, 'rents inside 4,200-4,400: 4,250 and 4,350');
+    assert.equal(h.compsNear, 4, 'within $100 of the range (4,100 to 4,500): 4,100, 4,250, 4,350 and 4,450');
+  });
+
+  console.log('--- Phase C: the confidence label (Item 4.3) ---');
+
+  const hl = (o = {}) => ({ countedTotal: 8, leasedCounted: 5, spread: 200, compsNear: 4, ...o });
+
+  await check('Confidence: spread boundaries 249.99 / 250 / 499.99 / 500 (High needs under 250 and Low starts at 500)', () => {
+    assert.equal(computeConfidence(hl({ spread: 249.99 })).label, 'high');
+    assert.equal(computeConfidence(hl({ spread: 250 })).label, 'medium');
+    assert.equal(computeConfidence(hl({ spread: 499.99 })).label, 'medium');
+    assert.equal(computeConfidence(hl({ spread: 500 })).label, 'low');
+    assert.equal(computeConfidence(hl({ spread: 0 })).label, 'high');
+  });
+
+  await check('Confidence: comp count 4 / 5 / 6 (under 5 is Low, 5 cannot be High, 6 can) and leased count 0 / 1 / 2 (none is Low, 1 cannot be High, 2 can)', () => {
+    assert.equal(computeConfidence(hl({ countedTotal: 4 })).label, 'low');
+    assert.equal(computeConfidence(hl({ countedTotal: 5 })).label, 'medium');
+    assert.equal(computeConfidence(hl({ countedTotal: 6 })).label, 'high');
+    assert.equal(computeConfidence(hl({ leasedCounted: 0 })).label, 'low');
+    assert.equal(computeConfidence(hl({ leasedCounted: 1 })).label, 'medium');
+    assert.equal(computeConfidence(hl({ leasedCounted: 2 })).label, 'high');
+  });
+
+  await check('Confidence: no counted comp priced near the range forces Low even when everything else is High; Low wins over every other rule', () => {
+    assert.equal(computeConfidence(hl({ compsNear: 0 })).label, 'low');
+    assert.equal(computeConfidence(hl({ compsNear: 1 })).label, 'high');
+    assert.equal(computeConfidence(hl({ spread: 900, countedTotal: 12, leasedCounted: 9 })).label, 'low');
+    assert.deepEqual(Object.keys(computeConfidence(hl())).sort(), ['label', 'reasonText', 'reasons']);
+  });
+
+  await check('Confidence: the reasons are written by code (counts and plain words only: no dollar figures, no spread number, nothing about time) and name what holds the label back', () => {
+    const all = [hl(), hl({ spread: 300 }), hl({ countedTotal: 4, leasedCounted: 0, spread: 800, compsNear: 0 }), hl({ countedTotal: 5, leasedCounted: 1 }), hl({ countedTotal: 7, leasedCounted: 0 })];
+    for (const input of all) {
+      const c = computeConfidence(input);
+      assert.ok(c.reasons.length >= 2);
+      assert.doesNotMatch(c.reasonText, /\$|\bdays?\b|\bweeks?\b|\bmonths?\b|chance|odds|window/i);
+      assert.match(c.reasons[0], /^\d+ comps? counted, \d+ of them (?:a )?confirmed leases?$/); // Round 3: "1 of them a confirmed lease"
+    }
+    assert.match(computeConfidence(hl({ countedTotal: 5, leasedCounted: 1 })).reasonText, /6 or more comps are needed for High/.source ? /2 or more confirmed leases are needed for High/ : /x/);
+    assert.match(computeConfidence(hl({ leasedCounted: 0 })).reasonText, /no confirmed lease is among them/);
+    assert.match(computeConfidence(hl({ compsNear: 0 })).reasonText, /no counted comp is priced near this range/);
+    assert.match(computeConfidence(hl({ spread: 700 })).reasonText, /their rents are spread widely/);
+    // Round 3: the count is given once ("4 comps counted, ...; 5 or more are needed for better than Low"), not repeated as "only 4 comps counted"
+    assert.match(computeConfidence(hl({ countedTotal: 4 })).reasonText, /^4 comps counted, \d+ of them confirmed leases; 5 or more are needed for better than Low/);
+    assert.doesNotMatch(computeConfidence(hl({ countedTotal: 4 })).reasonText, /only 4 comps counted/);
+    assert.match(computeConfidence(hl({ spread: 300 })).reasonText, /they agree only moderately/);
+    assert.match(computeConfidence(hl()).reasonText, /they mostly agree/);
+    assert.equal(computeConfidence(hl({ countedTotal: 1, leasedCounted: 1 })).reasons[0], '1 comp counted, 1 of them a confirmed lease');
+  });
+
+  await check('The product\'s range, prices and label agree with the accuracy test\'s own reference copy (backtest/metrics.js) on 2,000 random reports, so the published hit rates describe what the tool actually does', () => {
+    const M = require('./backtest/metrics');
+    for (let i = 0; i < 2000; i++) {
+      const n = 1 + Math.floor(rndC() * 12);
+      const leased = Math.floor(rndC() * (n + 1));
+      const mid = Math.round((1500 + rndC() * 6000) * 100) / 100;
+      const low = mid - rndC() * 700, high = mid + rndC() * 700;
+      const comps = Array.from({ length: n }, (_, k) => ({ monthly_rent: Math.round(mid + (rndC() - 0.5) * 1800), listing_status: k < leased ? 'leased' : 'active' }));
+      const head = Wc.computeHeadlineRange(rec(low, mid, high), comps, 'balanced');
+      const row = { est: mid, low, high, n, leased, spread: high - low };
+      const ref = M.headlineRange(row);
+      if (!ref) { assert.equal(head, null); continue; }
+      assert.deepEqual([head.low, head.high, head.listPrice, head.stretchPrice], [ref.low, ref.high, ref.listPrice, ref.stretchPrice], `range for mid ${mid}`);
+      const nearRange = comps.some(c => c.monthly_rent >= ref.low - 100 && c.monthly_rent <= ref.high + 100);
+      assert.equal(computeConfidence(head).label, (M.confidenceLabel({ ...row, nearRange }) || '').toLowerCase(), `label for n ${n}, leased ${leased}, spread ${Math.round(high - low)}`);
+    }
+  });
+
+  console.log('--- Phase C: what the screen is told, thin and empty reports, the database rules ---');
+
+  // numbers for a set of counted comps (all single-family, 4 bedrooms, in the size band)
+  const subjectC = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false };
+  const numbersFor = (rents, statuses, goal) => computeNumbersC({
+    comps: rents.map((monthly_rent, i) => ({
+      address: `${200 + i} Test Ave, Ventura, CA 93003`, property_type: 'single_family', bedrooms: 4, sqft: 1600, distance_miles: 0.2, monthly_rent,
+      listing_status: (statuses && statuses[i]) || 'leased', source_id: 's', source_name: 'CRMLS', is_estimated_price: false, had_price_cut: false, original_price: null,
+    })),
+    subject: { ...subjectC, ownerGoal: goal },
+  });
+
+  await check('computeNumbers() now also returns the counted totals, the headline range and the confidence label, and builds them only from the comps that counted', () => {
+    const six = numbersFor([4300, 4350, 4400, 4400, 4450, 4500]);
+    assert.deepEqual(six.counted, { total: 6, leased: 6 });
+    assert.equal(six.headline.high - six.headline.low, 200);
+    assert.equal(six.confidence.label, 'high');
+    // a comp that does not count is in neither total nor range
+    const withBad = computeNumbersC({ comps: [...numbersFor([4300, 4350, 4400, 4400, 4450, 4500]).compsWithMatch, { address: '999 Big Ave, Ventura, CA 93003', property_type: 'single_family', bedrooms: 4, sqft: 3500, distance_miles: 0.2, monthly_rent: 9000, listing_status: 'leased', source_id: 's', source_name: 'CRMLS' }], subject: subjectC });
+    assert.equal(withBad.counted.total, 6);
+    assert.equal(withBad.headline.high, six.headline.high);
+    // fewer than 4 counted: no headline, no label
+    const thin = numbersFor([4300, 4400, 4500]);
+    assert.equal(thin.headline, null);
+    assert.equal(thin.confidence, null);
+    assert.deepEqual(thin.counted, { total: 3, leased: 3 });
+    const none = computeNumbersC({ comps: [], subject: subjectC });
+    assert.deepEqual(none.counted, { total: 0, leased: 0 });
+    assert.equal(none.headline, null);
+    // the owner's goal reaches the suggested price through the subject
+    assert.equal(numbersFor([4000, 4150, 4300, 4450, 4600, 4750], undefined, 'lease_quickly').headline.listPrice, numbersFor([4000, 4150, 4300, 4450, 4600, 4750], undefined, 'lease_quickly').headline.low);
+  });
+
+  await check('Owner goal input: empty or missing means Balanced; exactly lease_quickly, balanced or maximize_rent pass; anything else (a near miss, a capital letter, a number) is refused with the three allowed words', () => {
+    for (const empty of [undefined, null, '']) assert.deepEqual(Oc.parseOwnerGoalInput(empty), { value: 'balanced' });
+    for (const g of Kc.OWNER_GOALS) assert.deepEqual(Oc.parseOwnerGoalInput(g), { value: g });
+    for (const bad of ['maximize', 'Balanced', 'lease quickly', 'quick', 7, true, {}, [], ' balanced']) {
+      const r = Oc.parseOwnerGoalInput(bad);
+      assert.match(r.error, /^owner_goal must be one of: lease_quickly, balanced, maximize_rent/, JSON.stringify(bad));
+      assert.equal(r.value, undefined);
+    }
+  });
+
+  await check('Sources that return nothing: comps found = carry on; none found with every source that ran fine = a FINISHED report; any source that broke (even beside one that found nothing), or no source ran at all = FAILED with the errors', () => {
+    const c = Oc.classifySourceResult;
+    assert.deepEqual(c({ comps: [{}], sourcesUsed: ['CRMLS'], sourceErrors: [] }), { kind: 'has_comps' });
+    assert.deepEqual(c({ comps: [{}], sourcesUsed: ['CRMLS'], sourceErrors: [{ name: 'RentCast', error: 'down' }] }), { kind: 'has_comps' }, 'a broken source does not matter once comps exist');
+    assert.deepEqual(c({ comps: [], sourcesUsed: ['RentCast', 'CRMLS'], sourceErrors: [] }), { kind: 'none_found' });
+    assert.deepEqual(c({ comps: [], sourcesUsed: ['CRMLS'], sourceErrors: [] }), { kind: 'none_found' });
+    assert.deepEqual(c({ comps: [], sourcesUsed: [], sourceErrors: [{ name: 'RentCast', error: 'down' }, { name: 'CRMLS', error: 'also down' }] }), { kind: 'failed', reason: 'RentCast: down | CRMLS: also down' });
+    assert.deepEqual(c({ comps: [], sourcesUsed: ['RentCast'], sourceErrors: [{ name: 'CRMLS', error: 'down' }] }), { kind: 'failed', reason: 'CRMLS: down' }, 'one source found nothing and another broke: we cannot say there are no comps');
+    assert.deepEqual(c({ comps: [], sourcesUsed: [], sourceErrors: [] }), { kind: 'failed', reason: 'No comps were returned by any active source.' }, 'nothing ran at all');
+    assert.deepEqual(c({ comps: undefined, sourcesUsed: undefined, sourceErrors: undefined }), { kind: 'failed', reason: 'No comps were returned by any active source.' });
+  });
+
+  // The migration's rules, written once more here so the saved patch can be checked without a database
+  // (20261018000000_rental_cma_quality.sql: chk_headline_range, the column checks and the loosened chk_complete_requires_rent_range).
+  const dbAccepts = a => {
+    const bad = [];
+    const mod = (v, m) => v % m === 0;
+    if (a.headline_range_low != null && !(a.headline_range_low >= 0 && mod(a.headline_range_low, 100))) bad.push('headline_range_low');
+    if (a.headline_range_high != null && !(a.headline_range_high >= 0 && mod(a.headline_range_high, 100))) bad.push('headline_range_high');
+    if (a.suggested_list_price != null && !(a.suggested_list_price >= 0 && mod(a.suggested_list_price, 50))) bad.push('suggested_list_price');
+    if (a.stretch_price != null && !(a.stretch_price >= 0 && mod(a.stretch_price, 50))) bad.push('stretch_price');
+    if (a.owner_goal != null && !['lease_quickly', 'balanced', 'maximize_rent'].includes(a.owner_goal)) bad.push('owner_goal');
+    if (a.confidence_label != null && !['high', 'medium', 'low'].includes(a.confidence_label)) bad.push('confidence_label');
+    if (a.confidence_spread != null && !(a.confidence_spread >= 0)) bad.push('confidence_spread');
+    if (a.counted_comp_count != null && !(a.counted_comp_count >= 0)) bad.push('counted_comp_count');
+    if (a.counted_leased_count != null && !(a.counted_leased_count >= 0)) bad.push('counted_leased_count');
+    if (a.method_version != null && a.method_version.length > 40) bad.push('method_version');
+    const allNull = a.headline_range_low == null && a.headline_range_high == null && a.suggested_list_price == null && a.stretch_price == null;
+    const consistent = a.headline_range_low != null && a.headline_range_high != null && a.suggested_list_price != null
+      && a.headline_range_high - a.headline_range_low === 200 && a.suggested_list_price >= a.headline_range_low && a.suggested_list_price <= a.headline_range_high
+      && (a.stretch_price == null || a.stretch_price === a.headline_range_high + 200);
+    if (!allNull && !consistent) bad.push('chk_headline_range');
+    if (a.status === 'complete') {
+      const strict = a.recommended_rent_low != null && a.recommended_rent_mid != null && a.recommended_rent_high != null;
+      const thin = a.counted_comp_count != null && a.counted_comp_count < 4 && a.recommended_rent_low == null && a.recommended_rent_mid == null && a.recommended_rent_high == null && allNull;
+      if (!strict && !thin) bad.push('chk_complete_requires_rent_range');
+    }
+    return bad;
+  };
+  const patchFor = (numbers, goal) => Oc.buildCompletionPatch({ numbers, ownerGoal: goal, propertyId: null, subjectEstimatedRent: 4100, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003', rationale: 'text' });
+
+  await check('Database rule simulation: the saved patch for a High, a Medium, a Low, a thin and an empty report is accepted by the migration\'s rules, with the counts in the SAME update as status complete; a Low report stores no stretch price; a thin or empty report stores no price of any kind', () => {
+    const high = patchFor(numbersFor([4300, 4350, 4400, 4400, 4450, 4500]), 'balanced');
+    const medium = patchFor(numbersFor([4000, 4150, 4300, 4450, 4600, 4750], undefined, 'maximize_rent'), 'maximize_rent');
+    const low = patchFor(numbersFor([4300, 4400, 4350, 4450], ['leased', 'leased', 'active', 'active'], 'lease_quickly'), 'lease_quickly');
+    const thin = patchFor(numbersFor([4300, 4400, 4500]), 'balanced');
+    const empty = patchFor(computeNumbersC({ comps: [], subject: subjectC }), 'balanced');
+    for (const [name, p] of Object.entries({ high, medium, low, thin, empty })) {
+      assert.equal(p.status, 'complete', name);
+      assert.deepEqual(dbAccepts(p), [], `${name}: the database accepts it`);
+      assert.ok(Number.isInteger(p.counted_comp_count) && Number.isInteger(p.counted_leased_count), `${name}: counts are in the same update`);
+      assert.equal(p.method_version, Kc.METHOD_VERSION);
+      assert.ok(Kc.OWNER_GOALS.includes(p.owner_goal));
+    }
+    assert.equal(high.confidence_label, 'high');
+    assert.equal(high.stretch_price, high.headline_range_high + 200);
+    assert.equal(medium.confidence_label, 'medium');
+    assert.equal(medium.suggested_list_price, medium.headline_range_high, 'Maximize rent suggests the range high');
+    assert.equal(low.confidence_label, 'low');
+    assert.equal(low.stretch_price, null, 'a Low report stores no stretch price');
+    assert.equal(low.suggested_list_price, low.headline_range_low, 'Lease quickly suggests the range low');
+    assert.ok(low.headline_range_low != null && low.recommended_rent_mid != null);
+    for (const p of [thin, empty]) {
+      for (const k of ['headline_range_low', 'headline_range_high', 'suggested_list_price', 'stretch_price', 'recommended_rent_low', 'recommended_rent_mid', 'recommended_rent_high', 'raw_comp_rent_low', 'raw_comp_rent_high', 'confidence_label', 'confidence_spread']) assert.equal(p[k], null, `${k} is NULL on a thin or empty report`);
+    }
+    assert.equal(thin.counted_comp_count, 3);
+    assert.equal(empty.counted_comp_count, 0);
+    assert.equal(empty.counted_leased_count, 0);
+    assert.equal(high.owner_goal, 'balanced');
+    assert.equal(patchFor(numbersFor([4300, 4350, 4400, 4400, 4450, 4500]), 'garbage').owner_goal, 'balanced', 'an unrecognised goal is saved as balanced');
+    assert.equal(patchFor(numbersFor([4300, 4350, 4400, 4400, 4450, 4500], undefined, 'lease_quickly'), 'maximize_rent').owner_goal, 'lease_quickly', 'the saved goal is the one the suggested price was worked out with');
+    // the pretend database really does refuse a wrong patch (so the checks above mean something)
+    assert.deepEqual(dbAccepts({ ...high, headline_range_high: high.headline_range_low + 300 }), ['chk_headline_range']);
+    assert.deepEqual(dbAccepts({ ...high, stretch_price: high.headline_range_high + 250 }), ['chk_headline_range']);
+    assert.deepEqual(dbAccepts({ ...thin, recommended_rent_low: 4000 }), ['chk_complete_requires_rent_range']);
+    assert.deepEqual(dbAccepts({ ...thin, counted_comp_count: null }), ['chk_complete_requires_rent_range']);
+    assert.deepEqual(dbAccepts({ ...high, confidence_label: 'High' }), ['confidence_label']);
+  });
+
+  await check('Database rule simulation on 600 random reports of every size: every patch is accepted (width 200, round ends, suggested inside, stretch exactly high + 200 or empty, counts present, no numbers when fewer than 4 counted)', () => {
+    for (let i = 0; i < 600; i++) {
+      const n = Math.floor(rndC() * 11);
+      const rents = Array.from({ length: n }, () => Math.round((2000 + rndC() * 4500) / 5) * 5);
+      const statuses = rents.map(() => ['leased', 'active', 'off_market'][Math.floor(rndC() * 3)]);
+      const goal = Kc.OWNER_GOALS[Math.floor(rndC() * 3)];
+      const numbers = numbersFor(rents, statuses, goal);
+      const patch = patchFor(numbers, goal);
+      assert.deepEqual(dbAccepts(patch), [], `report ${i} (${n} comps): ${JSON.stringify(patch)}`);
+      assert.equal(patch.counted_comp_count, numbers.counted.total);
+      if (numbers.counted.total < 4) assert.equal(patch.headline_range_low, null);
+      else assert.equal(patch.headline_range_high - patch.headline_range_low, 200);
+    }
+  });
+
+  const fakeRow = { id: 'a1', status: 'complete', subject_sqft: 1636, subject_estimated_rent: 4100, recommended_rent_low: 4100, recommended_rent_mid: 4350, recommended_rent_high: 4600, raw_comp_rent_low: 3900, raw_comp_rent_high: 4800, confidence_spread: 500, headline_range_low: 4200, owner_goal: 'balanced', rationale: 'text' };
+
+  await check('The answer to "run analysis" never carries the old wide computed range (recommended_rent_low/mid/high, raw_comp_rent_low/high, the internal spread); it carries headline (range, end labels, suggested price, goal, goal sentence, stretch price), confidence and counts', () => {
+    const numbers = numbersFor([4300, 4350, 4400, 4400, 4450, 4500]);
+    const comps = numbers.compsWithMatch.map((c, i) => ({ ...c, id: `c${i}`, exclusion_reason: numbers.exclusionReasons[i] }));
+    const out = Oc.buildApiResponse({ analysis: fakeRow, comps, marketData: null, numbers, scorecard: null });
+    for (const key of Oc.AUDIT_ONLY_COLUMNS) assert.ok(!(key in out.analysis), `${key} is not in the answer`);
+    const flat = JSON.stringify(out);
+    for (const word of ['recommended_rent_low', 'recommended_rent_mid', 'recommended_rent_high', 'raw_comp_rent_low', 'raw_comp_rent_high', 'confidence_spread']) assert.ok(!flat.includes(word), `${word} appears nowhere in the answer`);
+    assert.equal(out.analysis.headline_range_low, 4200, 'the saved headline columns may stay');
+    assert.deepEqual(Object.keys(out.headline).sort(), ['goal', 'goalSentence', 'high', 'highLabel', 'listPrice', 'low', 'lowLabel', 'stretchPrice', 'stretchWords']);
+    assert.equal(out.headline.goal, 'balanced');
+    assert.equal(out.headline.lowLabel, 'Lease quickly');
+    assert.equal(out.headline.highLabel, 'Hold out for more');
+    assert.equal(out.headline.stretchWords, 'Above the recommended range; may take longer to lease');
+    assert.equal(out.headline.stretchPrice, out.headline.high + 200);
+    assert.equal(out.confidence.label, 'high');
+    assert.equal(out.confidence.startingPoint, false);
+    assert.equal(out.confidence.firmUp, null);
+    assert.deepEqual(out.counted, { total: 6, leased: 6, active: 0, offMarket: 0 });
+    assert.equal(out.noRange, null);
+    assert.equal(out.accuracyLine, null, 'no published scorecard: no sentence is invented');
+    assert.equal(out.confidence.trackRecord, null);
+    assert.ok(!('spread' in out.headline) && !('compsInside' in out.headline) && !('centre' in out.headline), 'internal figures stay internal');
+  });
+
+  await check('On a Low report the answer has a muted "Starting point" flag, no stretch price and no stretch words; on a Medium report it carries the firm-this-up line; on a thin or empty report it has no headline, no label and one plain message', () => {
+    const lowNum = numbersFor([4300, 4400, 4350, 4450], ['leased', 'leased', 'active', 'active']);
+    const comps = lowNum.compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: lowNum.exclusionReasons[i] }));
+    const low = Oc.buildApiResponse({ analysis: fakeRow, comps, marketData: null, numbers: lowNum, scorecard: null });
+    assert.equal(low.confidence.label, 'low');
+    assert.equal(low.confidence.startingPoint, true);
+    assert.equal(low.headline.stretchPrice, null);
+    assert.equal(low.headline.stretchWords, null);
+    assert.ok(low.headline.low != null);
+    assert.equal(low.confidence.firmUp, "To firm this up: check the highest and lowest comps, and confirm the home's size and condition.");
+    assert.deepEqual(low.counted, { total: 4, leased: 2, active: 2, offMarket: 0 });
+    assert.deepEqual(Oc.headlineForDisplay(lowNum), low.headline);
+    const medNum = numbersFor([4000, 4150, 4300, 4450, 4600, 4750]);
+    const med = Oc.buildApiResponse({ analysis: fakeRow, comps: [], marketData: null, numbers: medNum, scorecard: null });
+    assert.equal(med.confidence.label, 'medium');
+    assert.ok(med.confidence.firmUp);
+    assert.ok(med.headline.stretchPrice != null);
+    const thinNum = numbersFor([4300, 4400]);
+    const thinComps = thinNum.compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: thinNum.exclusionReasons[i] }));
+    const thin = Oc.buildApiResponse({ analysis: fakeRow, comps: thinComps, marketData: null, numbers: thinNum, scorecard: null });
+    assert.equal(thin.headline, null);
+    assert.equal(thin.confidence, null);
+    assert.equal(thin.noRange, 'Only 2 comparable homes found (at least 4 are needed), so there is no recommended range and no suggested price.');
+    const emptyNum = computeNumbersC({ comps: [], subject: subjectC });
+    assert.equal(Oc.buildApiResponse({ analysis: fakeRow, comps: [], marketData: null, numbers: emptyNum, scorecard: null }).noRange, 'No comparable homes were found near this address, so there is no recommended range and no suggested price.');
+    assert.match(Oc.noRangeMessage(0, 7), /^None of the 7 homes found could be counted as comparable/);
+    assert.equal(Oc.noRangeMessage(1, 3), 'Only 1 comparable home found (at least 4 are needed), so there is no recommended range and no suggested price.');
+    const text = Oc.noCompsRationale(['RentCast', 'CRMLS']);
+    assert.match(text, /^No comparable homes were found near this address, so there is no recommended range and no suggested price\. Sources checked: RentCast, CRMLS\./);
+    assert.doesNotMatch(text, /\$|\bdays?\b|\bweeks?\b|chance|window/i);
+  });
+
+  await check('No wide range and no time claim anywhere a reader can see: the dashboards, the sentences the server builds and the written explanation\'s prompt have no "Comp Rent Range", no "Middle half", no old computed-range key names, no retired name for the recommendation, and no days-to-lease or chance wording', () => {
+    const dashboards = [pathC.join(__dirname, 'dashboard', 'index.html'), pathC.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html')].filter(f => fsC.existsSync(f));
+    for (const f of dashboards) {
+      const html = fsC.readFileSync(f, 'utf8');
+      for (const banned of ['Comp Rent Range', 'Middle half', 'recommended_rent_low', 'recommended_rent_high', 'recommended_rent_mid', 'raw_comp_rent', 'Recommended Asking Rent', 'Comps Used', 'Days on Market']) assert.ok(!html.includes(banned), `${pathC.basename(pathC.dirname(pathC.dirname(f)))}: "${banned}" is still in the page`);
+      assert.doesNotMatch(html, /(recommended|asking|price|rent|range)\s+window|window\s+(price|rent|range)/i, 'the recommendation is never called a window');
+      assert.doesNotMatch(html, /days? to lease|time to lease|leases? within \d+ days|chance of leasing|probability/i);
+      for (const needed of ['Owner goal', 'Subject is in a 55+ community', 'Comps Counted', 'Lease quickly', 'Hold out for more', 'Stretch price', 'Starting point, Low confidence']) assert.ok(html.includes(needed), `"${needed}" is on the page`);
+    }
+    const comps = [{ address: '103 Gamma St, Ventura, CA', monthly_rent: 3700, listing_status: 'leased' }];
+    const prompt = require('./lib/narrative').buildPrompt({ subject: { address: '1 Test St', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps, headline: { low: 3600, high: 3800, listPrice: 3750, goal: 'balanced', stretchPrice: 4000 }, confidence: { label: 'medium', reasonText: 'x.' }, subjectEstimatedRent: 3800, sourcesUsed: ['CRMLS'] });
+    assert.doesNotMatch(prompt, /\bwindow\b/i);
+    assert.doesNotMatch(prompt, /raw comp rent range|Raw range|25th|75th|percentile|midpoint/i);
+    for (const g of Kc.OWNER_GOALS) assert.doesNotMatch(Wc.goalSentenceFor(g, 4200), /window/i);
+    assert.doesNotMatch(Oc.STRETCH_WORDS + Oc.LOW_END_LABEL + Oc.HIGH_END_LABEL, /\d|window/);
+  });
+
+  console.log('--- Phase C: the written explanation (Item 4.6) ---');
+
+  const nInput = {
+    subject: { address: '2461 Bunting Avenue, Ventura, CA 93003' },
+    comps: [
+      { address: '101 Alpha St, Ventura, CA 93003', monthly_rent: 3800, listing_status: 'leased', exclusion_reason: null },
+      { address: '102 Beta St, Ventura, CA 93003', monthly_rent: 4600, listing_status: 'active', exclusion_reason: null },
+      { address: '103 Gamma St, Ventura, CA 93003', monthly_rent: 4300, listing_status: 'leased', exclusion_reason: null },
+      { address: '104 Delta St, Ventura, CA 93003', monthly_rent: 4500, listing_status: 'leased', exclusion_reason: null, had_price_cut: true, original_price: 4700 },
+      { address: '105 Echo St, Ventura, CA 93003', monthly_rent: 4350, listing_status: 'leased', exclusion_reason: null },
+    ],
+    headline: { low: 4200, high: 4400, listPrice: 4350, goal: 'balanced', stretchPrice: 4600 },
+    subjectEstimatedRent: 4400,
+  };
+
+  await check('Narrative gate passes: the recommended range written as "$4,200-$4,400" or "$4,200 to $4,400", the suggested price, the stretch price with the fixed words, two comps\' rents named separately, and a comp\'s own price cut', () => {
+    for (const ok of [
+      'The recommended range is $4,200-$4,400.',
+      'The recommended range of $4,200 to $4,400 rests on 103 Gamma St at $4,300.',
+      'Between $4,200 and $4,400 sits the recommended range.',
+      'We suggest listing at $4,350.',
+      'There is also a stretch price of $4,600, above the recommended range.',
+      'The stretch price is $4,600. Above the recommended range; may take longer to lease.',
+      '101 Alpha St leased at $3,800 and 102 Beta St asks $4,600.',
+      '104 Delta St leased at $4,500 after a cut from $4,700 to $4,500.',
+      'Because the goal is to lease quickly, the suggested price is the low end of the recommended range of $4,200-$4,400.',
+      'The subject has a 12-month lease and the comps are from the last 6 months.',
+      '104 Delta St was on the market for 30 days before it leased.',
+    ]) {
+      const v = validateC(ok, nInput);
+      assert.equal(v.ok, true, `should pass: ${ok} -> ${JSON.stringify(v.problems)}`);
+    }
+  });
+
+  await check('Narrative gate flags: a neighbor range ($4,300-$4,500), "from $3,400 to $4,600", "between $3,900 and $4,500", the old computed-range ends, "$4,400 to $4,600", "$4,200-$4,600", "up to $4,600", the stretch price in a sentence with "range", "leases within 30 days", "a 70% chance", and the retired name for the range', () => {
+    const cases = {
+      'neighbor range': 'Leases cluster at $4,300-$4,500.',
+      'wide span': 'Rents run from $3,400 to $4,600.',
+      'between': 'Most sit between $3,900 and $4,500.',
+      'old computed range end': 'The weighted 75th percentile is $4,750.',
+      'range up to the stretch price': 'The range is $4,400 to $4,600.',
+      'range to the stretch price': 'Rents are $4,200-$4,600.',
+      'up to the stretch price': 'The range extends up to $4,600.',
+      'stretch with range word': 'The recommended range is $4,200-$4,400 and the stretch price of $4,600 widens it.',
+      'time to lease': 'A home like this typically leases within 30 days.',
+      'weeks': 'Expect it to take about six weeks to lease.',
+      'chance': 'There is a 70% chance it leases at the top.',
+      'odds': 'The odds favor the low end.',
+      'probability': 'The probability of leasing is high.',
+      'window': 'Treat $4,200-$4,400 as the recommended window.',
+    };
+    for (const [name, text] of Object.entries(cases)) assert.equal(validateC(text, nInput).ok, false, `should flag (${name}): ${text}`);
+    // each one names its own kind of problem for the retry
+    assert.match(validateC(cases['neighbor range'], nInput).problems.join(' '), /span of dollar figures that is not the recommended range/);
+    assert.match(validateC(cases['wide span'], nInput).problems.join(' '), /never describe any spread of \$500 or more/);
+    assert.match(validateC(cases['range up to the stretch price'], nInput).problems.join(' '), /tied the stretch price to a range/);
+    assert.match(validateC(cases['time to lease'], nInput).problems.join(' '), /how long leasing takes or how likely it is/);
+    assert.match(validateC(cases.window, nInput).problems.join(' '), /banned word for the recommended range/);
+    assert.doesNotMatch(validateC(cases.window, nInput).problems.join(' '), /\bwindow\b/i, 'the correction message does not repeat the banned word');
+    // a span of exactly $500 or more is flagged whatever it is made of
+    assert.ok(findWideRangeStatements('Rents of $3,800 to $4,300.', nInput).some(b => b.kind === 'span'));
+    assert.ok(findWideRangeStatements('Rents of $3,800-$4,300.', nInput).some(b => b.kind === 'span'));
+  });
+
+  await check('Narrative gate detail: arithmetic like "$100 to $150 more" is not a rent range; a house number after "to" is not a rent; a comp priced exactly at the stretch price does not trip the stretch-sentence rule; a lease length or a data period is not a time statistic; with no range at all (a thin report) the range itself is flagged', () => {
+    assert.equal(validateC('Expect a $100 to $150 premium.', nInput).ok, true);
+    assert.equal(findWideRangeStatements('Rents from $3,800 up to 1121 Pittsfield Ln.', nInput).length, 0, 'a house number is not a rent');
+    const atStretch = { ...nInput, comps: [...nInput.comps, { address: '106 Foxtrot St, Ventura, CA 93003', monthly_rent: 4600, listing_status: 'leased', exclusion_reason: null }] };
+    assert.equal(validateC('106 Foxtrot St leased at $4,600, which is above the recommended range of $4,200-$4,400.', atStretch).ok, true);
+    assert.equal(validateC('The new tenant signs a 12-month lease.', nInput).ok, true);
+    assert.equal(validateC('The data covers the last 6 months.', nInput).ok, true);
+    assert.equal(validateC('Leasing takes 2 months.', nInput).ok, false);
+    assert.equal(validateC('The recommended range is $4,200-$4,400.', { ...nInput, headline: null }).ok, false, 'with no recommended range, the old range ends are not allowed figures');
+    assert.deepEqual(allowedC({ ...nInput, headline: null }).exact.has(420000), false);
+  });
+
+  await check('Allowed dollar figures are exactly: every comp rent and shown original price, the two ends of the recommended range, the suggested price, the stretch price and the subject\'s estimate; the old computed range is not among them', () => {
+    const a = allowedC(nInput);
+    for (const v of [3800, 4600, 4300, 4500, 4700, 4350, 4200, 4400, 4400]) assert.ok(a.exact.has(v * 100), `$${v} is allowed`);
+    assert.ok(a.exact.has(460000), 'the stretch price');
+    assert.ok(!a.exact.has(475000) && !a.exact.has(410000), 'a computed 75th or 25th percentile that was never shown is not allowed');
+    const lowRun = allowedC({ ...nInput, headline: { ...nInput.headline, stretchPrice: null } });
+    assert.ok(lowRun.exact.has(460000), '$4,600 is also a comp rent here, so it stays allowed as that comp\'s rent');
+    assert.ok(!allowedC({ ...nInput, comps: nInput.comps.filter(c => c.monthly_rent !== 4600), headline: { ...nInput.headline, stretchPrice: null } }).exact.has(460000), 'with no stretch price shown and no comp at that rent, $4,600 is not allowed');
+    assert.equal(validateC('A rent of $4,100 fits.', nInput).ok, false, 'the old computed 25th percentile in this fixture would have been 4,100: not shown, not allowed');
+  });
+
+  await check('The prompt tells the model the recommended range, the owner\'s goal, the suggested price, the stretch price (not on a Low report) and the label; with no range it says so and forbids inventing one; it keeps the 3x/2x/1x weight line', () => {
+    const { buildPrompt: build } = require('./lib/narrative');
+    const base = { subject: { address: '2461 Bunting Avenue', bedrooms: 4, bathrooms: 2, sqft: 1636, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps: nInput.comps, sourcesUsed: ['CRMLS'], subjectEstimatedRent: 4400 };
+    const full = build({ ...base, headline: nInput.headline, confidence: { label: 'medium', reasonText: '5 comps counted, 4 of them confirmed leases; they agree only moderately.' } });
+    assert.match(full, /- Recommended range: \$4,200-\$4,400 per month, exactly \$200 wide, centred on the weighted middle of the counted comps\. The low end is the "lease quickly" end and the high end is the "hold out for more" end\./);
+    assert.match(full, /- Owner goal: a balanced approach\. Suggested list price: \$4,350\./);
+    assert.match(full, /- Stretch price: \$4,600, a single price above the recommended range and not part of it\./);
+    assert.match(full, /- Confidence: medium \(5 comps counted, 4 of them confirmed leases; they agree only moderately\.\)\./);
+    assert.match(full, /leased comps count 3x today, active comps 2x, off_market comps 1x/);
+    assert.match(full, /Lowest counted rent: \$3,800 \(101 Alpha St\)\.\n- Highest counted rent: \$4,600 \(102 Beta St\)\./);
+    assert.match(full, /ABOVE the recommended range \(above \$4,400\): 2: 102 Beta St \$4,600 \(active\); 104 Delta St \$4,500 \(leased\)\./);
+    assert.match(full, /BELOW the recommended range \(below \$4,200\): 1: 101 Alpha St \$3,800 \(leased\)\./);
+    assert.match(full, /why the recommended range is what it is/);
+    const lowRun = build({ ...base, headline: { ...nInput.headline, stretchPrice: null }, confidence: { label: 'low', reasonText: 'x.' } });
+    assert.doesNotMatch(lowRun, /Stretch price: \$/);
+    const thin = build({ ...base, comps: nInput.comps.slice(0, 2), headline: null, confidence: null });
+    assert.match(thin, /There is NO recommended range and no suggested price for this analysis \(fewer than 4 comps counted\)/);
+    assert.match(thin, /No recommended range: only 2 counted comps \(at least 4 are needed\)\./);
+    assert.match(thin, /why there is no recommended range/);
+    assert.doesNotMatch(thin, /Recommended range: \$/);
+    const rules = full.slice(full.indexOf('HARD RULES:'), full.indexOf('SUBJECT PROPERTY:'));
+    assert.match(rules, /Above the recommended range; may take longer to lease/);
+    assert.match(rules, /Never write it as part of a range, never write a span that ends at it/);
+    assert.match(rules, /Say nothing about how long leasing will take\./);
+    assert.match(rules, /The recommended range is exactly \$200 wide, and it is the ONLY range you may state\./);
+    assert.match(rules, /Never write any other pair of dollar figures as a span or range/);
+  });
+
+  await check('Per-comp narratives obey the same range rule: a narrative with a wide span, the stretch price in a range, a chance of leasing or the retired name for the range is dropped with one warning; a narrative that gives its own comp\'s days on market and its own price cut is kept', async () => {
+    const input = nInput;
+    const out = await withCapturedWarnings(warnings => {
+      const kept = guardWideRanges(input.comps, [
+        '101 Alpha St asks $3,800, in line with leases.',
+        'Rents here run $3,800-$4,600.',
+        'The range stretches up to $4,600.',
+        'A 70% chance it leases.',
+        'A good window to lease.',
+        '104 Delta St sat 30 days and was cut from $4,700 to $4,500.',
+      ], input);
+      assert.equal(warnings.filter(w => /broke the range rule/.test(w)).length, 4);
+      return kept;
+    });
+    assert.deepEqual(out.map(x => x === null), [false, true, true, true, true, false]);
+  });
+
+  await check('generateNarrative() with the new gate: a rationale that states a neighbor range is rejected, ONE retry names the problem (rationale only), the clean retry is accepted; never more than 3 calls; the model is never shown the old wide computed range', async () => {
+    const { generateNarrative: gen } = require('./lib/narrative');
+    const reply = (rationale, narratives = { 0: 'Alpha narrative.' }) => ({ content: [{ type: 'text', text: `RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale, comp_narratives: narratives })}` }], stop_reason: 'end_turn', usage: { output_tokens: 10 } });
+    const calls = [];
+    const replies = [reply('Leases cluster at $4,300-$4,500 around 103 Gamma St.'), reply('The recommended range is $4,200-$4,400 and 103 Gamma St leased at $4,300.', {})];
+    const client = { messages: { create: async (req) => { calls.push(req); return replies[calls.length - 1]; } } };
+    const result = await withCapturedWarnings(() => gen({ ...nInput, confidence: { label: 'medium', reasonText: 'x.' }, sourcesUsed: ['CRMLS'], subject: { ...nInput.subject, bedrooms: 4, bathrooms: 2, sqft: 1636, propertyType: 'single_family', leaseTermMonths: 12, furnished: false } }, { client }));
+    assert.equal(calls.length, 2);
+    assert.match(calls[1].messages[0].content, /CORRECTION REQUIRED/);
+    assert.match(calls[1].messages[0].content, /span of dollar figures that is not the recommended range \("\$4,300-\$4,500"\)/);
+    assert.equal(result.rationale, 'The recommended range is $4,200-$4,400 and 103 Gamma St leased at $4,300.');
+    assert.equal(result.meta.anthropicCalls, 2);
+    assert.ok(result.meta.anthropicCalls <= 3);
+    assert.doesNotMatch(calls[0].messages[0].content, /Raw range|raw range|percentile/i);
+  });
+
+  console.log('--- Phase C: the published accuracy sentences (Item 4.3) ---');
+
+  // A small scorecard in the same shape as backtest/scorecard.json (aggregates only)
+  const blockC = (n, k300, kRange, extra = {}) => ({ n, typicalMiss: 280, within300OfSuggestedCount: k300, within300OfSuggestedCiPct: [50, 70], rangeHit200Count: kRange, rangeHit200CiPct: [20, 40], ...extra });
+  const scoreC = (o = {}) => ({
+    trusted: true, dataPulledOn: '2026-10-17', pool: { rentcast: 'not included (RentCast as-of snapshot, A2, is not built)' },
+    overall: { size25_item2: { county: { ranged: blockC(400, 240, 120), coveragePct: 75.9 } }, baseline: { county: { ranged: blockC(400, 160, 60), coveragePct: 91 } } },
+    groups: { size25_item2: { county: { confidence: { High: { ranged: blockC(150, 110, 60) }, Medium: { ranged: blockC(260, 150, 70) }, Low: { ranged: blockC(40, 15, 6) } } } } },
+    counties: { unknown: { overLimit: false, sharePct: 0 }, size25_item2: { venturaCounty: { ranged: blockC(300, 180, 85), coveragePct: 73, confidence: { High: { ranged: blockC(120, 90, 50) }, Medium: { ranged: blockC(150, 80, 40) }, Low: { ranged: blockC(30, 10, 3) } } } } },
+    ...o,
+  });
+
+  await check('Staff sentences come only from the scorecard: the Ventura County line and the label sentence for High / Medium / Low, "too few tests to say yet" under 100 leases, and nothing at all when the scorecard is missing, damaged or untrusted', () => {
+    const s = AS.staffSentences(scoreC(), 'high');
+    assert.match(s.accuracyLine, /^Blind-tested on 300 past Ventura County leases: typical miss about \$300; the suggested price landed within \$300 of the signed rent about 6 times in 10/);
+    assert.match(s.trackRecord, /^High confidence\. In blind tests on 120 past Ventura County leases, reports like this held the signed rent inside the recommended range about 4 times in 10 \(roughly \d to \d times in 10\) and landed within \$300 of the suggested price about 7 times in 10/);
+    assert.equal(AS.staffSentences(scoreC(), 'low').trackRecord, 'Low confidence: too few tests to say yet.');
+    assert.match(AS.staffSentences(scoreC(), 'medium').trackRecord, /^Medium confidence\. In blind tests on 150 past Ventura County leases/);
+    assert.deepEqual(AS.staffSentences(null, 'high'), { accuracyLine: null, trackRecord: null });
+    assert.deepEqual(AS.staffSentences({}, 'high'), { accuracyLine: null, trackRecord: null });
+    assert.deepEqual(AS.staffSentences({ overall: {}, groups: {} }, 'high'), { accuracyLine: null, trackRecord: null });
+    assert.deepEqual(AS.staffSentences({ overall: 'x', groups: 'y' }, 'high'), { accuracyLine: null, trackRecord: null });
+    assert.equal(AS.staffSentences(scoreC(), null).trackRecord, null, 'no label (a thin report) means no label sentence');
+    for (const sentence of Object.values(AS.staffSentences(scoreC(), 'high'))) assert.doesNotMatch(sentence, /accurate to|guarantee|promise|window|\bdays\b|weeks|months|chance|probab/i);
+  });
+
+  await check('loadAccuracyScorecard(): a missing file, bad JSON, the wrong shape and an untrusted run all give null (the sentences are then simply left out); a good trusted file is returned', () => {
+    const dir = fsC.mkdtempSync(pathC.join(osC.tmpdir(), 'acc-'));
+    try {
+      const w = (name, content) => { const f = pathC.join(dir, name); fsC.writeFileSync(f, content); return f; };
+      assert.equal(AS.loadAccuracyScorecard(pathC.join(dir, 'missing.json')), null);
+      assert.equal(AS.loadAccuracyScorecard(w('bad.json', '{not json')), null);
+      assert.equal(AS.loadAccuracyScorecard(w('empty.json', '{}')), null);
+      assert.equal(AS.loadAccuracyScorecard(w('array.json', '[]')), null);
+      assert.equal(AS.loadAccuracyScorecard(w('untrusted.json', JSON.stringify(scoreC({ trusted: false })))), null);
+      assert.equal(AS.loadAccuracyScorecard(w('notrust.json', JSON.stringify((({ trusted, ...rest }) => rest)(scoreC())))), null);
+      assert.equal(AS.loadAccuracyScorecard(w('good.json', JSON.stringify(scoreC()))).dataPulledOn, '2026-10-17');
+    } finally {
+      fsC.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check('The published scorecard, if one is present in lib/, is the same file in both lib folders, is aggregates-only (no address, zip, listing key or email) and yields the Ventura County sentences with no time statistic', () => {
+    const a = pathC.join(__dirname, 'lib', 'accuracy-scorecard.json'), b = pathC.join(__dirname, '..', 'hub', 'rental-analysis', 'lib', 'accuracy-scorecard.json');
+    if (!fsC.existsSync(a)) return; // not published yet
+    if (fsC.existsSync(b)) assert.equal(fsC.readFileSync(b, 'utf8'), fsC.readFileSync(a, 'utf8'));
+    const sc = AS.loadAccuracyScorecard(a);
+    assert.ok(sc, 'a published scorecard is trusted and well-formed');
+    require('./backtest/report').assertAggregatesOnly(sc);
+    for (const label of ['high', 'medium', 'low']) {
+      const s = AS.staffSentences(sc, label);
+      assert.match(s.accuracyLine, /Ventura County/);
+      assert.match(s.trackRecord, new RegExp(`^${label.charAt(0).toUpperCase() + label.slice(1)} confidence`));
+      for (const sentence of Object.values(s)) assert.doesNotMatch(sentence, /accurate to|guarantee|promise|window|\bdays\b|weeks|months|chance|probab/i);
+    }
+    assert.equal(Oc.PUBLISHED_SCORECARD && Oc.PUBLISHED_SCORECARD.dataPulledOn, sc.dataPulledOn, 'the server reads the same file at startup');
+  });
+
+  await check('Rule (c) numbers: right answers and badly wrong answers per 100 reports tried are computed from the suggested price and count a report with no range as neither', () => {
+    const M = require('./backtest/metrics');
+    const row = (rent, est, n = 6) => ({ rent, est, low: est - 100, high: est + 100, n, leased: n, spread: 200, date: '2026-09-01' });
+    const s = M.summarize([row(4000, 4000), row(4400, 4000), row(5000, 4000), row(4000, 4000, 3), { rent: 3000, est: null, n: 0, leased: 0 }]);
+    assert.equal(s.targets, 5);
+    assert.equal(s.rightPer100, 20, 'one report of five is within $300 (the 4,400 is $400 off, the thin one has no range)');
+    assert.equal(s.badlyWrongPer100, 20, 'one report of five is off by more than $600 (5,000 against 4,000)');
+    assert.deepEqual([M.summarize([]).rightPer100, M.summarize([]).badlyWrongPer100], [0, 0]);
+    assert.equal(M.summarize([row(4000, 4000), row(4100, 4000)]).rightPer100, 100);
+  });
+
+  await check('Acceptance rule against the real Phase B figures: right answers per 100 tried rose (34.8 to 38.5 across the whole box) while badly wrong ones fell (20.8 per 100 instead of 34.1), so the bundle passes rule (c) even though fewer reports get a range', () => {
+    const sc = JSON.parse(fsC.readFileSync(pathC.join(__dirname, 'backtest', 'scorecard.json'), 'utf8'));
+    const before = sc.overall.baseline.county, after = sc.overall.size25_item2.county;
+    assert.ok(after.coveragePct < before.coveragePct - 10, 'about 15 points fewer reports get a range');
+    // the scorecard keeps the shares, so the same "within $300 of the suggested price" counts are rebuilt per 100 tried
+    const rightPer100 = b => 100 * b.ranged.within300OfSuggestedCount / b.targets;
+    assert.ok(rightPer100(after) > rightPer100(before), `${rightPer100(after).toFixed(1)} vs ${rightPer100(before).toFixed(1)} right answers per 100 tried`);
+  });
+
+  console.log('--- Phase C: the whole request, both entry points, against a pretend database ---');
+
+  await check('SQL and code agree: the database hard-codes "fewer than 4 counted comps" and the code constant is 4; the method version fits its 40-character column', () => {
+    assert.equal(Kc.HEADLINE_MIN_COMPS, 4);
+    assert.ok(Kc.METHOD_VERSION.length <= 40 && Kc.METHOD_VERSION.length > 0);
+    const sql = pathC.join(__dirname, '..', '..', 'supabase', 'migrations', '20261018000000_rental_cma_quality.sql');
+    if (!fsC.existsSync(sql)) return;
+    const text = fsC.readFileSync(sql, 'utf8');
+    assert.match(text, new RegExp(`counted_comp_count < ${Kc.HEADLINE_MIN_COMPS}\\b`));
+    assert.match(text, /headline_range_high - headline_range_low = 200/);
+    assert.match(text, /stretch_price = headline_range_high \+ 200/);
+    assert.equal(Kc.HEADLINE_RANGE_WIDTH, 200);
+    assert.equal(Kc.STRETCH_ABOVE_RANGE, 200);
+  });
+
+  await check('server.js and router.js use the shared outcome code the same way: validate owner_goal before any lookup, save it with the new analysis, finish through ONE buildCompletionPatch(), answer through buildApiResponse(), never build a response from the audit columns, and skip saving comps when there are none', () => {
+    const strip = raw => raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const sources = {};
+    for (const file of ['server.js', pathC.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathC.join(__dirname, file);
+      if (!fsC.existsSync(p)) continue;
+      const src = strip(fsC.readFileSync(p, 'utf8'));
+      sources[file] = src;
+      assert.match(src, /parseOwnerGoalInput\(owner_goal\)/, `${file} validates owner_goal`);
+      assert.ok(src.indexOf('parseOwnerGoalInput(owner_goal)') < src.indexOf('const userRows = await select('), `${file}: before any lookup`);
+      assert.match(src, /owner_goal: ownerGoal,/, `${file} saves the goal with the new analysis`);
+      assert.match(src, /ownerGoal,\s*\n\s*\};/, `${file}: the goal travels on the subject`);
+      assert.equal((src.match(/buildCompletionPatch\(/g) || []).length, 1, `${file} finishes through one patch`);
+      // Round 3: the answer also carries sourceNotes (plain words about a source that did not fully come back)
+      assert.match(src, /buildApiResponse\(\{ analysis: updatedAnalysis, comps: responseComps, marketData, numbers, sourceNotes: buildSourceNotes\(\{ sourceErrors, sourceWarnings \}\) \}\)/);
+      assert.doesNotMatch(src, /res\.json\(\{ analysis/, `${file} no longer builds the answer by hand`);
+      assert.doesNotMatch(src, /recommended\.low|recommended\.high|raw\.low|raw\.high|recommended_rent|raw_comp_rent/, `${file} does not touch the old wide numbers`);
+      assert.match(src, /compRows\.length \? await insert\('rental_comps', compRows\) : \[\]/, `${file} saves no comps when there are none`);
+      assert.match(src, /headline: headlineForDisplay\(numbers\)/, `${file} tells the write-up only the display headline`);
+      assert.match(src, /if \(sourceOutcome\.kind === 'none_found'\)/);
+      // Round 4: the plain no-comps explanation is also told which sources were skipped (not searched), so it never says it checked them
+      assert.match(src, /rationale = noCompsRationale\(sourcesUsed, sourcesSkipped\)/);
+    }
+    const names = Object.keys(sources);
+    if (names.length === 2) {
+      const norm = s => s.replace(/\s+/g, ' ');
+      for (const piece of ['parseOwnerGoalInput(owner_goal)', 'owner_goal: ownerGoal,', 'buildCompletionPatch({ numbers, ownerGoal, propertyId: resolvedPropertyId', 'rationale = noCompsRationale(sourcesUsed, sourcesSkipped)', "sourceOutcome.kind === 'failed'"]) {
+        assert.equal(norm(sources[names[0]]).includes(norm(piece)), norm(sources[names[1]]).includes(norm(piece)), piece);
+        assert.ok(norm(sources[names[0]]).includes(norm(piece)), piece);
+      }
+    }
+  });
+
+  await check('Both entry points, run for real in a child process against a pretend database that enforces the migration\'s rules: High / Medium / Low reports, the three goals, thin and empty reports finish, broken sources fail, bad input is refused, the answer never carries the old wide range, and no outside address is reached', () => {
+    for (const mode of ['server', 'router']) {
+      if (mode === 'router' && !fsC.existsSync(pathC.join(__dirname, '..', 'hub', 'node_modules', 'express'))) continue; // the Hub's packages are not installed here
+      const res = spawnSync(process.execPath, [pathC.join(__dirname, 'q-entry-point-harness.js'), mode], { encoding: 'utf8', timeout: 120000 });
+      assert.equal(res.status, 0, `${mode} harness failed:\n${(res.stdout || '').slice(-1500)}\n${(res.stderr || '').slice(-2500)}`);
+      assert.match(res.stdout, new RegExp(`Entry-point harness \\(${mode}\\): PASS`));
+    }
+  });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Fixes after the live test of Phase C (TARS, 2026-10-17): spreads of $500 or more
+  // hidden between two comps' addresses, sources named that supplied nothing, the
+  // subject's own unit counted as a comp, the chart overlay, silly form values, and
+  // the screen items the spec asked for.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Review fixes: spans hidden behind addresses, sources named, own listing, form values, screen ---');
+  const NR = require('./lib/narrative');
+  const Wr = require('./lib/weighting');
+  const Or = require('./lib/outcome');
+  const Ar = require('./lib/accuracy-sentences');
+  const SI = require('./lib/subject-inputs');
+  const Fb = require('./lib/mls-facts');
+  const { computeNumbers: computeNumbersC } = require('./lib/analyze');
+  const subjectC = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false };
+  // a small scorecard in the same shape as backtest/scorecard.json (aggregates only)
+  const blockC = (n, k300, kRange) => ({ n, typicalMiss: 280, within300OfSuggestedCount: k300, within300OfSuggestedCiPct: [50, 70], rangeHit200Count: kRange, rangeHit200CiPct: [20, 40] });
+  const scoreC = () => ({
+    trusted: true, dataPulledOn: '2026-10-17', pool: { rentcast: 'not included (RentCast as-of snapshot, A2, is not built)' },
+    overall: { size25_item2: { county: { ranged: blockC(400, 240, 120), coveragePct: 75.9 } }, baseline: { county: { ranged: blockC(400, 160, 60), coveragePct: 91 } } },
+    groups: { size25_item2: { county: { confidence: { High: { ranged: blockC(150, 110, 60) }, Medium: { ranged: blockC(260, 150, 70) }, Low: { ranged: blockC(40, 15, 6) } } } } },
+    counties: { unknown: { overLimit: false, sharePct: 0 }, size25_item2: { venturaCounty: { ranged: blockC(300, 180, 85), coveragePct: 73, confidence: { High: { ranged: blockC(120, 90, 50) }, Medium: { ranged: blockC(150, 80, 40) }, Low: { ranged: blockC(30, 10, 3) } } } } },
+  });
+  const fsR = require('node:fs');
+  const pathR = require('node:path');
+  const { spawnSync: spawnR } = require('node:child_process');
+
+  const rInput = {
+    subject: { address: '2292 Buffalo Avenue, Ventura, CA 93003' },
+    comps: [
+      { address: '1556 Bittern Ct, Ventura, CA 93003', monthly_rent: 3200, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '6630 Sora St, Ventura, CA 93003', monthly_rent: 3400, listing_status: 'active', exclusion_reason: null, source_name: 'RentCast' },
+      { address: '2292 Buffalo Avenue, Ventura, CA 93003', monthly_rent: 4600, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '2300 Buffalo Avenue, Ventura, CA 93003', monthly_rent: 3900, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '14 Price Cut Ln, Ventura, CA 93003', monthly_rent: 4500, listing_status: 'active', exclusion_reason: null, source_name: 'RentCast', had_price_cut: true, original_price: 4700 },
+    ],
+    headline: { low: 3800, high: 4000, listPrice: 3900, goal: 'balanced', stretchPrice: 4200 },
+    subjectEstimatedRent: 3950,
+  };
+
+  await check('Spans hidden behind addresses are flagged: the five phrasings from the live run ("from $3,200 at 1556 Bittern Ct up to $4,600 at 2292 Buffalo Avenue", "from 1556 Bittern Ct at $3,200 up to 2292 Buffalo Avenue at $4,600", "from 6630 Sora St at $3,400 up to 2292 Buffalo Avenue at $4,600", "lowest $3,400 and highest $4,600", "$1,200 apart") each come back not ok, with a span problem the retry can name', () => {
+    const phrasings = [
+      'Rents are spread widely, from $3,200 at 1556 Bittern Ct up to $4,600 at 2292 Buffalo Avenue.',
+      'Rents are spread widely, from 1556 Bittern Ct at $3,200 up to 2292 Buffalo Avenue at $4,600.',
+      'Counted rents run from 6630 Sora St at $3,400 up to 2292 Buffalo Avenue at $4,600.',
+      'The lowest counted rent is $3,400 and the highest is $4,600.',
+      'The counted rents are $1,200 apart.',
+    ];
+    for (const text of phrasings) {
+      const v = validateRationale(text, rInput);
+      assert.equal(v.ok, false, `should be flagged: ${text}`);
+      assert.ok(v.badStatements.some(b => /^span: /.test(b)), `a span problem for: ${text} -> ${JSON.stringify(v.badStatements)}`);
+      assert.match(v.problems.join(' '), /span of dollar figures that is not the recommended range/, text);
+    }
+    // more ways of saying the same thing
+    for (const text of [
+      'Rents range from $3,200 at 1556 Bittern Ct to $4,600 at 2292 Buffalo Avenue.',
+      'Between $3,200 at 1556 Bittern Ct and $4,600 at 2292 Buffalo Avenue the rents are spread out.',
+      'There is a spread of $1,400 across the comps.',
+      'A gap of about $900 separates the low and high comps.',
+      'The difference is $1,200 between the cheapest and dearest comps.',
+      'The highest lease is $4,600 at 2292 Buffalo Avenue while the lowest lease is $3,200 at 1556 Bittern Ct.',
+    ]) assert.equal(validateRationale(text, rInput).ok, false, `should be flagged: ${text}`);
+  });
+
+  await check('Legitimate sentences still pass the span rules: the recommended range, a comp\'s own price cut (also with "from ... down to"), a single comp\'s rent, a small gap, lowest and highest under $500 apart, and a "from" that names only one figure', () => {
+    for (const text of [
+      'The recommended range is $3,800-$4,000, and the suggested price is $3,900.',
+      'Rents in the recommended range run from $3,800 to $4,000.',
+      '14 Price Cut Ln was cut from $4,700 to $4,500.',
+      '14 Price Cut Ln was cut from $4,700 down to $4,500 and is active.',
+      '1556 Bittern Ct leased at $3,200.',
+      '2292 Buffalo Avenue leased at $4,600, the highest counted rent.',
+      'The lowest counted lease is $3,900 and the highest is $4,100.',
+      'A gap of about $150 separates 2300 Buffalo Avenue and the suggested price.',
+      'The rents come from 6630 Sora St at $3,400 and others.',
+      'Rents are spread widely, so confidence is low.',
+    ]) {
+      const v = validateRationale(text, rInput);
+      assert.equal(v.badStatements.filter(b => /^span: /.test(b)).length, 0, `no span problem for: ${text} -> ${JSON.stringify(v.badStatements)}`);
+    }
+    assert.equal(validateRationale('The recommended range is $3,800-$4,000, and the suggested price is $3,900.', rInput).ok, true);
+    assert.equal(validateRationale('14 Price Cut Ln was cut from $4,700 to $4,500.', rInput).ok, true);
+  });
+
+  await check('The facts block lists the lowest and highest counted rent on TWO separate lines, and the prompt carries the rules that keep spans out: say only "spread widely" for low confidence, never give the lowest and highest together, and use "range" only for the recommended range', () => {
+    const lines = compFactsBlock(rInput.comps, { headline: rInput.headline }).split('\n');
+    assert.equal(lines[7], '- Lowest counted rent: $3,200 (1556 Bittern Ct).');
+    assert.equal(lines[8], '- Highest counted rent: $4,600 (2292 Buffalo Avenue).');
+    const prompt = buildPrompt({ subject: { address: '2292 Buffalo Avenue', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps: rInput.comps, headline: rInput.headline, confidence: { label: 'low', reasonText: 'x.' }, subjectEstimatedRent: 3950, sourcesUsed: ['CRMLS', 'RentCast'] });
+    const rules = prompt.slice(prompt.indexOf('HARD RULES:'), prompt.indexOf('SUBJECT PROPERTY:'));
+    assert.match(rules, /When you explain low confidence, say only that the rents are spread widely\. Never give the lowest and the highest rent together, and never state how far apart any two rents are\./);
+    assert.match(rules, /Use the word "range" only for the recommended range itself\. Never say that a group of comps "ranges", "runs" or "sits" lower, higher, above or below another group of comps or the recommended range \(for example "the leased comps range lower"\); to compare, name individual comps, each with its own address and its own rent\./);
+    assert.doesNotMatch(rules, /from \$\d|between \$\d|\$\d[\d,]*\s*(?:-|to)\s*\$\d/, 'the rules quote no sample dollar spans');
+  });
+
+  await check('Data sources: only the sources that supplied a comp are named to the model ("Comp data for this analysis came from"), and a write-up that names a source with no comp (LeadSimple, Move-Ins, CRMLS, RentCast) is refused with the sources named, unless it is about RentCast\'s automated estimate or the comps do not say where they came from', () => {
+    const onlyCrmls = { ...rInput, comps: rInput.comps.map(c => ({ ...c, source_name: 'CRMLS' })) };
+    const prompt = buildPrompt({ subject: { address: 'x', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps: onlyCrmls.comps, headline: rInput.headline, confidence: null, subjectEstimatedRent: null, sourcesUsed: ['CRMLS'] });
+    assert.match(prompt, /Comp data for this analysis came from: CRMLS\./);
+    const v = validateRationale('The comps come from RentCast, CRMLS, and LeadSimple Move-Ins.', onlyCrmls);
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.badSources, ['LeadSimple Move-Ins', 'RentCast']);
+    assert.match(v.problems.join(' '), /named a data source that supplied no comps to this analysis \(LeadSimple Move-Ins, RentCast\)/);
+    assert.deepEqual(validateRationale('Two LeadSimple Move-Ins leases agree.', onlyCrmls).badSources, ['LeadSimple Move-Ins']);
+    assert.deepEqual(validateRationale('CRMLS shows a lease at $3,200 for 1556 Bittern Ct.', onlyCrmls).badSources, []);
+    assert.deepEqual(validateRationale('RentCast estimates the subject at $3,950.', onlyCrmls).badSources, [], 'RentCast also supplies the subject\'s automated estimate');
+    assert.deepEqual(validateRationale('The automated RentCast rent for the home is $3,950.', onlyCrmls).badSources, []);
+    assert.deepEqual(validateRationale('RentCast listings show 6630 Sora St.', rInput).badSources, [], 'a RentCast comp exists');
+    const noSourceInfo = { ...rInput, comps: rInput.comps.map(({ source_name, ...c }) => c) };
+    assert.deepEqual(validateRationale('The comps come from LeadSimple Move-Ins.', noSourceInfo).badSources, [], 'comps with no source_name: nothing to judge');
+  });
+
+  await check('server.js and router.js give the write-up only the sources that supplied a comp (from the saved comps, not from the list of sources that merely ran fine), and still list every source that ran in the "no comparable homes" text', () => {
+    const strip = raw => raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    for (const file of ['server.js', pathR.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathR.join(__dirname, file);
+      if (!fsR.existsSync(p)) continue;
+      const src = strip(fsR.readFileSync(p, 'utf8'));
+      assert.match(src, /sourcesUsed: \[\.\.\.new Set\(compsWithMatch\.map\(c => c\.source_name\)\.filter\(Boolean\)\)\]/, `${file} names only sources with comps to the model`);
+      // Round 4: the no-comps text is also told the sources that were skipped
+      assert.match(src, /rationale = noCompsRationale\(sourcesUsed, sourcesSkipped\)/, `${file} still lists the sources checked when none found anything, and says which were skipped`);
+      assert.doesNotMatch(src, /^\s*sourcesUsed,\s*$/m, `${file} no longer hands the raw list to the model`);
+    }
+  });
+
+  await check('Address matching: the subject\'s own unit typed without commas ("1300 Saratoga Ave unit 500 Ventura, CA 93003") matches the same unit written the usual way; a different unit never matches (500 vs 502), nor does a unit-less address against a unit, nor a different house number; the old cases still match', () => {
+    const m = addressesMatch;
+    assert.equal(m('1300 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), true);
+    assert.equal(m('1300 Saratoga Ave Unit 500, Ventura, CA 93003', '1300 Saratoga Avenue, Unit 500, Ventura, CA 93003'), true);
+    assert.equal(m('1300 Saratoga Ave apt 500 Ventura CA', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), true, 'apt and unit are the same thing');
+    assert.equal(m('1300 Saratoga Ave unit 502 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), false, 'Unit 502 is not Unit 500');
+    assert.equal(m('1300 Saratoga Ave unit 5 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), false);
+    assert.equal(m('1300 Saratoga Ave Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), false, 'a unit-less address against a unit');
+    assert.equal(m('1301 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'), false, 'a different house number');
+    assert.equal(m('1300 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Hollywood Blvd, Unit 500, Ventura, CA 93003'), false, 'a different street');
+    // the cases that matched before still do
+    assert.equal(m('1696 Salt River Ave', '1696 Salt River Avenue'), true);
+    assert.equal(m('2461 Bunting Avenue, Ventura, CA 93003', '2461 Bunting Ave, Ventura, CA 93003'), true);
+    assert.equal(m('130 N Garden St Unit 1411', '130 N Garden St, Unit 1411, Ventura, CA 93001'), true);
+    assert.equal(m('130 N Garden St Unit 1207', '130 N Garden St, Unit 1411, Ventura, CA 93001'), false);
+    assert.equal(m('2194 Channel Dr', '2006 Channel Dr'), false);
+    assert.equal(m('77-79 Raemere St', '77 Raemere St'), false);
+  });
+
+  await check('The subject\'s own listing is no longer counted as one of its own comps when the address is typed without a comma before the city (1300 Saratoga Ave unit 500), while Unit 502 in the same building stays a comp', async () => {
+    const subject = { address: '1300 Saratoga Ave unit 500 Ventura, CA 93003', propertyType: 'condo', bedrooms: 2, bathrooms: 2, sqft: 900 };
+    const rows = [
+      rcListing({ formattedAddress: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', status: 'Inactive', price: 2900, propertyType: 'Condo' }),
+      rcListing({ formattedAddress: '1300 Saratoga Ave, Unit 502, Ventura, CA 93003', status: 'Active', price: 2850, propertyType: 'Condo' }),
+    ];
+    const mock = mockRentCastFetch({ avm: okJson(avmBody()), listings: okJson(rows) });
+    const comps = await withRentCastMock(mock, () => pullRentCastListings(subject, buntingLat, buntingLon));
+    assert.deepEqual(comps.map(c => c.address), ['1300 Saratoga Ave, Unit 502, Ventura, CA 93003']);
+  });
+
+  await check('Chart overlay: the shaded range, its tick, the gridlines and the dashed estimate line sit in an absolutely placed layer with a height of its own (as plain grid items they were 0 px tall), the same in both pages', () => {
+    const pages = [pathR.join(__dirname, 'dashboard', 'index.html'), pathR.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html')].filter(f => fsR.existsSync(f));
+    for (const f of pages) {
+      const html = fsR.readFileSync(f, 'utf8');
+      const rule = html.match(/\.chart-overlay \{([^}]*)\}/);
+      assert.ok(rule, 'the overlay rule exists');
+      assert.match(rule[1], /position:\s*absolute/);
+      assert.match(rule[1], /top:\s*0/);
+      assert.match(rule[1], /bottom:\s*26px/);
+      assert.match(rule[1], /left:\s*calc\(40% \+ 12px\)/);
+      assert.match(rule[1], /right:\s*0/);
+      assert.match(rule[1], /pointer-events:\s*none/);
+      assert.doesNotMatch(rule[1], /grid-row|grid-column/, 'not a grid item');
+    }
+  });
+
+  await check('Form values: sizes and counts above sane limits (20,000 sq ft, 20 bedrooms, 20 bathrooms, a 120-month lease) are refused with a plain message; the largest allowed values pass; control characters (a zero byte, line breaks) are dropped from typed text; Furnished must be a real true or false', () => {
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 4, bathrooms: 2, sqft: 1636, leaseTermMonths: 12 }), null);
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 20, bathrooms: 20, sqft: 20000, leaseTermMonths: 120 }), null);
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 4, bathrooms: 2, sqft: 20001, leaseTermMonths: 12 }), 'subject_sqft must be 20,000 or less.');
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 21, bathrooms: 2, sqft: 1600, leaseTermMonths: 12 }), 'subject_bedrooms must be 20 or less.');
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 4, bathrooms: 20.5, sqft: 1600, leaseTermMonths: 12 }), 'subject_bathrooms must be 20 or less.');
+    assert.equal(SI.checkSubjectLimits({ bedrooms: 4, bathrooms: 2, sqft: 1600, leaseTermMonths: 121 }), 'lease_term_months must be 120 or less.');
+    assert.equal(SI.stripControlChars('1895 Dorrit\u0000 St\u0007, Ventura'), '1895 Dorrit St, Ventura');
+    assert.equal(SI.stripControlChars('Hueneme\nBay\t1'), 'Hueneme Bay 1');
+    assert.equal(SI.stripControlChars('plain text, with punctuation & numbers 123'), 'plain text, with punctuation & numbers 123');
+    assert.deepEqual(Fb.parseSubdivisionInput('Hueneme Bay 1\u0000 - 148801'), { value: 'Hueneme Bay 1' });
+    assert.deepEqual(Fb.parseSubdivisionInput('\u0000\u0000'), { value: null });
+    for (const ok of [undefined, null]) assert.deepEqual(SI.parseFurnishedInput(ok), { value: false });
+    assert.deepEqual(SI.parseFurnishedInput(true), { value: true });
+    assert.deepEqual(SI.parseFurnishedInput(false), { value: false });
+    for (const bad of ['false', 'true', 'yes', 1, 0, '', {}, []]) assert.match(SI.parseFurnishedInput(bad).error, /^furnished must be true or false, or omitted\./, JSON.stringify(bad));
+  });
+
+  await check('server.js and router.js apply the form checks the same way: the address is cleaned of control characters first, Furnished goes through the strict check, and the size limits run before any lookup', () => {
+    const strip = raw => raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    for (const file of ['server.js', pathR.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathR.join(__dirname, file);
+      if (!fsR.existsSync(p)) continue;
+      const src = strip(fsR.readFileSync(p, 'utf8'));
+      assert.match(src, /body\.subject_address = stripControlChars\(body\.subject_address\)/, `${file} cleans the address`);
+      assert.match(src, /parseFurnishedInput\(furnished\)/);
+      assert.doesNotMatch(src, /!!furnished/, `${file} no longer reads any value as "furnished"`);
+      assert.match(src, /checkSubjectLimits\(\{ bedrooms, bathrooms, sqft, leaseTermMonths \}\)/);
+      assert.ok(src.indexOf('checkSubjectLimits(') < src.indexOf('const userRows = await select('), `${file}: before any lookup`);
+    }
+  });
+
+  await check('Screen: comp cards show the MLS facts saved with the comp as plain chips (HOA, private pool, utilities, water/trash, gardener, new construction, furnished, short-term, 55+), the page shows the size band line or says why the size rule was not used, and nothing on the page can change a number', () => {
+    const pages = [pathR.join(__dirname, 'dashboard', 'index.html'), pathR.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html')].filter(f => fsR.existsSync(f));
+    for (const f of pages) {
+      const html = fsR.readFileSync(f, 'utf8');
+      for (const label of ['HOA', 'Private pool', 'Utilities included', 'Water/trash included', 'Gardener included', 'New construction', 'Furnished', 'Short-term lease', '55+ community']) assert.ok(html.includes(`'${label}'`), `${label} chip`);
+      assert.match(html, /c\.mls_flags/);
+      assert.match(html, /extras\.sizeNote/);
+      assert.match(html, /size-band-note/);
+    }
+    const a = { subject_property_type: 'single_family', subject_sqft: 1636 };
+    assert.deepEqual(Or.sizeBandNote(a), { band: { pct: 25, low: 1227, high: 2045 }, text: 'Size band: 1,227-2,045 sq ft (within 25% of your home)' });
+    assert.equal(Or.sizeBandNote({ subject_property_type: 'condo', subject_sqft: null }).text, 'Home size not entered, so the size rule was not used.');
+    assert.equal(Or.sizeBandNote({ subject_property_type: 'condo', subject_sqft: 0 }).band, null);
+    assert.equal(Or.sizeBandNote({ subject_property_type: 'duplex', subject_sqft: 1600 }).text, 'The size rule is not used for this property type.');
+    const numbers = computeNumbersC({ comps: [], subject: subjectC });
+    const out = Or.buildApiResponse({ analysis: { id: 'a', subject_property_type: 'single_family', subject_sqft: 1636 }, comps: [], marketData: null, numbers, scorecard: null });
+    assert.equal(out.sizeNote, 'Size band: 1,227-2,045 sq ft (within 25% of your home)');
+    assert.deepEqual(out.sizeBand, { pct: 25, low: 1227, high: 2045 });
+  });
+
+  await check('The "RentCast listings ... were not part of this test" note and the LA-border note appear once in the staff sentences (in the accuracy line), not again in the track-record sentence; the track-record sentence keeps its figures', () => {
+    const s = Ar.staffSentences(scoreC(), 'medium');
+    const both = `${s.accuracyLine} ${s.trackRecord}`;
+    assert.equal((both.match(/RentCast listings, about 45% of the comps staff see, were not part of this test\./g) || []).length, 1);
+    assert.equal((both.match(/Figures for homes in the LA-border area/g) || []).length, 1);
+    assert.match(s.trackRecord, /^Medium confidence\. In blind tests on 150 past Ventura County leases, reports like this held the signed rent inside the recommended range about \d times? in 10/);
+    assert.match(s.trackRecord, /within \$300 of the suggested price about \d times? in 10 \(roughly \d to \d times in 10\)\.$/);
+    // with no accuracy line to carry the notes, the track-record sentence keeps its own
+    const justLabel = Ar.trackRecordSentence(scoreC(), 'Medium', { method: 'size25_item2' });
+    assert.match(justLabel, /RentCast listings/);
+  });
+
+  await check('The entry-point harness covers the review fixes end to end for both entry points: the write-up is told only the sources that supplied a comp, absurd sizes and a text "false" are refused before anything is saved, a zero byte in the address or neighborhood is removed before saving', () => {
+    for (const mode of ['server', 'router']) {
+      if (mode === 'router' && !fsR.existsSync(pathR.join(__dirname, '..', 'hub', 'node_modules', 'express'))) continue;
+      const res = spawnR(process.execPath, [pathR.join(__dirname, 'q-entry-point-harness.js'), mode], { encoding: 'utf8', timeout: 120000 });
+      assert.equal(res.status, 0, `${mode} harness failed:\n${(res.stdout || '').slice(-1500)}\n${(res.stderr || '').slice(-2500)}`);
+    }
+  });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Round 3: spreads said in other words, the subject's own listing, a half-down source, the screen
+  // ════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Round 3: spreads said in other words, trimming a rejected second draft, own listing, half-down sources, zip, screen ---');
+  const N3 = require('./lib/narrative');
+  const O3 = require('./lib/outcome');
+  const A3 = require('./lib/accuracy-sentences');
+  const PM3 = require('./lib/property-matching');
+  const C3 = require('./lib/crmls');
+  const vm3 = require('node:vm');
+  const fs3 = require('node:fs');
+  const path3 = require('node:path');
+  const dashboards3 = [path3.join(__dirname, 'dashboard', 'index.html'), path3.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html')].filter(f => fs3.existsSync(f));
+
+  const Fb = require('./lib/mls-facts');
+  const Kc = require('./lib/constants');
+  const { computeNumbers: computeNumbersC } = require('./lib/analyze');
+  const subjectC = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false };
+  const blockC = (n, k300, kRange) => ({ n, typicalMiss: 280, within300OfSuggestedCount: k300, within300OfSuggestedCiPct: [50, 70], rangeHit200Count: kRange, rangeHit200CiPct: [20, 40] });
+  const scoreC = () => ({
+    trusted: true, dataPulledOn: '2026-10-17', pool: { rentcast: 'not included (RentCast as-of snapshot, A2, is not built)' },
+    overall: { size25_item2: { county: { ranged: blockC(400, 240, 120), coveragePct: 75.9 } }, baseline: { county: { ranged: blockC(400, 160, 60), coveragePct: 91 } } },
+    groups: { size25_item2: { county: { confidence: { High: { ranged: blockC(150, 110, 60) }, Medium: { ranged: blockC(260, 150, 70) }, Low: { ranged: blockC(40, 15, 6) } } } } },
+    counties: { unknown: { overLimit: false, sharePct: 0 } },
+  });
+  const input3 = {
+    subject: { address: '2292 Buffalo Avenue, Ventura, CA 93003' },
+    comps: [
+      { address: '1556 Bittern Ct, Ventura, CA 93003', monthly_rent: 3200, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '6630 Sora St, Ventura, CA 93003', monthly_rent: 3400, listing_status: 'active', exclusion_reason: null, source_name: 'RentCast' },
+      { address: '2292 Buffalo Avenue, Ventura, CA 93003', monthly_rent: 4600, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '2300 Buffalo Avenue, Ventura, CA 93003', monthly_rent: 3900, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+      { address: '14 Price Cut Ln, Ventura, CA 93003', monthly_rent: 4500, listing_status: 'active', exclusion_reason: null, source_name: 'RentCast', had_price_cut: true, original_price: 4700 },
+      { address: '120 Mid Way, Ventura, CA 93003', monthly_rent: 4100, listing_status: 'leased', exclusion_reason: null, source_name: 'CRMLS' },
+    ],
+    headline: { low: 3800, high: 4000, listPrice: 3900, goal: 'balanced', stretchPrice: 4200 },
+    subjectEstimatedRent: 3950,
+  };
+
+  // The twelve sentences a live re-test found that got past the first span checks, then more ways of saying the same thing.
+  const SLIPPED = [
+    'Rents run as low as $3,200 at 1556 Bittern Ct and as high as $4,600 at 2292 Buffalo Avenue.',
+    'Rents top out at $4,600 at 2292 Buffalo Avenue and bottom out at $3,200 at 1556 Bittern Ct.',
+    'The counted comps start at $3,200 and top out at $4,600.',
+    'Rents go as high as $4,600 and as low as $3,200.',
+    '2292 Buffalo Avenue at $4,600 is about $1,400 more than the lowest comp, 1556 Bittern Ct at $3,200.',
+    '2292 Buffalo Avenue sits $1,400 above 1556 Bittern Ct at $3,200.',
+    'The counted rents differ by $1,400 from lowest to highest.',
+    'Counted rents cover a $1,400 band.',
+    'Rents vary by more than $1,000 across the counted comps.',
+    'The distance between the highest and lowest counted rent is $1,400.',
+    'Counted rents run from thirty-two hundred dollars to forty-six hundred dollars.',
+    'The three leased 3bd comps range lower than the 4bd lease at 2292 Buffalo Avenue.',
+  ];
+  const MORE_BAD = [
+    'Rents run $3,200‑$4,600.', 'Rents run $3,200‒$4,600.', 'Rents run $3,200−$4,600.', 'Rents run $3.4-4.6k.', 'Rents run $3.2k–4.6k.',
+    'The rents show a low of $3,200 and a high of $4,600.',
+    'The lowest rent is $3,200. The highest rent is $4,600.',
+    'Rents sit between thirty-two hundred dollars and forty-six hundred dollars.',
+    '2292 Buffalo Avenue at $4,600 is $500 above 1556 Bittern Ct at $3,200.',
+  ];
+  // Sentences that must stay clean: the range written both ways, price cuts, two comps' rents with no span words, one comp's
+  // days, true source mentions, the stretch price with its fixed words, "lowest ... highest" within $500, the estimate.
+  const CLEAN = [
+    'The recommended range is $3,800-$4,000.',
+    'The recommended range is $3,800 to $4,000, and the suggested list price is $3,900.',
+    'Our recommended range of $3,800–$4,000 is centred on the weighted middle of the counted comps.',
+    '14 Price Cut Ln was cut from $4,700 to $4,500 and is still active.',
+    '14 Price Cut Ln dropped its asking rent from $4,700 to $4,500.',
+    '1556 Bittern Ct leased at $3,200 and 2292 Buffalo Avenue leased at $4,600.',
+    '6630 Sora St is listed at $3,400, and 2300 Buffalo Avenue leased at $3,900.',
+    '2292 Buffalo Avenue leased at $4,600, which is above the recommended range.',
+    '1556 Bittern Ct at $3,200 is below the recommended range.',
+    '1556 Bittern Ct at $3,200 is $600 below the recommended range.',
+    '2292 Buffalo Avenue at $4,600 is $600 above the recommended range, while 1556 Bittern Ct at $3,200 is $600 below it.',
+    'The three leased comps are 1556 Bittern Ct at $3,200, 2300 Buffalo Avenue at $3,900 and 2292 Buffalo Avenue at $4,600.',
+    '6630 Sora St was on the market for 41 days.',
+    '2300 Buffalo Avenue leased after 12 days on the market.',
+    'The counted comps come from CRMLS and RentCast.',
+    'CRMLS shows two leases, 1556 Bittern Ct and 2292 Buffalo Avenue.',
+    "RentCast's own automated estimate for the home is $3,950.",
+    'The stretch price is $4,200. Above the recommended range; may take longer to lease.',
+    'The lowest counted lease among the close matches is $3,900 at 2300 Buffalo Avenue and the highest is $4,100 at 120 Mid Way.',
+    'Rents are spread widely, so confidence is low.',
+    'Only 2 of the 6 counted comps are confirmed leases, so confidence is medium.',
+    '2292 Buffalo Avenue is the highest counted rent at $4,600 and sits above the recommended range.',
+    'The lowest counted rent is $3,200 at 1556 Bittern Ct, below the recommended range.',
+    'The top of the recommended range is $4,000 and the bottom is $3,800.',
+    'The recommended range tops out at $4,000 and starts at $3,800.',
+    'Leasing quickly points to the low end of the recommended range, $3,800, while holding out for more points to the high end, $4,000.',
+    'The suggested price of $3,900 is $100 above the recommended low.',
+    '2300 Buffalo Avenue at $3,900 matches the suggested price.',
+    'A $50 difference separates the suggested price and 2300 Buffalo Avenue.',
+    "The subject's estimate of $3,950 sits inside the recommended range.",
+    '1556 Bittern Ct is 0.6 miles away and 2292 Buffalo Avenue is 0.2 miles away.',
+    'Of the 6 counted comps, 4 are leases and 2 are active listings.',
+    '14 Price Cut Ln, at $4,500, sits $500 above the recommended range.',
+    'The leased comps agree closely with each other.',
+    '6630 Sora St asks $3,400, and 1556 Bittern Ct leased for $3,200; neither is near the recommended range.',
+  ];
+
+  await check('Round 3 / spreads: the twelve sentences a live re-test slipped past the span checks, and nine more ways of saying the same thing, are each refused by the written-explanation check AND by the per-comp narrative check', () => {
+    for (const text of [...SLIPPED, ...MORE_BAD]) {
+      const v = validateRationale(text, input3);
+      assert.equal(v.ok, false, `explanation check should refuse: ${text}`);
+      assert.ok(v.badStatements.some(b => /^(span|group): /.test(b)), `a spread problem for: ${text} -> ${JSON.stringify(v.badStatements)}`);
+      assert.ok(N3.findWideRangeStatements(text, input3, { narrative: true }).length > 0, `per-comp check should refuse: ${text}`);
+    }
+    assert.match(validateRationale(SLIPPED[11], input3).problems.join(' '), /group of comps "ranges", "runs" or "sits"/);
+  });
+
+  await check('Round 3 / spreads: 36 sentences that are fine (the range written both ways, price cuts, two comps\' rents with no span words, one comp\'s days, true source mentions, the stretch price with its fixed words, lowest and highest within $500, a difference measured from the range, RentCast\'s own estimate) stay clean in both checks', () => {
+    for (const text of CLEAN) {
+      const v = validateRationale(text, input3);
+      assert.equal(v.ok, true, `should be clean: ${text} -> ${v.problems.join(' | ')}`);
+      assert.deepEqual(N3.findWideRangeStatements(text, input3, { narrative: true }), [], `per-comp check should be clean: ${text}`);
+    }
+    assert.ok(CLEAN.length >= 30);
+  });
+
+  await check('Round 3 / spreads: a per-comp narrative with a rent that is not in the data, or with "homes like this typically lease within 30 days", is dropped; its own days on market, price cut and distance from the range are fine', () => {
+    const narrative = text => N3.findWideRangeStatements(text, input3, { narrative: true });
+    // Round 5: its $1,400 is also a figure that is neither in the data nor how far a comp is from the range or a price, so it is flagged as a figure too
+    assert.deepEqual(narrative('Asking $3,950, about $1,400 under the top comp.').map(b => b.kind), ['span', 'figure']);
+    assert.deepEqual(narrative('At this price the data suggests the subject could rent for about $4,950.').map(b => b.kind), ['figure']);
+    assert.deepEqual(narrative('Homes like this typically lease within 30 days.').map(b => b.kind), ['time']);
+    assert.deepEqual(narrative('Leased in 12 days, and homes like this usually lease within a month or so.').map(b => b.kind), ['time']);
+    for (const fine of ['Leased at $3,200 after 12 days on the market; this is below the recommended range.', 'Asking $4,500 after a price cut from $4,700, a $200 reduction.', 'This 3-bedroom is priced $700 above the recommended range.', 'Active listing at $3,400, about $400 below the recommended range.', 'It leased for $3,200 in 12 days.']) {
+      assert.deepEqual(narrative(fine), [], fine);
+    }
+    // with no rents in the data at all there is nothing to compare a figure with, so the figure check stays quiet
+    assert.deepEqual(N3.findWideRangeStatements('Leased at $3,475 in 11 days.', { comps: [{ address: '1 A St' }], headline: null }, { narrative: true }), []);
+    // the guard drops the narrative itself, and warns once
+    const dropped = N3.guardWideRanges(input3.comps, ['Asking $3,950, about $1,400 under the top comp.', null, 'Leased at $3,200 after 12 days.', null, null, null], input3);
+    assert.equal(dropped[0], null);
+    assert.equal(dropped[2], 'Leased at $3,200 after 12 days.');
+  });
+
+  await check('Round 3 / spreads: dashes of every kind (hyphen, U+2010-U+2015, minus U+2212), "$3.4-4.6k", and money written in words are read as figures; the prompt tells the writer never to give a figure for how far apart rents are', () => {
+    for (const dash of ['-', '‐', '‑', '‒', '–', '—', '―', '−']) {
+      assert.equal(validateRationale(`Rents run $3,200${dash}$4,600.`, input3).ok, false, `dash U+${dash.charCodeAt(0).toString(16)}`);
+      assert.equal(validateRationale(`Rents run $3,200${dash}4,600.`, input3).ok, false, `bare second figure after U+${dash.charCodeAt(0).toString(16)}`);
+    }
+    assert.deepEqual(N3.extractDollarFigures('rents of $3.4-4.6k').map(f => f.value), [3400, 4600]);
+    assert.deepEqual(N3.extractDollarFigures('from thirty-two hundred dollars to forty-six hundred dollars').map(f => f.value), [3200, 4600]);
+    assert.deepEqual(N3.extractDollarFigures('four thousand six hundred dollars').map(f => f.value), [4600]);
+    assert.deepEqual(N3.extractDollarFigures('a hundred dollars more').map(f => f.value), [100]);
+    // the recommended range written with any dash is still the recommended range
+    assert.equal(validateRationale('The recommended range is $3,800‒$4,000.', input3).ok, true);
+    const prompt = N3.buildPrompt({ subject: { address: '2292 Buffalo Avenue', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, comps: input3.comps, headline: input3.headline, confidence: { label: 'low', reasonText: 'x.' }, subjectEstimatedRent: 3950, sourcesUsed: ['CRMLS'] });
+    const rules = prompt.slice(prompt.indexOf('HARD RULES:'), prompt.indexOf('SUBJECT PROPERTY:'));
+    assert.match(rules, /Never give a figure for how far apart rents are: no gap, spread, difference, band or distance in dollars/);
+    assert.match(rules, /Do not write "as low as \.\.\. as high as", "start at \.\.\. top out at", or "the rents differ by"/);
+    assert.match(rules, /a distance from the recommended range or from the suggested price is fine/);
+  });
+
+  await check('Round 3 / spreads: "from ... to" only reads as a span when what sits between the figures is an address or a short description; a cut "from $5,200 to get there, so the $5,000+ asks" is not a span', () => {
+    const find = text => N3.findWideRangeStatements(text, { comps: [], headline: null });
+    assert.deepEqual(find('a cut from $5,200 to get there, so the $5,000+ active asks'), []);
+    assert.deepEqual(find('it took a cut from $4,800 and 25 days to move, signaling resistance above the high-$4,000s').filter(b => b.kind === 'span'), []);
+    for (const text of ['Rents run from $3,200 (1556 Bittern Ct) to $4,600 (2292 Buffalo Avenue).', 'Rents run from $3,200 at 1556 Bittern Ct. up to $4,600 at 2292 Buffalo Ave.', 'Counted rents RANGE FROM $3,200 TO $4,600.', 'Rents are spread widely, from 1556 Bittern Ct at $3,200 up to 2292 Buffalo Avenue at $4,600.']) {
+      assert.ok(find(text).some(b => b.kind === 'span'), text);
+    }
+  });
+
+  await check('Round 3 / second draft: when the corrected explanation is rejected too, the flagged sentences are taken out and what is left is saved if it passes; otherwise it is null; never more than 3 writer calls', async () => {
+    const base = { ...input3, subject: { address: '2292 Buffalo Avenue', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, confidence: null, sourcesUsed: ['CRMLS', 'RentCast'] };
+    const GOOD1 = 'The recommended range is $3,800-$4,000, centred on the weighted middle of the six counted comps.';
+    const GOOD2 = 'The suggested list price is $3,900, which matches 2300 Buffalo Avenue.';
+    const BADS = 'Rents run as low as $3,200 at 1556 Bittern Ct and as high as $4,600 at 2292 Buffalo Avenue.';
+    const reply = text => textReply(`RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale: text, comp_narratives: {} })}`);
+    const run = async (first, second) => {
+      const mock = mockClaude([reply(first), reply(second)]);
+      const result = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+      return { result, calls: mock.calls.length };
+    };
+    // 1. one bad sentence among good ones in BOTH drafts: the second draft is saved without it
+    let { result, calls } = await run(`${GOOD1} ${BADS} ${GOOD2}`, `${GOOD1} ${BADS} ${GOOD2}`);
+    assert.equal(calls, 2);
+    assert.equal(result.rationale, `${GOOD1} ${GOOD2}`);
+    assert.equal(result.meta.rationaleTrimmed, true);
+    assert.equal(result.meta.rationaleDropped, false);
+    assert.equal(result.meta.anthropicCalls, 2);
+    assert.equal(validateRationale(result.rationale, base).ok, true);
+    // 2. nothing but a flagged sentence: null
+    ({ result } = await run(BADS, BADS));
+    assert.equal(result.rationale, null);
+    assert.equal(result.meta.rationaleDropped, true);
+    assert.equal(result.meta.rationaleTrimmed, false);
+    // 3. too little left to be worth saving: null
+    ({ result } = await run(`Fine. ${BADS}`, `Fine. ${BADS}`));
+    assert.equal(result.rationale, null);
+    // 4. every sentence passes alone but the pair is the same spread said in two steps: the whole still fails, so null
+    const PAIR = `${GOOD1} The lowest counted rent is $3,200 at 1556 Bittern Ct. The highest counted rent is $4,600 at 2292 Buffalo Avenue.`;
+    assert.equal(validateRationale(PAIR, base).ok, false, 'lowest in one sentence and highest in the next is refused');
+    ({ result } = await run(PAIR, PAIR));
+    assert.equal(result.rationale, null);
+    // 5. a good second draft is kept whole and is not marked as trimmed
+    ({ result } = await run(`${GOOD1} ${BADS}`, `${GOOD1} ${GOOD2}`));
+    assert.equal(result.rationale, `${GOOD1} ${GOOD2}`);
+    assert.equal(result.meta.rationaleTrimmed, false);
+    // 6. the call count stays at 3 or fewer even when the first answer was cut off and both drafts need trimming
+    const cutOff = textReply('RENTAL_ANALYSIS_OUTPUT: {"rationale": "The rec', 'max_tokens');
+    const mock = mockClaude([cutOff, reply(`${GOOD1} ${BADS} ${GOOD2}`), reply(`${GOOD1} ${BADS} ${GOOD2}`)]);
+    const three = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+    assert.ok(mock.calls.length <= 3, `${mock.calls.length} calls`);
+    assert.equal(three.rationale, `${GOOD1} ${GOOD2}`);
+    assert.ok(N3.dropFlaggedSentences(`${GOOD1} ${BADS}`, base) === GOOD1 || N3.dropFlaggedSentences(`${GOOD1} ${BADS}`, base) === null);
+  });
+
+  await check('Round 3 / own listing: the AVM\'s similar-rentals list can include the subject\'s own unit; it is taken out (Unit 500 out, Unit 502 and other homes stay), however the unit was typed', async () => {
+    const subject = { address: '1300 Saratoga Ave unit 500 Ventura, CA 93003', propertyType: 'condo', bedrooms: 2, bathrooms: 2, sqft: 1100 };
+    const comparables = [
+      { formattedAddress: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', state: 'CA', distance: 0, latitude: buntingLat, longitude: buntingLon, price: 2900, status: 'Inactive' },
+      { formattedAddress: '1300 Saratoga Ave, Unit 502, Ventura, CA 93003', state: 'CA', distance: 0, latitude: buntingLat, longitude: buntingLon, price: 3000, status: 'Active' },
+      { formattedAddress: '1400 Saratoga Ave, Ventura, CA 93003', state: 'CA', distance: 0.1, latitude: buntingLat, longitude: buntingLon, price: 3100, status: 'Active' },
+    ];
+    const mock = mockRentCastFetch({ avm: okJson(avmBody(comparables)), listings: okJson([]) });
+    const result = await withRentCastMock(mock, () => pullRentCastComps(subject));
+    assert.deepEqual(result.comps.map(c => c.address).sort(), ['1300 Saratoga Ave, Unit 502, Ventura, CA 93003', '1400 Saratoga Ave, Ventura, CA 93003']);
+    assert.equal(result.comps.length, 2, 'only Unit 500 was removed');
+    // the same listing typed with commas, with "#", and the building without a unit
+    for (const typed of ['1300 Saratoga Ave, Unit 500, Ventura, CA 93003', '1300 Saratoga Ave #500 Ventura, CA 93003']) {
+      const again = await withRentCastMock(mockRentCastFetch({ avm: okJson(avmBody(comparables)), listings: okJson([]) }), () => pullRentCastComps({ ...subject, address: typed }));
+      assert.ok(!again.comps.some(c => /Unit 500/.test(c.address)), typed);
+      assert.ok(again.comps.some(c => /Unit 502/.test(c.address)), typed);
+    }
+  });
+
+  await check('Round 3 / own listing: whatever the source, the subject\'s own current listing is dropped (RentCast any status, an MLS Active record); a confirmed lease at the same address (MLS Closed) and Rincon\'s own earlier lease of the same unit are kept; another unit stays', async () => {
+    const comps = [
+      { address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', listing_status: 'off_market', source_name: 'RentCast', monthly_rent: 2900 },
+      { address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast', monthly_rent: 2950 },
+      { address: '1300 Saratoga Ave Unit 500, Ventura, CA 93003', listing_status: 'active', source_name: 'CRMLS', monthly_rent: 2950 },
+      { address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', listing_status: 'leased', source_name: 'CRMLS', monthly_rent: 2800 },
+      { address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', listing_status: 'leased', source_name: 'LeadSimple Move-Ins', monthly_rent: 2700 },
+      { address: '1300 Saratoga Ave, Unit 502, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast', monthly_rent: 3000 },
+    ];
+    const { kept, dropped } = PM3.dropSubjectsOwnListing(comps, '1300 Saratoga Ave unit 500 Ventura, CA 93003');
+    assert.equal(dropped.length, 3);
+    assert.deepEqual(dropped.map(c => `${c.source_name}/${c.listing_status}`), ['RentCast/off_market', 'RentCast/active', 'CRMLS/active']);
+    assert.deepEqual(kept.map(c => `${c.source_name}/${c.listing_status}/${/Unit (\d+)/.exec(c.address)[1]}`), ['CRMLS/leased/500', 'LeadSimple Move-Ins/leased/500', 'RentCast/active/502']);
+    assert.deepEqual(PM3.dropSubjectsOwnListing(comps, '').dropped, [], 'no subject address: nothing is dropped');
+    // and the same through runActiveSources(), whichever handler supplied it
+    const originals = { ...sourcesLib.SOURCE_HANDLERS };
+    sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ comps: comps.filter(c => c.source_name === 'RentCast').map(c => ({ ...c })), subjectEstimatedRent: 2950, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003' });
+    sourcesLib.SOURCE_HANDLERS.CRMLS = async () => ({ comps: comps.filter(c => c.source_name === 'CRMLS').map(c => ({ ...c })) });
+    sourcesLib.SOURCE_HANDLERS['LeadSimple Move-Ins'] = async () => ({ comps: comps.filter(c => c.source_name === 'LeadSimple Move-Ins').map(c => ({ ...c })) });
+    try {
+      const out = await withCapturedWarnings(() => runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's2', name: 'CRMLS' }, { id: 's3', name: 'LeadSimple Move-Ins' }], { address: '1300 Saratoga Ave unit 500 Ventura, CA 93003', propertyType: 'condo', bedrooms: 2, bathrooms: 2, sqft: 1100 }));
+      assert.equal(out.comps.length, 3);
+      assert.ok(!out.comps.some(c => c.listing_status !== 'leased' && /Unit 500/.test(c.address)));
+    } finally {
+      Object.assign(sourcesLib.SOURCE_HANDLERS, originals);
+    }
+  });
+
+  await check('Round 3 / half-down sources: a source that cannot load part of its search says so (RentCast listings search failing on a bad answer, a non-array body or an exception; CRMLS losing its Closed or its Active half); a clean run says nothing', async () => {
+    const subject = buntingSubject;
+    const run = async listings => {
+      const mock = mockRentCastFetch({ avm: okJson(avmBody([])), listings });
+      return withCapturedWarnings(() => withRentCastMock(mock, () => pullRentCastComps(subject)));
+    };
+    for (const listings of [{ ok: false, status: 500, json: async () => ({}), text: async () => '' }, okJson({ not: 'an array' }), () => { throw new Error('socket hang up'); }]) {
+      const r = await run(listings);
+      assert.equal(r.partialFailure.length, 1, JSON.stringify(r.partialFailure));
+      assert.equal(r.partialFailure[0].what, 'its search of nearby rental listings');
+      assert.ok(r.partialFailure[0].message);
+    }
+    const clean = await run(okJson([rcListing()]));
+    assert.equal('partialFailure' in clean, false);
+    // direct callers that pass no callback still get [] and no error
+    const direct = await withCapturedWarnings(() => withRentCastMock(mockRentCastFetch({ avm: okJson(avmBody([])), listings: { ok: false, status: 429, json: async () => ({}) } }), () => pullRentCastListings(subject, buntingLat, buntingLon)));
+    assert.deepEqual(direct, []);
+    // CRMLS: one half rejected
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    try {
+      const pull = async rejectOrderby => {
+        global.fetch = async url => {
+          const orderby = new URL(String(url)).searchParams.get('$orderby');
+          if (orderby === rejectOrderby) return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) };
+          return { ok: true, json: async () => ({ value: [] }) };
+        };
+        return withCapturedWarnings(() => pullCrmlsComps({ address: '2461 Bunting Avenue, Ventura, CA 93003', latitude: buntingLat, longitude: buntingLon }));
+      };
+      const closedDown = await pull('CloseDate desc');
+      assert.deepEqual(closedDown.partialFailure.map(p => p.what), ['its recently leased homes']);
+      const activeDown = await pull('OnMarketDate desc');
+      assert.deepEqual(activeDown.partialFailure.map(p => p.what), ['its active listings']);
+      const bothUp = await pull('none');
+      assert.equal('partialFailure' in bothUp, false);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  await check('Round 3 / half-down sources: runActiveSources() collects each source\'s partialFailure as sourceWarnings; zero comps with any warning is a FAILED analysis (with the warning in the reason), zero comps and no warning is a finished "none found" report, comps with a warning carry on', async () => {
+    const originals = { ...sourcesLib.SOURCE_HANDLERS };
+    const subject = { address: '1 Test St, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 2, bathrooms: 1, sqft: 900 };
+    const mk = comps => ({ comps, subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null });
+    try {
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ ...mk([]), partialFailure: [{ what: 'its search of nearby rental listings', message: 'status 500' }] });
+      sourcesLib.SOURCE_HANDLERS.CRMLS = async () => ({ ...mk([]), partialFailure: 'the Closed half was rejected' });
+      let out = await withCapturedWarnings(() => runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's2', name: 'CRMLS' }], subject));
+      assert.deepEqual(out.sourceWarnings, [
+        { name: 'RentCast', what: 'its search of nearby rental listings', message: 'status 500' },
+        { name: 'CRMLS', what: 'part of what it searches', message: 'the Closed half was rejected' },
+      ]);
+      assert.deepEqual(out.sourceErrors, []);
+      const failed = O3.classifySourceResult({ comps: out.comps, sourcesUsed: out.sourcesUsed, sourceErrors: out.sourceErrors, sourceWarnings: out.sourceWarnings });
+      assert.equal(failed.kind, 'failed');
+      assert.match(failed.reason, /RentCast: only partly worked, its search of nearby rental listings did not come back \(status 500\)/);
+      assert.match(failed.reason, /CRMLS: only partly worked/);
+      // clean: no warnings, a source ran: finished with nothing found
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => mk([]);
+      sourcesLib.SOURCE_HANDLERS.CRMLS = async () => mk([]);
+      out = await runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's2', name: 'CRMLS' }], subject);
+      assert.deepEqual(out.sourceWarnings, []);
+      assert.deepEqual(O3.classifySourceResult({ comps: out.comps, sourcesUsed: out.sourcesUsed, sourceErrors: out.sourceErrors, sourceWarnings: out.sourceWarnings }), { kind: 'none_found' });
+      // comps from one source, a warning from another: carry on
+      sourcesLib.SOURCE_HANDLERS.CRMLS = async () => mk([{ address: '9 Oak St, Ventura, CA 93003', monthly_rent: 4000, listing_status: 'leased', distance_miles: 0.3 }]);
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ ...mk([]), partialFailure: [{ what: 'its search of nearby rental listings', message: 'status 500' }] });
+      out = await runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's2', name: 'CRMLS' }], subject);
+      assert.equal(out.comps.length, 1);
+      assert.equal(out.sourceWarnings.length, 1);
+      assert.equal(O3.classifySourceResult({ comps: out.comps, sourcesUsed: out.sourcesUsed, sourceErrors: out.sourceErrors, sourceWarnings: out.sourceWarnings }).kind, 'has_comps');
+      // the old behaviour is unchanged: an error with nothing found fails, a handler that never reports a partial failure gives an empty list
+      assert.equal(O3.classifySourceResult({ comps: [], sourcesUsed: ['RentCast'], sourceErrors: [{ name: 'CRMLS', error: 'down' }] }).kind, 'failed');
+      assert.equal(O3.classifySourceResult({ comps: [], sourcesUsed: [], sourceErrors: [], sourceWarnings: [] }).kind, 'failed');
+    } finally {
+      Object.assign(sourcesLib.SOURCE_HANDLERS, originals);
+    }
+  });
+
+  await check('Round 3 / source notes: the answer carries plain notes about a source that did not fully come back (down, or only part of it), nothing else about the report changes, and the notes are not saved anywhere', () => {
+    const notes = O3.buildSourceNotes({ sourceErrors: [{ name: 'RentCast', error: 'x' }, { name: 'RentCast', error: 'again' }], sourceWarnings: [{ name: 'CRMLS', what: 'its recently leased homes', message: 'x' }, { name: 'CRMLS', what: 'its active listings', message: 'y' }, { name: 'RentCast', what: 'ignored: already down', message: 'z' }, { name: 'LeadSimple Move-Ins', what: 'its leases', message: 'q' }] });
+    assert.deepEqual(notes, [
+      'RentCast was unavailable when this report ran, so it uses fewer comparable homes. Run it again to include them.',
+      'CRMLS was only partly available when this report ran (its recently leased homes and its active listings could not be loaded), so it may use fewer comparable homes. Run it again to include them.',
+      "Rincon's own move-in records was only partly available when this report ran (its leases could not be loaded), so it may use fewer comparable homes. Run it again to include them.",
+    ]);
+    assert.deepEqual(O3.buildSourceNotes({}), []);
+    assert.deepEqual(O3.buildSourceNotes({ sourceErrors: [], sourceWarnings: [] }), []);
+    const numbers = computeNumbersC({ comps: [], subject: subjectC });
+    const plain = O3.buildApiResponse({ analysis: { id: 'a', subject_property_type: 'single_family', subject_sqft: 1636 }, comps: [], marketData: null, numbers, scorecard: null });
+    const withNotes = O3.buildApiResponse({ analysis: { id: 'a', subject_property_type: 'single_family', subject_sqft: 1636 }, comps: [], marketData: null, numbers, scorecard: null, sourceNotes: notes });
+    assert.deepEqual(plain.sourceNotes, []);
+    assert.deepEqual(withNotes.sourceNotes, notes);
+    assert.deepEqual({ ...withNotes, sourceNotes: [] }, plain, 'only the notes differ: no number, label or sentence changes');
+    // no column holds them: the completion patch has no field for them
+    const patch = O3.buildCompletionPatch({ numbers, ownerGoal: 'balanced', propertyId: null, subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null, rationale: null });
+    assert.ok(!Object.keys(patch).some(k => /note|warning|source/i.test(k)), Object.keys(patch).join(','));
+  });
+
+  await check('Round 3 / zip: an address typed without a zip (as the suggestion list gives it) searches Rincon\'s own move-in leases using the zip the geocoder found for the subject; a typed zip still wins; with no zip anywhere the source is skipped as before', async () => {
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA 93003' }), '93003');
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA, USA', zip: '93003' }), '93003');
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA 93001', zip: '93003' }), '93001', 'a typed zip wins');
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA, USA', zip: '93003-1234' }), '93003');
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA, USA' }), null);
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA, USA', zip: 'abc' }), null);
+    assert.equal(C3.subjectZipFor({ address: '2461 Bunting Avenue, Ventura, CA, USA', zip: 93003 }), null, 'only text is read');
+    assert.equal(C3.subjectZipFor(null), null);
+    // the LeadSimple pull really uses it
+    const originalFetch = global.fetch;
+    const urls = [];
+    global.fetch = async url => { urls.push(String(url)); return { ok: true, json: async () => ([{ address: '2303 Otter Creek Ln', city: 'Ventura', state: 'CA', zip_code: '93003', property_type: 'Single Home', bedrooms: 4, bathrooms: 2, sqft: 1850, rent: 3865, lease_start_date: '2026-09-09', closed_at: '2026-09-16' }]) }; };
+    try {
+      let result = await withCapturedWarnings(() => pullLeadSimpleComps({ address: '2461 Bunting Avenue, Ventura, CA, USA', zip: '93003' }));
+      assert.equal(urls.length, 1);
+      assert.match(urls[0], /zip_code=eq\.93003/);
+      assert.equal(result.comps.length, 1);
+      assert.equal(result.subjectZip, '93003');
+      urls.length = 0;
+      result = await withCapturedWarnings(() => pullLeadSimpleComps({ address: '2461 Bunting Avenue, Ventura, CA, USA' }));
+      assert.equal(urls.length, 0, 'no zip anywhere: never queries, as before');
+      assert.deepEqual(result.comps, []);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    // runActiveSources hands RentCast's zip on to the sources that run after it
+    const originals = { ...sourcesLib.SOURCE_HANDLERS };
+    const seen = [];
+    sourcesLib.SOURCE_HANDLERS.RentCast = async () => ({ comps: [], subjectEstimatedRent: 4000, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003' });
+    sourcesLib.SOURCE_HANDLERS['LeadSimple Move-Ins'] = async s => { seen.push({ zip: s.zip, address: s.address }); return { comps: [] }; };
+    try {
+      const noZipSubject = { address: '2461 Bunting Avenue, Ventura, CA, USA', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636 };
+      await runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's3', name: 'LeadSimple Move-Ins' }], noZipSubject);
+      assert.deepEqual(seen, [{ zip: '93003', address: '2461 Bunting Avenue, Ventura, CA, USA' }]);
+      assert.equal(noZipSubject.zip, undefined, 'the caller\'s subject is not changed');
+      // RentCast down: nothing to hand on, exactly as before
+      seen.length = 0;
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => { throw new Error('down'); };
+      await withCapturedWarnings(() => runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's3', name: 'LeadSimple Move-Ins' }], noZipSubject));
+      assert.deepEqual(seen, [{ zip: undefined, address: '2461 Bunting Avenue, Ventura, CA, USA' }]);
+    } finally {
+      Object.assign(sourcesLib.SOURCE_HANDLERS, originals);
+    }
+  });
+
+  // ── the screen, with the page's own script run against a pretend page ──
+  const renderPage3 = (file, analysis, comps, extras) => {
+    const html = fs3.readFileSync(file, 'utf8');
+    const script = [...html.matchAll(/<script(?![^>]*src)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+    const captured = {};
+    const el = id => new Proxy({ id, style: {}, classList: { add() {}, remove() {}, toggle() {} }, options: [], children: [], value: '', checked: false, dataset: {} }, {
+      get(t, k) { if (k in t) return t[k]; if (['addEventListener', 'appendChild', 'setAttribute', 'focus', 'scrollIntoView', 'removeChild', 'remove'].includes(k)) return () => {}; if (k === 'querySelector' || k === 'closest') return () => null; if (k === 'querySelectorAll') return () => []; return undefined; },
+      set(t, k, v) { t[k] = v; if (k === 'innerHTML') captured[id] = v; return true; },
+    });
+    const els = {};
+    const ctx = vm3.createContext({
+      document: { getElementById: id => (els[id] = els[id] || el(id)), querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, createElement: () => el('x'), body: el('body') },
+      window: { scrollTo() {}, print() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: () => Promise.reject(new Error('no network')),
+      setTimeout: () => 0, console: { log() {}, error() {}, warn() {} }, URLSearchParams, Number, Math, Date, JSON, String, Array, Object, Set, Map, isNaN, parseInt, parseFloat, encodeURIComponent, L: undefined,
+    });
+    vm3.runInContext(script, ctx);
+    vm3.runInContext('renderReport(__a, __c, __m, __x)', Object.assign(ctx, { __a: analysis, __c: comps, __m: extras.marketData || null, __x: extras }));
+    return captured.reportDoc || '';
+  };
+  const baseAnalysis3 = { id: 'a1', subject_address: '2461 Bunting Avenue, Ventura, CA 93003', subject_bedrooms: 4, subject_bathrooms: 2, subject_sqft: 1636, subject_property_type: 'single_family', lease_term_months: 12, furnished: false, subject_estimated_rent: 4580, size_band_pct: 25, created_at: '2026-10-17T12:00:00Z' };
+  const comps3 = [4100, 4200, 4300, 4400, 4500].map((rent, i) => ({ id: `c${i}`, address: `${10 + i} Oak St, Ventura, CA`, monthly_rent: rent, listing_status: i % 2 ? 'active' : 'leased', property_type: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1600, exclusion_reason: null, mls_flags: [] }));
+  const headline3 = { low: 4100, high: 4300, lowLabel: 'Lease quickly', highLabel: 'Hold out for more', listPrice: 4200, goal: 'balanced', goalSentence: 'Based on your goal of a balanced approach, we suggest listing at $4,200.', stretchPrice: 4500, stretchWords: 'Above the recommended range; may take longer to lease' };
+
+  await check('Round 3 / screen: the Median Days on Market tile and the unused form box for the neighborhood are gone from both pages (the per-comp days badge stays); the backend still accepts the field', () => {
+    assert.ok(dashboards3.length >= 1);
+    for (const f of dashboards3) {
+      const html = fs3.readFileSync(f, 'utf8');
+      assert.ok(!html.includes('Days on Market'), `${f}: no "Days on Market" tile`);
+      assert.ok(!/daysOnMarket/.test(html), `${f}: the unused variable is gone`);
+      assert.ok(!html.includes('Neighborhood or subdivision'), `${f}: no neighborhood box`);
+      assert.ok(!/subject_subdivision/.test(html), `${f}: the page no longer reads or sends the neighborhood`);
+      assert.match(html, /days on market|DAYS|days listed/i, `${f}: the per-comp days badge is still there`);
+      assert.match(html, /Zip Median Rent/);
+      assert.match(html, /Zip Rent per Sqft/);
+    }
+    // the market tile area really renders with two tiles, and without a days tile even when the zip data has days
+    for (const f of dashboards3) {
+      const page = renderPage3(f, baseAnalysis3, comps3, { headline: headline3, counted: { total: 5, leased: 3, active: 2, offMarket: 0 }, marketData: { zip: '93003', median_rent: 4000, median_rent_per_sqft: 2.4, median_days_on_market: 31, history: [] } });
+      assert.match(page, /Zip Median Rent/);
+      assert.ok(!/Days on Market|31 days/.test(page), 'no days tile');
+    }
+    for (const file of ['server.js', path3.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      assert.match(fs3.readFileSync(path3.join(__dirname, file), 'utf8'), /parseSubdivisionInput\(subject_subdivision\)/, `${file} still accepts the neighborhood`);
+    }
+  });
+
+  await check('Round 3 / screen: RentCast\'s own estimate is shown only beside a recommended range, labelled "(not used in our range)"; with no range the box, the chart\'s dashed line and the map pin\'s estimate are all left out', () => {
+    for (const f of dashboards3) {
+      const withRange = renderPage3(f, baseAnalysis3, comps3, { headline: headline3, counted: { total: 5, leased: 3, active: 2, offMarket: 0 } });
+      assert.match(withRange, /RentCast's automated estimate<span class="stat-label-note">\(not used in our range\)<\/span>/);
+      assert.match(withRange, /\$4,580\/mo/);
+      assert.match(withRange, /class="chart-subject-line"/, 'the dashed line is there beside a range');
+      assert.match(withRange, /RentCast's automated estimate<\/span>/, 'the legend says what the dashed line is');
+      assert.ok(!/Estimated Market Rent/.test(withRange));
+      const noRange = renderPage3(f, baseAnalysis3, comps3.slice(0, 3), { headline: null, counted: { total: 3, leased: 2, active: 1, offMarket: 0 }, noRange: 'Only 3 comparable homes found (at least 4 are needed), so there is no recommended range and no suggested price.' });
+      assert.ok(!/automated estimate|4,580|chart-subject-line|stat-label-note/.test(noRange), `${f}: nothing about the estimate on a report with no range`);
+      assert.match(noRange, /no recommended range and no suggested price/);
+      const empty = renderPage3(f, baseAnalysis3, [], { headline: null, counted: { total: 0, leased: 0, active: 0, offMarket: 0 }, noRange: 'No comparable homes were found near this address, so there is no recommended range and no suggested price.' });
+      assert.ok(!/automated estimate|4,580/.test(empty), 'an empty report shows no estimate either');
+      const html = fs3.readFileSync(f, 'utf8');
+      assert.match(html, /initMap\(shown, comps\)/, 'the map pin gets the same estimate-free copy of the analysis');
+      assert.match(html, /buildChart\(shown, comps, headline\)/);
+    }
+  });
+
+  await check('Round 3 / screen: the source note shows under the counted-comps box in both pages, in plain words, escaped; no note when none is sent; the not-used row quotes the size band the server saved, not a typed number', () => {
+    for (const f of dashboards3) {
+      const notes = ['RentCast was unavailable when this report ran, so it uses fewer comparable homes. Run it again to include them.', 'CRMLS <b>x</b>'];
+      const page = renderPage3(f, baseAnalysis3, comps3, { headline: headline3, counted: { total: 5, leased: 3, active: 2, offMarket: 0 }, sourceNotes: notes });
+      assert.match(page, /<div class="source-note">RentCast was unavailable when this report ran, so it uses fewer comparable homes\. Run it again to include them\.<\/div>/);
+      assert.match(page, /CRMLS &lt;b&gt;x&lt;\/b&gt;/, 'a note is escaped');
+      assert.ok(page.indexOf('Comps Counted') < page.indexOf('source-note') || page.indexOf('source-note') < page.indexOf('Comparable Rentals'), 'sits with the counted-comps box');
+      assert.ok(!/source-note/.test(renderPage3(f, baseAnalysis3, comps3, { headline: headline3, counted: { total: 5, leased: 3, active: 2, offMarket: 0 } })), 'no note when none is sent');
+      const oversized = [{ ...comps3[0], id: 'big', address: '5 Big St, Ventura, CA', sqft: 3000, exclusion_reason: 'size_sqft' }];
+      const withBand = renderPage3(f, { ...baseAnalysis3, size_band_pct: 20 }, [...comps3, ...oversized], { headline: headline3, counted: { total: 5, leased: 3, active: 2, offMarket: 0 } });
+      assert.match(withBand, /too large \(3,000 sq ft\)/);
+      const html = fs3.readFileSync(f, 'utf8');
+      assert.ok(!/size outside the 25% band/.test(html), 'no 25 typed into the page');
+      assert.match(html, /analysis\.size_band_pct/);
+    }
+  });
+
+  await check('Round 3 / wording and settings: "The 1 home found ..." reads right; the confidence reasons state the count once; the size band percent in the writer\'s labels comes from the one constant; the accuracy line says how the figures were measured, computed from the scorecard', () => {
+    assert.equal(O3.noRangeMessage(0, 1), 'The 1 home found could not be counted as comparable (see the home reviewed but not used below), so there is no recommended range and no suggested price.');
+    assert.match(O3.noRangeMessage(0, 2), /^None of the 2 homes found could be counted as comparable \(see the homes reviewed but not used below\)/);
+    const narrativeSource = fs3.readFileSync(path3.join(__dirname, 'lib', 'narrative.js'), 'utf8');
+    assert.ok(!/\b25%/.test(narrativeSource), 'no typed 25% in narrative.js');
+    assert.match(narrativeSource, /SQFT_BAND_PCT/);
+    assert.match(N3.describeComp({ address: '1 A St', monthly_rent: 4000, listing_status: 'leased', exclusion_reason: 'size_sqft' }, 0), new RegExp(`more than ${Kc.SQFT_BAND_PCT}% larger or smaller`));
+    // the accuracy line's extra sentence is made from the scorecard's own listing-time check
+    const sc = JSON.parse(JSON.stringify(scoreC()));
+    sc.listingTimeCheck = {
+      closeDateBasis: { size25_item2: { county: { ranged: { n: 800, typicalMiss: 300, within300Pct: 50.6 } } } },
+      listingTimeBasis: { size25_item2: { county: { ranged: { n: 804, typicalMiss: 350, within300Pct: 47.8 } } } },
+    };
+    const line = A3.accuracyLine(sc, { method: 'size25_item2' });
+    // Round 4: a plain sentence with no numbers in it (the two "within $300" figures side by side were confusing)
+    assert.match(line, /Measured as of the day each home was listed rather than the day it leased, the results are slightly worse\./);
+    assert.doesNotMatch(line.match(/Measured as of the day[^.]*\./)[0], /\d/, 'no numbers in the sentence');
+    assert.doesNotMatch(A3.accuracyLine(scoreC(), { method: 'size25_item2' }), /Measured as of the day each home was listed/, 'no listing-time check in the scorecard: no sentence');
+    sc.listingTimeCheck.listingTimeBasis.size25_item2.county.ranged = { n: 804, typicalMiss: 300, within300Pct: 52 };
+    assert.doesNotMatch(A3.accuracyLine(sc, { method: 'size25_item2' }), /Measured as of the day each home was listed/, 'not said when it is not worse');
+    sc.listingTimeCheck.listingTimeBasis.size25_item2.county.ranged = { n: 40, typicalMiss: 900, within300Pct: 20 };
+    assert.doesNotMatch(A3.accuracyLine(sc, { method: 'size25_item2' }), /Measured as of the day each home was listed/, 'not said when too few leases stand behind it');
+    // the published scorecard really carries it
+    const published = A3.loadAccuracyScorecard();
+    if (published && published.listingTimeCheck) assert.match(A3.staffSentences(published, 'medium').accuracyLine, /Measured as of the day each home was listed rather than the day it leased, the results are slightly worse\./);
+  });
+
+  await check('Round 3 / settings: subject_age_restricted must be a real true or false like Furnished (the page sends the checkbox as a boolean), and the entry-point harness picks its own free port', () => {
+    assert.deepEqual(Fb.parseAgeRestrictedInput(true), { value: true });
+    assert.match(Fb.parseAgeRestrictedInput('false').error, /must be true or false/);
+    for (const f of dashboards3) assert.match(fs3.readFileSync(f, 'utf8'), /subject_age_restricted: form\.subject_age_restricted\.checked/);
+    const harness = fs3.readFileSync(path3.join(__dirname, 'q-entry-point-harness.js'), 'utf8');
+    assert.ok(!/34571|34572/.test(harness), 'no fixed ports');
+    assert.match(harness, /createServer\(\)[\s\S]{0,40}listen\(0/);
+  });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Round 4: bounded work on hostile text, comp-priced range ends, more spread wordings, the subject-self drop, leftovers
+  // ════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Round 4: hostile text, comp-priced range ends, more spread wordings, subject-self drop, leftovers ---');
+  const N4 = require('./lib/narrative');
+  const O4 = require('./lib/outcome');
+  const PM4 = require('./lib/property-matching');
+  const C4 = require('./lib/crmls');
+  const speed4 = require('./q-regex-speed-test');
+  const fs4 = require('node:fs');
+  const path4 = require('node:path');
+
+  // Comps priced at every one of the recommended range's own figures, so a range figure can also be a rent.
+  const mk4 = (address, rent, status = 'leased', extra = {}) => ({ address: `${address}, Ventura, CA 93003`, monthly_rent: rent, listing_status: status, exclusion_reason: null, source_name: status === 'leased' ? 'CRMLS' : 'RentCast', ...extra });
+  const comps4 = [
+    mk4('1556 Bittern Ct', 3200), mk4('6630 Sora St', 3400, 'active'), mk4('2292 Buffalo Avenue', 4600), mk4('2300 Buffalo Avenue', 3900), mk4('14 Price Cut Ln', 4500, 'active', { had_price_cut: true, original_price: 4700 }),
+    mk4('120 Mid Way', 4100), mk4('1 Alpha St', 4200), mk4('2 Beta St', 4400, 'active'), mk4('3 Gamma St', 4350), mk4('4 Delta St', 4580, 'active'), mk4('5 Echo St', 4900, 'active'), mk4('6 Foxtrot St', 3500),
+    mk4('826 Camelia Drive', 3600, 'leased', { had_price_cut: true, original_price: 4500 }),
+  ];
+  const input4 = { subject: { address: '2292 Buffalo Avenue, Ventura, CA 93003' }, comps: comps4, headline: { low: 4200, high: 4400, listPrice: 4350, goal: 'balanced', stretchPrice: 4600 }, subjectEstimatedRent: 4580 };
+  const refused4 = text => !N4.validateRationale(text, input4).ok;
+  const refusedNarrative4 = text => N4.findWideRangeStatements(text, input4, { narrative: true }).length > 0;
+
+  await check('Round 4 / speed: 50,000-character hostile strings (54 shapes: every one that ever made a pattern slow plus repeated "from $1,000 to $2,000", nested punctuation, capitalized runs after "from", unicode-dash, zero-width and HTML-entity spam, ALL CAPS, address spam, "carries no weight" repeated, one 50,000-character token) go through all 15 functions that read model text; no call takes 500 ms (usually a few ms)', () => {
+    for (const size of [50000, 7900, 1900]) {
+      const rows = speed4.measureAll(size);
+      assert.ok(Object.keys(speed4.hostileStrings(10)).length >= 50 && Object.keys(speed4.FUNCTIONS).length >= 15);
+      assert.equal(rows.length, Object.keys(speed4.hostileStrings(10)).length * Object.keys(speed4.FUNCTIONS).length);
+      const slow = rows.filter(r => r.ms >= 500);
+      assert.equal(slow.length, 0, `slow at ${size} characters: ${slow.map(r => `${r.fn} on "${r.pattern}" ${r.ms.toFixed(0)} ms`).join('; ')}`);
+    }
+  });
+
+  await check('Round 4 / limits: a rationale over 8,000 characters and a per-comp narrative over 2,000 are refused before any pattern runs (fail closed); at the limit they are read; more than 80 sentences is refused; a long second draft is rejected, never trimmed; the fixes themselves are in place (bounded word-number and house-number lists, white space collapsed)', async () => {
+    const sentence = 'The recommended range is centred on the weighted middle of the counted comps. ';
+    const justUnder = sentence.repeat(Math.floor(7999 / sentence.length)).trim();   // 8,000 characters or fewer, about 100 sentences
+    const long = sentence.repeat(120);
+    const v = N4.validateRationale(long, input4);
+    assert.equal(long.length > 8000, true);
+    assert.equal(v.ok, false);
+    assert.equal(v.tooLong, true);
+    assert.match(v.problems.join(' '), /longer than 8000 characters; write 3 to 6 sentences/);
+    assert.deepEqual(Object.keys(v).sort(), ['badAddresses', 'badClaims', 'badFigures', 'badSources', 'badStatements', 'labels', 'ok', 'problems', 'tooLong']);
+    assert.equal(N4.validateRationale('x'.repeat(8000), input4).tooLong, undefined, 'at 8,000 characters it is read, not refused');
+    assert.equal(N4.validateRationale('x'.repeat(8001), input4).tooLong, true);
+    assert.equal(N4.validateRationale(justUnder, input4).tooLong, undefined);
+    assert.match(N4.validateRationale(justUnder, input4).problems.join(' '), /more than 80 sentences/, 'about 100 short sentences is not 3 to 6');
+    assert.equal(N4.dropFlaggedSentences(long, input4), null, 'a too-long draft is never trimmed into an answer');
+    // per-comp narratives: every guard drops one over 2,000 characters and keeps one within it
+    const ok = 'Active listing near the recommended range. '.repeat(45).trim();   // under 2,000
+    const over = 'Active listing near the recommended range. '.repeat(48).trim();  // over 2,000
+    assert.ok(ok.length <= 2000 && over.length > 2000);
+    await withCapturedWarnings(async warnings => {
+      for (const guard of [N4.guardLeasedClaims, N4.guardCompLabels, N4.guardNoWeightClaims, (c, n) => N4.guardWideRanges(c, n, input4)]) {
+        const out = guard(comps4.map(c => ({ ...c, listing_status: 'active' })), [over, ok]);
+        assert.equal(out[0], null, 'over 2,000 characters: dropped');
+        assert.equal(out[1], ok, 'within 2,000 characters: kept');
+      }
+      assert.ok(warnings.some(w => /longer than 2000 characters/.test(w)));
+    });
+    // through generateNarrative: a first rationale over the limit is rejected like any other bad one; a second over the limit is null
+    const base = { ...input4, subject: { address: '2292 Buffalo Avenue', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, confidence: null, sourcesUsed: ['CRMLS', 'RentCast'] };
+    const GOOD_A = 'The recommended range is $4,200-$4,400, centred on the weighted middle of the counted comps.';
+    const GOOD_B = 'The suggested list price is $4,350, which matches 3 Gamma St.';
+    const reply = (rationale, narratives = {}) => textReply(`RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale, comp_narratives: narratives })}`);
+    let mock = mockClaude([reply(long), reply(`${GOOD_A} ${GOOD_B}`)]);
+    let result = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+    assert.equal(mock.calls.length, 2);
+    assert.equal(result.rationale, `${GOOD_A} ${GOOD_B}`);
+    mock = mockClaude([reply(long), reply(long)]);
+    result = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+    assert.equal(result.rationale, null);
+    assert.equal(result.meta.anthropicCalls, 2);
+    mock = mockClaude([reply(`${GOOD_A} ${GOOD_B}`, { 0: over, 1: ok })]);
+    result = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+    assert.equal(result.narrativesByIndex[0], null, 'an over-long per-comp narrative from the writer is dropped');
+    assert.equal(result.narrativesByIndex[1], ok);
+    assert.equal(result.rationale, `${GOOD_A} ${GOOD_B}`);
+    // the fixes themselves
+    const src = fs4.readFileSync(path4.join(__dirname, 'lib', 'narrative.js'), 'utf8');
+    assert.ok(src.includes('{0,11})\\\\s+dollars?'), 'word-number phrases are at most 12 words');
+    assert.ok(src.includes('\\d{1,6}[A-Z]?){0,7})(?=\\s+'), 'house-number lists are at most 8 numbers');
+    assert.ok(src.includes('cleanModelText(narrative, MAX_NARRATIVE_CHARS).split('), 'the narrative is cleaned (look-alike characters, white space collapsed) before the leased-claim clauses are split');
+    assert.ok(src.includes(".replace(/\\s+/g, ' ');   // every run of spaces"), 'every check starts from text with white space collapsed');
+  });
+
+  await check('Round 4 / hostile address: an address of more than 300 characters is refused with a plain message before anything is looked up, in both entry points', () => {
+    const SI4 = require('./lib/subject-inputs');
+    assert.equal(SI4.MAX_ADDRESS_LENGTH, 300);
+    for (const file of ['server.js', path4.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const src = fs4.readFileSync(path4.join(__dirname, file), 'utf8');
+      assert.match(src, /subject_address\.length > MAX_ADDRESS_LENGTH/, file);
+      assert.match(src, /subject_address must be \$\{MAX_ADDRESS_LENGTH\} characters or fewer\./, file);
+      assert.ok(src.indexOf('subject_address.length > MAX_ADDRESS_LENGTH') < src.indexOf('const userRows = await select('), `${file}: before any lookup`);
+    }
+  });
+
+  await check('Round 4 / comp-priced range ends: a range figure counts as a rent when a comp is priced at it, so "as low as $3,400 and as high as $4,400" (and with $4,350, $4,600 or $4,580 as the high figure, or $4,200 and $4,900) is refused; the lowest/highest sentence too; the range described in its own words is still fine', () => {
+    for (const text of [
+      'Comps are as low as $3,400 and as high as $4,400.', 'Comps are as low as $3,400 and as high as $4,350.', 'Comps are as low as $3,400 and as high as $4,600.', 'Comps are as low as $3,400 and as high as $4,580.',
+      'The lowest counted rent is $3,400 and the highest is $4,400.', 'Comps are as low as $4,200 and as high as $4,900.', 'The cheapest comp is $3,400 and the priciest is $4,580.',
+      'The lowest counted rent is $3,400 at 6630 Sora St. The highest counted rent is $4,400 at 2 Beta St.',
+    ]) {
+      assert.equal(refused4(text), true, `explanation: ${text}`);
+      assert.equal(refusedNarrative4(text), true, `per-comp: ${text}`);
+    }
+    // with no comp priced at a range figure that figure is still the range, not a rent (unchanged)
+    const noneAtRange = { ...input4, comps: comps4.filter(c => ![4200, 4400, 4350, 4580, 4600].includes(c.monthly_rent)) };
+    assert.equal(N4.validateRationale('The recommended range tops out at $4,400 and starts at $4,200.', noneAtRange).ok, true);
+    assert.equal(N4.validateRationale('The recommended range tops out at $4,400 and starts at $4,200.', input4).ok, true, 'the range described in its own words is fine even when comps sit at its ends');
+    assert.equal(N4.validateRationale('Leasing quickly points to the low end of the recommended range, $4,200, while holding out for more points to the high end, $4,400.', input4).ok, true);
+  });
+
+  const SLIPPED4 = [
+    'Counted rents stretch from $3,200 out to $4,600.',
+    '2292 Buffalo Avenue at $4,600 is about 44% higher than 1556 Bittern Ct at $3,200.',
+    '2292 Buffalo Avenue at $4,600 is nearly double 1556 Bittern Ct at $3,200.',
+    'At the top we see $4,600 at 2292 Buffalo Avenue. At the bottom we see $3,200 at 1556 Bittern Ct.',
+    'Counted rents run $３,２００ to $４,６００.',
+    'Counted rents run from $3,200 t​o $4,600.',
+    'Counted rents run $3,200​ - ​$4,600.',
+    'Counted rents run $3,200 &ndash; $4,600.',
+    'Counted rents run $3,200&mdash;$4,600.',
+    'Rents run as little as $3,200 and as much as $4,600 per month.',
+    'Rents begin at $3,200 and end around $4,600.',
+    'Rents run between 3,200 and 4,600 dollars a month.',
+    'Owners could push from $2,500 up to the stretch price of $2,800.',
+  ];
+  const MORE4 = [
+    'Rents are a good 50 percent higher at 2292 Buffalo Avenue ($4,600) than at 1556 Bittern Ct ($3,200).',
+    '2292 Buffalo Avenue at $4,600 is three times as much as 1556 Bittern Ct at $3,200, give or take.',
+    'The priciest comp is 2292 Buffalo Avenue at $4,600 and the cheapest is 1556 Bittern Ct at $3,200.',
+    'Rents have a low end of $3,200 and a high end of $4,600.',
+    'The best comp is 2292 Buffalo Avenue at $4,600 and the worst comp is 1556 Bittern Ct at $3,200.',
+    'Counted rents run $3,200 &#8211; $4,600.', 'Counted rents run $3,200&#x2014;$4,600.', 'Counted rents run $3,200&minus;$4,600.',
+    'Counted rents run $3,200&nbsp;to&nbsp;$4,600.', 'Rents run 3,200 to 4,600 dollars.',
+    'Counted rents stretch from $3,200 all the way up to $4,600.',
+    'Owners can go from $4,200 to the stretch price of $4,600.',
+  ];
+  const GOOD4 = [
+    'The recommended range is $4,200–$4,400.', 'The recommended range is $4,200-$4,400, and the suggested list price is $4,350.', 'The recommended range is $4,200 to $4,400.',
+    '1556 Bittern Ct at $3,500 is $700 below the recommended low.', '2 Beta St at $4,400 is $50 above the suggested price of $4,350.',
+    "RentCast's automated estimate of $4,580 is about $280 above the top of the recommended range.",
+    '1556 Bittern Ct leased at $3,200 and 2292 Buffalo Avenue leased at $4,600.',
+    '1 Alpha St and 2 Beta St are within $100 of each other.', '2 Beta St at $4,400 and 3 Gamma St at $4,350 are within $100 of each other.',
+    'The stretch price is $4,600. Above the recommended range; may take longer to lease.',
+    '826 Camelia Drive leased at $3,600 after a cut from $4,500, a $900 reduction.',
+    'The size band is 1,227-2,045 sq ft, and the comps are 0.2 to 1.5 miles away.', 'The counted comps are 3 to 5 bedrooms.',
+    'CRMLS shows 4 leases, and RentCast shows 2 active listings.',
+    'The leased comps are 1556 Bittern Ct at $3,200, 2300 Buffalo Avenue at $3,900 and 2292 Buffalo Avenue at $4,600.',
+    '1556 Bittern Ct, 2300 Buffalo Avenue and 2292 Buffalo Avenue were leased at $3,200, $3,900 and $4,600.',
+    'Only 5 of the 12 counted comps are confirmed leases, so confidence is medium.', 'Rents are spread widely, so confidence is low.',
+    'Leasing quickly points to the low end of the recommended range, $4,200, while holding out for more points to the high end, $4,400.',
+    'The recommended range tops out at $4,400 and starts at $4,200.', 'The top of the recommended range is $4,400 and the bottom is $4,200.',
+    'The suggested price of $4,350 is $150 above the recommended low.',
+    '1 Alpha St at $4,200 matches the low end of the recommended range.', '2 Beta St at $4,400 matches the high end of the recommended range.',
+    '6630 Sora St was on the market for 41 days.', '2300 Buffalo Avenue leased after 12 days on the market.',
+    '2292 Buffalo Avenue is the highest counted rent at $4,600 and sits above the recommended range.',
+    'The lowest counted rent is $3,200 at 1556 Bittern Ct, below the recommended range.',
+    '14 Price Cut Ln dropped its asking rent from $4,700 to $4,500 and is still active.',
+    '1556 Bittern Ct at $3,200 is $1,000 below the recommended range.',
+    '1556 Bittern Ct at $3,200 is $1,000 below the recommended range, while 2292 Buffalo Avenue at $4,600 is $200 above it.',
+    'A $50 difference separates the suggested price and 3 Gamma St.', "The subject's estimate of $4,580 sits just above the recommended range.",
+    '6 Foxtrot St asks $3,500, and 1556 Bittern Ct leased for $3,200; neither is near the recommended range.',
+    'Two leases sit right at the range: 1 Alpha St at $4,200 and 2 Beta St at $4,400.',
+    'The weighted middle of the counted rents is near the suggested price of $4,350.',
+    'We counted 12 comps: 6 leased, 5 active and 1 off market.', 'The subject is a 4-bedroom, 2-bath home of 1,636 sq ft.',
+    'Confidence is medium because 5 comps counted and they mostly agree.', 'Both 1 Alpha St and 2 Beta St are 4-bedroom single-family homes like the subject.',
+    'The 12-month lease term matches the comps.',
+    'About 40% of the counted comps are confirmed leases, such as 1556 Bittern Ct at $3,200 and 2292 Buffalo Avenue at $4,600.',
+    'The estimate from RentCast is automated and is not used in our range.', 'CRMLS and RentCast both supplied comps.',
+    'Because leased comps count 3x, the weighted middle leans on 1556 Bittern Ct at $3,200 and 2292 Buffalo Avenue at $4,600.',
+    'The 25% size band excluded comps such as 6630 Sora St at $3,400 and 2292 Buffalo Avenue at $4,600.',
+    'The active listings 2292 Buffalo Avenue at $4,600 and 1556 Bittern Ct at $3,200 add supporting signal at 2x weight.',
+    'The low end is weighed down by 1556 Bittern Ct at $3,200, which sits below the recommended range, and the high end is held by 2 Beta St at $4,400.',
+    'The lease at 1556 Bittern Ct for $3,200 sits below the range and the active ask at 2292 Buffalo Avenue for $4,600 sits above it.',
+    '2 Beta St and 3 Gamma St are both priced inside the recommended range.',
+  ];
+
+  await check('Round 4 / more spread wordings: the 13 explanation sentences that slipped (a percentage or "nearly double", the top comp then the bottom comp, full-width digits, zero-width characters, &ndash; and &mdash; entities, "as little as ... as much as", "begin at ... end around", "between 3,200 and 4,600 dollars", "up to the stretch price") and 12 more wordings are each refused, by the explanation check and the per-comp check', () => {
+    for (const text of [...SLIPPED4, ...MORE4]) {
+      assert.equal(refused4(text), true, `explanation: ${text}`);
+      assert.equal(refusedNarrative4(text), true, `per-comp: ${text}`);
+    }
+    assert.equal(SLIPPED4.length, 13);
+    // look-alike spellings hide nothing: the checks read the cleaned text
+    assert.deepEqual(N4.extractDollarFigures('$３,２００ to $４,６００').map(f => f.value), [3200, 4600]);
+    assert.deepEqual(N4.extractDollarFigures('3,200 and 4,600 dollars').map(f => f.value), [3200, 4600]);
+    assert.deepEqual(N4.extractDollarFigures('$3,200 &ndash; $4,600').map(f => f.value), [3200, 4600]);
+  });
+
+  await check('Round 4 / more spread wordings: the per-comp narrative "About $1,400 less than the best comp, 2292 Buffalo Avenue." (and the worst-comp version) is refused; the same words with no dollar figure are not; the explanation check does not apply this one', () => {
+    for (const text of ['About $1,400 less than the best comp, 2292 Buffalo Avenue.', 'Roughly $900 more than the worst comp, 1556 Bittern Ct.', 'Priced $600 below the best comp.', 'Sits $700 above the worst comp.']) {
+      assert.equal(refusedNarrative4(text), true, text);
+    }
+    assert.equal(refusedNarrative4('Priced below the best comp.'), false);
+    assert.equal(N4.findWideRangeStatements('Priced $600 below the best comp.', input4).length, 0);
+  });
+
+  await check('Round 4 / more spread wordings: 50 sentences that are fine stay clean in both checks (the range both ways with an en dash, "$700 below the recommended low", "$50 above the suggested price", RentCast\'s estimate above the top of the range, two comps\' rents in a plain list, "within $100 of each other", the stretch price with its fixed words, a price cut with its reduction, size and distance ranges, "3x weight", "25% size band", comps below the range pulling the low end down, source mentions)', () => {
+    assert.ok(GOOD4.length >= 50, `${GOOD4.length} good sentences`);
+    for (const text of GOOD4) {
+      const v = N4.validateRationale(text, input4);
+      assert.equal(v.ok, true, `should be clean: ${text} -> ${v.problems.join(' | ')}`);
+      assert.deepEqual(N4.findWideRangeStatements(text, input4, { narrative: true }), [], `per-comp check should be clean: ${text}`);
+    }
+    for (const narrative of ['Leased at $3,200 after 12 days on the market; this is below the recommended range.', 'Asking $4,500 after a price cut from $4,700, a $200 reduction.', 'This 3-bedroom is priced $700 above the recommended range.', 'Active listing at $3,400, about $400 below the recommended range.', 'It leased for $3,200 in 12 days.', 'Active at $4,400, right at the high end of the recommended range.']) {
+      assert.deepEqual(N4.findWideRangeStatements(narrative, input4, { narrative: true }), [], narrative);
+    }
+  });
+
+  await check('Round 4 / second draft: after the flagged sentences are taken out, at least TWO sentences and 60 characters must be left; one thin sentence left over is null', async () => {
+    const base = { ...input4, subject: { address: '2292 Buffalo Avenue', bedrooms: 3, bathrooms: 2, sqft: 1500, propertyType: 'single_family', leaseTermMonths: 12, furnished: false }, confidence: null, sourcesUsed: ['CRMLS', 'RentCast'] };
+    const BAD = 'Rents run as little as $3,200 and as much as $4,600 per month.';
+    const THIN = 'With a balanced approach, the suggested list price is $4,350, which sits inside the recommended range.';   // one sentence, over 60 characters
+    assert.ok(THIN.length > 60);
+    assert.equal(N4.dropFlaggedSentences(`${BAD} ${THIN}`, base), null, 'one sentence left');
+    const TWO = 'The recommended range is $4,200-$4,400, centred on the weighted middle of the counted comps.';
+    assert.equal(N4.dropFlaggedSentences(`${BAD} ${TWO} ${THIN}`, base), `${TWO} ${THIN}`);
+    const reply = text => textReply(`RENTAL_ANALYSIS_OUTPUT: ${JSON.stringify({ rationale: text, comp_narratives: {} })}`);
+    const mock = mockClaude([reply(`${BAD} ${THIN}`), reply(`${BAD} ${THIN}`)]);
+    const result = await withCapturedWarnings(() => generateNarrative(base, { client: mock.client }));
+    assert.equal(result.rationale, null);
+    assert.equal(result.meta.rationaleDropped, true);
+    assert.equal(result.meta.rationaleTrimmed, false);
+  });
+
+  await check('Round 4 / own listing: a comp is the subject\'s own listing only on the same STREET (name, direction when both have one, suffix when both have one): 123 Maple St, 123 Elm St, 123 Maine St, 123 Main Ave, the other direction and Oak Hill Dr for Oak Park Dr stay; other units, other house numbers and the building listing stay; the same home written any way is dropped', () => {
+    const same = (a, b) => PM4.isSameHome(a, b);
+    for (const [a, b] of [
+      ['123 Main St', '123 Main St'], ['123 Main St', '123 Main Street, Ventura, CA 93003'], ['123 N Main St', '123 North Main Street'], ['123 Main St', '123 N Main St'],
+      ['100 Oak Park Dr', '100 Oak Park Drive'], ['100 Court St', '100 Court Street'], ['1696 Salt River Ave', '1696 Salt River Avenue'],
+      ['1300 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'], ['1300 Saratoga Ave #500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003'],
+      ['1300 Saratoga Ave Apt 500, Ventura, CA', '1300 Saratoga Ave, Unit 500, Ventura, CA'], ['1300 Saratoga Ave Apt 500 Ventura CA 93003', '1300 Saratoga Avenue #500'], ['2461 Bunting Avenue Ventura CA 93003', '2461 Bunting Ave, Ventura, CA'],
+    ]) assert.equal(same(a, b), true, `${a} | ${b}`);
+    for (const [a, b, why] of [
+      ['123 Main St', '123 Maple St', 'other street'], ['123 Main St', '123 Elm St', 'other street'], ['123 Main St', '123 Maine St', 'other street'], ['123 Main St', '123 Main Ave', 'other suffix'],
+      ['123 N Main St', '123 S Main St', 'other direction'], ['100 Oak Park Dr', '100 Oak Hill Dr', 'other street'], ['123 North St', '123 South St', 'other street'],
+      ['123 Main St Unit 5', '123 Main St Unit 50', 'unit 5 is not unit 50'], ['123 Main St #5', '123 Main St #50', '#5 is not #50'], ['123 Main St Unit A', '123 Main St Unit B', 'unit A is not B'],
+      ['500 Main St', '501 Main St', 'other house'], ['1234 Main St', '123 Main St', 'other house'], ['77 Raemere St', '77-79 Raemere St', 'other house number'],
+      ['1300 Saratoga Ave unit 500', '1300 Saratoga Ave', 'a building-level listing is not unit 500'], ['1300 Saratoga Ave', '1300 Saratoga Ave Unit 500', 'nor the other way round'],
+    ]) assert.equal(same(a, b), false, `${a} | ${b} (${why})`);
+    const comps = [
+      { address: '123 Maple St, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast' }, { address: '123 Elm St, Ventura, CA 93003', listing_status: 'off_market', source_name: 'RentCast' },
+      { address: '123 Maine St, Ventura, CA 93003', listing_status: 'active', source_name: 'CRMLS' }, { address: '123 Main Ave, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast' },
+      { address: '123 S Main St, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast' }, { address: '123 Main St, Ventura, CA 93003', listing_status: 'active', source_name: 'RentCast' },
+      { address: '123 Main St, Ventura, CA 93003', listing_status: 'leased', source_name: 'CRMLS' }, { address: '123 Main St, Ventura, CA 93003', listing_status: 'leased', source_name: 'LeadSimple Move-Ins' },
+    ];
+    const out = PM4.dropSubjectsOwnListing(comps, '123 N Main St, Ventura, CA 93003');
+    assert.deepEqual(out.dropped.map(c => `${c.source_name}/${c.listing_status}`), ['RentCast/active'], 'only the real same-street active listing goes');
+    assert.equal(out.dropped[0].address, '123 Main St, Ventura, CA 93003');
+    assert.equal(out.kept.length, 7);
+    assert.equal(PM4.dropSubjectsOwnListing([{ address: '100 Oak Hill Dr, Ventura, CA', listing_status: 'active', source_name: 'RentCast' }], '100 Oak Park Dr, Ventura, CA').dropped.length, 0);
+    assert.equal(PM4.dropSubjectsOwnListing([{ address: '1300 Saratoga Ave, Unit 50, Ventura, CA', listing_status: 'active', source_name: 'RentCast' }], '1300 Saratoga Ave unit 5 Ventura, CA').dropped.length, 0);
+    for (const typed of ['1300 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', '1300 Saratoga Ave #500 Ventura, CA 93003', '1300 Saratoga Ave Apt 500, Ventura, CA 93003']) {
+      assert.equal(PM4.dropSubjectsOwnListing([{ address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003', listing_status: 'off_market', source_name: 'RentCast' }], typed).dropped.length, 1, typed);
+    }
+  });
+
+  await check('Round 4 / leftovers: a CRMLS reply with no "value" list is a malformed reply (a lost half, reported as a partial failure; both halves lost is a source error) while an empty list is a real "nothing nearby"', async () => {
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    const subject = { address: '2461 Bunting Avenue, Ventura, CA 93003', latitude: 34.252446, longitude: -119.200606 };
+    const pull = async (closedBody, activeBody) => {
+      global.fetch = async url => {
+        const body = new URL(String(url)).searchParams.get('$orderby') === 'CloseDate desc' ? closedBody : activeBody;
+        return { ok: true, json: async () => body };
+      };
+      return withCapturedWarnings(() => C4.pullCrmlsComps(subject));
+    };
+    try {
+      let r = await pull({ value: [] }, { value: [] });
+      assert.equal('partialFailure' in r, false, 'an empty list is fine');
+      r = await pull({ notValue: 1 }, { value: [] });
+      assert.deepEqual(r.partialFailure.map(p => p.what), ['its recently leased homes']);
+      assert.match(r.partialFailure[0].message, /unexpected reply for the Closed query \(no "value" list\)/);
+      r = await pull({ value: [] }, null);
+      assert.deepEqual(r.partialFailure.map(p => p.what), ['its active listings']);
+      await assert.rejects(() => pull({}, {}), /CRMLS request failed for both Closed and Active/);
+    } finally {
+      global.fetch = originalFetch;
+      process.env.RECORE_SERVER_TOKEN = originalToken;
+    }
+  });
+
+  await check('Round 4 / leftovers: a source that could not search (LeadSimple with no zip, CRMLS with no location or zip) is reported as skipped, not as checked; the no-comps text says so, and a report where nothing at all was searched is a failed analysis', async () => {
+    const lsResult = await withCapturedWarnings(() => pullLeadSimpleComps({ address: '2461 Bunting Avenue, Ventura, CA, USA' }));
+    assert.equal(lsResult.skipped, 'the address has no zip code');
+    const originals = { ...sourcesLib.SOURCE_HANDLERS };
+    const subject = { address: '2461 Bunting Avenue, Ventura, CA, USA', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636 };
+    const mk = extra => ({ comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null, ...extra });
+    try {
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => mk({});
+      sourcesLib.SOURCE_HANDLERS['LeadSimple Move-Ins'] = async () => mk({ skipped: 'the address has no zip code' });
+      let out = await runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's3', name: 'LeadSimple Move-Ins' }], subject);
+      assert.deepEqual(out.sourcesUsed, ['RentCast']);
+      assert.deepEqual(out.sourcesSkipped, [{ name: 'LeadSimple Move-Ins', reason: 'the address has no zip code' }]);
+      assert.equal(O4.classifySourceResult(out).kind, 'none_found');
+      const text = O4.noCompsRationale(out.sourcesUsed, out.sourcesSkipped);
+      assert.match(text, /Sources checked: RentCast\. Not searched: Rincon's own move-in records \(the address has no zip code\)\./);
+      assert.doesNotMatch(text, /Sources checked:[^.]*LeadSimple/);
+      assert.equal(O4.noCompsRationale(['RentCast', 'CRMLS']).includes('Not searched'), false, 'nothing skipped: the text is as before');
+      // nothing was searched at all: not "no comparable homes" but a failure
+      sourcesLib.SOURCE_HANDLERS.RentCast = async () => mk({ skipped: 'no location or zip code for this address' });
+      out = await runActiveSources([{ id: 's1', name: 'RentCast' }, { id: 's3', name: 'LeadSimple Move-Ins' }], subject);
+      assert.deepEqual(out.sourcesUsed, []);
+      assert.equal(O4.classifySourceResult(out).kind, 'failed');
+    } finally {
+      Object.assign(sourcesLib.SOURCE_HANDLERS, originals);
+    }
+  });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Round 5: sentence cuts at address stops, unit numbers before an address, ordinal streets, dollar-sign counts,
+  //          more spread wordings (with look-alike spellings), a bare house number
+  // ════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Round 5: address stops, unit numbers, ordinal streets, dollar-sign counts, more wordings, a bare house number ---');
+  const N5 = require('./lib/narrative');
+  const PM5 = require('./lib/property-matching');
+  const fs5 = require('node:fs');
+  const path5 = require('node:path');
+
+  const mk5 = (address, rent, status = 'leased', extra = {}) => ({ address: `${address}, Ventura, CA 93003`, monthly_rent: rent, listing_status: status, exclusion_reason: null, source_name: status === 'leased' ? 'CRMLS' : 'RentCast', ...extra });
+  const comps5 = [
+    mk5('1556 Bittern Ct', 3200), mk5('6630 Sora St', 3400, 'active'), mk5('2292 Buffalo Avenue', 4600), mk5('2300 Buffalo Avenue', 3900), mk5('14 Price Cut Ln', 4500, 'active', { had_price_cut: true, original_price: 4700 }),
+    mk5('120 Mid Way', 4100), mk5('1 Alpha St', 4200), mk5('2 Beta St', 4400, 'active'), mk5('3 Gamma St', 4350), mk5('4 Delta St', 4580, 'active'), mk5('5 Echo St', 4900, 'active'), mk5('6 Foxtrot St', 3500),
+    mk5('826 Camelia Drive', 3600, 'leased', { had_price_cut: true, original_price: 4500 }), mk5('2292 Buffalo Ave', 4650, 'active'), mk5('1205 Snipe Ave', 3350, 'active'),
+  ];
+  const input5 = { subject: { address: '2292 Buffalo Avenue, Ventura, CA 93003' }, comps: comps5, headline: { low: 4200, high: 4400, listPrice: 4350, goal: 'balanced', stretchPrice: 4600 }, subjectEstimatedRent: 4580 };
+  // a second report whose range is $2,400-$2,600 (the Port Hueneme shape)
+  const compsH = [
+    mk5('1266 Hill St', 3895, 'active'), mk5('826 Camelia Drive', 3600, 'leased', { had_price_cut: true, original_price: 4500 }), mk5('631 W Channel Islands Blvd', 2650, 'active'), mk5('121 W. Channel Islands Blvd', 2400, 'active'),
+    mk5('2577 Rudder Ave', 2400, 'active'), mk5('130 E Alta Grn', 2695, 'off_market'), mk5('2670 Victoria Ave', 2500, 'active'), mk5('332 S. Saticoy Ave', 2550, 'leased'), mk5('760 W. Hemlock St Unit 3', 2400, 'active'),
+  ];
+  const inputH = { subject: { address: '2461 Bunting Avenue, Ventura, CA 93003' }, comps: compsH, headline: { low: 2400, high: 2600, listPrice: 2500, goal: 'balanced', stretchPrice: 2800 }, subjectEstimatedRent: 2630 };
+  const refused5 = (text, input = input5) => !N5.validateRationale(text, input).ok;
+  const refusedNarrative5 = (text, input = input5) => N5.findWideRangeStatements(text, input, { narrative: true }).length > 0;
+
+  await check('Round 5 / sentence cuts: a full stop that belongs to an address (an initial, "Apt", "No", "Mt", or a street suffix before a unit) does not end a sentence; "121 W. Channel Islands Blvd.", "332 S. Saticoy Ave" and "760 W. Hemlock St. Unit 3" stay whole; real sentence ends still split', () => {
+    const text = 'The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. is active at $2,400 and 760 W. Hemlock St. Unit 3 asks $2,400. Active 2bd listings bracket the recommended range well. 332 S. Saticoy Ave leased at $2,550. The rest is fine.';
+    assert.deepEqual(N5.sentencesOf(text), [
+      'The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. is active at $2,400 and 760 W. Hemlock St. Unit 3 asks $2,400.',
+      'Active 2bd listings bracket the recommended range well.',
+      '332 S. Saticoy Ave leased at $2,550.',
+      'The rest is fine.',
+    ]);
+    assert.deepEqual(N5.sentencesOf('See Apt. 5 and No. 7 on Mt. Hood Dr. The next one is fine.'), ['See Apt. 5 and No. 7 on Mt. Hood Dr.', 'The next one is fine.']);
+    assert.deepEqual(N5.sentencesOf('It is at 2292 Buffalo Ave. The lowest rent is $3,200. Done!'), ['It is at 2292 Buffalo Ave.', 'The lowest rent is $3,200.', 'Done!'], 'a suffix that ends a real sentence still splits when no unit follows');
+  });
+
+  await check('Round 5 / second draft: after the flagged sentences are removed, what is left starts with a capital, digit or $, ends with a full stop, question or exclamation mark, never ends in the middle of an address, and passes the checks as a whole; otherwise null', () => {
+    const BAD = 'Rents run as little as $2,400 and as much as $3,895 per month.';
+    const real = `The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. is active at $2,400 and 332 S. Saticoy Ave leased at $2,550. ${BAD} Active 2bd listings bracket the recommended range well, and 760 W. Hemlock St. Unit 3 asks $2,400.`;
+    const out = N5.dropFlaggedSentences(real, inputH);
+    assert.equal(out, 'The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. is active at $2,400 and 332 S. Saticoy Ave leased at $2,550. Active 2bd listings bracket the recommended range well, and 760 W. Hemlock St. Unit 3 asks $2,400.');
+    assert.equal(N5.validateRationale(out, inputH).ok, true);
+    assert.ok(/^[A-Z0-9$]/.test(out) && /[.!?]$/.test(out));
+    // a draft cut off in the middle of a sentence (no closing stop), or in the middle of an address, or starting in lower case: null
+    assert.equal(N5.dropFlaggedSentences(`${BAD} The recommended range is $2,400-$2,600, centred on the weighted middle of the counted comps. The rest of it ran out at 121 W.`, inputH), null);
+    assert.equal(N5.dropFlaggedSentences(`${BAD} The recommended range is $2,400-$2,600, centred on the weighted middle of the counted comps. The suggested price is $2,500, which matches 2670 Victoria Ave`, inputH), null);
+    assert.equal(N5.dropFlaggedSentences(`rents are fine here and the recommended range is $2,400-$2,600, centred on the middle of the comps. The suggested price is $2,500, which matches 2670 Victoria Ave. ${BAD}`, inputH), null);
+    // the old cut: "...121 W." kept and "Channel Islands Blvd. is ..." dropped can no longer happen
+    const before = 'The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. asks $3,895 and 826 Camelia Drive leased at $3,600. Active 2bd listings bracket the recommended range well.';
+    const cleaned = N5.dropFlaggedSentences(`${before} ${BAD} The suggested price is $2,500, which matches 2670 Victoria Ave.`, inputH);
+    assert.ok(cleaned === null || !/121 W\.\s*Active/.test(cleaned), 'never "121 W. Active ..."');
+  });
+
+  await check('Round 5 / unit numbers: "Apt 5 and 2577 Rudder Ave", "Unit 12 and 4567 Oak Ave", "#500 and 1301 Saratoga Ave" read as the one address after the unit; "77 and 79 Raemere St" is still one address; the comma form and the unit-word forms are accepted by the address check', () => {
+    const only = text => N5.extractAddressMentions(text).map(a => a.numbers.join('/'));
+    assert.deepEqual(only('Apt 5 and 2577 Rudder Ave'), ['2577']);
+    assert.deepEqual(only('Unit 12 and 4567 Oak Ave'), ['4567']);
+    assert.deepEqual(only('#500 and 1301 Saratoga Ave'), ['1301']);
+    assert.deepEqual(only('Suite 3 and 2577 Rudder Ave'), ['2577']);
+    assert.deepEqual(only('No. 5 and 2577 Rudder Ave'), ['2577']);
+    assert.deepEqual(only('UNIT 5 and 2577 Rudder Ave'), ['2577']);
+    assert.deepEqual(only('77 and 79 Raemere St'), ['77/79']);
+    const input = { subject: { address: '2461 Bunting Avenue, Ventura, CA 93003' }, comps: [mk5('2577 Rudder Ave', 2400, 'active'), mk5('631 W Channel Islands Blvd', 2650, 'active'), mk5('1301 Saratoga Ave', 2800, 'leased')] };
+    for (const text of ['631 W Channel Islands Blvd, Apt 5 and 2577 Rudder Ave are both active.', '631 W Channel Islands Blvd, Apt 5, and 2577 Rudder Ave are both active.', 'Unit 5 and 2577 Rudder Ave are both active.', '#500 and 1301 Saratoga Ave are both listed.']) {
+      assert.deepEqual(N5.findBadAddresses(text, input), [], text);
+    }
+    assert.equal(N5.findBadAddresses('435 S Seaward Avenue is active.', input).length, 1, 'a wrong address is still caught');
+  });
+
+  await check('Round 5 / ordinal streets: "500 1st St" is not "500 2nd St" (nor 3rd/4th, 10th/20th); "1st" = "First", "2nd" = "Second" ... "20th" = "Twentieth", "Mt" = "Mount", "St Louis" = "Saint Louis", "Ft" = "Fort", "Pt" = "Point"; the earlier look-alike and keep lists still hold', () => {
+    const same = (a, b) => PM5.isSameHome(a, b);
+    for (const [a, b] of [['500 1st St', '500 First St'], ['500 2nd St', '500 Second St'], ['5 20th Ave', '5 Twentieth Ave'], ['100 Mt Hood Dr', '100 Mount Hood Drive'], ['100 St Louis Ave', '100 Saint Louis Avenue'], ['9 Ft Ord Rd', '9 Fort Ord Road'], ['9 Pt Loma Way', '9 Point Loma Way'], ['500 1st St', '500 1st Street'],
+      ['123 Main St', '123 Main St'], ['123 N Main St', '123 North Main Street'], ['1300 Saratoga Ave unit 500 Ventura, CA 93003', '1300 Saratoga Ave, Unit 500, Ventura, CA 93003']]) assert.equal(same(a, b), true, `${a} | ${b}`);
+    for (const [a, b] of [['500 1st St', '500 2nd St'], ['500 3rd Ave', '500 4th Ave'], ['12 10th St', '12 20th St'], ['500 1st St', '500 3rd St'], ['500 First St', '500 Third St'],
+      ['123 Main St', '123 Maple St'], ['123 Main St', '123 Main Ave'], ['123 N Main St', '123 S Main St'], ['100 Oak Park Dr', '100 Oak Hill Dr'], ['123 Main St Unit 5', '123 Main St Unit 50'], ['77 Raemere St', '77-79 Raemere St'], ['1300 Saratoga Ave unit 500', '1300 Saratoga Ave']]) assert.equal(same(a, b), false, `${a} | ${b}`);
+    assert.deepEqual(PM5.streetParts('500 1st St'), { name: '1st', direction: null, suffix: 'st' });
+    assert.deepEqual(PM5.streetParts('12 10th St, Ventura, CA'), { name: '10th', direction: null, suffix: 'st' });
+    assert.equal(PM5.dropSubjectsOwnListing([{ address: '500 2nd St, Ventura, CA', listing_status: 'active', source_name: 'RentCast' }], '500 1st St, Ventura, CA').dropped.length, 0, 'a different street is kept');
+    assert.equal(PM5.dropSubjectsOwnListing([{ address: '500 First St, Ventura, CA', listing_status: 'active', source_name: 'RentCast' }], '500 1st St, Ventura, CA').dropped.length, 1, 'the same street spelled another way is dropped');
+  });
+
+  await check('Round 5 / dollar signs: a rationale with more than 100 "$" is refused (fail closed) so a long run of "$1" cannot push an invented rent past the match limit; a per-comp narrative with more than 30 is dropped; the second draft is never trimmed into an answer', async () => {
+    const run = `${'$1 '.repeat(450)}Rent them at $9,999 a month.`;
+    assert.ok(run.length < 8000);
+    const v = N5.validateRationale(run, input5);
+    assert.equal(v.ok, false);
+    assert.equal(v.tooLong, true);
+    assert.match(v.problems.join(' '), /more than 100 dollar signs/);
+    assert.equal(N5.validateRationale(`${'$1 '.repeat(100)}`, input5).tooLong, undefined, '100 is read');
+    assert.equal(N5.validateRationale(`${'$1 '.repeat(101)}`, input5).tooLong, true, '101 is refused');
+    assert.equal(N5.dropFlaggedSentences(`${run} The recommended range is $4,200-$4,400, centred on the weighted middle of the counted comps.`, input5), null);
+    await withCapturedWarnings(async warnings => {
+      const narrativeRun = `${'$1 '.repeat(40)}Rent them at $9,999 a month.`;
+      const out = N5.guardWideRanges(comps5, [narrativeRun, `${'$1 '.repeat(30)}`.trim()], input5);
+      assert.equal(out[0], null, 'more than 30 dollar signs: dropped');
+      assert.notEqual(out[1], null, '30 is read');
+      assert.ok(warnings.some(w => /more than 30 dollar signs/.test(w)));
+    });
+  });
+
+  const SPREADS5 = [
+    'Rents at the high end reach $4,650 (2292 Buffalo Ave), while the low end starts at $3,350 (1205 Snipe Ave).',
+    'Rents reach as far as $4,600 and dip to $3,200.', 'Rents climb to $4,600 and fall to $3,200.',
+    'The leases at 1556 Bittern Ct ($3,200) and 2292 Buffalo Avenue ($4,600) mark the two extremes.',
+    'The leases at 1556 Bittern Ct ($3,200) and 2292 Buffalo Avenue ($4,600) bracket the typical comp.', 'Rents sit at both ends, $3,200 and $4,600.',
+    'At the expensive end we see $4,600 and at the cheap end $3,200.',
+    'Comps at $3,200, $3,400, $3,500 and so on up to $4,600.',
+    'Counted rents have a $1,400 range from low to high.', 'From low to high the counted rents move by $1,400.', 'Rents have a swing of $1,400.', 'The gap between low and high is a $1,400 spread.',
+    'Rents are shown as (low: $3,200; high: $4,600).', '| Lowest | $3,200 |\n| Highest | $4,600 |', '- Low: $3,200\n- High: $4,600', '| Low | High |\n| $3,200 | $4,600 |',
+    'Rents are $3,200/mo / $4,600/mo.', 'Rents are $3,200 / $4,600.',
+    '2292 Buffalo Avenue at $4,600 is one and a half times 1556 Bittern Ct at $3,200.', '2292 Buffalo Avenue at $4,600 is half again as much as 1556 Bittern Ct at $3,200.',
+    '2292 Buffalo Avenue at $4,600 is a third higher than 1556 Bittern Ct at $3,200.', '2292 Buffalo Avenue at $4,600 is three-fold 1556 Bittern Ct at $3,200.', 'Rents are two thirds higher at 2292 Buffalo Avenue ($4,600) than at 1556 Bittern Ct ($3,200).',
+    'Counted rents run from $3,200 tо $4,600.', 'Counted rents run $3,200 t\u043e $4,600 and f\u0430ll.', '<b>$3,200</b> to <b>$4,600</b>', 'Counted rents run $3 200 to $4 600.', 'Counted rents run $3.200 to $4.600.',
+    'Rents run $3.2 thousand to $4.6 thousand.', 'Rents run 3.2 to 4.6 thousand dollars.', 'Rents run somewhere between 3,200 and 4,600.', 'Rents run between 3.200 and 4.600 dollars.',
+    'Zillow shows 1556 Bittern Ct at $3,200.', 'Per Redfin, 2292 Buffalo Avenue leased at $4,600.', 'Realtor.com lists the home.', 'Facebook Marketplace asks are lower.', 'Trulia, Zumper and Craigslist agree.',
+    'Homes like this usually rent within a month.', 'Comps typically lease at $4,400.', 'Rents run 3,200 to 4,600 dollars.',
+  ];
+  await check('Round 5 / more spread wordings: ratios and fractions, top and bottom words (reach, climb, dip, fall, expensive end, cheap end), "extremes", "bracket", "both ends", "and so on up to", a "$1,400 range" or "moves by $1,400", labelled low/high pairs (sentence, bullets, table), slash pairs, look-alike Cyrillic letters, stray HTML tags, "$3 200", "$3.200", "$3.2 thousand", plain figures with "dollars" or after "somewhere between", outside sources (Zillow, Redfin, Trulia, Realtor.com, Craigslist, Zumper, Facebook Marketplace) and time wording are each refused, by the explanation check and the per-comp check', () => {
+    assert.ok(SPREADS5.length >= 40, `${SPREADS5.length} wordings`);
+    for (const text of SPREADS5) {
+      assert.equal(refused5(text), true, `explanation: ${JSON.stringify(text)}`);
+      assert.equal(refusedNarrative5(text), true, `per-comp: ${JSON.stringify(text)}`);
+    }
+    assert.match(N5.validateRationale('Zillow shows 1556 Bittern Ct at $3,200.', input5).problems.join(' '), /source the comps did not come from \("Zillow"\)/);
+  });
+
+  await check('Round 5 / per-comp narratives: a figure of $500 or more that is not in the data is refused unless it is exactly how far a comp is from the recommended range, the suggested or stretch price or RentCast\'s estimate, or a price cut; "Roughly 30 days to lease" is refused but a comp\'s own "it took 62 days to lease" is not', () => {
+    const old = { subject: { address: '2292 Buffalo Avenue, Ventura, CA 93003' }, comps: [mk5('1556 Bittern Ct', 3200), mk5('6630 Sora St', 3400, 'active'), mk5('2292 Buffalo Avenue', 4600), mk5('2300 Buffalo Avenue', 3900), mk5('14 Price Cut Ln', 4500, 'active', { had_price_cut: true, original_price: 4700 })], headline: { low: 3800, high: 4000, listPrice: 3900, goal: 'balanced', stretchPrice: 4200 }, subjectEstimatedRent: 3950 };
+    assert.equal(refusedNarrative5('Rent of $4,600 sits $1,200 above the leased comp at 1556 Bittern Ct.', old), true);
+    assert.deepEqual(N5.findWideRangeStatements('Rent of $4,600 sits $1,200 above the leased comp at 1556 Bittern Ct.', old, { narrative: true }).map(b => b.kind), ['figure']);
+    for (const text of ['Roughly 30 days to lease.', 'Takes about 30 days to rent.', 'About 30 days to lease at this price.']) assert.equal(refusedNarrative5(text, old), true, text);
+    for (const fine of ['It took 62 days to lease after a cut from $4,700.', 'Leased at $3,200 and took 41 days to lease.', 'Confirmed lease at $3,200; it took a $200 cut and 51 days to lease.']) assert.deepEqual(N5.findWideRangeStatements(fine, old, { narrative: true }), [], fine);
+    // exactly how far from the range / a price is allowed ($4,600 is $600 above the recommended high of $4,000; $800 = 4,600 - 3,800 is the distance below ... the low end)
+    for (const fine of ['Asking $4,600, $600 above the recommended high.', 'At $4,600 it is $700 above the suggested price of $3,900.', 'Leased at $3,200, $600 below the recommended low.', 'Asking $4,500 after a cut from $4,700, a $200 reduction.']) assert.deepEqual(N5.findWideRangeStatements(fine, old, { narrative: true }), [], fine);
+    assert.equal(refusedNarrative5('Asking $4,600, about $730 above the recommended high.', old), true, 'a rounded distance that is not exact is not allowed in a per-comp narrative');
+  });
+
+  await check('Round 5 / a correct difference: "1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600." is accepted (exactly the comp\'s rent minus the recommended high), while a figure that is not that arithmetic is still refused', () => {
+    assert.equal(N5.validateRationale('1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.', inputH).ok, true);
+    assert.deepEqual(N5.findWideRangeStatements('1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.', inputH, { narrative: true }), []);
+    assert.equal(N5.validateRationale('1266 Hill St asks $3,895, about $1,300 above the recommended high of $2,600.', inputH).ok, false, '$1,300 is not the exact difference');
+    assert.equal(N5.validateRationale('1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.', { ...inputH, headline: { ...inputH.headline, high: 2700 } }).ok, false, 'with a different range high it is not the arithmetic');
+    assert.equal(N5.validateRationale('Rent them at $2,137 a month.', inputH).ok, false, 'an invented rent is still refused');
+  });
+
+  const GOOD5 = [
+    '1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.',
+    'The recommended range is $2,400–$2,600, and the suggested price is $2,500.', 'The recommended range is $2,400-$2,600.',
+    '2577 Rudder Ave at $2,400 sits at the low end of the recommended range.', '130 E Alta Grn came off the market at $2,695, $95 above the recommended high.',
+    'The stretch price is $2,800. Above the recommended range; may take longer to lease.', '1266 Hill St asks $3,895, which is $1,095 above the stretch price.',
+    "RentCast's automated estimate of $2,630 is not used in our range.", "RentCast's automated estimate of $2,630 is about $30 above the top of the recommended range.",
+    '631 W Channel Islands Blvd, Apt 5 and 2577 Rudder Ave are both active listings.', 'Unit 5 and 2577 Rudder Ave are both active 2-bedroom listings.',
+    'The two confirmed leases point in different directions: 121 W. Channel Islands Blvd. is active at $2,400 and 826 Camelia Drive leased at $3,600.',
+    '760 W. Hemlock St. Unit 3 asks $2,400, and 332 S. Saticoy Ave leased at $2,550.',
+    'Active 2bd listings bracket the recommended range well.', 'The four active listings bracket that figure, with 2577 Rudder Ave at $2,400 and 130 E Alta Grn at $2,695.',
+    'These leases bracket the center of the range.', '2670 Victoria Ave asks $2,500, right at the suggested price.', 'Rents are spread widely, so confidence is low.',
+    'Between 3 and 5 bedrooms, the comps match the subject.', 'The size band is between 1,227 and 2,045 sq ft.', 'The homes were built between 2019 and 2023.', 'The comps are between 0.2 and 1.5 miles away.',
+    'The 1266 Hill St listing has 4 bedrooms and 2,100 sq ft.', 'We counted 5 comps: 3 leased and 2 active.',
+    'The recommended range is exactly $200 wide.', 'The recommended range is a $200 range centred on the weighted middle.', 'Confidence is low because there are only 4 comps.',
+    'Leased comps count 3x, so 826 Camelia Drive at $3,600 pulls the centre up.', '826 Camelia Drive leased at $3,600 after a cut from $4,500, a $900 reduction.',
+    // (a sentence with two band figures, "the high-$2,000s to low-$3,000s", is a spread in disguise and is refused since Round 6)
+    'The smaller 3-bedroom comps cluster in the low $2,000s.', 'Asks of $2,400 and $2,500 cluster near the middle of the range.',
+    'The high asks at 1266 Hill St ($3,895) and 2577 Rudder Ave ($2,400) were discounted because of their extreme days on market.',
+    '1266 Hill St is $1,495 above the suggested price of $2,400.', 'About 40% of the counted comps are confirmed leases.', '2 of the 5 counted comps are confirmed leases.',
+    'The 25% size band left out three comps.', 'The comps are 2 to 4 bedrooms.', 'Only the 4 counted comps near the subject were weighted heavily.',
+    '2577 Rudder Ave leased within days of listing at $2,400.', 'The total comp set is 9 homes across 3 sources.', 'CRMLS and RentCast supplied the comps.',
+    'The suggested price of $2,500 sits at the weighted middle of the counted rents.', '130 E Alta Grn sits $95 above the recommended high of $2,600 and was off the market.',
+    'A $50 difference separates the suggested price and 2670 Victoria Ave.', 'The estimate and the suggested price differ by $130.',
+    'The three active listings near the subject asked $2,400, $2,500 and $2,650.', '631 W Channel Islands Blvd, Apt 5 asks $2,650, $50 above the recommended high.',
+    'The lease at 826 Camelia Drive closed at $3,600, well above the recommended range.', '2 of the 9 comps came off the market without a lease.',
+    'The recommended range centres on 2670 Victoria Ave and 332 S. Saticoy Ave.', 'Because the range is $200 wide, the suggested price of $2,500 sits in its middle.',
+  ];
+  await check('Round 5 / more spread wordings: 50 fresh sentences that are fine stay clean in both checks, including a distance measured exactly from the recommended high, a unit number before an address, an address with initials and a unit, "bracket" about a single figure or the range, size and year ranges written "between ... and ...", and a "$200 range"', () => {
+    assert.ok(GOOD5.length >= 50, `${GOOD5.length} good sentences`);
+    for (const text of GOOD5) {
+      const v = N5.validateRationale(text, inputH);
+      assert.equal(v.ok, true, `should be clean: ${text} -> ${v.problems.join(' | ')}`);
+      assert.deepEqual(N5.findWideRangeStatements(text, inputH, { narrative: true }), [], `per-comp check should be clean: ${text}`);
+    }
+    for (const narrative of ['Active at $2,500, right at the suggested price.', 'Asking $3,895, about $1,295 above the recommended high of $2,600.', 'Leased at $3,600 after a cut from $4,500, a $900 reduction.', 'On the market for 41 days at $2,400.', 'Came off the market at $2,695, $95 above the recommended high.', 'It took 62 days to lease at $2,550.']) {
+      assert.deepEqual(N5.findWideRangeStatements(narrative, inputH, { narrative: true }), [], narrative);
+    }
+  });
+
+  await check('Round 5 / a bare house number: "2461" alone (or "2461, Ventura, CA", "2461 Apt 5") is refused with "subject_address needs a street name." before any lookup, in both entry points, and the same for the property lookup; real addresses pass', () => {
+    for (const [address, ok] of [['2461', false], ['2461, Ventura, CA', false], ['2461 Apt 5', false], ['2461 N', false], ['12345 Unit 4', false], ['2461 Bunting Avenue, Ventura, CA 93003', true], ['123 Main', true], ['500 1st St', true], ['77 and 79 Raemere St', true], ['1300 Saratoga Ave unit 500', true]]) {
+      assert.equal(PM5.hasStreetName(address), ok, address);
+    }
+    for (const file of ['server.js', path5.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const src = fs5.readFileSync(path5.join(__dirname, file), 'utf8');
+      assert.match(src, /if \(!hasStreetName\(subject_address\)\) \{\s*return validationError\(res, 'subject_address needs a street name\.'\);/, file);
+      assert.match(src, /if \(!hasStreetName\(address\)\) \{\s*return validationError\(res, 'address needs a street name\.'\);/, `${file} (property lookup)`);
+      assert.ok(src.indexOf("hasStreetName(subject_address)") < src.indexOf('const userRows = await select('), `${file}: before any lookup`);
+    }
+  });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Round 6: spreads that name no addresses, the "difference of two rents" hole, readable property types
+  // ════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Round 6: rents with no addresses, the difference-of-two-rents hole, readable property types ---');
+  const N6 = require('./lib/narrative');
+  const speed6 = require('./q-regex-speed-test');
+
+  const mk6 = (address, rent, status = 'leased', extra = {}) => ({ address: `${address}, Ventura, CA 93003`, monthly_rent: rent, listing_status: status, exclusion_reason: null, source_name: status === 'leased' ? 'CRMLS' : 'RentCast', ...extra });
+  const comps6 = [
+    mk6('1556 Bittern Ct', 3200), mk6('6630 Sora St', 3400, 'active'), mk6('2292 Buffalo Avenue', 4600), mk6('2300 Buffalo Avenue', 3900), mk6('14 Price Cut Ln', 4500, 'active', { had_price_cut: true, original_price: 4700 }),
+    mk6('120 Mid Way', 4100), mk6('826 Camelia Drive', 3600, 'leased', { had_price_cut: true, original_price: 4500 }), mk6('1237 Saratoga Avenue', 2500, 'active'), mk6('9 Far St', 5200, 'active', { exclusion_reason: 'size_mismatch' }),
+    mk6('1300 Saratoga Ave, Unit 500', 2950, 'off_market'), mk6('1300 Saratoga Avenue, Unit 1212', 2825, 'active'),
+  ];
+  const input6 = { subject: { address: '2461 Bunting Avenue, Ventura, CA 93003' }, comps: comps6, headline: { low: 4100, high: 4300, listPrice: 4200, goal: 'balanced', stretchPrice: 4500 }, subjectEstimatedRent: 4580 };
+  const refused6 = text => !N6.validateRationale(text, input6).ok;
+  const refusedNarrative6 = text => N6.findWideRangeStatements(text, input6, { narrative: true }).length > 0;
+
+  const M1 = [
+    'The low end of the counted comps is $3,200 and the high end is $4,600.',
+    'Counted rents begin near $3,200 and top out near $4,600.',
+    'Rents differ by $1,400 depending on the comp.',
+    'Prices here stretch across more than a thousand dollars, from the low $3,000s to the mid $4,000s.',
+  ];
+  await check('Round 6 / the four phrasings that slipped (the low end of the counted comps is $3,200 and the high end is $4,600; begin near ... top out near ...; "differ by $1,400"; "from the low $3,000s to the mid $4,000s") are refused by the explanation check and the per-comp check', () => {
+    for (const text of M1) {
+      assert.equal(refused6(text), true, `explanation: ${text}`);
+      assert.equal(refusedNarrative6(text), true, `per-comp: ${text}`);
+    }
+    // why: the first two give two comps' rents with no address, the third is an invented figure, the fourth is two band figures
+    assert.ok(N6.findWideRangeStatements(M1[0], input6).some(b => b.kind === 'span'));
+    assert.ok(N6.findWideRangeStatements(M1[1], input6).some(b => b.kind === 'span'));
+    assert.deepEqual(N6.validateRationale(M1[2], input6).badFigures, ['$1,400']);
+    assert.ok(N6.findWideRangeStatements(M1[3], input6).some(b => b.kind === 'span'));
+  });
+
+  await check('Round 6 / figures: under $500 is arithmetic; $500 or more must be a figure in the data, exactly how far a comp is from a range end, the suggested or stretch price or RentCast\'s estimate, or a price cut; the difference of two comps\' rents is not allowed', () => {
+    const ok = text => N6.validateRationale(text, input6).badFigures.length === 0;
+    assert.equal(ok('1237 Saratoga Avenue asks $2,500, which is $1,600 below the recommended low of $4,100.'), true, '$1,600 = 4,100 - 2,500, exactly a comp from the range end');
+    assert.equal(ok('1237 Saratoga Avenue asks $2,500, which is $1,650 below the recommended low of $4,100.'), false, '$1,650 is not that arithmetic');
+    assert.equal(ok('2292 Buffalo Avenue leased at $4,600, $300 above the recommended high.'), true);
+    assert.equal(ok('6630 Sora St asks $3,400, $700 below the recommended low.'), true, '$700 = 4,100 - 3,400');
+    assert.equal(ok('826 Camelia Drive leased at $3,600 after a $900 cut.'), true, 'a price cut is allowed');
+    assert.equal(ok('A $150 premium, a $250 aside and a $450 difference are small.'), true, 'under $500');
+    assert.equal(ok('Rents differ by $1,400.'), false, '$1,400 = 4,600 - 3,200 is the difference of two comps rents, which is no longer allowed');
+    assert.equal(ok('2292 Buffalo Avenue is $1,075 above 1556 Bittern Ct.'), false, 'a difference of two comps rents');
+    assert.equal(ok('Rent them at $4,000 a month.'), false);
+  });
+
+  const GOOD6 = [
+    '826 Camelia Drive leased at $3,600 and 1237 Saratoga Avenue is listed at $2,500.',
+    '1556 Bittern Ct leased at $3,200 and 2292 Buffalo Avenue leased at $4,600.',
+    'The three leased comps are 1556 Bittern Ct at $3,200, 2300 Buffalo Avenue at $3,900 and 120 Mid Way at $4,100.',
+    'The recommended range is $4,100-$4,300, and the suggested list price is $4,200.', 'The recommended range is $4,100–$4,300.', 'The recommended range is $4,100 to $4,300.',
+    '14 Price Cut Ln dropped its asking rent from $4,700 to $4,500 and is still active.', '826 Camelia Drive leased at $3,600 after a cut from $4,500.',
+    '826 Camelia Drive leased at $3,600 after a cut from $4,500, a $900 reduction.',
+    'The stretch price is $4,500. Above the recommended range; may take longer to lease.', 'The stretch price of $4,500 is $200 above the recommended high.',
+    "RentCast's automated estimate of $4,580 is about $280 above the top of the recommended range.", "RentCast's automated estimate of $4,580 is not used in our range.",
+    '120 Mid Way leased at $4,100, right at the low end of the recommended range.', '2300 Buffalo Avenue at $3,900 is $200 below the recommended low.',
+    '1237 Saratoga Avenue asks $2,500, which is $1,600 below the recommended low of $4,100.', '6630 Sora St asks $3,400, $700 below the recommended low.',
+    '2292 Buffalo Avenue leased at $4,600, $300 above the recommended high.', 'The suggested price of $4,200 sits in the middle of the recommended range.',
+    'Only 3 of the 8 counted comps are confirmed leases, so confidence is low.', '9 Far St asks $5,200 but is a much larger home, so it is not counted.',
+    '6630 Sora St came on the market 12 days ago at $3,400.', 'The 3 active listings sit below the range, led by 6630 Sora St at $3,400.',
+    '2292 Buffalo Avenue is the highest counted rent at $4,600 and sits above the recommended range.', 'The lowest counted rent is $2,500 at 1237 Saratoga Avenue, far below the recommended range.',
+    '1556 Bittern Ct at $3,200 and 1237 Saratoga Avenue at $2,500 both sit below the recommended low and pull the centre down.',
+    '120 Mid Way at $4,100 and 2292 Buffalo Avenue at $4,600 bracket the recommended range.', 'Both 120 Mid Way and 2300 Buffalo Avenue are single-family homes like the subject.',
+    'All 8 counted comps are single-family like the subject.', 'The two active asks at 6630 Sora St and 14 Price Cut Ln are unconfirmed.', 'We counted 8 comps: 5 leased and 3 active.',
+    // two units in one building are two addresses (real wording from saved reports)
+    'Counted comps above the range include 1300 Saratoga Ave, Unit 500 at $2,950 (off-market, so unconfirmed) and 1300 Saratoga Avenue, Unit 1212 asking $2,825.',
+    '1300 Saratoga Ave #500 at $2,950 and 1300 Saratoga Ave Apt 1212 at $2,825 are both in the same building.',
+  ];
+  await check('Round 6 / good sentences: 34 realistic sentences (two comps with their own addresses in one sentence, the range both ways, price cuts, the stretch price with its fixed words, RentCast\'s estimate and its distance, distances measured exactly from the range, readable property types) stay clean in both checks', () => {
+    assert.ok(GOOD6.length >= 30, `${GOOD6.length} good sentences`);
+    for (const text of GOOD6) {
+      const v = N6.validateRationale(text, input6);
+      assert.equal(v.ok, true, `should be clean: ${text} -> ${v.problems.join(' | ')}`);
+      assert.deepEqual(N6.findWideRangeStatements(text, input6, { narrative: true }), [], `per-comp check should be clean: ${text}`);
+    }
+  });
+
+  await check('Round 6 / the structural rule: two or more counted comps\' rents in a sentence need two or more addresses; the range\'s own figures, a price cut\'s original price and an excluded comp\'s rent do not count as rents; two band figures are refused; a repeated rent counts once', () => {
+    const flagged = text => N6.findWideRangeStatements(text, input6).some(b => b.kind === 'span');
+    assert.equal(flagged('Rents are $3,200 and $3,900.'), true, 'two rents, no address');
+    assert.equal(flagged('1556 Bittern Ct leased at $3,200, and rents are $3,900.'), true, 'two rents, one address');
+    assert.equal(flagged('1556 Bittern Ct leased at $3,200 and 2300 Buffalo Avenue leased at $3,900.'), false, 'each rent has its address');
+    assert.equal(flagged('Rents are $3,200 and $3,200.'), false, 'one distinct rent');
+    assert.equal(flagged('1300 Saratoga Ave, Unit 500 asks $2,950 and 1300 Saratoga Avenue, Unit 1212 asks $2,825.'), false, 'two units in one building are two addresses');
+    assert.equal(flagged('1300 Saratoga Ave, Unit 500 asks $2,950 and the rest of the building asks $2,825.'), true, 'one address, two rents');
+    assert.equal(flagged('The recommended range is $4,100-$4,300 and the suggested price is $4,200 and the stretch price is $4,500.'), false, 'the range\'s own figures are not rents');
+    assert.equal(flagged('14 Price Cut Ln was cut from $4,700 to $4,500.'), false, 'an original price is not a second rent');
+    assert.equal(flagged('9 Far St asks $5,200 and 6630 Sora St asks $3,400.'), false, 'two addresses, two rents (the excluded one is not counted as a rent at all)');
+    assert.equal(flagged('Rents are $5,200 and $3,400.'), false, 'an excluded comp\'s $5,200 is not a counted rent, so only one counted rent is given');
+    assert.equal(flagged('Most asks sit in the low $3,000s.'), false, 'one band figure');
+    assert.equal(flagged('Asks run from the low $3,000s to the mid $4,000s.'), true, 'two band figures');
+    assert.equal(flagged('Asks sit in the high-$3,000s to low-$4,000s.'), true);
+    // it uses the cleaned text: look-alike letters, full-width digits and tags do not hide it
+    assert.equal(flagged('Rents are <b>$３,２００</b> and $3,900.'), true);
+    // the speed shapes for it are part of the speed test (50,000 characters of them), and stay well under a second in the unit test
+    const rows = speed6.measureAll(50000).filter(r => /\$3,200|\$3,000s|distinct rents|same rent/.test(r.pattern));
+    assert.ok(rows.length >= 4 * 15, `${rows.length} calls`);
+    assert.equal(rows.filter(r => r.ms >= 500).length, 0);
+  });
+
+  await check('Round 6 / readable property types: the writer is shown "single-family" (and "manufactured home"), never the stored code with an underscore, on every comp line, in the counts, for the subject and in the rule about types; the checks accept the readable forms', () => {
+    const subject = { address: '2461 Bunting Avenue, Ventura, CA 93003', bedrooms: 4, bathrooms: 2, sqft: 1636, propertyType: 'single_family', leaseTermMonths: 12, furnished: false };
+    const typed = [{ ...mk6('1 Alpha St', 4200), property_type: 'single_family', bedrooms: 4 }, { ...mk6('2 Beta St', 4300), property_type: 'manufactured', bedrooms: 4 }, { ...mk6('3 Gamma St', 4250, 'active'), property_type: 'single_family', bedrooms: 3 }, { ...mk6('4 Delta St', 4150), property_type: 'condo', bedrooms: 2 }];
+    const prompt = N6.buildPrompt({ subject, comps: typed, headline: input6.headline, confidence: { label: 'medium', reasonText: 'x.' }, subjectEstimatedRent: 4580, sourcesUsed: ['CRMLS', 'RentCast'] });
+    assert.ok(!prompt.includes('single_family'), 'no "single_family" anywhere in the prompt');
+    assert.ok(!/manufactured(?!\s+home)/.test(prompt.replace(/manufactured homes? only/g, '')) || prompt.includes('manufactured home'), 'manufactured is shown as "manufactured home"');
+    assert.match(prompt, /\| type: single-family \|/);
+    assert.match(prompt, /\| type: manufactured home \|/);
+    assert.match(prompt, /\| type: condo \|/);
+    assert.match(prompt, /\| 1636 sqft \| single-family \| 12-month lease/, 'the subject line');
+    assert.match(prompt, /- Counted comps by property type: single-family 2, condo 1, manufactured home 1\./);
+    assert.match(prompt, /- Counted leased comps by property type and bedrooms: .*single-family 4bd 1.*/);
+    assert.match(prompt, /using the type as written there \(single-family, condo, townhouse, duplex, and so on\)/);
+    // the checks are unaffected: the readable words, and the old code, are accepted in an explanation
+    for (const text of ['All 4 counted comps are single-family like the subject.', 'Two of the counted comps are single_family homes.', '1556 Bittern Ct is a manufactured home.']) {
+      assert.equal(N6.validateRationale(text, input6).ok, true, text);
+      assert.deepEqual(N6.findWideRangeStatements(text, input6, { narrative: true }), [], text);
+    }
+  });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Round 7: a figure that is only "how far a comp is from the range" must sit next to that comp
+  // ════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Round 7: a distance of $500 or more must name its comp ---');
+  const N7 = require('./lib/narrative');
+  const speed7 = require('./q-regex-speed-test');
+
+  const trees7 = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Fir', 'Gum', 'Hazel', 'Ironwood', 'Juniper', 'Kauri', 'Larch', 'Maple', 'Nutmeg', 'Oak', 'Pine', 'Quince', 'Redwood', 'Spruce', 'Tamarack', 'Umber', 'Vine', 'Walnut', 'Yew', 'Zelkova', 'Ash', 'Beech', 'Cypress', 'Date', 'Ebony', 'Fig', 'Ginkgo', 'Holly', 'Ivy', 'Jasmine', 'Kapok', 'Laurel', 'Mulberry', 'Olive', 'Poplar'];
+  // count comps with rents start, start+step, ...: on a set this big, nearly every round hundred is SOME comp's distance from a range end
+  const set7 = (start, step, count, city, build = () => ({})) => Array.from({ length: count }, (_, i) => ({
+    address: `${100 + i * 3} ${trees7[i % trees7.length]} St, ${city}`, monthly_rent: start + i * step, listing_status: i % 3 ? 'active' : 'leased', exclusion_reason: null, source_name: i % 3 ? 'RentCast' : 'CRMLS', ...build(i),
+  }));
+  const shortAddress7 = comp => comp.address.split(',')[0];
+
+  // Port Hueneme style: 40 counted comps, $1,500 to $5,400, recommended range $2,400-$2,600
+  const hueneme7 = { subject: { address: '161 East Channel Islands Boulevard, Port Hueneme, CA 93041' }, comps: set7(1500, 100, 40, 'Port Hueneme, CA 93041'), headline: { low: 2400, high: 2600, listPrice: 2500, goal: 'balanced', stretchPrice: 2800 }, subjectEstimatedRent: 2630 };
+  // Saratoga style: 34 counted comps, $2,200 to $3,850, many of them units of one building
+  const saratoga7 = { subject: { address: '1300 Saratoga Ave, Unit 500, Ventura, CA 93003' }, comps: set7(2200, 50, 34, 'Ventura, CA 93003', i => (i % 2 ? { address: `1300 Saratoga Ave, Unit ${1000 + i * 11}, Ventura, CA 93003` } : {})), headline: { low: 2400, high: 2600, listPrice: 2500, goal: 'balanced', stretchPrice: 2800 }, subjectEstimatedRent: 2550 };
+  // Bunting style: 18 counted comps, $3,200 to $4,900, suggested $4,200, no stretch price, one price cut
+  const bunting7 = { subject: { address: '2461 Bunting Avenue, Ventura, CA 93003' }, comps: set7(3200, 100, 18, 'Ventura, CA 93003', i => (i === 5 ? { had_price_cut: true, original_price: 3750 } : {})), headline: { low: 4100, high: 4300, listPrice: 4200, goal: 'balanced', stretchPrice: null }, subjectEstimatedRent: 4580 };
+  const indexOfRent7 = (input, rent) => input.comps.findIndex(c => c.monthly_rent === rent);
+  const kept7 = (input, index, text) => N7.guardWideRanges(input.comps, input.comps.map((c, i) => (i === index ? text : null)), input)[index] !== null;
+  const refusedBoth7 = (input, ownRent, text, label) => {
+    const v = N7.validateRationale(text, input);
+    assert.equal(v.ok, false, `${label || text}: the explanation check must refuse it`);
+    assert.equal(kept7(input, indexOfRent7(input, ownRent), text), false, `${label || text}: the per-comp check must drop it`);
+    return v;
+  };
+
+  await check('Round 7 / big comp sets: "Rents differ by $1,400 depending on the comp." and "Rents jump by about $1,300 from the bottom of the counted comps to the top." (Port Hueneme: 40 comps) are refused by the explanation check and the per-comp check, though $1,400 and $1,300 are some comp\'s exact distance from the range', () => {
+    const d = N7.allowedDollarFigures(hueneme7);
+    assert.ok(d.distances.has(140000) && d.distances.has(130000), 'the setup: both are exactly some comp\'s distance from a range end, a price or the estimate');
+    assert.ok(!d.exact.has(140000) && !d.exact.has(130000) && !d.cuts.has(140000) && !d.cuts.has(130000), 'and neither is a figure in the data');
+    const a = refusedBoth7(hueneme7, 2000, 'Rents differ by $1,400 depending on the comp.');
+    assert.ok(a.badFigures.includes('$1,400'));
+    const b = refusedBoth7(hueneme7, 2000, 'Rents jump by about $1,300 from the bottom of the counted comps to the top.');
+    assert.ok(b.badFigures.includes('$1,300'));
+    assert.ok(a.problems.some(p => /without naming the comp/.test(p)), 'the correction tells the writer what to do');
+  });
+
+  await check('Round 7 / Saratoga and Bunting equivalents ("Rents differ by $700 depending on the comp.", "Rents jump by about $700 from the bottom ... to the top.", "Rents jump by about $800 ..." with $800 the $3,400 comp\'s distance from the suggested $4,200) are refused too', () => {
+    assert.ok(N7.allowedDollarFigures(saratoga7).distances.has(70000));
+    assert.ok(N7.allowedDollarFigures(bunting7).distances.has(80000));
+    assert.equal(bunting7.comps[indexOfRent7(bunting7, 3400)].monthly_rent, 3400);
+    refusedBoth7(saratoga7, 2200, 'Rents differ by $700 depending on the comp.');
+    refusedBoth7(saratoga7, 2200, 'Rents jump by about $700 from the bottom of the counted comps to the top.');
+    refusedBoth7(bunting7, 3200, 'Rents jump by about $800 from the bottom of the counted comps to the top.');
+    refusedBoth7(bunting7, 3200, 'Rents differ by $800 depending on the comp.');
+  });
+
+  await check('Round 7 / the figure rule stands on its own: wordings with none of the spread verbs ("Expect to see $1,400 in either direction.", "Some units cost $1,400 more than others.", "The cheapest comp is $1,400 under the recommended low.") are refused for the same reason, and so is a distance that names only the subject or an address that is not in the data', () => {
+    for (const text of ['Expect to see $1,400 in either direction.', 'Some homes cost $1,400 more than others.', 'The cheapest comp is $1,400 under the recommended low.', 'Plan for $1,400 of movement.', 'The priciest comp is $1,400 over the suggested price.']) {
+      const v = refusedBoth7(hueneme7, 2000, text);
+      assert.deepEqual(v.badFigures, ['$1,400'], text);
+      assert.deepEqual(v.badStatements, [], `${text}: only the figure rule caught it`);
+    }
+    // the subject is not a counted comp; an address that is not in the data is not a comp either (and is refused as an address)
+    assert.equal(N7.validateRationale('161 East Channel Islands Boulevard could rent $1,400 above the cheapest comp.', hueneme7).ok, false);
+    assert.equal(N7.validateRationale('9999 Nowhere Rd is $1,400 above the recommended low.', hueneme7).ok, false);
+  });
+
+  await check('Round 7 / a distance next to the comp it is about is still accepted: "1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.", a distance beside a comp\'s address in a big set (written "St" or "Street"), or beside its unit; the per-comp check allows that comp\'s own distance', () => {
+    const hill = { subject: { address: '5 Subject Way, Ventura, CA 93001' }, comps: [{ address: '1266 Hill St, Ventura, CA 93001', monthly_rent: 3895, listing_status: 'active', exclusion_reason: null }, { address: '1237 Elm St, Ventura, CA 93001', monthly_rent: 2700, listing_status: 'leased', exclusion_reason: null }], headline: { low: 2400, high: 2600, listPrice: 2500, goal: 'balanced', stretchPrice: null }, subjectEstimatedRent: 2550 };
+    const sentence = '1266 Hill St asks $3,895, about $1,295 above the recommended high of $2,600.';
+    assert.equal(N7.validateRationale(sentence, hill).ok, true);
+    assert.equal(kept7(hill, 0, sentence), true, 'and the per-comp check keeps it');
+    // a big set: the comp asking $3,800 sits $1,400 above the recommended low of $2,400
+    const at3800 = hueneme7.comps[indexOfRent7(hueneme7, 3800)];
+    const street = shortAddress7(at3800);
+    for (const text of [`${street} asks $3,800, which is $1,400 above the recommended low of $2,400.`, `${street.replace(/ St$/, ' Street')} asks $3,800, $1,400 above the recommended low of $2,400.`, `${street} asks $3,800 and sits $1,400 over the low end of the range.`]) {
+      assert.equal(N7.validateRationale(text, hueneme7).ok, true, text);
+    }
+    // the same sentence without the address is refused
+    assert.equal(N7.validateRationale('One comp asks $3,800, which is $1,400 above the recommended low of $2,400.', hueneme7).ok, false);
+    // a unit of a comp (Saratoga) names it as well as its street address does
+    const unit = saratoga7.comps.find(c => /Unit 1275/.test(c.address));
+    assert.ok(unit, 'the setup: a Saratoga comp with Unit 1275');
+    const away = Math.round(unit.monthly_rent - 2400);
+    assert.ok(away >= 500 && N7.allowedDollarFigures(saratoga7).distances.has(away * 100), `setup: $${away} is a distance`);
+    const dollars = n => `$${n.toLocaleString('en-US')}`;
+    assert.equal(N7.validateRationale(`Unit 1275 asks ${dollars(unit.monthly_rent)}, ${dollars(away)} above the recommended low of $2,400.`, saratoga7).ok, true, 'a unit');
+    assert.equal(N7.validateRationale(`1300 Saratoga Ave asks ${dollars(unit.monthly_rent)}, ${dollars(away)} above the recommended low of $2,400.`, saratoga7).ok, true, 'the building');
+    assert.equal(N7.validateRationale(`Unit 77 asks ${dollars(unit.monthly_rent)}, ${dollars(away)} above the recommended low of $2,400.`, saratoga7).ok, false, 'a unit number no comp has names nothing');
+  });
+
+  await check('Round 7 / per-comp narratives: "Asks $3,400, $700 below the recommended low of $4,100." stays clean for the $3,400 comp (its own distance) and is dropped for a different comp, whose own distances do not include $700; the same sentence is refused for no comp when it is under $500', () => {
+    const sentence = 'Asks $3,400, $700 below the recommended low of $4,100.';
+    assert.equal(kept7(bunting7, indexOfRent7(bunting7, 3400), sentence), true);
+    assert.equal(kept7(bunting7, indexOfRent7(bunting7, 3200), sentence), false, 'another comp\'s distance is not this comp\'s');
+    assert.equal(kept7(bunting7, indexOfRent7(bunting7, 4700), sentence), false);
+    assert.deepEqual(N7.findWideRangeStatements(sentence, bunting7, { narrative: true, ownComp: bunting7.comps[indexOfRent7(bunting7, 3400)] }), []);
+    assert.ok(N7.findWideRangeStatements(sentence, bunting7, { narrative: true, ownComp: bunting7.comps[indexOfRent7(bunting7, 3200)] }).some(b => b.kind === 'figure'));
+    // without the comp named in the options, any comp's distance counts (the old rule, for a caller that has no comp)
+    assert.deepEqual(N7.findWideRangeStatements(sentence, bunting7, { narrative: true }), []);
+    // its own price cut, and a figure under $500
+    const cutComp = bunting7.comps[5];
+    assert.equal(cutComp.original_price - cutComp.monthly_rent, 3750 - cutComp.monthly_rent);
+    assert.equal(kept7(bunting7, 5, `It was cut by $${(cutComp.original_price - cutComp.monthly_rent).toLocaleString('en-US')} from $3,750.`), true);
+    assert.equal(kept7(bunting7, indexOfRent7(bunting7, 3200), 'Asks $3,200, $300 above the cheapest comp.'), true);
+    // the explanation check lets a price cut be mentioned without an address, because it is a figure in the data
+    assert.equal(N7.validateRationale(`One comp cut its price by $${cutComp.original_price - cutComp.monthly_rent}, from $3,750 to $${cutComp.monthly_rent.toLocaleString('en-US')}.`, bunting7).ok, true);
+  });
+
+  await check('Round 7 / what needs no address: the range, the suggested and stretch price, RentCast\'s estimate and any comp\'s rent are data figures even when they are also somebody\'s distance, and a figure under $500 is always arithmetic', () => {
+    const lots = N7.allowedDollarFigures(hueneme7);
+    assert.ok(lots.distances.has(250000) && lots.exact.has(250000), 'setup: $2,500 is the suggested price and also the distance of the $5,000 comp');
+    for (const text of ['The recommended range is $2,400 to $2,600, with a suggested price of $2,500.', 'The stretch price of $2,800 is a push.', 'RentCast estimates $2,630 for the subject.', 'That is $300 above the recommended high.', 'One comp asks $5,000 and another asks $1,500.']) {
+      const v = N7.validateRationale(text, hueneme7);
+      assert.deepEqual(v.badFigures, [], text);
+    }
+    // a figure in a sentence that carries one real distance and one invented-by-arithmetic: only the unanchored one is named
+    const v = N7.validateRationale('Rents differ by $1,400 depending on the comp, and $9,999 is typical.', hueneme7);
+    assert.ok(v.badFigures.includes('$1,400') && v.badFigures.includes('$9,999'));
+    assert.ok(v.problems.some(p => /not in the data/.test(p)) && v.problems.some(p => /without naming the comp/.test(p)));
+  });
+
+  await check('Round 7 / the added spread verbs: "differ(s) by", "jump(s) by", "vary by", "change(s) by" with a figure of $500 or more that is not in the data are spans', () => {
+    for (const text of ['Rents differ by $1,400 depending on the comp.', 'Asking rents jump by $1,300 between the cheapest and the dearest.', 'Prices vary by $1,100 here.', 'Rents changed by $900 from one comp to the next.', 'One differs by $750 from the next.', 'It jumps by about $900.']) {
+      assert.ok(N7.findWideRangeStatements(text, hueneme7).some(b => b.kind === 'span'), text);
+      assert.ok(N7.findWideRangeStatements(text, hueneme7, { narrative: true }).some(b => b.kind === 'span'), text);
+    }
+    for (const text of ['The price changed by $200 after a cut.', 'It differs by $150 from the cheapest.', 'Comps vary by size.']) {
+      assert.deepEqual(N7.findWideRangeStatements(text, hueneme7), [], text);
+    }
+  });
+
+  await check('Round 7 / dropFlaggedSentences() gives up on a text with more than 15 sentences (null, however clean), still trims a short one, and a context built once gives exactly the answers the per-call build does', () => {
+    const clean = 'The recommended range is $2,400 to $2,600.';
+    const bad = 'Rents differ by $1,400 depending on the comp.';
+    const nine = Array(9).fill(clean).concat([bad]).join(' ');
+    assert.equal(N7.dropFlaggedSentences(nine, hueneme7), Array(9).fill(clean).join(' '), 'ten sentences: the bad one is dropped');
+    assert.equal(N7.sentencesOf(Array(15).fill(clean).join(' ')).length, 15);
+    assert.equal(N7.dropFlaggedSentences(Array(14).fill(clean).concat([bad]).join(' '), hueneme7), Array(14).fill(clean).join(' '), 'fifteen sentences: still trimmed');
+    assert.equal(N7.dropFlaggedSentences(Array(15).fill(clean).concat([bad]).join(' '), hueneme7), null, 'sixteen sentences: not trimmed');
+    assert.equal(N7.dropFlaggedSentences(Array(16).fill(clean).join(' '), hueneme7), null, 'sixteen clean sentences: not trimmed either');
+    // one context for every sentence is the same as one per sentence
+    const at3800 = shortAddress7(hueneme7.comps[indexOfRent7(hueneme7, 3800)]);
+    const texts = [clean, bad, `${at3800} asks $3,800, $1,400 above the recommended low of $2,400.`, 'Expect to see $1,400 in either direction.', 'The stretch price is $2,800 and it will take longer.', 'That is $9,999 a month.', 'It carries no weight in the range.', '9999 Nowhere Rd asks $2,500.', 'All the comps are leased.'];
+    const ctx = N7.buildCheckContext(hueneme7);
+    for (const text of texts) assert.deepEqual(N7.validateRationale(text, hueneme7, ctx), N7.validateRationale(text, hueneme7), text);
+    const mixed = texts.slice(0, 5).join(' ');
+    const reference = N7.sentencesOf(mixed).filter(s => N7.validateRationale(s, hueneme7).ok);
+    assert.equal(N7.dropFlaggedSentences(mixed, hueneme7), reference.length >= 2 ? reference.join(' ') : null);
+    // the per-comp check: one set of allowed figures for all the narratives gives the answers the one-at-a-time call gives
+    const narratives = hueneme7.comps.map((c, i) => [clean, bad, `Asks $${c.monthly_rent.toLocaleString('en-US')}.`, `Asks $${c.monthly_rent.toLocaleString('en-US')}, $${Math.abs(c.monthly_rent - 2400).toLocaleString('en-US')} ${c.monthly_rent >= 2400 ? 'above' : 'below'} the recommended low of $2,400.`][i % 4]);
+    const guarded = N7.guardWideRanges(hueneme7.comps, narratives, hueneme7);
+    narratives.forEach((n, i) => assert.equal(guarded[i] === null, N7.findWideRangeStatements(n, hueneme7, { narrative: true, ownComp: hueneme7.comps[i] }).length > 0, `comp ${i}: ${n}`));
+    assert.ok(guarded.filter(x => x === null).length >= 10 && guarded.filter(x => x !== null).length >= 20, 'both outcomes are in the run');
+  });
+
+  await check('Round 7 / speed: distances with no comp named, a hash mark or unit word repeated, and a distance in every short sentence, each 50,000 characters, take under 500 ms in every function', () => {
+    const rows = speed7.measureAll(50000).filter(r => /distance|unit words|hash marks/.test(r.pattern));
+    assert.ok(rows.length >= 5 * 16, `${rows.length} calls`);
+    assert.equal(rows.filter(r => r.ms >= 500).length, 0);
+    assert.ok(Object.keys(speed7.FUNCTIONS).includes('findUnanchoredDistances'));
   });
   }
 

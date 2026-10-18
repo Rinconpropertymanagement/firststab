@@ -53,7 +53,7 @@
  */
 
 const { select } = require('./supabase');
-const { extractZip, haversineMiles } = require('./crmls');
+const { subjectZipFor, haversineMiles } = require('./crmls');
 const { WIDE_SEARCH_RADIUS_MILES, positiveOrNull } = require('./constants');
 
 // "The last year or two at the most," per Peter's own words (spec, "What Q
@@ -170,23 +170,27 @@ function mapComparable(row, distanceMiles = null) {
  * above). Same {comps: [...]} shape every other source returns, so
  * lib/sources.js's loop doesn't need to know which source it called.
  *
- * Self-sufficient, like lib/crmls.js's own extractZip() fallback path:
+ * Self-sufficient, like lib/crmls.js's own zip fallback path:
  * parses the zip straight off the subject's typed address, so the QUERY
- * itself doesn't depend on RentCast running first. Radius TIERING (see
+ * itself doesn't depend on RentCast running first. When the address has no zip
+ * (one picked from the suggestion dropdown ends "..., CA, USA"), the zip the
+ * geocoder found for the subject (subject.zip, handed on by lib/sources.js from
+ * RentCast's answer) is used instead; with neither, this source is skipped as
+ * before. Radius TIERING (see
  * below) does opt into lib/sources.js's enrichedSubject.latitude/longitude
  * when RentCast already geocoded the subject — same mechanism
  * lib/crmls.js's box search uses — but degrades to exactly the previous
  * zip-only behavior (no tiering, every fetched row kept, distance_miles
  * null) whenever those coordinates aren't available, never throws over it.
  *
- * @param {{address: string, latitude?: number, longitude?: number}} subject
+ * @param {{address: string, zip?: string, latitude?: number, longitude?: number}} subject
  * @returns {Promise<{comps: object[], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: string|null}>}
  */
 async function pullLeadSimpleComps(subject) {
-  const zip = extractZip(subject.address);
+  const zip = subjectZipFor(subject);
   if (!zip) {
-    console.warn(`[rental-analysis] LeadSimple Move-Ins: could not find a 5-digit zip at the end of "${subject.address}" — skipping (this source is zip-scoped only, no coordinate fallback).`);
-    return { comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null };
+    console.warn(`[rental-analysis] LeadSimple Move-Ins: could not find a 5-digit zip at the end of "${subject.address}" (or from the geocoder) — skipping (this source is zip-scoped only, no coordinate fallback).`);
+    return { comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null, skipped: 'the address has no zip code' };
   }
 
   const cutoff = new Date();

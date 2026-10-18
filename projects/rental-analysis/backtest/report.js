@@ -163,6 +163,10 @@ function westlakeVillageSplit(rows) {
   };
 }
 
+// A few Rincon addresses can never be answered (an address with a thousand MLS records, say), and the product keeps their
+// LeadSimple type too; more than this share missing means the saved answers were not pulled properly.
+const RINCON_TYPE_UNCOVERED_LIMIT = 0.02;
+
 function daysBetweenDates(a, b) {
   return Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
 }
@@ -188,6 +192,15 @@ function buildScorecard(r) {
   if (!dataPulledOn) trustReasons.push('the date the data was pulled is unknown');
   else if (daysBetweenDates(dataPulledOn, r.runDate) > MAX_DATA_AGE_DAYS) trustReasons.push(`data older than ${MAX_DATA_AGE_DAYS} days (pulled ${dataPulledOn}); re-pull with --refresh`);
   if (r.dataCoverage && !r.dataCoverage.ok) trustReasons.push(`the saved data starts ${r.dataCoverage.dataFrom} but the targets need data from ${r.dataCoverage.requiredFrom}; re-pull with --refresh (and --data-from if needed)`);
+  // Rincon's own leases are typed by what the MLS says is at the address, from saved answers (backtest/rincon-mls.js); the
+  // product asks the MLS live. The saved answers must exist, cover the leases and be recent, or the replay would be of a tool
+  // that types every Rincon lease by LeadSimple's label, which the product no longer does.
+  const rt = r.rinconTypes;
+  if (!rt || !rt.present) trustReasons.push('the saved MLS answers about what kind of home each Rincon lease is are missing (run with --refresh or --refresh-types); without them the replay would type every Rincon lease by LeadSimple\'s label, which the product no longer does');
+  else {
+    if (rt.total > 0 && rt.uncovered / rt.total > RINCON_TYPE_UNCOVERED_LIMIT) trustReasons.push(`${rt.uncovered} of ${rt.total} searchable Rincon lease addresses have no saved MLS answer (more than ${Math.round(RINCON_TYPE_UNCOVERED_LIMIT * 100)}% allowed); re-pull with --refresh-types`);
+    if (rt.oldest && daysBetweenDates(rt.oldest, r.runDate) > MAX_DATA_AGE_DAYS) trustReasons.push(`the saved MLS answers about Rincon lease types are older than ${MAX_DATA_AGE_DAYS} days (oldest ${rt.oldest}); re-pull with --refresh-types`);
+  }
   // What the run sent over the network is measured, not assumed.
   if (!r.network || !r.network.measured) trustReasons.push('network use was not measured');
   else if (r.network.requestsDuringReplay > 0) trustReasons.push(`the replay made ${fmtCount(r.network.requestsDuringReplay)} outbound request(s); it must make none`);
@@ -265,7 +278,7 @@ function buildScorecard(r) {
     },
     rincon: r.rincon && r.rincon.headline && {
       targets: r.rincon.headline.baseline.targets,
-      description: `Rincon single-home leases started in the last 12 months after the plausibility screen; signed rent is the target; pool = full (${LIVE_RINCON_MONTHS}-month Rincon lookback)`,
+      description: `Rincon single-home leases started in the last 12 months after the plausibility screen, each typed as a house, condo or townhouse by what the MLS says is at its address (LeadSimple's label where the MLS has no clear answer; leases the MLS shows to be some other kind of home are not tested); signed rent is the target; pool = full (${LIVE_RINCON_MONTHS}-month Rincon lookback, Rincon leases typed the same way, implausible rents left out)`,
       baseline: viewBlock(r.rincon.headline.baseline),
       size25_item2: viewBlock(r.rincon.headline.size25_item2),
       note: 'signed rent is not always market rent: a unit re-priced after sitting vacant signs below its first ask (no asking-price history exists yet, A3)',
@@ -689,6 +702,14 @@ function renderReport(r, previousScorecard, scorecard) {
     L.push('## Rincon portfolio test (A.4, A.7)');
     L.push('');
     L.push(`${r.counts.rinconTargets} single-home leases started in the last 12 months after the plausibility screen (screened out: ${Object.entries(r.counts.rinconScreenedOut).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join(', ')}). Signed rent is the target; it is not always market rent (a re-priced unit signs below its first ask), and no asking-price history exists yet.`);
+    if (r.rinconTypes && r.rinconTypes.present) {
+      const rt = r.rinconTypes;
+      L.push('');
+      L.push(`Rincon leases are typed the way the product types them (lib/leadsimple.js): by what the MLS says is at the street address, from answers saved on ${rt.newest || 'an unknown date'}${rt.oldest && rt.oldest !== rt.newest ? ` (oldest ${rt.oldest})` : ''}, and by LeadSimple's label where the MLS has no clear answer. The saved answers cover ${rt.covered} of ${rt.total} searchable Rincon lease addresses. Of the ${r.counts.rinconTargets} tested leases, ${rt.typedByMls} were typed by the MLS. Tested by type: ${Object.entries(rt.targetsByType || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}. In the comp pools, Rincon leases with an implausible rent are left out and "Multi-Family" leases count only for apartment-type subjects unless the MLS names another type.`);
+    } else {
+      L.push('');
+      L.push('The saved MLS answers about Rincon lease types are missing, so every Rincon lease here is typed by LeadSimple\'s label. This is not what the product does (run with --refresh-types).');
+    }
     L.push('');
     const rrows = [];
     for (const c of r.rincon.combos) {

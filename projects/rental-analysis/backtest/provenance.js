@@ -34,6 +34,7 @@ const TRACKED_FILES = [
   'lib/constants.js',
   'backtest/recore.js',     // what the pull selects (the county field is part of it)
   'backtest/asof-sources.js',
+  'backtest/rincon-mls.js', // how the replay gets each Rincon lease's real type (the saved MLS evidence)
   'backtest/candidates.js', // pool settings (lookbacks, asking price rule) live here
   'backtest/engine.js',     // how one lease is run through the tool
   'backtest/selftests.js',  // the fidelity check itself

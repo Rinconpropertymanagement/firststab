@@ -17,7 +17,7 @@
  * subject fields to runActiveSources and keeps rent for scoring).
  */
 const { FROM_CRMLS_PROPERTY_TYPE, buildAddress: buildCrmlsAddress } = require('../lib/crmls');
-const { buildAddress: buildLeadSimpleAddress, FROM_LEADSIMPLE_PROPERTY_TYPE } = require('../lib/leadsimple');
+const { buildAddress: buildLeadSimpleAddress, FROM_LEADSIMPLE_PROPERTY_TYPE, rentOutsideRange, rentPerSqftOutsideRange } = require('../lib/leadsimple');
 const { COUNTY_BOX, CORE_BOX, USABLE, USABLE_TARGET_TYPES, RINCON, HOLDOUT_MONTHS } = require('./constants');
 const { isLikeForLikeTarget } = require('./mls-facts-ref');
 
@@ -89,12 +89,20 @@ function buildMlsTargets(closedRecords, { targetFrom, today }) {
 
 /**
  * Rincon single-home leases (A.4): started in the last RINCON.lookbackMonths,
- * rent and rent-per-sq-ft plausible, sq ft / bedrooms / coordinates known.
+ * rent and rent-per-sq-ft plausible (the product's own screen, lib/leadsimple.js),
+ * sq ft / bedrooms / coordinates known, and a kind of home the test covers.
  * Returns { targets, screenedOut } where screenedOut counts why rows left.
+ *
+ * `resolveType(row)` says what kind of home a lease really is, {type, source}, the same
+ * way the product does it (lib/leadsimple.js classifyRinconLease(), here from the saved MLS
+ * evidence, backtest/rincon-mls.js). A lease the MLS shows to be a condo or a townhouse is
+ * tested as a condo or a townhouse; one that is not a house, condo or townhouse (a mix of
+ * the two, a duplex ...) is not one of the kinds the test covers and is left out
+ * (typeNotTested). Without it every lease is a single-family home, as before the fix.
  */
-function buildRinconTargets(leadsimpleRows, { today }) {
+function buildRinconTargets(leadsimpleRows, { today, resolveType = null }) {
   const since = monthsBefore(today, RINCON.lookbackMonths);
-  const screenedOut = { notSingleHome: 0, tooOld: 0, notYetStarted: 0, rentOutOfRange: 0, rentPerSqftOutOfRange: 0, missingFacts: 0 };
+  const screenedOut = { notSingleHome: 0, tooOld: 0, notYetStarted: 0, rentOutOfRange: 0, rentPerSqftOutOfRange: 0, missingFacts: 0, typeNotTested: 0 };
   const targets = [];
   for (const row of leadsimpleRows) {
     if (!RINCON.singleHomeTypes.includes(row.property_type)) { screenedOut.notSingleHome++; continue; }
@@ -102,10 +110,12 @@ function buildRinconTargets(leadsimpleRows, { today }) {
     if (!start || start < since) { screenedOut.tooOld++; continue; }
     if (start > today) { screenedOut.notYetStarted++; continue; }
     const rent = Number(row.rent);
-    if (!(rent >= RINCON.minRent && rent <= RINCON.maxRent)) { screenedOut.rentOutOfRange++; continue; }
+    if (rentOutsideRange(rent)) { screenedOut.rentOutOfRange++; continue; }
     if (!(row.sqft > 0) || typeof row.bedrooms !== 'number' || typeof row.latitude !== 'number' || typeof row.longitude !== 'number') { screenedOut.missingFacts++; continue; }
-    const perSqft = rent / row.sqft;
-    if (!(perSqft >= RINCON.minRentPerSqft && perSqft <= RINCON.maxRentPerSqft)) { screenedOut.rentPerSqftOutOfRange++; continue; }
+    if (rentPerSqftOutsideRange(rent, row.sqft)) { screenedOut.rentPerSqftOutOfRange++; continue; }
+    const resolved = resolveType ? resolveType(row) : { type: FROM_LEADSIMPLE_PROPERTY_TYPE[row.property_type] || 'single_family', source: 'label' };
+    const propertyType = resolved.type || 'single_family';
+    if (!USABLE_TARGET_TYPES.includes(propertyType)) { screenedOut.typeNotTested++; continue; }
     targets.push({
       kind: 'rincon',
       key: row.id,
@@ -114,7 +124,8 @@ function buildRinconTargets(leadsimpleRows, { today }) {
       address: buildLeadSimpleAddress(row),
       city: row.city || null,
       zip: row.zip_code || null,
-      propertyType: FROM_LEADSIMPLE_PROPERTY_TYPE[row.property_type] || 'single_family',
+      propertyType,
+      typeSource: resolved.source,
       bedrooms: row.bedrooms,
       bathrooms: typeof row.bathrooms === 'number' ? row.bathrooms : 0,
       sqft: row.sqft,

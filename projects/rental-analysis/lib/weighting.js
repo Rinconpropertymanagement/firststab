@@ -158,11 +158,23 @@ function hasExclusionFacts(comp) {
   );
 }
 
+// A comp whose rent cannot be right for the home (a 3-bedroom house at $280,
+// a 613 sq ft condo at $199) is a data error and never counts. Only Rincon's own
+// lease records can carry the mark: lib/leadsimple.js sets it on a comp whose rent
+// fails the screen in RINCON_RENT_SCREEN (lib/constants.js). A comp that carries no
+// mark is never affected, so older callers and the "before" method of the accuracy
+// test see no change from any comp they build by hand.
+function hasImplausibleRent(comp) {
+  return !!comp && comp.implausible_rent === true;
+}
+
 // The reason, if any, among the four new ones. In this order when several
 // apply: size_sqft, furnished_mismatch, short_term_lease, age_restricted.
 // Only the reason that is REPORTED depends on the order; whether the comp
-// counts does not.
+// counts does not. A rent that cannot be right (see hasImplausibleRent above)
+// comes first and, unlike the four, needs nothing from the subject.
 function extraExclusionReason(comp, subjectPropertyType, subjectExtras) {
+  if (hasImplausibleRent(comp)) return 'implausible_rent';
   const x = subjectExtras || {};
   if (sqftOutsideBand(comp.sqft, x.sqft, subjectPropertyType)) return 'size_sqft';
   if (typeof x.furnished === 'boolean') {
@@ -314,8 +326,14 @@ function excludeRinconManaged(comps) {
 // footage more than 25% off), furnished_mismatch, short_term_lease and
 // age_restricted (a 55+ community). Same rule as the first three: only one
 // reason is reported, and the order never changes whether a comp counts.
+//
+// One more, implausible_rent, needs no subject at all: Rincon's own lease records whose rent
+// cannot be right for the home carry a mark (comp.implausible_rent) and never count.
 function exclusionReason(comp, subjectBedrooms, subjectPropertyType, subjectExtras) {
   if (isExcludedRinconManaged(comp)) return 'rincon_managed';
+  // A rent that cannot be right is the more basic problem with a comp (its other facts are no more
+  // trustworthy), so it is the reason reported, ahead of a type or size difference.
+  if (hasImplausibleRent(comp)) return 'implausible_rent';
   if (propertyTypeMultiplier(comp.property_type, subjectPropertyType) === 0) return 'property_type_mismatch';
   if (sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) === 0) return 'size_mismatch';
   return extraExclusionReason(comp, subjectPropertyType, subjectExtras);
@@ -461,6 +479,7 @@ module.exports = {
   sqftOutsideBand,
   subjectExtrasFrom,
   hasExclusionFacts,
+  hasImplausibleRent,
   extraExclusionReason,
   exclusionReason,
   computeRecommendedRange,

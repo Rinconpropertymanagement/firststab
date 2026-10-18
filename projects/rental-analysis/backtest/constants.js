@@ -8,7 +8,7 @@
 // These settings are shared with the product (which writes the same sentences and
 // the same $200 range), so there is ONE definition, in lib/. They are re-exported
 // here under their old names.
-const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH } = require('../lib/constants');
+const { HEADLINE_MIN_COMPS, HEADLINE_RANGE_WIDTH, RINCON_RENT_SCREEN } = require('../lib/constants');
 const { TRACK_RECORD_MIN_LEASES, RENTCAST_SHARE_PERCENT, COUNTY_LABELS, COUNTY_UNKNOWN_LIMIT_PERCENT } = require('../lib/accuracy-sentences');
 
 // Ventura-area service-area box and the Ventura "core" box inside it
@@ -35,11 +35,13 @@ const USABLE = { minRent: 500, maxRent: 20000 };
 const USABLE_TARGET_TYPES = ['single_family', 'condo', 'townhouse'];
 
 // Rincon portfolio test (A.4): single-home leases started in the last 12
-// months, after the plausibility screen.
+// months, after the plausibility screen. The four rent limits are the product's own
+// (lib/constants.js RINCON_RENT_SCREEN): the report page leaves out a Rincon lease
+// that fails them, and this test leaves out the same leases as targets, so the two
+// cannot disagree about what a plausible rent is.
 const RINCON = {
   lookbackMonths: 12,
-  minRent: 800, maxRent: 12000,
-  minRentPerSqft: 0.80, maxRentPerSqft: 6.00,
+  ...RINCON_RENT_SCREEN,
   singleHomeTypes: ['Single Home', 'Single-Family'],
 };
 

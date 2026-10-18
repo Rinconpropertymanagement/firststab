@@ -12,7 +12,12 @@
  * ever give a different estimate, range, comp count or set of counted rents for
  * ANY lease, this script says which one and exits 1.
  *
- * A second proof rides along (Phase C): for every lease, the product's recommended
+ * Two more proofs ride along. (1) Rincon lease types: the replay gets each Rincon lease's
+ * real type from SAVED MLS answers (backtest/rincon-mls.js) where the product asks the live
+ * MLS; both go through the same lib/leadsimple.js buildLeadSimpleComps(). This script runs the
+ * product's live lookup (lookupMlsRecords(), against a pretend Recore that serves the saved
+ * answers) and the saved-answers path on every Rincon lease, for four kinds of subject, and
+ * requires the identical comps, types and rent marks. (2) Phase C: for every lease, the product's recommended
  * range, suggested price, stretch price and High / Medium / Low label (lib/weighting.js
  * computeHeadlineRange and lib/confidence.js) must equal the reference copy the
  * scorecard is built from (backtest/metrics.js). If they ever disagree, the hit rates
@@ -65,6 +70,9 @@ const { DEFAULT_TARGET_FROM } = require('./constants');
 const M = require('./metrics');
 const { computeHeadlineRange } = require('../lib/weighting');
 const { computeConfidence } = require('../lib/confidence');
+const leadsimpleLib = require('../lib/leadsimple');
+const rinconMlsLib = require('./rincon-mls');
+const { makeFakeRecoreFetch } = require('./tests/fake-recore-mls');
 
 const today = todayArg || new Date().toLocaleDateString('sv-SE');
 
@@ -122,15 +130,54 @@ async function compare(label, world, targets, pool, tally) {
   }
 }
 
+// The product's live lookup and the replay's saved-answers lookup, on every Rincon lease, must give the same comps.
+// The live path runs for real (batching, the search text, reading the reply) against a pretend Recore that serves the
+// saved answers; no network is used.
+async function rinconTypeEquivalence(cache, tally) {
+  if (!cache.rinconMls) {
+    console.error('  Rincon lease types: NO saved MLS answers (backtest/cache/rincon-mls.json): the replay types every Rincon lease by label. Run: node backtest/run.js --refresh-types');
+    tally.differ++;
+    return;
+  }
+  const entries = cache.rinconMls.entries;
+  const rows = cache.leadsimple.filter(row => { const q = leadsimpleLib.mlsQueryFor(row); return !q || !!entries[q.key]; });
+  const fake = makeFakeRecoreFetch({ recordsFor: q => (entries[`${q.number}|${q.zip}|${q.words.join('/')}`] || { records: [] }).records });
+  const live = queries => leadsimpleLib.lookupMlsRecords(queries, {
+    fetchImpl: fake, token: 'pretend-token', cache: new Map(), limits: { maxRequests: 500, totalBudgetMs: 120000, requestTimeoutMs: 20000 },
+  });
+  const saved = rinconMlsLib.evidenceLookup(cache.rinconMls);
+  let compared = 0, mlsTyped = 0, differ = 0;
+  const kinds = { single_family: 0, condo: 0, townhouse: 0, other: 0, apartment: 0 };
+  for (const subject of [{ propertyType: 'single_family', bedrooms: 3 }, { propertyType: 'condo', bedrooms: 2 }, { propertyType: 'townhouse', bedrooms: 3 }, { propertyType: 'apartment', bedrooms: 2 }]) {
+    const selected = rows.map(row => ({ row, distanceMiles: null }));
+    const a = await leadsimpleLib.buildLeadSimpleComps(selected, subject, { lookup: live, log: null });
+    const b = await leadsimpleLib.buildLeadSimpleComps(selected, subject, { lookup: saved, log: null });
+    try {
+      assert.deepStrictEqual(a.comps, b.comps);
+      assert.equal(a.stats.couldNotCheck, 0, 'the live path could not check some lease that the saved answers cover');
+    } catch (err) {
+      differ++;
+      console.error(`  Rincon lease types, ${subject.propertyType} subject: the live lookup and the saved answers DIFFER (${String(err.message).split('\n')[0].slice(0, 160)})`);
+    }
+    compared += b.comps.length;
+    mlsTyped += b.comps.filter(c => c.property_type_source === 'mls').length;
+    if (subject.propertyType === 'single_family') for (const c of b.comps) kinds[c.property_type] = (kinds[c.property_type] || 0) + 1;
+  }
+  tally.pools.push({ label: 'Rincon lease types, live lookup vs saved answers', leases: rows.length, withEstimate: 0, differ, shippedKeptExtraComps: 0, headlineDiffers: 0 });
+  tally.differ += differ;
+  if (!differ) console.log(`  Rincon lease types: ${rows.length} leases x 4 kinds of subject (${compared} comps): the product's live lookup (run against a pretend Recore serving the saved answers) and the replay's saved-answers path give identical comps, types and rent marks; ${mlsTyped} comp-types came from the MLS. Types with a house subject: ${Object.entries(kinds).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ')}.`);
+}
+
 async function main() {
   const t0 = Date.now();
   const cache = data.loadCache();
-  const world = asof.createWorld({ closed: cache.closed, leadsimple: cache.leadsimple, properties: cache.properties });
+  const world = asof.createWorld({ closed: cache.closed, leadsimple: cache.leadsimple, properties: cache.properties, rinconMls: cache.rinconMls });
   const mlsTargets = T.buildMlsTargets(cache.closed, { targetFrom: DEFAULT_TARGET_FROM, today });
-  const { targets: rinconTargets } = T.buildRinconTargets(cache.leadsimple, { today });
+  const { targets: rinconTargets } = T.buildRinconTargets(cache.leadsimple, { today, resolveType: cache.rinconMls ? rinconMlsLib.resolverFor(cache.rinconMls) : null });
   console.log(`Phase B equivalence: ${mlsTargets.length} MLS leases and ${rinconTargets.length} Rincon leases, saved data pulled ${cache.meta.pulledAt}.`);
 
   const tally = { pools: [], leases: 0, differ: 0 };
+  await rinconTypeEquivalence(cache, tally);
   for (const [id, pool] of [['mls', C.POOLS.mls], ['mls+asking', C.POOLS['mls+asking']], ['full', C.POOLS.full]]) {
     await compare(`MLS leases, pool ${id}`, world, mlsTargets, pool, tally);
   }

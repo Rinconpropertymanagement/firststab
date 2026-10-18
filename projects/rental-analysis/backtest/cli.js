@@ -15,7 +15,7 @@ const VALUE_OPTIONS = {
   'data-from': { what: 'a date as YYYY-MM-DD', test: isDate },
   out: { what: 'a folder path', test: v => v.length > 0 },
 };
-const FLAG_OPTIONS = ['help', 'refresh', 'fidelity', 'no-leak-test', 'no-asof-listing', 'asof-listing', 'judge-holdout', 'rejudge', 'plant-leak', 'publish', 'a0'];
+const FLAG_OPTIONS = ['help', 'refresh', 'refresh-types', 'fidelity', 'no-leak-test', 'no-asof-listing', 'asof-listing', 'judge-holdout', 'rejudge', 'plant-leak', 'publish', 'a0'];
 
 function isDate(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(new Date(`${v}T12:00:00Z`).getTime());

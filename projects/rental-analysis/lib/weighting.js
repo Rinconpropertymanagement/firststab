@@ -7,6 +7,12 @@
  * FlexMLS is live (see rental_comp_sources).
  */
 
+const {
+  SQFT_BAND_PCT, SQFT_BAND_PROPERTY_TYPES, SHORT_TERM_LEASE_BELOW_MONTHS,
+  HEADLINE_RANGE_WIDTH, HEADLINE_MIN_COMPS, LIST_PRICE_STEP, STRETCH_ABOVE_RANGE,
+  OWNER_GOALS, DEFAULT_OWNER_GOAL, OWNER_GOAL_PHRASES, NEAR_RANGE_DOLLARS,
+} = require('./constants');
+
 // Higher weight = more trust in that comp's price as a real signal of
 // current market rent.
 //   - leased: a confirmed real transaction — the strongest possible signal.
@@ -30,6 +36,7 @@ const LISTING_STATUS_WEIGHTS = {
 function weightFor(listingStatus) {
   return LISTING_STATUS_WEIGHTS[listingStatus] || 1;
 }
+
 
 // How much to trust a comp's price based on how close its bedroom count is
 // to the subject property's — a comp of a very different size isn't really
@@ -77,6 +84,116 @@ function sizeSimilarityMultiplier(compBedrooms, subjectBedrooms) {
 function propertyTypeMultiplier(compPropertyType, subjectPropertyType) {
   if (!subjectPropertyType || !compPropertyType) return 1;
   return compPropertyType === subjectPropertyType ? 1 : 0;
+}
+
+// ─── The new rules (CMA-QUALITY-SPEC.md Items 1 and 2) ──────────────────────
+// Four more reasons a comp can be left out of the numbers. They are decided in
+// ONE place (extraExclusionReason below) and used by the range math, the
+// radius search, the duplicate check, the written explanation and the
+// dashboards, so none of them can disagree about which comps count.
+//
+// "subjectExtras" describes the subject for these rules:
+//   { sqft, furnished, leaseTermMonths, ageRestricted }
+// Each rule turns on only when its piece is given, so a caller that passes
+// nothing (every older caller, and the "before Phase B" method in the accuracy
+// test) gets exactly the old behavior. The report pages always pass all four.
+// A fact the MLS did not give us (null) is NEVER a reason to leave a comp out.
+
+// True when this subject's square footage is a usable whole number and its
+// property type is one the size rule covers.
+function sqftRuleApplies(subjectSqft, subjectPropertyType) {
+  return Number.isInteger(subjectSqft) && subjectSqft > 0 && SQFT_BAND_PROPERTY_TYPES.includes(subjectPropertyType);
+}
+
+// The percent shown on the report ("size band 25%"), or null when the rule
+// does not apply to this subject (a duplex, no square footage, ...).
+function sizeBandPctFor(subjectPropertyType, subjectSqft) {
+  return sqftRuleApplies(subjectSqft, subjectPropertyType) ? SQFT_BAND_PCT : null;
+}
+
+// The smallest and largest comp size that still counts, for the written note
+// on the report: a 1,636 sq ft subject gives 1,227 to 2,045. Null when the
+// rule does not apply.
+function sqftBandFor(subjectPropertyType, subjectSqft) {
+  if (!sqftRuleApplies(subjectSqft, subjectPropertyType)) return null;
+  return {
+    pct: SQFT_BAND_PCT,
+    low: Math.ceil(subjectSqft * (100 - SQFT_BAND_PCT) / 100),
+    high: Math.floor(subjectSqft * (100 + SQFT_BAND_PCT) / 100),
+  };
+}
+
+// True when a comp's size is too far from the subject's. Whole-number maths
+// only (no rounding): exactly 25.0% off still counts, 25.1% off does not. A
+// comp with no square footage listed is unknown, never excluded, the same
+// rule already used for an unknown bedroom count or property type.
+function sqftOutsideBand(compSqft, subjectSqft, subjectPropertyType) {
+  if (!sqftRuleApplies(subjectSqft, subjectPropertyType)) return false;
+  if (!Number.isInteger(compSqft) || compSqft <= 0) return false;
+  return Math.abs(compSqft - subjectSqft) * 100 > subjectSqft * SQFT_BAND_PCT;
+}
+
+// Builds the subjectExtras above from the subject object the entry points and
+// runActiveSources() already pass around: { sqft, furnished, leaseTermMonths,
+// ageRestricted } (any of them may be missing).
+function subjectExtrasFrom(subject) {
+  const s = subject || {};
+  return {
+    sqft: s.sqft,
+    furnished: s.furnished,
+    leaseTermMonths: s.leaseTermMonths,
+    ageRestricted: s.ageRestricted,
+  };
+}
+
+// True when the comp carries any of the three MLS facts that decide whether it
+// is left out (furnished, lease length, 55+). Used to prefer the copy of a
+// listing that has them (lib/property-matching.js) and to decide which comps
+// can borrow them (lib/mls-facts.js).
+function hasExclusionFacts(comp) {
+  return !!comp && (
+    (comp.furnished_status !== null && comp.furnished_status !== undefined) ||
+    (comp.lease_term_class !== null && comp.lease_term_class !== undefined) ||
+    (comp.age_restricted !== null && comp.age_restricted !== undefined)
+  );
+}
+
+// A comp whose rent cannot be right for the home (a 3-bedroom house at $280,
+// a 613 sq ft condo at $199) is a data error and never counts. Only Rincon's own
+// lease records can carry the mark: lib/leadsimple.js sets it on a comp whose rent
+// fails the screen in RINCON_RENT_SCREEN (lib/constants.js). A comp that carries no
+// mark is never affected, so older callers and the "before" method of the accuracy
+// test see no change from any comp they build by hand.
+function hasImplausibleRent(comp) {
+  return !!comp && comp.implausible_rent === true;
+}
+
+// The reason, if any, among the four new ones. In this order when several
+// apply: size_sqft, furnished_mismatch, short_term_lease, age_restricted.
+// Only the reason that is REPORTED depends on the order; whether the comp
+// counts does not. A rent that cannot be right (see hasImplausibleRent above)
+// comes first and, unlike the four, needs nothing from the subject.
+function extraExclusionReason(comp, subjectPropertyType, subjectExtras) {
+  if (hasImplausibleRent(comp)) return 'implausible_rent';
+  const x = subjectExtras || {};
+  if (sqftOutsideBand(comp.sqft, x.sqft, subjectPropertyType)) return 'size_sqft';
+  if (typeof x.furnished === 'boolean') {
+    // A furnished subject wants furnished comps; an unfurnished one wants unfurnished.
+    // "partly furnished", "either" and unknown never leave a comp out.
+    if (comp.furnished_status === 'furnished' && !x.furnished) return 'furnished_mismatch';
+    if (comp.furnished_status === 'unfurnished' && x.furnished) return 'furnished_mismatch';
+  }
+  if (Number.isInteger(x.leaseTermMonths) && x.leaseTermMonths >= SHORT_TERM_LEASE_BELOW_MONTHS) {
+    // A subject leasing for 6 months or more does not want month-to-month or
+    // vacation-style comps. A subject with a shorter lease keeps them.
+    if (comp.lease_term_class === 'short') return 'short_term_lease';
+  }
+  if (typeof x.ageRestricted === 'boolean' && !x.ageRestricted) {
+    // A subject that is not in a 55+ community leaves 55+ comps out; a 55+
+    // subject keeps them.
+    if (comp.age_restricted === true) return 'age_restricted';
+  }
+  return null;
 }
 
 // Builds a weighted sample by repeating each comp's rent `weight` times, so
@@ -203,21 +320,35 @@ function excludeRinconManaged(comps) {
 // display — it has no effect on whether a comp counts (that's still decided
 // independently, and identically, by computeRecommendedRange()/
 // computeRawRange() below multiplying all three checks together).
-function exclusionReason(comp, subjectBedrooms, subjectPropertyType) {
+//
+// Four more reasons follow, from extraExclusionReason() above, only when the
+// caller passes subjectExtras (see the block above): size_sqft (square
+// footage more than 25% off), furnished_mismatch, short_term_lease and
+// age_restricted (a 55+ community). Same rule as the first three: only one
+// reason is reported, and the order never changes whether a comp counts.
+//
+// One more, implausible_rent, needs no subject at all: Rincon's own lease records whose rent
+// cannot be right for the home carry a mark (comp.implausible_rent) and never count.
+function exclusionReason(comp, subjectBedrooms, subjectPropertyType, subjectExtras) {
   if (isExcludedRinconManaged(comp)) return 'rincon_managed';
+  // A rent that cannot be right is the more basic problem with a comp (its other facts are no more
+  // trustworthy), so it is the reason reported, ahead of a type or size difference.
+  if (hasImplausibleRent(comp)) return 'implausible_rent';
   if (propertyTypeMultiplier(comp.property_type, subjectPropertyType) === 0) return 'property_type_mismatch';
   if (sizeSimilarityMultiplier(comp.bedrooms, subjectBedrooms) === 0) return 'size_mismatch';
-  return null;
+  return extraExclusionReason(comp, subjectPropertyType, subjectExtras);
 }
 
 /**
  * @param {object[]} comps - each needs {monthly_rent, listing_status, is_rincon_managed, bedrooms, property_type}
  * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
  * @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
+ * @param {object} [subjectExtras] - optional; see the "new rules" block above. Comps left out by size_sqft, furnished_mismatch, short_term_lease or age_restricted are dropped here too.
  * @returns {{low: number|null, mid: number|null, high: number|null}}
  */
-function computeRecommendedRange(comps, subjectBedrooms, subjectPropertyType) {
-  const eligible = excludeRinconManaged(comps);
+function computeRecommendedRange(comps, subjectBedrooms, subjectPropertyType, subjectExtras) {
+  const eligible = excludeRinconManaged(comps)
+    .filter(c => extraExclusionReason(c, subjectPropertyType, subjectExtras) === null);
   if (!eligible.length) return { low: null, mid: null, high: null };
   const sample = buildWeightedSample(eligible, subjectBedrooms, subjectPropertyType);
   return {
@@ -238,16 +369,96 @@ function computeRecommendedRange(comps, subjectBedrooms, subjectPropertyType) {
  * @param {object[]} comps - each needs {monthly_rent, is_rincon_managed, bedrooms, property_type}
  * @param {number} [subjectBedrooms] - optional; see sizeSimilarityMultiplier
  * @param {string} [subjectPropertyType] - optional; see propertyTypeMultiplier
+ * @param {object} [subjectExtras] - optional; see the "new rules" block above
  * @returns {{low: number|null, high: number|null}}
  */
-function computeRawRange(comps, subjectBedrooms, subjectPropertyType) {
+function computeRawRange(comps, subjectBedrooms, subjectPropertyType, subjectExtras) {
   const eligible = excludeRinconManaged(comps)
     .filter(c => sizeSimilarityMultiplier(c.bedrooms, subjectBedrooms) > 0)
-    .filter(c => propertyTypeMultiplier(c.property_type, subjectPropertyType) > 0);
+    .filter(c => propertyTypeMultiplier(c.property_type, subjectPropertyType) > 0)
+    .filter(c => extraExclusionReason(c, subjectPropertyType, subjectExtras) === null);
   if (!eligible.length) return { low: null, high: null };
   const rents = eligible.map(c => Number(c.monthly_rent)).filter(n => Number.isFinite(n));
   if (!rents.length) return { low: null, high: null };
   return { low: round2(Math.min(...rents)), high: round2(Math.max(...rents)) };
+}
+
+// ─── The recommended range, the suggested price and the stretch price ───────
+// (CMA-QUALITY-SPEC.md Item 4.2.) The computed range above (the 25th, 50th and
+// 75th percentiles and the lowest-to-highest rents) is WIDE and is kept only for
+// the audit trail and for working out how well the comps agree. What a reader is
+// ever told is the headline below: a range exactly $200 wide, built around the
+// weighted middle of the counted comps.
+
+// Rounds `mid` to the nearest `step` dollars. Exactly halfway (an x50 middle for
+// a $100 step, an x25 or x75 middle for a $50 step) takes whichever candidate is
+// closer to the middle of the computed range (low + high) / 2; if still tied, the
+// lower one.
+function roundToStep(mid, step, low, high) {
+  const lo = Math.floor(mid / step) * step;
+  const hi = lo + step;
+  if (mid === lo) return lo;
+  const dLo = mid - lo, dHi = hi - mid;
+  if (dLo < dHi) return lo;
+  if (dHi < dLo) return hi;
+  const centre = (low + high) / 2;
+  return Math.abs(hi - centre) < Math.abs(lo - centre) ? hi : lo;
+}
+
+// A missing or unrecognised goal means Balanced.
+function normalizeOwnerGoal(goal) {
+  return OWNER_GOALS.includes(goal) ? goal : DEFAULT_OWNER_GOAL;
+}
+
+function formatDollars(n) {
+  return `$${Number(n).toLocaleString('en-US')}`;
+}
+
+// The one plain sentence that carries the suggested price. Three fixed
+// templates; the price is the only thing that changes. (Same words on the screen
+// and, later, on the owner page.)
+function goalSentenceFor(goal, listPrice) {
+  return `Based on your goal of ${OWNER_GOAL_PHRASES[normalizeOwnerGoal(goal)]}, we suggest listing at ${formatDollars(listPrice)}.`;
+}
+
+/**
+ * @param {{low: number|null, mid: number|null, high: number|null}} recommended - the computed range (internal)
+ * @param {object[]} countedComps - only the comps that counted (each needs monthly_rent, listing_status)
+ * @param {string} [goal] - lease_quickly | balanced | maximize_rent (anything else means balanced)
+ * @returns {null | {low, high, listPrice, goal, goalSentence, stretchPrice, centre, countedTotal, leasedCounted, compsInside, compsNear, spread}}
+ *   null (no range, no prices) when fewer than HEADLINE_MIN_COMPS comps counted or there is no middle to work from.
+ *   low/high are exactly HEADLINE_RANGE_WIDTH apart, both multiples of $100; listPrice is a multiple of $50
+ *   inside the range; stretchPrice is the range high plus STRETCH_ABOVE_RANGE. spread is INTERNAL (it feeds
+ *   the confidence label and is saved for audit); it is never shown.
+ */
+function computeHeadlineRange(recommended, countedComps, goal) {
+  const counted = Array.isArray(countedComps) ? countedComps : [];
+  if (!recommended || recommended.mid === null || recommended.mid === undefined || !Number.isFinite(Number(recommended.mid))) return null;
+  if (counted.length < HEADLINE_MIN_COMPS) return null;
+  const mid = Number(recommended.mid);
+  const half = HEADLINE_RANGE_WIDTH / 2;
+  // never lower than $0 at the bottom (the database refuses a negative end)
+  const centre = Math.max(half, roundToStep(mid, 100, recommended.low, recommended.high));
+  const low = centre - half;
+  const high = centre + half;
+  const chosenGoal = normalizeOwnerGoal(goal);
+  const balanced = Math.min(high, Math.max(low, roundToStep(mid, LIST_PRICE_STEP, recommended.low, recommended.high)));
+  const listPrice = chosenGoal === 'lease_quickly' ? low : chosenGoal === 'maximize_rent' ? high : balanced;
+  const rents = counted.map(c => Number(c.monthly_rent)).filter(Number.isFinite);
+  return {
+    low,
+    high,
+    listPrice,
+    goal: chosenGoal,
+    goalSentence: goalSentenceFor(chosenGoal, listPrice),
+    stretchPrice: high + STRETCH_ABOVE_RANGE,
+    centre,
+    countedTotal: counted.length,
+    leasedCounted: counted.filter(c => c.listing_status === 'leased').length,
+    compsInside: rents.filter(r => r >= low && r <= high).length,
+    compsNear: rents.filter(r => r >= low - NEAR_RANGE_DOLLARS && r <= high + NEAR_RANGE_DOLLARS).length,
+    spread: recommended.high - recommended.low,
+  };
 }
 
 module.exports = {
@@ -262,7 +473,20 @@ module.exports = {
   percentile,
   isExcludedRinconManaged,
   excludeRinconManaged,
+  sqftRuleApplies,
+  sizeBandPctFor,
+  sqftBandFor,
+  sqftOutsideBand,
+  subjectExtrasFrom,
+  hasExclusionFacts,
+  hasImplausibleRent,
+  extraExclusionReason,
   exclusionReason,
   computeRecommendedRange,
   computeRawRange,
+  roundToStep,
+  normalizeOwnerGoal,
+  formatDollars,
+  goalSentenceFor,
+  computeHeadlineRange,
 };

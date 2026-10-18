@@ -52,7 +52,8 @@
 const { WIDE_SEARCH_RADIUS_MILES, positiveOrNull, nonNegativeOrNull, inRangeOrNull } = require('./constants');
 const { BEDROOM_MISMATCH_THRESHOLD } = require('./weighting');
 const { haversineMiles } = require('./crmls');
-const { addressesMatch } = require('./property-matching');
+const { isSameHome } = require('./property-matching');
+const { cleanListingId, cleanYearBuilt } = require('./mls-facts');
 
 const RENTCAST_BASE_URL = 'https://api.rentcast.io/v1';
 // Kept at 10 on the AVM call on purpose. RentCast bills per request, not per
@@ -240,6 +241,13 @@ function mapComparable(c) {
     // this column — not asserted as a lease start date, consistent with
     // never claiming 'leased' for a RentCast comp (see mapListingStatus).
     leased_date: toDateOnly(c.removedDate),
+    // RentCast gives an MLS number only for listings that came from CRMLS
+    // (mlsName "CRMLS"); that number equals the CRMLS ListingId, which is how
+    // lib/mls-facts.js's mergeMlsFacts() finds the matching CRMLS copy and lends
+    // this comp its furnished / lease length / 55+ facts. The year built is
+    // shown on the comp card. RentCast gives nothing else about the MLS.
+    mls_listing_id: c.mlsName === 'CRMLS' ? cleanListingId(c.mlsNumber) : null,
+    year_built: cleanYearBuilt(c.yearBuilt),
   };
 }
 
@@ -307,8 +315,10 @@ function capInactiveListings(comps) {
  * capInactiveListings()).
  *
  * NEVER THROWS. A non-OK response (including a 429), a network error, bad
- * JSON, or a body that is not an array each log one warning line and return
- * [] — the AVM comps already pulled still produce a report. Does not
+ * JSON, or a body that is not an array each log one warning line, tell the
+ * optional reportPartialFailure callback ({what, message}) and return
+ * [] — the AVM comps already pulled still produce a report, and the caller
+ * can say that part of RentCast did not come back. Does not
  * paginate. If RentCast reports (x-total-count) more matches than it sent
  * back, logs a single truncation warning.
  *
@@ -328,9 +338,13 @@ function capInactiveListings(comps) {
  * @param {{address: string, propertyType: string, bedrooms: number}} subject
  * @param {number} lat - the AVM's subject latitude
  * @param {number} lon - the AVM's subject longitude
+ * @param {function} [reportPartialFailure] - called with {what, message} on any failure
  * @returns {Promise<object[]>} mapped comps, [] on any failure
  */
-async function pullRentCastListings(subject, lat, lon) {
+async function pullRentCastListings(subject, lat, lon, reportPartialFailure = () => {}) {
+  // Every path that returns [] without a real answer tells the caller (pullRentCastComps) so a report built on the
+  // similar-rentals list alone can say that part of RentCast did not come back.
+  const LISTINGS_WHAT = 'its search of nearby rental listings';
   try {
     const params = new URLSearchParams({
       latitude: String(lat),
@@ -353,11 +367,13 @@ async function pullRentCastListings(subject, lat, lon) {
     });
     if (!res.ok) {
       console.warn(`[rental-analysis] RentCast listings search failed (${res.status}) — continuing with the AVM comps only.`);
+      reportPartialFailure({ what: LISTINGS_WHAT, message: `status ${res.status}` });
       return [];
     }
     const data = await res.json();
     if (!Array.isArray(data)) {
       console.warn('[rental-analysis] RentCast listings search returned an unexpected (non-array) response — continuing with the AVM comps only.');
+      reportPartialFailure({ what: LISTINGS_WHAT, message: 'unexpected response' });
       return [];
     }
 
@@ -374,10 +390,11 @@ async function pullRentCastListings(subject, lat, lon) {
       .map(listing => mapListing(listing, lat, lon))
       .filter(Boolean) // mapListing() returns null for a listing with no price > 0
       .filter(comp => !(typeof comp.distance_miles === 'number' && comp.distance_miles > WIDE_SEARCH_RADIUS_MILES))
-      .filter(comp => !addressesMatch(subject.address, comp.address));
+      .filter(comp => !isSameHome(subject.address, comp.address));
     return capInactiveListings(validRows);
   } catch (err) {
     console.warn(`[rental-analysis] RentCast listings search failed (${err.message}) — continuing with the AVM comps only.`);
+    reportPartialFailure({ what: LISTINGS_WHAT, message: err.message });
     return [];
   }
 }
@@ -439,8 +456,9 @@ async function pullRentCastComps(subject) {
   // request. Skipped (one log line, no request) when there are no coordinates
   // to search around. Never throws — see pullRentCastListings().
   let listingComps = [];
+  const partialFailure = [];
   if (typeof subjectLatitude === 'number' && typeof subjectLongitude === 'number') {
-    listingComps = await pullRentCastListings(subject, subjectLatitude, subjectLongitude);
+    listingComps = await pullRentCastListings(subject, subjectLatitude, subjectLongitude, failure => partialFailure.push(failure));
   } else {
     console.log('[rental-analysis] RentCast: AVM returned no subject coordinates — skipping the listings search.');
   }
@@ -459,7 +477,12 @@ async function pullRentCastComps(subject) {
     // AVM comps first so dedupeComps()'s first-seen tie-break stays stable:
     // an AVM comp beats its identical listings-search twin.
     // mapComparable() returns null for a comparable with no price > 0 — dropped.
-    comps: [...comparables.map(mapComparable).filter(Boolean), ...listingComps],
+    // The subject's own listing is never one of its comps. The similar-rentals list can include the subject itself
+    // (a live run returned "1300 Saratoga Ave, Unit 500" for Unit 500), so it is taken out here as the listings
+    // search already does for its own results. Another unit in the same building stays.
+    comps: [...comparables.map(mapComparable).filter(Boolean).filter(c => !isSameHome(subject.address, c.address)), ...listingComps],
+    // Only present when part of this source did not come back (see lib/sources.js sourceWarnings).
+    ...(partialFailure.length ? { partialFailure } : {}),
   };
 }
 

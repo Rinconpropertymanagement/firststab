@@ -33,6 +33,7 @@
 
 const { NARROW_SEARCH_RADIUS_MILES, WIDE_SEARCH_RADIUS_MILES, MIN_COMPS_FOR_NARROW_RADIUS, positiveOrNull, nonNegativeOrNull, inRangeOrNull } = require('./constants');
 const { BEDROOM_MISMATCH_THRESHOLD } = require('./weighting');
+const { mlsFactsFromRecord } = require('./mls-facts');
 
 const CRMLS_BASE_URL = 'https://api.marketplace.recore.net/api/v2/OData/crmls/Property';
 
@@ -66,6 +67,13 @@ const SELECT_FIELDS = [
   'ListPrice', 'ClosePrice', 'OriginalListPrice',
   'CloseDate', 'OnMarketDate', 'ListingContractDate',
   'Latitude', 'Longitude', 'LivingArea', 'DaysOnMarket',
+  // The extra MLS facts (CMA-QUALITY-SPEC.md Item 2): furnished, lease length,
+  // 55+ community, neighborhood, year built, the MLS's own condition word, and
+  // the fields behind the display tags (HOA, private pool, what the rent
+  // includes). PublicRemarks (the listing's marketing text) is deliberately NOT
+  // fetched: nothing uses it yet, and it is licensed text we never store.
+  'Furnished', 'LeaseTerm', 'SeniorCommunityYN', 'SubdivisionName', 'YearBuilt',
+  'PropertyCondition', 'AssociationYN', 'PoolPrivateYN', 'RentIncludes',
 ].join(',');
 
 // CRMLS's PropertySubType -> our CHECK-constraint list (rental_comps.property_type,
@@ -135,6 +143,17 @@ function extractZip(address) {
   return match ? match[1] : null;
 }
 
+// The zip a zip-scoped search uses: the one typed at the end of the address when there is one; otherwise the zip the
+// geocoder found for the subject (RentCast's own answer to this analysis, already paid for), which lib/sources.js
+// hands on as subject.zip. An address picked from the suggestion dropdown arrives as "..., CA, USA" with no zip, which
+// used to mean Rincon's own move-in records were never searched. null when there is no zip anywhere.
+function subjectZipFor(subject) {
+  const typed = extractZip(subject && subject.address);
+  if (typed) return typed;
+  const found = subject && typeof subject.zip === 'string' ? subject.zip.trim().match(/^(\d{5})(?:-\d{4})?$/) : null;
+  return found ? found[1] : null;
+}
+
 function toDateOnly(dateString) {
   if (!dateString || typeof dateString !== 'string') return null;
   return dateString.slice(0, 10); // CRMLS dates already come as 'YYYY-MM-DD'; slice is a safe no-op if ever fuller
@@ -194,6 +213,17 @@ function buildAddress(record) {
   return [streetLine, unit, cityStateZip].filter(Boolean).join(', ');
 }
 
+// True for a Closed lease whose close date is later than today. That can only
+// be a data-entry mistake (one real record, 7376 Impala Drive, was closed
+// "2026-11-15" in a year-typo for 2025-11-15), and left in it would look like
+// a brand-new lease. Such a record is dropped. Only Closed records are
+// checked: an Active listing has no close date. `now` is injectable for tests.
+function isFutureDatedClosedRecord(record, now = new Date()) {
+  if (!record || record.StandardStatus !== 'Closed') return false;
+  const closeDate = toDateOnly(record.CloseDate);
+  return !!closeDate && closeDate > now.toISOString().slice(0, 10);
+}
+
 /**
  * Maps one CRMLS Property record into a partial rental_comps row. Returns
  * null when no usable rent figure exists — monthly_rent must be a number > 0;
@@ -206,8 +236,10 @@ function buildAddress(record) {
  *   subject, computed by pullCrmlsComps() when the search was box-based and
  *   this record has its own real Latitude/Longitude. Omitted (-> null) for
  *   the zip-fallback path or a record with no coordinates — never guessed.
+ * @param {Date} [now] - today, injectable only so a test can pin it. Used for the future-close-date check and the "new construction" tag.
  */
-function mapComparable(record, distanceMiles = null) {
+function mapComparable(record, distanceMiles = null, now = new Date()) {
+  if (isFutureDatedClosedRecord(record, now)) return null;
   const isClosed = record.StandardStatus === 'Closed';
   // Closed (leased) records: ClosePrice is the actual amount it leased for
   // — the real transaction figure, and what makes this comp worth 3x in
@@ -228,9 +260,11 @@ function mapComparable(record, distanceMiles = null) {
     : positiveOrNull(record.ListPrice);
   if (monthlyRent === null) return null;
 
+  const propertyType = FROM_CRMLS_PROPERTY_TYPE[record.PropertySubType] || null;
+
   return {
     address: buildAddress(record),
-    property_type: FROM_CRMLS_PROPERTY_TYPE[record.PropertySubType] || null,
+    property_type: propertyType,
     bedrooms: nonNegativeOrNull(record.BedroomsTotal),
     bathrooms: nonNegativeOrNull(record.BathroomsTotalDecimal),
     // A live CRMLS record reports LivingArea 0 for "unknown"; rental_comps.sqft
@@ -262,6 +296,10 @@ function mapComparable(record, distanceMiles = null) {
     // here (unlike RentCast, which never sets this — see mapListingStatus
     // there), consistent with only CRMLS producing 'leased' comps.
     leased_date: toDateOnly(record.CloseDate),
+    // The extra MLS facts (lib/mls-facts.js): MLS number, year built,
+    // neighborhood, furnished, lease length, 55+, the MLS's condition word and
+    // the display tags. Unknown stays null and never excludes a comp.
+    ...mlsFactsFromRecord(record, { propertyType, now }),
   };
 }
 
@@ -321,7 +359,12 @@ async function fetchByStatus(scope, status, orderBy, relevance) {
     throw new Error(`CRMLS API request failed (${res.status}): ${body || res.statusText}`);
   }
   const data = await res.json();
-  const records = Array.isArray(data.value) ? data.value : [];
+  // An empty list is a real answer ("nothing nearby"); a reply with no list at all is a malformed one, and is reported as
+  // a failure of this half (see pullCrmlsComps(): a lost half becomes a partial-failure warning) instead of reading as "no comps".
+  if (!data || !Array.isArray(data.value)) {
+    throw new Error(`CRMLS API returned an unexpected reply for the ${status} query (no "value" list).`);
+  }
+  const records = data.value;
   if (records.length >= MAX_RECORDS_PER_STATUS) {
     console.warn(`[rental-analysis] CRMLS: ${status} query returned ${records.length} records, the maximum page size — results may be truncated (not paginated).`);
   }
@@ -362,7 +405,7 @@ async function pullCrmlsComps(subject) {
   // Parsed either way: it's the search scope on the fallback path, and just
   // a nice-to-have subjectZip fallback (see the return below) on the
   // coordinate path, where it's not required for the search itself.
-  const zip = extractZip(subject.address);
+  const zip = subjectZipFor(subject);
 
   let scope;
   if (hasCoordinates) {
@@ -371,7 +414,7 @@ async function pullCrmlsComps(subject) {
     scope = { type: 'zip', zip };
   } else {
     console.warn(`[rental-analysis] CRMLS: no subject coordinates available and could not find a 5-digit zip at the end of "${subject.address}" — skipping (no way to scope a CRMLS search without one).`);
-    return { comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null };
+    return { comps: [], subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: null, skipped: 'no location or zip code for this address' };
   }
 
   // runActiveSources() hands every handler the whole subject, so propertyType
@@ -386,11 +429,16 @@ async function pullCrmlsComps(subject) {
   if (closedResult.status === 'rejected' && activeResult.status === 'rejected') {
     throw new Error(`CRMLS request failed for both Closed and Active: ${closedResult.reason.message}`);
   }
+  // One half failed: keep the other half, but say so (lib/sources.js sourceWarnings), so a report with no comps cannot
+  // read as "nothing nearby" when part of the MLS never answered.
+  const partialFailure = [];
   if (closedResult.status === 'rejected') {
     console.warn(`[rental-analysis] CRMLS: Closed (leased) query failed, continuing with Active only: ${closedResult.reason.message}`);
+    partialFailure.push({ what: 'its recently leased homes', message: closedResult.reason.message });
   }
   if (activeResult.status === 'rejected') {
     console.warn(`[rental-analysis] CRMLS: Active query failed, continuing with Closed only: ${activeResult.reason.message}`);
+    partialFailure.push({ what: 'its active listings', message: activeResult.reason.message });
   }
 
   let records = [
@@ -416,7 +464,12 @@ async function pullCrmlsComps(subject) {
       .filter(record => typeof record._distanceMiles !== 'number' || record._distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
   }
 
-  const comps = records.map(record => mapComparable(record, record._distanceMiles)).filter(Boolean);
+  const now = new Date();
+  const futureDated = records.filter(record => isFutureDatedClosedRecord(record, now)).length;
+  if (futureDated) {
+    console.warn(`[rental-analysis] CRMLS: dropped ${futureDated} Closed record(s) with a close date in the future (a data-entry mistake in the MLS).`);
+  }
+  const comps = records.map(record => mapComparable(record, record._distanceMiles, now)).filter(Boolean);
 
   return {
     comps,
@@ -431,6 +484,7 @@ async function pullCrmlsComps(subject) {
     // zip parsed out of the typed address, in case RentCast's call ever
     // fails on an analysis where CRMLS's still succeeds.
     subjectZip: zip,
+    ...(partialFailure.length ? { partialFailure } : {}),
   };
 }
 
@@ -438,6 +492,7 @@ module.exports = {
   pullCrmlsComps,
   mapComparable,
   extractZip,
+  subjectZipFor,
   toDateOnly,
   buildAddress,
   assertConfigured,
@@ -445,6 +500,8 @@ module.exports = {
   buildBoundingBox,
   buildFilter,
   closedSinceDate,
+  isFutureDatedClosedRecord,
+  SELECT_FIELDS,
   FROM_CRMLS_PROPERTY_TYPE,
   TO_CRMLS_PROPERTY_SUBTYPES,
   MAX_RECORDS_PER_STATUS,

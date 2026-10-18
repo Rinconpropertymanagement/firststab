@@ -315,12 +315,52 @@
     }
     .rent-headline .amount .permo { font-size: 18px; font-weight: 600; color: #9ca3af; }
 
+    /* Recommended range block (headline). Plain and functional; a full design pass comes later. */
+    .rent-headline.low-confidence .amount { color: #9ca3af; }
+    .rent-headline .range-ends {
+      display: flex; justify-content: space-between;
+      max-width: 340px; margin: 0 auto;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: #6b7280;
+    }
+    .rent-headline .starting-point { font-size: 12px; font-weight: 600; color: #b45309; margin-top: 6px; }
+    .goal-line { text-align: center; font-size: 15px; color: #111827; margin: 0 0 12px; }
+    .stretch-line {
+      text-align: center; font-size: 13px; color: #6b21a8;
+      background: #faf5ff; border: 1px solid #e9d5ff; border-radius: 8px;
+      padding: 8px 12px; margin: 0 auto 16px; max-width: 520px;
+    }
+    .stretch-line .stretch-label { font-weight: 700; margin-right: 6px; }
+    .stretch-line .stretch-price { font-weight: 800; font-size: 15px; margin-right: 8px; }
+    .conf-line { text-align: center; font-size: 13px; color: #374151; margin: 0 auto 6px; max-width: 640px; }
+    .conf-line .conf-label { font-weight: 700; }
+    .conf-line.conf-high .conf-label { color: #15803d; }
+    .conf-line.conf-medium .conf-label { color: #b45309; }
+    .conf-line.conf-low .conf-label { color: #b91c1c; }
+    .conf-note { text-align: center; font-size: 12px; color: #6b7280; margin: 0 auto 6px; max-width: 640px; }
+    .no-range-box {
+      background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+      padding: 16px; margin-bottom: 24px; font-size: 14px; color: #92400e; text-align: center;
+    }
+    .accuracy-line { text-align: center; font-size: 11px; color: #9ca3af; margin: 8px auto 0; max-width: 640px; }
+    .agree-wrap { margin: 12px auto 24px; max-width: 640px; }
+    .agree-strip { position: relative; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; background: #fafafa; }
+    .agree-band { position: absolute; top: 0; bottom: 0; background: rgba(223,140,65,0.18); border-left: 1px dashed var(--sienna); border-right: 1px dashed var(--sienna); }
+    .agree-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #111827; }
+    .agree-dot { position: absolute; border-radius: 50%; box-sizing: border-box; transform: translate(-50%, 0); }
+    .agree-dot.dot-leased { width: 11px; height: 11px; background: #16a34a; }
+    .agree-dot.dot-active { width: 11px; height: 11px; background: #fff; border: 2px solid #3b82f6; }
+    .agree-dot.dot-off_market { width: 7px; height: 7px; background: #9ca3af; margin-top: 2px; }
+    .agree-caption { font-size: 11px; color: #6b7280; text-align: center; margin-top: 6px; }
+    .chart-gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid #f3f4f6; }
+    .chart-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #111827; }
+
     .stat-row {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
       gap: 16px;
       margin-bottom: 28px;
     }
+    .stat-row.two-up { grid-template-columns: 1fr 1fr; }
     .stat-box {
       background: #f9fafb;
       border: 1px solid #e5e7eb;
@@ -336,6 +376,8 @@
       color: #6b7280;
       margin-bottom: 4px;
     }
+    .stat-box .stat-label .stat-label-note { display: block; font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; color: #9ca3af; margin-top: 1px; }
+    .source-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 9px 14px; font-size: 12.5px; line-height: 1.5; margin: -14px 0 18px; }
     .stat-box .stat-value {
       font-size: 20px;
       font-weight: 700;
@@ -381,9 +423,17 @@
       min-width: 480px;
       position: relative;
     }
+    /* The overlays (the shaded recommended range, its tick and gridlines, the dashed
+       estimate line) sit over the bar column: absolutely placed so they have a height of
+       their own (as plain grid items they had none and showed as 0 px tall). The left edge
+       is the end of the label column plus the column gap; the bottom leaves room for the
+       axis row. */
     .chart-overlay {
-      grid-column: 2;
-      position: relative;
+      position: absolute;
+      top: 0;
+      bottom: 26px;
+      left: calc(40% + 12px);
+      right: 0;
       pointer-events: none;
     }
     .chart-band {
@@ -428,14 +478,14 @@
     .chart-bar.managed-ring { box-shadow: 0 0 0 2px var(--violet); }
     .chart-axis {
       grid-column: 2;
-      display: flex;
-      justify-content: space-between;
+      position: relative;
+      height: 18px;
       font-size: 10px;
       color: #9ca3af;
-      padding-top: 4px;
       margin-top: 2px;
       border-top: 1px solid #f3f4f6;
     }
+    .chart-axis span { position: absolute; top: 4px; transform: translateX(-50%); }
 
     /* ── Comp map ── */
     .map-wrap {
@@ -493,6 +543,9 @@
     .comp-badge.b-off_market   { background: #f3f4f6; color: #4b5563; }
     .comp-badge.b-managed      { background: var(--violet); color: #fff; }
     .comp-badge.b-cut          { background: #fef3c7; color: #92400e; }
+    /* facts from the MLS shown on a comp card (display only: they never change a number) */
+    .comp-badge.b-flag         { background: #f3f4f6; color: #374151; font-weight: 600; }
+    .size-band-note { text-align: center; font-size: 12px; color: #6b7280; margin: -14px 0 24px; }
     .comp-card .comp-narrative {
       font-size: 12.5px;
       color: #4b5563;
@@ -502,7 +555,7 @@
       border-top: 1px solid #f3f4f6;
     }
 
-    /* ── Comps Used / Not Used split (see buildNotUsedRow()) ──
+    /* ── Comps Counted / Not Used split (see buildNotUsedRow()) ──
        This report gets printed/emailed as a static document — no click-to-
        expand, nothing interactive. Both sections are always fully rendered;
        "not used" is just visually secondary/compact (smaller, muted,
@@ -526,8 +579,11 @@
     }
     .comp-notused-row {
       display: flex;
+      /* a long reason (the MLS and unit-number wordings are up to about 100 characters) drops to its own line
+         instead of squeezing the address down to "130 N Ivy St #3..." and hiding the unit number */
+      flex-wrap: wrap;
       align-items: baseline;
-      gap: 10px;
+      gap: 2px 10px;
       padding: 7px 12px;
       background: #f9fafb;
       border: 1px solid #e5e7eb;
@@ -537,7 +593,7 @@
     .comp-notused-row .cn-addr {
       font-weight: 600;
       color: #4b5563;
-      flex: 1;
+      flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -656,10 +712,63 @@
     }
     .report-footer .brand-name { font-weight: 700; color: var(--violet); }
 
+    /* ── Past reports (the list, the saved-report banner, the older-report notes) ── */
+    .history-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 12px; }
+    .history-controls input[type="search"] {
+      flex: 1 1 240px; min-width: 0; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 14px; font-family: inherit; color: #111827; background: #fff;
+    }
+    .history-controls input[type="search"]:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    .history-controls .checkbox-row { padding-top: 0; }
+    .hist-status { font-size: 13px; color: #6b7280; min-height: 18px; margin-bottom: 8px; }
+    .hist-table { width: 100%; border-collapse: collapse; }
+    .hist-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+    .hist-table td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: top; font-size: 13px; color: #374151; }
+    .hist-table tbody tr { cursor: pointer; }
+    .hist-table tbody tr:hover { background: #f9fafb; }
+    .hist-open { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: #1d4ed8; text-align: left; cursor: pointer; }
+    .hist-open:hover { text-decoration: underline; }
+    .hist-sub { display: block; font-size: 11px; color: #6b7280; margin-top: 2px; }
+    .hist-none { color: #6b7280; font-style: italic; }
+    .hist-tag { display: inline-block; white-space: nowrap; padding: 1px 7px; border-radius: 10px; background: #e5e7eb; color: #4b5563; font-size: 11px; font-weight: 600; }
+    .hist-table td strong { white-space: nowrap; }
+    .hist-tag.failed { background: #fee2e2; color: #b91c1c; }
+    .hist-conf-high { color: #15803d; font-weight: 600; }
+    .hist-conf-medium { color: #b45309; font-weight: 600; }
+    .hist-conf-low { color: #b91c1c; font-weight: 600; }
+    .hist-more { text-align: center; margin-top: 14px; }
+    .saved-banner {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px;
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; border-radius: 8px;
+      padding: 9px 14px; font-size: 13px; margin-bottom: 12px;
+    }
+    .link-btn { background: none; border: none; padding: 0; font: inherit; font-weight: 600; color: #1d4ed8; cursor: pointer; }
+    .link-btn:hover { text-decoration: underline; }
+    .older-banner {
+      background: #e5e7eb; border-bottom: 1px solid #d1d5db; color: #374151;
+      padding: 14px 28px; font-size: 14px; font-weight: 600; line-height: 1.5;
+    }
+    .legacy-range-box {
+      background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;
+      margin-bottom: 24px; font-size: 14px; color: #4b5563; text-align: center; line-height: 1.6;
+    }
+    .legacy-range-box .legacy-label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #4b5563; margin-bottom: 4px; }
+    .legacy-range-box .legacy-note { display: block; font-size: 13px; color: #4b5563; margin-top: 4px; }
+    .legacy-range-box .legacy-figures { display: block; font-size: 18px; font-weight: 600; color: #4b5563; }
+
     /* ── Responsive ── */
     @media (max-width: 640px) {
       .field-grid { grid-template-columns: 1fr; }
-      .stat-row { grid-template-columns: 1fr; }
+      .older-banner { padding: 14px 16px; }
+      /* the list turns into one small card per report, so nothing needs side-scrolling */
+      .hist-table thead { display: none; }
+      .hist-table, .hist-table tbody, .hist-table tr, .hist-table td { display: block; width: 100%; }
+      .hist-table tr { border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; background: #fff; }
+      .hist-table td { display: flex; justify-content: space-between; gap: 12px; border-bottom: none; padding: 4px 0; text-align: right; }
+      .hist-table td::before { content: attr(data-label); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; text-align: left; flex: none; padding-top: 2px; }
+      .hist-table td.hist-cell-address { display: block; text-align: left; }
+      .hist-table td.hist-cell-address::before { display: block; margin-bottom: 2px; }
+      .stat-row, .stat-row.two-up { grid-template-columns: 1fr; }
       .rent-headline .amount { font-size: 30px; }
       .report-band, .report-body { padding: 18px 16px; }
       .report-footer { padding: 16px; }
@@ -673,12 +782,13 @@
          sharing the line below. */
       .comp-notused-row { flex-wrap: wrap; row-gap: 2px; }
       .comp-notused-row .cn-addr { flex-basis: 100%; white-space: normal; }
+      .comp-notused-row .cn-reason { flex: 0 1 auto; min-width: 0; }
     }
 
     /* ── Print ── */
     @media print {
       body { background: #fff; }
-      .header, .report-toolbar, .form-view { display: none !important; }
+      .header, .report-toolbar, .form-view, .history-view, .saved-banner { display: none !important; }
       .page { max-width: 100%; padding: 0; }
       .report-doc { border: none; }
       .map-wrap { display: none !important; }
@@ -695,11 +805,13 @@
       <h1>Rental Market Analysis</h1>
       <p>Rincon Management</p>
     </div>
+    <!-- Shown only when the server answers the past-reports list (the Hub does; the standalone app has no login and no list) -->
+    <button type="button" class="btn-secondary" id="pastReportsBtn" style="display:none">Past reports</button>
   </div>
 
   <!-- ── Error banner (validation / network) ── -->
   <div class="banner-error" id="errorBanner">
-    <strong>Couldn&rsquo;t run this analysis</strong>
+    <strong id="errorBannerTitle">Couldn&rsquo;t run this analysis</strong>
     <span id="errorBannerText"></span>
   </div>
 
@@ -769,6 +881,23 @@
         </div>
 
         <div class="field span-2">
+          <div class="checkbox-row">
+            <input type="checkbox" id="f_age_restricted" name="subject_age_restricted">
+            <label for="f_age_restricted">Subject is in a 55+ community</label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="f_owner_goal">Owner goal <span class="hint">(optional)</span></label>
+          <select id="f_owner_goal" name="owner_goal">
+            <option value="lease_quickly">Lease quickly</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="maximize_rent">Maximize rent</option>
+          </select>
+          <span class="hint">Sets which price inside the range we suggest listing at.</span>
+        </div>
+
+        <div class="field span-2">
           <label for="f_run_by">Run by</label>
           <select id="f_run_by" name="run_by" required>
             <option value="">Loading users&hellip;</option>
@@ -783,6 +912,28 @@
     </form>
   </div><!-- /formView -->
 
+  <!-- ── Past reports list ── -->
+  <div id="historyView" class="history-view" style="display:none">
+    <div class="card">
+      <div class="history-controls">
+        <input type="search" id="histSearch" placeholder="Search by address" maxlength="60" autocomplete="off" aria-label="Search past reports by address">
+        <div class="checkbox-row">
+          <input type="checkbox" id="histShowFailed">
+          <label for="histShowFailed">Show failed reports</label>
+        </div>
+        <button type="button" class="btn-secondary" id="histNewBtn">&larr; New Analysis</button>
+      </div>
+      <div class="hist-status" id="histStatus" role="status" aria-live="polite"></div>
+      <table class="hist-table" id="histTable">
+        <thead>
+          <tr><th>Date</th><th>Address</th><th>Ran by</th><th>Range</th><th>Confidence</th></tr>
+        </thead>
+        <tbody id="histBody"></tbody>
+      </table>
+      <div class="hist-more"><button type="button" class="btn-secondary" id="histMore" style="display:none">Load more</button></div>
+    </div>
+  </div><!-- /historyView -->
+
   <!-- ── Loading View ── -->
   <div id="loadingView" style="display:none">
     <div class="loading-wrap">
@@ -794,6 +945,10 @@
 
   <!-- ── Report View ── -->
   <div id="reportView" style="display:none">
+    <div class="saved-banner" id="savedBanner" style="display:none">
+      <span id="savedBannerText"></span>
+      <button type="button" class="link-btn" id="backToListBtn">&larr; Back to list</button>
+    </div>
     <div class="report-toolbar">
       <button class="btn-secondary" id="newAnalysisBtn">&larr; New Analysis</button>
       <button class="btn-secondary" id="printBtn">Print / Save as PDF</button>
@@ -886,7 +1041,10 @@
     return map[t] || t || '';
   }
 
-  function showError(msg) {
+  const DEFAULT_ERROR_TITLE = 'Couldn\u2019t run this analysis';
+
+  function showError(msg, title) {
+    document.getElementById('errorBannerTitle').textContent = title || DEFAULT_ERROR_TITLE;
     document.getElementById('errorBannerText').textContent = msg;
     document.getElementById('errorBanner').classList.add('visible');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -898,6 +1056,7 @@
 
   function showView(view) {
     document.getElementById('formView').style.display    = view === 'form'    ? '' : 'none';
+    document.getElementById('historyView').style.display = view === 'history' ? '' : 'none';
     document.getElementById('loadingView').style.display  = view === 'loading' ? '' : 'none';
     document.getElementById('reportView').style.display   = view === 'report'  ? '' : 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1177,6 +1336,8 @@
       subject_property_type: form.subject_property_type.value,
       lease_term_months: Number(form.lease_term_months.value),
       furnished: form.furnished.checked,
+      subject_age_restricted: form.subject_age_restricted.checked,
+      owner_goal: form.owner_goal.value,
       run_by: runBy,
     };
 
@@ -1203,7 +1364,8 @@
         return;
       }
 
-      renderReport(data.analysis, data.comps || [], data.marketData || null);
+      renderReport(data.analysis, data.comps || [], data.marketData || null, data);
+      hideSavedBanner();
       showView('report');
     } catch (err) {
       console.error(err);
@@ -1228,31 +1390,42 @@
     return map[status] || { cls: 'off_market', label: (status || 'UNKNOWN').toUpperCase() };
   }
 
-  function buildChart(analysis, comps) {
+  // Round dollar marks for the chart's bottom edge (never the padded ends of the data).
+  function niceTicks(min, max) {
+    const span = max - min;
+    const step = span > 6000 ? 1000 : span > 2500 ? 500 : span > 1000 ? 250 : 100;
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max; v += step) ticks.push(v);
+    return ticks;
+  }
+
+  // The bars are the evidence. The shaded band is the recommended range and the tick is the
+  // suggested list price (when a range exists). The domain comes from the comp rents and the
+  // range only. The stretch price is deliberately NOT drawn here.
+  function buildChart(analysis, comps, headline) {
     const priced = comps.filter(c => c.monthly_rent != null);
     const values = [];
     priced.forEach(c => values.push(c.monthly_rent));
     if (analysis.subject_estimated_rent != null) values.push(analysis.subject_estimated_rent);
-    if (analysis.recommended_rent_low != null)  values.push(analysis.recommended_rent_low);
-    if (analysis.recommended_rent_high != null) values.push(analysis.recommended_rent_high);
-    if (analysis.raw_comp_rent_low != null)  values.push(analysis.raw_comp_rent_low);
-    if (analysis.raw_comp_rent_high != null) values.push(analysis.raw_comp_rent_high);
+    if (headline) { values.push(headline.low); values.push(headline.high); }
 
     if (!values.length) return '';
 
     let domainMin = Math.min(...values);
     let domainMax = Math.max(...values);
-    const pad = Math.max((domainMax - domainMin) * 0.15, 150);
-    domainMin = Math.max(0, Math.floor((domainMin - pad) / 50) * 50);
-    domainMax = Math.ceil((domainMax + pad) / 50) * 50;
+    const pad = Math.max((domainMax - domainMin) * 0.05, 100);
+    domainMin = Math.max(0, domainMin - pad);
+    domainMax = domainMax + pad;
     const span = domainMax - domainMin || 1;
     const pct = (v) => ((v - domainMin) / span) * 100;
 
-    let overlayHtml = '';
-    if (analysis.recommended_rent_low != null && analysis.recommended_rent_high != null) {
-      const left = pct(analysis.recommended_rent_low);
-      const width = pct(analysis.recommended_rent_high) - left;
+    const ticks = niceTicks(domainMin, domainMax);
+    let overlayHtml = ticks.map(v => '<div class="chart-gridline" style="left:' + pct(v) + '%"></div>').join('');
+    if (headline) {
+      const left = pct(headline.low);
+      const width = pct(headline.high) - left;
       overlayHtml += '<div class="chart-band" style="left:' + left + '%;width:' + width + '%"></div>';
+      overlayHtml += '<div class="chart-tick" style="left:' + pct(headline.listPrice) + '%"></div>';
     }
 
     let rows = '';
@@ -1283,15 +1456,54 @@
         '<span class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span>Just leased</span>' +
         '<span class="legend-item"><span class="legend-swatch" style="background:#9ca3af"></span>Off market</span>' +
         '<span class="legend-item"><span class="legend-ring"></span>Rincon-managed</span>' +
-        '<span class="legend-item"><span class="legend-swatch band"></span>Recommended range</span>' +
-        '<span class="legend-item"><span class="legend-swatch line"></span>Estimated market rent</span>' +
+        (headline ? '<span class="legend-item"><span class="legend-swatch band"></span>Recommended range</span>' : '') +
+        (headline ? '<span class="legend-item"><span class="legend-swatch" style="background:#111827"></span>Suggested list price</span>' : '') +
+        (analysis.subject_estimated_rent != null ? '<span class="legend-item"><span class="legend-swatch line"></span>RentCast\'s automated estimate</span>' : '') +
       '</div>' +
       '<div class="chart-scroll"><div class="chart-grid">' +
         '<div class="chart-overlay">' + overlayHtml + '</div>' +
         rows +
         '<div class="chart-overlay">' + lineHtml + '</div>' +
-        '<div class="chart-axis"><span>' + fmtMoney(domainMin) + '</span><span>' + fmtMoney(domainMax) + '</span></div>' +
+        '<div class="chart-axis">' + ticks.map(v => '<span style="left:' + pct(v) + '%">' + fmtMoney(v) + '</span>').join('') + '</div>' +
       '</div></div>'
+    );
+  }
+
+  // One dot per counted comp, placed by its rent on a single line. Green filled = leased, blue
+  // hollow = active listing, small gray = off market. The shaded part is the recommended range and
+  // the dark tick is the suggested list price. No minimum or maximum is written out, and the
+  // stretch price is not on it. Hover a dot for the address and rent.
+  function buildAgreementStrip(headline, comps) {
+    const counted = comps.filter(c => !c.exclusion_reason && c.monthly_rent != null);
+    if (!headline || !counted.length) return '';
+    const rents = counted.map(c => Number(c.monthly_rent)).concat([headline.low, headline.high]);
+    const lo = Math.min(...rents), hi = Math.max(...rents);
+    const pad = Math.max((hi - lo) * 0.04, 50);
+    const min = lo - pad, span = (hi + pad) - min || 1;
+    const pct = (v) => ((v - min) / span) * 100;
+
+    const ordered = counted.slice().sort((a, b) => a.monthly_rent - b.monthly_rent);
+    const rowEnds = [];
+    let dots = '';
+    ordered.forEach((c) => {
+      const x = pct(Number(c.monthly_rent));
+      let r = rowEnds.findIndex(end => x - end >= 2.2);
+      if (r === -1) { r = rowEnds.length; rowEnds.push(-100); }
+      rowEnds[r] = x;
+      const status = ['leased', 'active', 'off_market'].includes(c.listing_status) ? c.listing_status : 'off_market';
+      dots += '<div class="agree-dot dot-' + status + '" style="left:' + x + '%;top:' + (6 + r * 15) + 'px" title="' +
+        esc((c.address || 'Unknown address') + ' ' + '$' + Number(c.monthly_rent).toLocaleString('en-US')) + '"></div>';
+    });
+    const height = 12 + Math.max(rowEnds.length, 1) * 15;
+    return (
+      '<div class="agree-wrap">' +
+        '<div class="agree-strip" style="height:' + height + 'px">' +
+          '<div class="agree-band" style="left:' + pct(headline.low) + '%;width:' + (pct(headline.high) - pct(headline.low)) + '%"></div>' +
+          '<div class="agree-tick" style="left:' + pct(headline.listPrice) + '%"></div>' +
+          dots +
+        '</div>' +
+        '<div class="agree-caption">Counted comps (each dot is one comp&rsquo;s rent): filled green = leased, hollow blue = active listing, small gray = off market. Shaded = recommended range; dark tick = suggested list price.</div>' +
+      '</div>'
     );
   }
 
@@ -1394,7 +1606,6 @@
     if (!marketData) return '';
 
     const zip = marketData.zip || analysis.subject_zip || '';
-    const daysOnMarket = marketData.median_days_on_market;
 
     const trendChartHtml = buildTrendChart(marketData.history);
     const bedroomHtml = buildBedroomBreakdown(marketData, analysis.subject_bedrooms);
@@ -1403,7 +1614,7 @@
       '<div class="section-heading">Market Trends' + (zip ? ' &mdash; ZIP ' + esc(zip) : '') + '</div>' +
       '<div class="market-trends-note">Area-wide data for this zip code as a whole &mdash; not specific to the subject property above. Use this for broader market context, not as a substitute for the comps.</div>' +
 
-      '<div class="stat-row">' +
+      '<div class="stat-row two-up">' +
         '<div class="stat-box">' +
           '<div class="stat-label">Zip Median Rent</div>' +
           '<div class="stat-value">' + fmtMoney(marketData.median_rent) + (marketData.median_rent != null ? '/mo' : '') + '</div>' +
@@ -1411,10 +1622,6 @@
         '<div class="stat-box">' +
           '<div class="stat-label">Zip Rent per Sqft</div>' +
           '<div class="stat-value">' + fmtPerSqft(marketData.median_rent_per_sqft) + '</div>' +
-        '</div>' +
-        '<div class="stat-box">' +
-          '<div class="stat-label">Median Days on Market</div>' +
-          '<div class="stat-value">' + (daysOnMarket != null ? fmtNum(daysOnMarket) + ' days' : '&#8212;') + '</div>' +
         '</div>' +
       '</div>' +
 
@@ -1592,6 +1799,22 @@
   // weight) — the RINCON MANAGED badge below stays for that real case, it's
   // just no longer paired with any "internal reference only" caveat, since
   // a comp that reaches this function was never excluded to begin with.
+  // The MLS facts saved with a comp (mls_flags), in plain words. Display only.
+  const MLS_FLAG_LABELS = {
+    hoa: 'HOA',
+    private_pool: 'Private pool',
+    utilities_included: 'Utilities included',
+    water_trash_included: 'Water/trash included',
+    gardener_included: 'Gardener included',
+    new_construction: 'New construction',
+    furnished: 'Furnished',
+    partly_furnished: 'Partly furnished',
+    short_term: 'Short-term lease',
+    age_restricted: '55+ community',
+    adu_or_guest_house: 'ADU or guest house',
+    view_property: 'View',
+  };
+
   function buildCompCard(c) {
     const sm = statusMeta(c.listing_status);
     let badges = '<span class="comp-badge b-' + sm.cls + '">' +
@@ -1599,6 +1822,9 @@
       '</span>';
     if (c.is_rincon_managed) badges += '<span class="comp-badge b-managed">RINCON MANAGED</span>';
     if (c.had_price_cut) badges += '<span class="comp-badge b-cut">PRICE CUT</span>';
+    (Array.isArray(c.mls_flags) ? c.mls_flags : []).forEach(function (flag) {
+      if (MLS_FLAG_LABELS[flag]) badges += '<span class="comp-badge b-flag">' + esc(MLS_FLAG_LABELS[flag]) + '</span>';
+    });
 
     const priceHtml = fmtMoney(c.monthly_rent) +
       (c.is_estimated_price ? '<span class="est-flag">*est.</span>' : '') +
@@ -1627,6 +1853,19 @@
     rincon_managed: 'Rincon-managed property',
     property_type_mismatch: 'different property type',
     size_mismatch: 'different size',
+    size_sqft: 'size outside the size band',
+    furnished_mismatch: 'furnished status differs',
+    short_term_lease: 'short-term lease',
+    age_restricted: '55+ community',
+    implausible_rent: 'rent or size looks like a data error',
+  };
+
+  // When a Rincon lease is left out because its real type differs from the subject's, the report can say
+  // where that type came from: the MLS (the server looked the street address up), or a unit number in the
+  // address (so it is not a house). Plain words only; nothing else about the row changes.
+  const MLS_TYPE_PHRASES = {
+    single_family: 'a house', condo: 'a condo', townhouse: 'a townhouse', duplex: 'a duplex', triplex: 'a triplex',
+    fourplex: 'a fourplex', apartment: 'an apartment', manufactured: 'a manufactured home', other: 'a different kind of property',
   };
 
   // Compact single-line row for a comp that contributed zero weight to
@@ -1635,8 +1874,26 @@
   // emailed as a static document — no expand/collapse is possible once
   // that happens), just visually secondary next to buildCompCard()'s full
   // detail cards above it.
-  function buildNotUsedRow(c) {
-    const reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
+  function buildNotUsedRow(c, analysis) {
+    let reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
+    if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'mls' && c.property_type === 'other') {
+      // the MLS lists both condo and townhouse records at this address, which is neither one kind nor the other
+      reasonLabel = 'different property type (the MLS lists both condos and townhouses at this address)';
+    } else if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'mls' && MLS_TYPE_PHRASES[c.property_type]) {
+      reasonLabel = 'different property type (the MLS lists it as ' + MLS_TYPE_PHRASES[c.property_type] + ')';
+    } else if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'unit_number') {
+      // "so it is not a house" explains the exclusion only for a house subject; for any other kind of subject it would not
+      reasonLabel = analysis && analysis.subject_property_type === 'single_family'
+        ? 'different property type (it has a unit number, so it is not a house)'
+        : 'different property type (it has a unit number, but the MLS does not clearly say it is a condo or townhouse)';
+    }
+    // the band's percent is the one the server used (saved with the analysis), never typed here
+    if (c.exclusion_reason === 'size_sqft' && analysis && analysis.size_band_pct) reasonLabel = 'size outside the ' + analysis.size_band_pct + '% band';
+    // A size exclusion says which way it is off and by what size, when both
+    // sizes are known: "too large (2,467 sq ft)".
+    if (c.exclusion_reason === 'size_sqft' && c.sqft && analysis && analysis.subject_sqft) {
+      reasonLabel = (c.sqft > analysis.subject_sqft ? 'too large (' : 'too small (') + fmtNum(c.sqft) + ' sq ft)';
+    }
     const priceLabel = c.monthly_rent != null ? fmtMoney(c.monthly_rent) + '/mo' : 'Price unavailable';
     return (
       '<div class="comp-notused-row">' +
@@ -1647,7 +1904,81 @@
     );
   }
 
-  function renderReport(analysis, comps, marketData) {
+  // The goal sentence with the suggested price in bold. The sentence comes from the server,
+  // so both pages and the owner page use the same words.
+  function goalSentenceHtml(headline) {
+    const price = '$' + Number(headline.listPrice).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const safe = esc(headline.goalSentence || '');
+    const at = safe.indexOf(esc(price));
+    if (at === -1) return safe;
+    return safe.slice(0, at) + '<strong>' + esc(price) + '</strong>' + safe.slice(at + esc(price).length);
+  }
+
+  // An older report (saved before the recommended-range method): the figures it was saved with, in grey and
+  // plainly marked as the previous method's result. Never drawn as a recommended range, and there is no
+  // suggested price or stretch price beside it.
+  function legacyRangeHtml(r) {
+    const have = r && (r.low != null || r.high != null || r.mid != null);
+    const figures = have
+      ? fmtMoney(r.low) + ' to ' + fmtMoney(r.high) + ' a month' + (r.mid != null ? ' (middle ' + fmtMoney(r.mid) + ')' : '')
+      : 'No figures were saved with this report.';
+    return '<div class="legacy-range-box">' +
+      '<span class="legacy-label">Result saved by the previous method</span>' +
+      '<span class="legacy-figures">' + figures + '</span>' +
+      'This is not a current recommendation.' +
+      '<span class="legacy-note">The written explanation from the previous method is not shown.</span>' +
+    '</div>';
+  }
+
+  // The headline block, top to bottom: the recommended range with its two end labels, the
+  // goal sentence with the suggested price, the stretch price on its own line (Medium and High
+  // reports only), the confidence label with its reasons and track record, and the accuracy line.
+  // With no range, one plain message says why. `extras` is the part of the server's answer that
+  // is not the analysis row: headline, confidence, counted, noRange, sizeNote, accuracyLine, sourceNotes.
+  function buildHeadlineBlock(extras) {
+    const x = extras || {};
+    const h = x.headline;
+    if (!h) {
+      if (x.olderFormat) return legacyRangeHtml(x.legacyRange);
+      return '<div class="no-range-box">' +
+        esc(x.noRange || 'This report was made before the recommended-range format, so only the comparable homes are shown.') +
+      '</div>';
+    }
+    const c = x.confidence || null;
+    const low = !!(c && c.label === 'low');
+    let html =
+      '<div class="rent-headline' + (low ? ' low-confidence' : '') + '">' +
+        '<div class="label">Recommended range' + (low ? ' &middot; Starting point, Low confidence' : '') + '</div>' +
+        '<div class="amount">' + fmtMoney(h.low) + '&ndash;' + fmtMoney(h.high) + '<span class="permo">/mo</span></div>' +
+        '<div class="range-ends"><span>' + esc(h.lowLabel || 'Lease quickly') + '</span><span>' + esc(h.highLabel || 'Hold out for more') + '</span></div>' +
+      '</div>' +
+      '<div class="goal-line">' + goalSentenceHtml(h) + '</div>';
+    if (h.stretchPrice != null) {
+      html += '<div class="stretch-line"><span class="stretch-label">Stretch price</span>' +
+        '<span class="stretch-price">' + fmtMoney(h.stretchPrice) + '</span>' +
+        '<span class="stretch-words">' + esc(h.stretchWords || '') + '</span></div>';
+    }
+    if (c) {
+      html += '<div class="conf-line conf-' + esc(c.label) + '"><span class="conf-label">' + esc(c.label.charAt(0).toUpperCase() + c.label.slice(1)) + ' confidence</span>: ' + esc(c.reasonText || '') + '</div>';
+      if (c.trackRecord) {
+        // the label already stands in front of this line, so the sentence's own opening label is dropped
+        const record = c.trackRecord.replace(/^(?:High|Medium|Low) confidence[.:]\s*/, '');
+        html += '<div class="conf-note">' + esc(record.charAt(0).toUpperCase() + record.slice(1)) + '</div>';
+      }
+      if (c.firmUp) html += '<div class="conf-note">' + esc(c.firmUp) + '</div>';
+    }
+    if (x.accuracyLine) html += '<div class="accuracy-line">' + esc(x.accuracyLine) + '</div>';
+    return html;
+  }
+
+  // A source that did not fully come back while the others supplied comps: said in plain words, right under the
+  // counted-comps box. The words come from the server (nothing is saved for them and no number changes).
+  function sourceNotesHtml(extras) {
+    const notes = extras && Array.isArray(extras.sourceNotes) ? extras.sourceNotes.filter(n => typeof n === 'string' && n.trim()) : [];
+    return notes.map(n => '<div class="source-note">' + esc(n) + '</div>').join('');
+  }
+
+  function renderReport(analysis, comps, marketData, extras) {
     const subjectMeta = [
       analysis.subject_bedrooms + ' bed',
       fmtBath(analysis.subject_bathrooms) + ' bath',
@@ -1656,9 +1987,22 @@
       analysis.lease_term_months + '-mo ' + (analysis.furnished ? 'furnished' : 'unfurnished') + ' lease',
     ].filter(Boolean).join(' &middot; ');
 
-    const hasRecommendation = analysis.recommended_rent_low != null && analysis.recommended_rent_high != null;
+    const headline = extras && extras.headline ? extras.headline : null;
+    const counted = extras && extras.counted ? extras.counted : null;
+    // a failed or never-finished report has no counts or price to show, so the small boxes are left out altogether
+    const hideStats = !!(extras && extras.format === 'unfinished');
 
-    const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(analysis, comps) : '';
+    // RentCast's own automated estimate is shown only beside a recommended range, and labelled as not part of it.
+    // With no range it is not shown anywhere (the box, the map pin's popup and the chart's dashed line all get a copy
+    // of the analysis without it), so a report that says "no range, no prices" never shows a rent figure beside it.
+    const shown = headline ? analysis : Object.assign({}, analysis, { subject_estimated_rent: null });
+    const estimateBox = shown.subject_estimated_rent != null
+      ? '<div class="stat-box">' +
+          '<div class="stat-label">RentCast\'s automated estimate<span class="stat-label-note">(not used in our range)</span></div>' +
+          '<div class="stat-value">' + fmtMoney(shown.subject_estimated_rent) + '/mo</div>' +
+        '</div>'
+      : '';
+    const chartHtml = comps.some(c => c.monthly_rent != null) ? buildChart(shown, comps, headline) : '';
 
     // Two always-visible, statically-rendered parts (this report gets
     // printed/emailed — no click-to-expand is possible once that happens):
@@ -1674,12 +2018,17 @@
       ? usedComps.map(buildCompCard).join('')
       : '<div style="grid-column:1/-1;color:#9ca3af;font-size:13px;padding:12px 0">' +
           (comps.length
-            ? 'None of the comps found contributed to this range — see reviewed-but-not-used properties below.'
+            ? 'None of the comps found were counted — see the reviewed-but-not-used properties below.'
             : 'No comparable properties were returned for this analysis.') +
         '</div>';
-    const notUsedRowsHtml = notUsedComps.map(buildNotUsedRow).join('');
+    const notUsedRowsHtml = notUsedComps.map(c => buildNotUsedRow(c, analysis)).join('');
+
+    const olderBanner = extras && extras.olderFormat
+      ? '<div class="older-banner">Older report. This was run with the previous method (a wide range). Run it again for the current recommended range.</div>'
+      : '';
 
     const html =
+      olderBanner +
       '<div class="report-band">' +
         '<div class="eyebrow">Rental Market Analysis</div>' +
         '<h2>' + esc(analysis.subject_address) + '</h2>' +
@@ -1687,33 +2036,32 @@
       '</div>' +
       '<div class="report-body">' +
 
-        (hasRecommendation ?
-          '<div class="rent-headline">' +
-            '<div class="label">Recommended Asking Rent</div>' +
-            '<div class="amount">' + fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '<span class="permo">/mo</span></div>' +
-          '</div>'
-        : '') +
+        buildHeadlineBlock(extras) +
 
-        '<div class="stat-row">' +
+        buildAgreementStrip(headline, comps) +
+
+        (hideStats ? '' :
+        '<div class="stat-row' + (estimateBox ? '' : ' two-up') + '">' +
+          estimateBox +
           '<div class="stat-box">' +
-            '<div class="stat-label">Estimated Market Rent</div>' +
-            '<div class="stat-value">' + fmtMoney(analysis.subject_estimated_rent) + (analysis.subject_estimated_rent != null ? '/mo' : '') + '</div>' +
-          '</div>' +
-          '<div class="stat-box">' +
-            '<div class="stat-label">Comp Rent Range</div>' +
-            '<div class="stat-value">' + fmtMoney(analysis.raw_comp_rent_low) + '&ndash;' + fmtMoney(analysis.raw_comp_rent_high) + '</div>' +
+            '<div class="stat-label">Comps Counted</div>' +
+            '<div class="stat-value">' + (counted ? counted.total + ' <span style="font-size:12px;font-weight:500;color:#6b7280">(' + counted.leased + ' leased, ' + counted.active + ' active' + (counted.offMarket ? ', ' + counted.offMarket + ' off market' : '') + ')</span>' : '&#8212;') + '</div>' +
           '</div>' +
           '<div class="stat-box">' +
             '<div class="stat-label">Price per Sqft</div>' +
-            '<div class="stat-value">' + pricePerSqft(analysis.recommended_rent_mid, analysis.subject_sqft) + '</div>' +
+            '<div class="stat-value">' + (headline ? pricePerSqft(headline.listPrice, analysis.subject_sqft) : '&#8212;') + '</div>' +
           '</div>' +
-        '</div>' +
+        '</div>') +
+
+        sourceNotesHtml(extras) +
+
+        (extras && extras.sizeNote ? '<div class="size-band-note">' + esc(extras.sizeNote) + '</div>' : '') +
 
         buildMapSection(analysis, comps) +
 
         (chartHtml ? '<div class="section-heading">Comparable Rentals</div>' + chartHtml : '') +
 
-        '<div class="comp-subheading">Comps Used in This Range</div>' +
+        '<div class="comp-subheading">Comps Counted</div>' +
         '<div class="comp-cards">' + usedCardsHtml + '</div>' +
 
         (notUsedComps.length ?
@@ -1724,7 +2072,7 @@
         buildMarketTrendsSection(marketData, analysis) +
 
         (analysis.rationale ?
-          '<div class="section-heading">Why ' + (hasRecommendation ? fmtMoney(analysis.recommended_rent_low) + '&ndash;' + fmtMoney(analysis.recommended_rent_high) + '/mo' : 'This Range') + '</div>' +
+          '<div class="section-heading">Why ' + (headline ? fmtMoney(headline.low) + '&ndash;' + fmtMoney(headline.high) + '/mo' : 'There Is No Recommended Range') + '</div>' +
           '<div class="rationale-box">' + esc(analysis.rationale) + '</div>'
         : '') +
 
@@ -1738,12 +2086,179 @@
 
     // Deferred so it runs after showView('report') makes the container
     // visible — see the comment in initMap() for why that matters.
-    setTimeout(() => initMap(analysis, comps), 0);
+    setTimeout(() => initMap(shown, comps), 0);
+  }
+
+  // ── Past reports ─────────────────────────────────────────────────────
+  // The list of reports that were run before, and reopening one. Read-only: nothing here runs, changes or
+  // deletes an analysis. The "Past reports" button stays hidden unless the server answers the list (the Hub
+  // does; the standalone app has no login and no such address, so it never shows the button). Everything the
+  // server sends is put on the page through esc(); the typed search text only ever goes into the web address.
+  const HIST = { rows: [], hasMore: false, query: '', showFailed: false, requestNo: 0, busy: false };
+  const HIST_PAGE_SIZE = 50;
+
+  function fmtWhen(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' ' +
+      d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function histRangeHtml(r) {
+    if (r.format === 'new') {
+      if (r.headline) {
+        return '<strong>' + fmtMoney(r.headline.low) + '&ndash;' + fmtMoney(r.headline.high) + '</strong>' +
+          (r.suggested_list_price != null ? '<span class="hist-sub">suggested ' + fmtMoney(r.suggested_list_price) + '</span>' : '');
+      }
+      return '<span class="hist-none">No range</span>';
+    }
+    // an older report shows no dollar figures in the list, only the tag (its old range is seen inside the report, in the grey box)
+    if (r.format === 'older') return '<span class="hist-tag">Older report</span>';
+    return '<span class="hist-tag failed">' + (r.status === 'failed' ? 'Failed' : 'Not finished') + '</span>';
+  }
+
+  function histConfidenceHtml(r) {
+    const label = ['high', 'medium', 'low'].includes(r.confidence_label) ? r.confidence_label : null;
+    return label ? '<span class="hist-conf-' + label + '">' + label.charAt(0).toUpperCase() + label.slice(1) + '</span>' : '&#8212;';
+  }
+
+  function histRowHtml(r) {
+    const meta = [
+      r.subject_bedrooms != null ? esc(r.subject_bedrooms) + ' bd' : '',
+      r.subject_bathrooms != null ? esc(fmtBath(r.subject_bathrooms)) + ' ba' : '',
+      r.subject_sqft ? fmtNum(r.subject_sqft) + ' sqft' : '',
+      esc(propertyTypeLabel(r.subject_property_type)),
+    ].filter(Boolean).join(' &middot; ');
+    return '<tr data-id="' + esc(r.id) + '">' +
+      '<td data-label="Date"><span class="hist-cell-body">' + esc(fmtWhen(r.created_at)) + '</span></td>' +
+      '<td class="hist-cell-address" data-label="Address"><span class="hist-cell-body"><button type="button" class="hist-open">' + esc(r.subject_address) + '</button>' +
+        (meta ? '<span class="hist-sub">' + meta + '</span>' : '') + '</span></td>' +
+      '<td data-label="Ran by"><span class="hist-cell-body">' + (r.run_by_name ? esc(r.run_by_name) : '&#8212;') + '</span></td>' +
+      '<td data-label="Range"><span class="hist-cell-body">' + histRangeHtml(r) + '</span></td>' +
+      '<td data-label="Confidence"><span class="hist-cell-body">' + histConfidenceHtml(r) + '</span></td>' +
+    '</tr>';
+  }
+
+  function setHistStatus(text) {
+    document.getElementById('histStatus').textContent = text;
+  }
+
+  function renderHistory() {
+    document.getElementById('histBody').innerHTML = HIST.rows.map(histRowHtml).join('');
+    document.getElementById('histTable').style.display = HIST.rows.length ? '' : 'none';
+    document.getElementById('histMore').style.display = HIST.hasMore ? '' : 'none';
+  }
+
+  // reset = start the list again from the newest (a new search, the failed box, or just opening the list);
+  // otherwise the next page is added under the ones already shown.
+  async function loadHistory(reset) {
+    if (reset) {
+      HIST.rows = [];
+      HIST.hasMore = false;
+      renderHistory();
+    } else if (HIST.busy) {
+      return;
+    }
+    const thisRequest = ++HIST.requestNo;
+    HIST.busy = true;
+    setHistStatus('Loading…');
+    const params = 'limit=' + HIST_PAGE_SIZE + '&offset=' + HIST.rows.length +
+      '&q=' + encodeURIComponent(HIST.query) + (HIST.showFailed ? '&show_failed=1' : '');
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/history?' + params, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (thisRequest !== HIST.requestNo) return; // a newer search was started; this answer is out of date
+      if (!data || !Array.isArray(data.rows)) throw new Error('unexpected answer');
+      HIST.rows = HIST.rows.concat(data.rows);
+      HIST.hasMore = !!data.hasMore;
+      renderHistory();
+      setHistStatus(HIST.rows.length ? '' : (HIST.query ? 'No past reports match that address.' : 'No past reports yet.'));
+    } catch (err) {
+      if (thisRequest !== HIST.requestNo) return;
+      setHistStatus('Couldn’t load past reports. Please try again.');
+    } finally {
+      if (thisRequest === HIST.requestNo) HIST.busy = false;
+    }
+  }
+
+  function showSavedBanner(data) {
+    const when = fmtDate(data.analysis && data.analysis.created_at);
+    document.getElementById('savedBannerText').textContent =
+      'Saved report from ' + when + (data.runByName ? ', run by ' + data.runByName : '');
+    document.getElementById('savedBanner').style.display = '';
+  }
+
+  function hideSavedBanner() {
+    document.getElementById('savedBanner').style.display = 'none';
+  }
+
+  async function openSavedReport(id) {
+    if (!id) return;
+    hideError();
+    setHistStatus('Opening saved report…');
+    try {
+      const res = await fetch(API_BASE + '/api/rental-analysis/history/' + encodeURIComponent(id), { credentials: 'same-origin' });
+      const data = await res.json().catch(() => null);
+      setHistStatus('');
+      if (!res.ok || !data || !data.analysis) {
+        showError((data && data.error) ? data.error : 'The server returned an error (HTTP ' + res.status + ').', 'Couldn’t open this saved report');
+        return;
+      }
+      renderReport(data.analysis, data.comps || [], data.marketData || null, data);
+      showSavedBanner(data);
+      showView('report');
+      // keyboard users: the list they were on is now hidden, so focus moves to the report's heading instead of being dropped at the top of the page
+      const heading = document.querySelector('#reportDoc h2');
+      if (heading) {
+        heading.setAttribute('tabindex', '-1');
+        heading.focus({ preventScroll: true });
+      }
+    } catch (err) {
+      setHistStatus('');
+      showError('Couldn’t reach the server. Please try again.', 'Couldn’t open this saved report');
+    }
+  }
+
+  document.getElementById('pastReportsBtn').addEventListener('click', () => {
+    hideError();
+    showView('history');
+    loadHistory(true);
+  });
+  document.getElementById('histNewBtn').addEventListener('click', () => { hideError(); showView('form'); });
+  document.getElementById('backToListBtn').addEventListener('click', () => { hideError(); showView('history'); });
+  document.getElementById('histMore').addEventListener('click', () => loadHistory(false));
+  document.getElementById('histShowFailed').addEventListener('change', (e) => {
+    HIST.showFailed = e.target.checked;
+    loadHistory(true);
+  });
+  let histSearchTimer = null;
+  document.getElementById('histSearch').addEventListener('input', (e) => {
+    clearTimeout(histSearchTimer);
+    const typed = e.target.value;
+    histSearchTimer = setTimeout(() => { HIST.query = typed.trim(); loadHistory(true); }, 300);
+  });
+  document.getElementById('histBody').addEventListener('click', (e) => {
+    const row = e.target.closest('tr[data-id]');
+    if (row) openSavedReport(row.getAttribute('data-id'));
+  });
+
+  // One request, once, when the page loads: does this server have the past-reports list? Only a good answer
+  // with a list in it shows the button; a 404 (the standalone app), a login or role refusal, a network
+  // failure or anything unexpected leaves it hidden, and nothing is written to the console.
+  function detectPastReports() {
+    fetch(API_BASE + '/api/rental-analysis/history?limit=1', { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data.rows)) document.getElementById('pastReportsBtn').style.display = '';
+      })
+      .catch(() => {});
   }
 
   // ── Init ──────────────────────────────────────────────────────────────
   loadUsers();
   loadMapConfig();
+  detectPastReports();
 </script>
 
 </body>

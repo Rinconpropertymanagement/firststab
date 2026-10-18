@@ -17,6 +17,7 @@ const { normalizeOwnerGoal, sqftBandFor } = require('./weighting');
 const { SQFT_BAND_PROPERTY_TYPES } = require('./constants');
 const { FIRM_UP_LINE } = require('./confidence');
 const { loadAccuracyScorecard, staffSentences } = require('./accuracy-sentences');
+const { TYPE_CHECK_WHAT } = require('./leadsimple');
 
 // The published accuracy results, read once when the server starts. null when the
 // file is missing or damaged; the sentences that depend on it are then left out.
@@ -72,6 +73,10 @@ function classifySourceResult({ comps, sourcesUsed, sourceErrors, sourceWarnings
   return { kind: 'failed', reason: parts.length ? parts.join(' | ') : 'No comps were returned by any active source.' };
 }
 
+// The screen note when the MLS check of Rincon's own leases (house, condo or townhouse) could not be finished: it failed, timed out,
+// or hit its limit (lib/leadsimple.js). Every lease is still counted; the ones not checked keep LeadSimple's type.
+const TYPE_CHECK_NOTE = "Rincon's own signed leases could not all be checked against the MLS (house, condo or townhouse) when this report ran, so some are counted under the type LeadSimple gives them, which is sometimes wrong. Run it again to redo that check.";
+
 // How a source is named to the reader (the table name for Rincon's own move-in records means nothing to them).
 const SOURCE_DISPLAY_NAMES = { 'LeadSimple Move-Ins': "Rincon's own move-in records" };
 const displayNameOf = name => SOURCE_DISPLAY_NAMES[name] || name;
@@ -98,7 +103,12 @@ function buildSourceNotes({ sourceErrors, sourceWarnings } = {}) {
     if (!partial.has(w.name)) partial.set(w.name, []);
     if (w.what && !partial.get(w.name).includes(w.what)) partial.get(w.name).push(w.what);
   }
-  for (const [name, whats] of partial) {
+  for (const [name, allWhats] of partial) {
+    // The MLS check of each Rincon lease's type is not a source that went missing: every comp is still there, some just keep the
+    // type LeadSimple gives them. It has its own sentence (and only that sentence), whatever else the same source reports.
+    if (allWhats.includes(TYPE_CHECK_WHAT)) notes.push(TYPE_CHECK_NOTE);
+    const whats = allWhats.filter(what => what !== TYPE_CHECK_WHAT);
+    if (allWhats.length && !whats.length) continue;
     const missing = whats.length ? ` (${whats.join(' and ')} could not be loaded)` : '';
     notes.push(`${displayNameOf(name)} was only partly available when this report ran${missing}, so it may use fewer comparable homes. Run it again to include them.`);
   }

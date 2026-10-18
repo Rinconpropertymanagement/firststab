@@ -579,8 +579,11 @@
     }
     .comp-notused-row {
       display: flex;
+      /* a long reason (the MLS and unit-number wordings are up to about 100 characters) drops to its own line
+         instead of squeezing the address down to "130 N Ivy St #3..." and hiding the unit number */
+      flex-wrap: wrap;
       align-items: baseline;
-      gap: 10px;
+      gap: 2px 10px;
       padding: 7px 12px;
       background: #f9fafb;
       border: 1px solid #e5e7eb;
@@ -590,7 +593,7 @@
     .comp-notused-row .cn-addr {
       font-weight: 600;
       color: #4b5563;
-      flex: 1;
+      flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -779,6 +782,7 @@
          sharing the line below. */
       .comp-notused-row { flex-wrap: wrap; row-gap: 2px; }
       .comp-notused-row .cn-addr { flex-basis: 100%; white-space: normal; }
+      .comp-notused-row .cn-reason { flex: 0 1 auto; min-width: 0; }
     }
 
     /* ── Print ── */
@@ -1853,6 +1857,15 @@
     furnished_mismatch: 'furnished status differs',
     short_term_lease: 'short-term lease',
     age_restricted: '55+ community',
+    implausible_rent: 'rent or size looks like a data error',
+  };
+
+  // When a Rincon lease is left out because its real type differs from the subject's, the report can say
+  // where that type came from: the MLS (the server looked the street address up), or a unit number in the
+  // address (so it is not a house). Plain words only; nothing else about the row changes.
+  const MLS_TYPE_PHRASES = {
+    single_family: 'a house', condo: 'a condo', townhouse: 'a townhouse', duplex: 'a duplex', triplex: 'a triplex',
+    fourplex: 'a fourplex', apartment: 'an apartment', manufactured: 'a manufactured home', other: 'a different kind of property',
   };
 
   // Compact single-line row for a comp that contributed zero weight to
@@ -1863,6 +1876,17 @@
   // detail cards above it.
   function buildNotUsedRow(c, analysis) {
     let reasonLabel = EXCLUSION_REASON_LABELS[c.exclusion_reason] || 'not used in this range';
+    if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'mls' && c.property_type === 'other') {
+      // the MLS lists both condo and townhouse records at this address, which is neither one kind nor the other
+      reasonLabel = 'different property type (the MLS lists both condos and townhouses at this address)';
+    } else if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'mls' && MLS_TYPE_PHRASES[c.property_type]) {
+      reasonLabel = 'different property type (the MLS lists it as ' + MLS_TYPE_PHRASES[c.property_type] + ')';
+    } else if (c.exclusion_reason === 'property_type_mismatch' && c.property_type_source === 'unit_number') {
+      // "so it is not a house" explains the exclusion only for a house subject; for any other kind of subject it would not
+      reasonLabel = analysis && analysis.subject_property_type === 'single_family'
+        ? 'different property type (it has a unit number, so it is not a house)'
+        : 'different property type (it has a unit number, but the MLS does not clearly say it is a condo or townhouse)';
+    }
     // the band's percent is the one the server used (saved with the analysis), never typed here
     if (c.exclusion_reason === 'size_sqft' && analysis && analysis.size_band_pct) reasonLabel = 'size outside the ' + analysis.size_band_pct + '% band';
     // A size exclusion says which way it is off and by what size, when both

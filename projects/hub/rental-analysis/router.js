@@ -671,9 +671,13 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
     // exclusionReason() directly — see server.js's copy of this comment for
     // the full explanation. Same reason codes narrative.js's
     // EXCLUSION_LABELS keys off of.
+    // property_type_source ('mls', 'unit_number' or 'label') is how the screen can say, beside a Rincon
+    // lease that is not used, that the MLS lists it as a different kind of home. Like exclusion_reason it
+    // is sent to the screen only; there is no column for it.
     const responseComps = insertedComps.map((row, i) => ({
       ...row,
       exclusion_reason: exclusionReasons[i],
+      property_type_source: compsWithMatch[i].property_type_source || null,
     }));
 
     // ONE update marks the analysis complete and carries the whole outcome with it:

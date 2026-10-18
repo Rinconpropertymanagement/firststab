@@ -3940,8 +3940,11 @@ async function main() {
     assert.equal(mapped.longitude, null);
   });
 
-  await check('mapComparable() maps an unmapped/ambiguous property_type (e.g. "Multi-Family", null) to null rather than guessing, same discipline as CRMLS/RentCast', () => {
-    assert.equal(mapLeadSimpleComparable({ address: '1 Test St', rent: 3000, property_type: 'Multi-Family' }).property_type, null);
+  // CHANGED (CONDO-LEASE-TYPE work, requirement C): "Multi-Family" used to map to null (unknown), and an unknown type counts for
+  // EVERY kind of subject, which let three Multi-Family leases (a 3-bedroom house among them) count for a 2-bedroom condo. It
+  // now maps to "apartment", a real type that is not a house, a condo or a townhouse. null and "Student" still map to null.
+  await check('mapComparable() maps "Multi-Family" to apartment (no longer unknown, which counted for every subject) and an unmapped/ambiguous property_type (null, "Student") to null rather than guessing', () => {
+    assert.equal(mapLeadSimpleComparable({ address: '1 Test St', rent: 3000, property_type: 'Multi-Family' }).property_type, 'apartment');
     assert.equal(mapLeadSimpleComparable({ address: '1 Test St', rent: 3000, property_type: null }).property_type, null);
     assert.equal(mapLeadSimpleComparable({ address: '1 Test St', rent: 3000, property_type: 'Student' }).property_type, null);
   });
@@ -5410,6 +5413,10 @@ async function main() {
       dataPulledOn: '2026-10-16', dataCoverage: { dataFrom: '2025-03-15', requiredFrom: '2025-04-16', ok: true }, medianGapDays: 33, partialReasons: [],
       network: { measured: true, rentcastRequests: 0, anthropicRequests: 0, otherHostRequests: 0, requestsDuringReplay: 0, recoreRequests: 37, supabaseRequests: 3 },
       trackedHashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' },
+      // CHANGED (CONDO-LEASE-TYPE work): a run now also carries what it knows about the saved MLS answers for Rincon lease types,
+      // and the scorecard is not trusted without them (see the new "Rincon lease types" trust checks below). Good answers here, so
+      // every assertion that builds on this helper still sees a trusted run.
+      rinconTypes: { present: true, total: 250, covered: 250, uncovered: 0, oldest: '2026-10-16', newest: '2026-10-16', typedByMls: 70, targetsByType: { single_family: 40, condo: 20, townhouse: 10 } },
       selfTests: { leak: { pass: true, sample: 30, clean: { typicalMiss: 300 }, single: { typicalMiss: 150 }, heavy: { typicalMiss: 0 } }, fidelity: { pass: true, subjects: 5, pulledAt: 'P1', hashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' } } },
       mls: { mls: { baseline: rows, size25_item2: rows } },
       rincon: { headline: { baseline: btA.metrics.summarize(rows.slice(0, 8)), size25_item2: btA.metrics.summarize(rows.slice(0, 8)) } },
@@ -9660,6 +9667,911 @@ async function main() {
   });
   }
 
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // CONDO-LEASE-TYPE work (spec 2026-10-17, plus the junk-rent screen and the Multi-Family fix Peter approved with it).
+  // Rincon's own leases are typed by what the MLS says is at their street address instead of LeadSimple's blanket "Single Home";
+  // a lease whose rent cannot be right never counts; a "Multi-Family" lease no longer counts for every kind of subject.
+  // Every address, street name and rent below is made up (shaped like the real cases in the spec, never copied from them).
+  // ══════════════════════════════════════════════════════════════════════════════
+  {
+  console.log('--- Rincon lease types: the rules (lib/leadsimple.js classifyRinconLease / resolveLeaseType) ---');
+  const LS = require('./lib/leadsimple');
+  const FAKE_RECORE = require('./backtest/tests/fake-recore-mls');
+  const fsB = require('node:fs');
+  const pathB = require('node:path');
+  const btA = {
+    asof: require('./backtest/asof-sources'),
+    targets: require('./backtest/targets'),
+    report: require('./backtest/report'),
+    metrics: require('./backtest/metrics'),
+  };
+  // a small made-up set of finished test results (the same shape run.js builds), with good answers for the Rincon lease types
+  const fakeResults = () => {
+    const rowOf = (i, city) => ({
+      key: `k${String(i).padStart(2, '0')}`, kind: 'mls', date: '2026-08-01', address: `${1000 + i} Fake Street, ${city}, CA 93001`, city, type: 'single_family', area: 'core',
+      beds: 3, sqft: 1500, rent: 3000 + (i % 7) * 50, est: 3000 + (i % 5) * 40, low: 2950, high: 3150, spread: 200, n: 6, leased: 3, nearRange: true,
+      mix: { mlsLeased: 6, asking: 0, rincon: 0 }, rents: [3000, 3100], planted: false,
+    });
+    const rows = [...Array.from({ length: 130 }, (_, i) => rowOf(i, 'Alpha City')), ...Array.from({ length: 5 }, (_, i) => rowOf(100 + i, 'Beta City'))];
+    return {
+      generatedAt: '2026-10-16T00:00:00Z', runDate: '2026-10-16', dataThrough: '2026-10-16', cachePulledAt: 'P1', partial: false,
+      config: { holdoutStart: '2026-07-16', targetFrom: '2026-04-15' }, counts: { tune: 10, holdout: 20 },
+      dataPulledOn: '2026-10-16', dataCoverage: { dataFrom: '2025-03-15', requiredFrom: '2025-04-16', ok: true }, medianGapDays: 33, partialReasons: [],
+      network: { measured: true, rentcastRequests: 0, anthropicRequests: 0, otherHostRequests: 0, requestsDuringReplay: 0, recoreRequests: 37, supabaseRequests: 3 },
+      trackedHashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' },
+      rinconTypes: { present: true, total: 250, covered: 250, uncovered: 0, oldest: '2026-10-16', newest: '2026-10-16', typedByMls: 70, targetsByType: { single_family: 40, condo: 20, townhouse: 10 } },
+      selfTests: { leak: { pass: true, sample: 30, clean: { typicalMiss: 300 }, single: { typicalMiss: 150 }, heavy: { typicalMiss: 0 } }, fidelity: { pass: true, subjects: 5, pulledAt: 'P1', hashes: { files: { 'lib/crmls.js': 'aaaa' }, combined: 'H1' } } },
+      mls: { mls: { baseline: rows, size25_item2: rows } },
+      rincon: { headline: { baseline: btA.metrics.summarize(rows.slice(0, 8)), size25_item2: btA.metrics.summarize(rows.slice(0, 8)) } },
+      outcomes: { counts: { analyses: 71, complete: 69, analysesWithAnyAddressMatch: 10, retrospectiveMatches: 10, forwardMatches: 0 } },
+    };
+  };
+  const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+  // an MLS record in the shape the product keeps: house number, zip, street pieces, unit, the MLS's kind of home
+  const mrec = (number, street, over = {}) => ({ number, zip: '93003', dirPrefix: null, street, suffix: 'Ave', dirSuffix: null, unit: null, subtype: 'Condominium', ...over });
+  // a leadsimple_new_leases row
+  const lrow = (address, over = {}) => ({ address, city: 'Testville', state: 'CA', zip_code: '93003', property_type: 'Single Home', bedrooms: 2, bathrooms: 1, sqft: 900, rent: 2400, lease_start_date: '2026-08-01', closed_at: '2026-08-10', latitude: 34.2, longitude: -119.2, ...over });
+  const many = (n, make) => Array.from({ length: n }, (_, i) => make(i));
+  const fakeRecoreFor = (records, hooks = {}) => FAKE_RECORE.makeFakeRecoreFetch({ recordsFor: q => records.filter(r => LS.recordAnswersQuery(r, q)), ...hooks });
+  const liveLookupOver = (records, opts = {}) => queries => LS.lookupMlsRecords(queries, { fetchImpl: fakeRecoreFor(records), token: 'test-token', cache: new Map(), ...opts });
+
+  await check('Rule table, shaped like the real Saratoga-area cases: a lone condo record is a condo, two condo records a condo, two townhouse records a townhouse, a condo/townhouse mix is "other", and an address with no MLS record keeps LeadSimple\'s house', () => {
+    assert.deepEqual(LS.resolveLeaseType(lrow('1177 Alder Ave'), [mrec(1177, 'Alder', { suffix: 'Avenue' })]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('5232 Birch St'), [mrec(5232, 'Birch', { suffix: 'St' }), mrec(5232, 'BIRCH', { suffix: 'Street' })]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('4975 Cedar St'), [mrec(4975, 'Cedar', { suffix: 'St' })]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('5605 Dune St'), [mrec(5605, 'Dune', { suffix: 'St', subtype: 'Townhouse' }), mrec(5605, 'Dune', { suffix: 'St', subtype: 'Townhouse' })]), { type: 'townhouse', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('1363 Elm Ct'), [mrec(1363, 'Elm', { suffix: 'Ct' }), mrec(1363, 'Elm', { suffix: 'Ct' }), mrec(1363, 'Elm', { suffix: 'Ct', subtype: 'Townhouse' })]), { type: 'other', source: 'mls' });
+    for (const address of ['1267 Fir Way', '1222 Gum Rd', '943 Holly St']) assert.deepEqual(LS.resolveLeaseType(lrow(address), []), { type: 'single_family', source: 'label' }, address);
+  });
+
+  await check('Rule table, unit numbers: a unit in the address is never a house. #3144 in a condo building is a condo; a unit with only a house record, or a building of mixed records with no record for that unit, is "other"; a unit with no MLS record at all is "other"', () => {
+    const building = [...many(33, i => mrec(130, 'Ivy', { zip: '93001', dirPrefix: 'N', suffix: 'St', unit: String(1000 + i * 111) })), mrec(130, 'Ivy', { zip: '93001', dirPrefix: 'N', suffix: 'St', unit: '3144' })];
+    assert.deepEqual(LS.resolveLeaseType(lrow('130 N Ivy St #3144', { zip_code: '93001', sqft: 613, rent: 1800 }), building), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('332 S. Juniper Ave Unit 0'), [mrec(332, 'Juniper', { dirPrefix: 'S', subtype: 'Single Family Residence' })]), { type: 'other', source: 'unit_number' }, 'a studio behind a house: not a house');
+    const mixedBuilding = [...many(26, i => mrec(225, 'Kelp', { dirPrefix: 'S', suffix: 'Rd', unit: String(100 + i) })), ...many(3, i => mrec(225, 'Kelp', { dirPrefix: 'S', suffix: 'Rd', subtype: 'Single Family Residence', unit: String(200 + i) })), mrec(225, 'Kelp', { dirPrefix: 'S', suffix: 'Rd', subtype: 'Townhouse', unit: '300' })];
+    assert.deepEqual(LS.resolveLeaseType(lrow('225 S Kelp Rd Unit 99'), mixedBuilding), { type: 'other', source: 'unit_number' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('225 S Kelp Rd Unit 99'), []), { type: 'other', source: 'unit_number' }, 'no record at all, but the address itself says it is a unit');
+    assert.deepEqual(LS.resolveLeaseType(lrow('225 S Kelp Rd Unit 101'), mixedBuilding), { type: 'condo', source: 'mls' }, 'a unit that has its own condo record is a condo even though the building is mixed');
+  });
+
+  await check('Rule table, a real conflict keeps LeadSimple: 5 condo records and 2 house records at one address with no unit number stay "single_family" (today\'s behavior), as does a house/townhouse mix', () => {
+    const conflict = [...many(5, i => mrec(2720, 'Laurel', { dirSuffix: 'E', unit: String(i + 1) })), ...many(2, i => mrec(2720, 'Laurel', { dirSuffix: 'E', subtype: 'Single Family Residence', unit: String(i + 10) }))];
+    assert.deepEqual(LS.resolveLeaseType(lrow('2720 Laurel Ave E'), conflict), { type: 'single_family', source: 'label' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('1 Pine Ave'), [mrec(1, 'Pine', { subtype: 'Single Family Residence' }), mrec(1, 'Pine', { subtype: 'Townhouse' })]), { type: 'single_family', source: 'label' });
+    // every record the same kind, whatever kind: that kind
+    assert.deepEqual(LS.resolveLeaseType(lrow('2 Pine Ave'), [mrec(2, 'Pine', { subtype: 'Single Family Residence' })]), { type: 'single_family', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('3 Pine Ave'), [mrec(3, 'Pine', { subtype: 'Duplex' })]), { type: 'duplex', source: 'mls' });
+  });
+
+  await check('Records with no kind, or a kind the tool does not map (Loft, Stock Cooperative), say nothing and are ignored; only such records means "no record"', () => {
+    assert.deepEqual(LS.resolveLeaseType(lrow('4 Pine Ave'), [mrec(4, 'Pine', { subtype: null }), mrec(4, 'Pine', { subtype: 'Condominium' })]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('5 Pine Ave'), [mrec(5, 'Pine', { subtype: null }), mrec(5, 'Pine', { subtype: 'Loft' }), mrec(5, 'Pine', { subtype: 'Stock Cooperative' })]), { type: 'single_family', source: 'label' });
+  });
+
+  await check('When the MLS could not be asked (null) every lease keeps LeadSimple\'s type, even one with a unit number: nothing changes from today', () => {
+    assert.deepEqual(LS.classifyRinconLease(lrow('6 Pine Ave'), null), { type: 'single_family', source: 'label' });
+    assert.deepEqual(LS.classifyRinconLease(lrow('7 Pine Ave #4'), null), { type: 'single_family', source: 'label' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('7 Pine Ave #4'), null), { type: 'single_family', source: 'label' });
+    assert.deepEqual(LS.classifyRinconLease(lrow('8 Pine Ave', { property_type: null }), null), { type: null, source: 'label' }, 'a blank label stays unknown');
+    assert.deepEqual(LS.classifyRinconLease(lrow('9 Pine Ave', { property_type: 'Student' }), null), { type: null, source: 'label' });
+  });
+
+  await check('A blank or unusual LeadSimple label takes the MLS\'s clear answer when there is one', () => {
+    assert.deepEqual(LS.resolveLeaseType(lrow('10 Pine Ave', { property_type: null }), [mrec(10, 'Pine', { subtype: 'Townhouse' })]), { type: 'townhouse', source: 'mls' });
+  });
+
+  console.log('--- Rincon lease types: matching the right street (the traps) ---');
+
+  await check('Street matching ignores capitals, "Ave" vs "Avenue", "Dr." vs "DRIVE" attached to the name, and "Saint" vs "St."', () => {
+    assert.equal(LS.recordsAtAddress(lrow('3013 Willow Dr.'), [mrec(3013, 'WILLOW', { suffix: 'DR' })]).length, 1, 'capital letters');
+    assert.equal(LS.recordsAtAddress(lrow('1177 Alder Ave'), [mrec(1177, 'ALDER', { suffix: 'Avenue' })]).length, 1, 'Ave vs Avenue');
+    assert.equal(LS.recordsAtAddress(lrow('12 Blue Dolphin Dr'), [mrec(12, 'BLUE DOLPHIN DRIVE', { suffix: null })]).length, 1, 'the suffix word stored inside the street name');
+    assert.equal(LS.recordsAtAddress(lrow('12 Saint Clair Dr'), [mrec(12, 'St. Clair', { suffix: 'Dr' })]).length, 1, 'Saint vs St.');
+    assert.equal(LS.recordsAtAddress(lrow('12 St. Clair Dr'), [mrec(12, 'Saint Clair', { suffix: 'Dr' })]).length, 1, 'St. vs Saint');
+    assert.equal(LS.recordsAtAddress(lrow('500 Fourth St'), [mrec(500, '4th', { suffix: 'St' })]).length, 1, 'Fourth vs 4th');
+    assert.equal(LS.recordsAtAddress(lrow("12 O'Neill Way"), [mrec(12, "O'NEILL", { suffix: 'Way' })]).length, 1, 'an apostrophe');
+  });
+
+  await check('Street matching refuses look-alikes: another street with the same number and zip, a different house number, a different zip, a different direction, a different suffix', () => {
+    // the search for "Main" also finds "Mainsail": the exact street is checked on this side
+    const q = LS.mlsQueryFor(lrow('100 Main St'));
+    assert.ok(LS.recordAnswersQuery(mrec(100, 'Mainsail', { suffix: 'Ln' }), q), 'the search itself is loose, on purpose');
+    assert.equal(LS.recordsAtAddress(lrow('100 Main St'), [mrec(100, 'Mainsail', { suffix: 'Ln' })]).length, 0, 'but Mainsail Ln is not Main St');
+    assert.equal(LS.recordsAtAddress(lrow('100 Main St'), [mrec(100, 'Domain', { suffix: 'St' })]).length, 0);
+    assert.equal(LS.recordsAtAddress(lrow('100 Main St'), [mrec(101, 'Main', { suffix: 'St' })]).length, 0, 'a different house number');
+    assert.equal(LS.recordsAtAddress(lrow('100 Main St'), [mrec(100, 'Main', { suffix: 'St', zip: '93004' })]).length, 0, 'a different zip');
+    assert.equal(LS.recordsAtAddress(lrow('130 N Ivy St'), [mrec(130, 'Ivy', { suffix: 'St', dirPrefix: 'S' })]).length, 0, 'South is not North');
+    assert.equal(LS.recordsAtAddress(lrow('130 N Ivy St'), [mrec(130, 'Ivy', { suffix: 'St', dirPrefix: 'N' })]).length, 1);
+    assert.equal(LS.recordsAtAddress(lrow('130 Ivy St'), [mrec(130, 'Ivy', { suffix: 'St', dirPrefix: 'N' })]).length, 1, 'a direction only one side gives does not disagree');
+    assert.equal(LS.recordsAtAddress(lrow('100 Court St'), [mrec(100, 'Court', { suffix: 'Ave' })]).length, 0, 'Court St is not Court Ave');
+    assert.equal(LS.recordsAtAddress(lrow('100 Court St'), [mrec(100, 'Court', { suffix: 'Street' })]).length, 1);
+    assert.equal(LS.recordsAtAddress(lrow('100 East St'), [mrec(100, 'East', { suffix: 'St' })]).length, 1, 'a street actually named East');
+  });
+
+  await check('The right unit wins: only that unit\'s records are used when there are any ("#5", "Unit 0005" and "5" are the same unit); when the unit has no record, the whole building\'s records are used', () => {
+    const records = [mrec(50, 'Oak', { suffix: 'St', unit: '5', subtype: 'Townhouse' }), mrec(50, 'Oak', { suffix: 'St', unit: '1' }), mrec(50, 'Oak', { suffix: 'St', unit: '2' })];
+    assert.deepEqual(LS.resolveLeaseType(lrow('50 Oak St #5'), records), { type: 'townhouse', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('50 Oak St Unit 0005'), records), { type: 'townhouse', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('50 Oak St Apt 5'), [mrec(50, 'Oak', { suffix: 'St', unit: '#5', subtype: 'Townhouse' }), ...records.slice(1)]), { type: 'townhouse', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(lrow('50 Oak St #9'), records.slice(1)), { type: 'condo', source: 'mls' }, 'unit 9 has no record: the building (all condo) decides');
+    assert.deepEqual(LS.resolveLeaseType(lrow('50 Oak St #9'), records), { type: 'other', source: 'unit_number' }, 'unit 9 has no record and the building is mixed');
+  });
+
+  await check('Addresses that cannot be searched safely are not searched: a range ("77-79"), a letter after the number, no zip, a bare street; they simply keep LeadSimple\'s type', () => {
+    assert.equal(LS.mlsQueryFor(lrow('77-79 Raemere St')), null);
+    assert.equal(LS.mlsQueryFor(lrow('123A Main St')), null);
+    assert.equal(LS.mlsQueryFor(lrow('Main St')), null);
+    assert.equal(LS.mlsQueryFor(lrow('12 Main St', { zip_code: null })), null);
+    assert.equal(LS.mlsQueryFor(lrow('12 Main St', { zip_code: 'abc' })), null);
+    assert.equal(LS.mlsQueryFor({ address: null }), null);
+    assert.equal(LS.mlsQueryFor(null), null);
+    assert.equal(LS.mlsQueryFor(lrow('12 Main St', { zip_code: '93003-1234' })).zip, '93003', 'a zip+4 is reduced to the zip');
+  });
+
+  await check('The MLS search text: the house number, the zip and one street word per address, lower-cased, letters and digits only; nothing typed in an address can change its shape', () => {
+    const f = LS.buildMlsLookupFilter([LS.mlsQueryFor(lrow('1177 Alder Ave')), LS.mlsQueryFor(lrow('500 Fourth St'))]);
+    assert.equal(f, "(StreetNumberNumeric eq 1177 and PostalCode eq '93003' and contains(tolower(StreetName),'alder')) or (StreetNumberNumeric eq 500 and PostalCode eq '93003' and (contains(tolower(StreetName),'fourth') or contains(tolower(StreetName),'4th')))");
+    const hostile = LS.buildMlsLookupFilter([LS.mlsQueryFor(lrow("12 O'Brien') or 1 eq 1 or ('x St"))]);
+    assert.match(hostile, /^\(StreetNumberNumeric eq 12 and PostalCode eq '93003' and (?:\(?contains\(tolower\(StreetName\),'[a-z0-9]+'\)(?: or )?)+\)?\)$/);
+    assert.ok(!/1 eq 1/.test(hostile), 'no piece of the typed text becomes part of the search');
+    assert.equal(LS.mlsQueryFor(lrow("12 O'Neill Way")).words[0], 'neill', 'a street word with an apostrophe is searched by its longest piece');
+    assert.deepEqual(LS.mlsQueryFor(lrow('12 Saint Clair Dr')).words, ['clair'], 'a word the MLS may spell two ways is not the search word when the name has another');
+  });
+
+  console.log('--- Rincon lease types: asking the MLS (batches, limits, memory, failures) ---');
+
+  await check('Lookup: addresses are asked in batches of 20 (45 addresses = 3 requests), repeated addresses once, and every answer is matched back to its own address', async () => {
+    const records = many(45, i => mrec(100 + i, `Street${i}x`, { suffix: 'Ave', subtype: i % 2 ? 'Condominium' : 'Townhouse' }));
+    const queries = records.map(r => LS.mlsQueryFor(lrow(`${r.number} ${r.street} Ave`)));
+    let requests = 0, biggest = 0;
+    const fetchImpl = fakeRecoreFor(records, { onRequest: req => { requests++; biggest = Math.max(biggest, req.queries.length); } });
+    const out = await LS.lookupMlsRecords([...queries, queries[0], queries[1]], { fetchImpl, token: 'test-token', cache: new Map() });
+    assert.equal(requests, 3);
+    assert.equal(out.requests, 3);
+    assert.equal(biggest, 20);
+    assert.equal(out.byKey.size, 45);
+    queries.forEach((q, i) => assert.deepEqual(out.byKey.get(q.key), [records[i]], q.key));
+    assert.equal(out.ceilingHit, false);
+    assert.equal(out.problem, null);
+  });
+
+  await check('Lookup: an address the MLS has no record for comes back as an empty list (a real answer), not as "could not be checked"', async () => {
+    const q = LS.mlsQueryFor(lrow('1267 Fir Way'));
+    const out = await LS.lookupMlsRecords([q], { fetchImpl: fakeRecoreFor([]), token: 'test-token', cache: new Map() });
+    assert.deepEqual(out.byKey.get(q.key), []);
+  });
+
+  await check('Lookup never throws and never fails an analysis: an error reply, a reply that cannot be read, a network error, a request that never answers and a missing access key all come back as "could not be checked" (null) with a reason in words', async () => {
+    const queries = [LS.mlsQueryFor(lrow('1177 Alder Ave')), LS.mlsQueryFor(lrow('5232 Birch St'))];
+    const run = async (fetchImpl, opts = {}) => LS.lookupMlsRecords(queries, { fetchImpl, token: 'secret-token-123', cache: new Map(), ...opts });
+    const down = await run(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+    assert.deepEqual([...down.byKey.values()], [null, null]);
+    assert.match(down.problem, /error \(status 500\)/);
+    const garbage = await run(async () => ({ ok: true, status: 200, json: async () => ({ nothing: true }) }));
+    assert.deepEqual([...garbage.byKey.values()], [null, null]);
+    assert.match(garbage.problem, /could not be read/);
+    const notJson = await run(async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } }));
+    assert.deepEqual([...notJson.byKey.values()], [null, null]);
+    const networkError = await run(async () => { throw new Error('connect ECONNREFUSED https://api.marketplace.recore.net/x?access_token=secret-token-123'); });
+    assert.deepEqual([...networkError.byKey.values()], [null, null]);
+    assert.match(networkError.problem, /could not be reached/);
+    assert.ok(!JSON.stringify([...networkError.byKey], networkError.problem).includes('secret-token-123'), 'a network error that spells out the web address (with the key) is never repeated');
+    const started = Date.now();
+    const hangs = await run(() => new Promise(() => {}), { limits: { requestTimeoutMs: 40, totalBudgetMs: 1000 } });
+    assert.ok(Date.now() - started < 700, 'a request that never answers is given up on');
+    assert.deepEqual([...hangs.byKey.values()], [null, null]);
+    assert.match(hangs.problem, /did not answer in time/);
+    let called = 0;
+    const noKey = await LS.lookupMlsRecords(queries, { fetchImpl: async () => { called++; return {}; }, token: '', cache: new Map() });
+    assert.equal(called, 0, 'with no access key nothing is asked');
+    assert.deepEqual([...noKey.byKey.values()], [null, null]);
+    assert.match(noKey.problem, /no MLS access key/);
+    const odd = await LS.lookupMlsRecords(null, { fetchImpl: async () => ({}), token: 't', cache: new Map() });
+    assert.ok(odd.byKey instanceof Map, 'even nonsense in gives an answer, not an exception');
+  });
+
+  await check('The access key is sent to Recore the way lib/crmls.js sends it (in the web address) and appears nowhere else: not in the log line, the problem text, the results, or any console output', async () => {
+    const lines = [];
+    const saved = [console.log, console.warn, console.error];
+    console.log = (...a) => lines.push(a.join(' ')); console.warn = (...a) => lines.push(a.join(' ')); console.error = (...a) => lines.push(a.join(' '));
+    let urlSeen = null;
+    let out;
+    try {
+      const selected = [{ row: lrow('1177 Alder Ave'), distanceMiles: 0.2 }, { row: lrow('5232 Birch St'), distanceMiles: 0.3 }];
+      out = await LS.buildLeadSimpleComps(selected, { propertyType: 'condo', bedrooms: 2 }, {
+        lookup: qs => LS.lookupMlsRecords(qs, { token: 'secret-token-456', cache: new Map(), fetchImpl: async url => { urlSeen = String(url); throw new Error(`failed: ${url}`); } }),
+      });
+    } finally {
+      [console.log, console.warn, console.error] = saved;
+    }
+    assert.match(urlSeen, /access_token=secret-token-456/);
+    assert.ok(lines.length >= 1 && lines.every(l => !l.includes('secret-token-456')), lines.join(' | '));
+    assert.ok(!JSON.stringify(out).includes('secret-token-456'));
+    assert.ok(!JSON.stringify(out).includes('access_token'));
+  });
+
+  await check('Lookup limits: a reply of 200 records means more may follow, so the next page is read; a batch that is still not finished after the pages allowed is given up on (an unfinished list could hide a disagreement)', async () => {
+    const big = many(250, i => mrec(5, 'Bigbuilding', { suffix: 'St', unit: String(i + 1) }));
+    const q = LS.mlsQueryFor(lrow('5 Bigbuilding St'));
+    const skips = [];
+    const fetchImpl = fakeRecoreFor(big, { onRequest: req => skips.push(req.skip) });
+    const paged = await LS.lookupMlsRecords([q], { fetchImpl, token: 'test-token', cache: new Map() });
+    assert.deepEqual(skips, [0, 200]);
+    assert.equal(paged.byKey.get(q.key).length, 250);
+    const capped = await LS.lookupMlsRecords([q], { fetchImpl: fakeRecoreFor(big), token: 'test-token', cache: new Map(), limits: { maxPagesPerBatch: 1 } });
+    assert.equal(capped.byKey.get(q.key), null);
+    assert.match(capped.problem, /too many records/);
+  });
+
+  await check('Lookup limits: at most 6 requests and 8 seconds per analysis, a failing request is not retried, and two failures in a row end the check early; whatever is left unasked keeps LeadSimple\'s type and the ceiling is reported', async () => {
+    const addresses = many(130, i => lrow(`${200 + i} Limit${i}x Ave`));
+    const queries = addresses.map(r => LS.mlsQueryFor(r));
+    let requests = 0;
+    const answering = await LS.lookupMlsRecords(queries, { fetchImpl: fakeRecoreFor([], { onRequest: () => requests++ }), token: 'test-token', cache: new Map() });
+    assert.equal(requests, 6, '130 addresses would need 7 requests; the 7th is not made');
+    assert.equal(answering.ceilingHit, true);
+    assert.equal([...answering.byKey.values()].filter(v => v === null).length, 10, 'the 10 addresses past the sixth request were not asked');
+    assert.equal([...answering.byKey.values()].filter(v => Array.isArray(v)).length, 120);
+    let failRequests = 0;
+    const failing = await LS.lookupMlsRecords(queries, { fetchImpl: async () => { failRequests++; return { ok: false, status: 503, json: async () => ({}) }; }, token: 'test-token', cache: new Map() });
+    assert.equal(failRequests, 2, 'two failures in a row and it stops asking');
+    assert.equal([...failing.byKey.values()].every(v => v === null), true);
+    // the time budget: each request takes 40 ms, the budget is 50 ms, so the third request is never started
+    let slowRequests = 0;
+    const started = Date.now();
+    const slow = await LS.lookupMlsRecords(queries, { fetchImpl: fakeRecoreFor([], { onRequest: () => slowRequests++, respond: async () => { await sleepMs(40); } }), token: 'test-token', cache: new Map(), limits: { totalBudgetMs: 50, maxRequests: 100 } });
+    assert.ok(slowRequests <= 2, `requests started: ${slowRequests}`);
+    assert.equal(slow.ceilingHit, true);
+    assert.ok(Date.now() - started < 400);
+    assert.ok([...slow.byKey.values()].some(v => v === null));
+  });
+
+  await check('Lookup memory: an answer is remembered, so the second analysis for the same addresses asks nothing; it is forgotten after 12 hours and when the memory is full, and "could not be checked" is never remembered', async () => {
+    const records = [mrec(1177, 'Alder', { suffix: 'Avenue' })];
+    const q = LS.mlsQueryFor(lrow('1177 Alder Ave'));
+    const cache = new Map();
+    let clock = 1000000, requests = 0;
+    const options = { fetchImpl: fakeRecoreFor(records, { onRequest: () => requests++ }), token: 'test-token', cache, now: () => clock };
+    const first = await LS.lookupMlsRecords([q], options);
+    assert.equal(requests, 1);
+    assert.equal(first.cacheHits, 0);
+    const second = await LS.lookupMlsRecords([q], options);
+    assert.equal(requests, 1, 'no new request');
+    assert.equal(second.cacheHits, 1);
+    assert.equal(second.requests, 0);
+    assert.deepEqual(second.byKey.get(q.key), records);
+    clock += 11 * 3600 * 1000;
+    await LS.lookupMlsRecords([q], options);
+    assert.equal(requests, 1, 'still remembered after 11 hours');
+    clock += 2 * 3600 * 1000;
+    await LS.lookupMlsRecords([q], options);
+    assert.equal(requests, 2, 'forgotten after 12 hours');
+    const q2 = LS.mlsQueryFor(lrow('2 Memory Ave')), q3 = LS.mlsQueryFor(lrow('3 Memory Ave'));
+    const small = new Map();
+    await LS.lookupMlsRecords([q, q2, q3], { ...options, cache: small, limits: { maxCacheEntries: 2 } });
+    assert.equal(small.size, 2, 'the memory never holds more than its limit');
+    const failedCache = new Map();
+    await LS.lookupMlsRecords([q], { fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }), token: 'test-token', cache: failedCache });
+    assert.equal(failedCache.size, 0);
+    LS.clearMlsTypeCache();
+  });
+
+  console.log('--- Rincon lease types: building the comps (what is asked, what falls back, what is said) ---');
+
+  await check('buildLeadSimpleComps(): asks about only the leases that could change an answer: not a rent of $0, not a rent that cannot be right, not a lease 2 or more bedrooms off the subject\'s (one off, or no bedroom count, is asked); and nothing at all when the subject has no type', async () => {
+    const rows = [
+      lrow('11 Ask Ave', { bedrooms: 2 }), lrow('12 Ask Ave', { bedrooms: 3 }), lrow('13 Ask Ave', { bedrooms: null }),
+      lrow('14 Ask Ave', { bedrooms: 4 }),                       // 2 off: never counts, not asked
+      lrow('15 Ask Ave', { rent: 0 }),                           // not a comp at all
+      lrow('16 Ask Ave', { rent: 280, sqft: 900 }),              // rent cannot be right: never counts, not asked
+    ];
+    const selected = rows.map(row => ({ row, distanceMiles: 0.5 }));
+    let asked = null;
+    const lookup = async queries => { asked = queries.map(q => q.number); return { byKey: new Map(queries.map(q => [q.key, []])), requests: 1, cacheHits: 0, ceilingHit: false, problem: null }; };
+    const built = await LS.buildLeadSimpleComps(selected, { propertyType: 'condo', bedrooms: 2 }, { lookup, log: null });
+    assert.deepEqual(asked, [11, 12, 13]);
+    assert.equal(built.comps.length, 5, 'the $0 rent is not a comp; the other five are, junk rent included (shown as not used)');
+    assert.equal(built.stats.looked, 3);
+    let called = false;
+    await LS.buildLeadSimpleComps(selected, { bedrooms: 2 }, { lookup: async () => { called = true; return { byKey: new Map() }; }, log: null });
+    assert.equal(called, false, 'a subject with no type: no comp\'s type can leave it out, so nothing is asked');
+    called = false;
+    await LS.buildLeadSimpleComps(selected, { propertyType: 'condo', bedrooms: 2 }, { lookup: null, log: null });
+    assert.equal(called, false);
+  });
+
+  await check('buildLeadSimpleComps(): a lookup that fails, answers for some only, or throws never stops the comps: the unanswered leases keep their LeadSimple type, one "partly worked" warning says so, and an address the MLS simply has no record for is not a failure', async () => {
+    const rows = [lrow('21 Part Ave'), lrow('22 Part Ave'), lrow('23 Part Ave')];
+    const selected = rows.map(row => ({ row, distanceMiles: 0.5 }));
+    const subject = { propertyType: 'condo', bedrooms: 2 };
+    const partial = await LS.buildLeadSimpleComps(selected, subject, { lookup: async queries => ({ byKey: new Map([[queries[0].key, [mrec(21, 'Part')]], [queries[1].key, []], [queries[2].key, null]]), requests: 1, cacheHits: 0, ceilingHit: false, problem: 'it answered with an error (status 500)' }), log: null });
+    assert.deepEqual(partial.comps.map(c => [c.property_type, c.property_type_source]), [['condo', 'mls'], ['single_family', 'label'], ['single_family', 'label']]);
+    assert.equal(partial.partialFailure.length, 1);
+    assert.match(partial.partialFailure[0].message, /^1 of 3 homes could not be checked \(it answered with an error \(status 500\)\); those keep the type LeadSimple gives them$/);
+    const clean = await LS.buildLeadSimpleComps(selected, subject, { lookup: async queries => ({ byKey: new Map(queries.map(q => [q.key, []])), requests: 1, cacheHits: 0, ceilingHit: false, problem: null }), log: null });
+    assert.equal(clean.partialFailure, null, 'no MLS record is an answer, not a failure');
+    const threw = await LS.buildLeadSimpleComps(selected, subject, { lookup: async () => { throw new Error('boom'); }, log: null });
+    assert.equal(threw.comps.length, 3);
+    assert.ok(threw.comps.every(c => c.property_type === 'single_family' && c.property_type_source === 'label'));
+    assert.equal(threw.partialFailure.length, 1);
+    const ceiling = await LS.buildLeadSimpleComps(selected, subject, { lookup: async queries => ({ byKey: new Map(queries.map(q => [q.key, null])), requests: 6, cacheHits: 0, ceilingHit: true, problem: 'the limit for the check was reached' }), log: null });
+    assert.match(ceiling.partialFailure[0].message, /the limit for the check was reached/, 'a ceiling that was hit is reported');
+  });
+
+  await check('buildLeadSimpleComps(): exactly one plain log line per analysis (how many looked up, how many answered, how many fell back, requests and remembered answers) and none when there was nothing to look up', async () => {
+    const selected = [lrow('31 Say Ave'), lrow('32 Say Ave'), lrow('33 Say Ave')].map(row => ({ row, distanceMiles: 0.5 }));
+    const lines = [];
+    await LS.buildLeadSimpleComps(selected, { propertyType: 'condo', bedrooms: 2 }, {
+      lookup: async queries => ({ byKey: new Map([[queries[0].key, [mrec(31, 'Say')]], [queries[1].key, []], [queries[2].key, null]]), requests: 1, cacheHits: 2, ceilingHit: false, problem: 'it could not be reached' }),
+      log: msg => lines.push(msg),
+    });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^\[rental-analysis\] LeadSimple Move-Ins: looked up the real property type of 3 Rincon leases in the MLS: 1 answered, 1 had no clear MLS record, 1 could not be checked \(it could not be reached\)\. Any that were not answered keep the type LeadSimple gives them\. 1 MLS request\(s\), 2 answer\(s\) remembered from earlier\.$/);
+    const none = [];
+    await LS.buildLeadSimpleComps([], { propertyType: 'condo', bedrooms: 2 }, { lookup: async () => ({ byKey: new Map() }), log: msg => none.push(msg) });
+    assert.deepEqual(none, []);
+  });
+
+  await check('pullLeadSimpleComps(): with the subject\'s type known it asks the MLS once for the leases it found, types them, and reports a failed MLS as a "partly worked" warning without losing a comp; the Supabase read is still a single GET', async () => {
+    LS.clearMlsTypeCache();
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    const lsRows = [lrow('41 Pull Ave'), lrow('42 Pull Ave', { property_type: 'Multi-Family' })];
+    const seen = [];
+    let mlsMode = 'ok';
+    global.fetch = async (url, opts = {}) => {
+      const u = String(url);
+      seen.push({ u, method: opts.method || 'GET' });
+      if (u.includes('/rest/v1/leadsimple_new_leases')) return okJson(lsRows);
+      if (u.includes('recore.net')) return mlsMode === 'ok' ? fakeRecoreFor([mrec(41, 'Pull', { subtype: 'Condominium' }), mrec(42, 'Pull', { subtype: 'Duplex' })])(url, opts) : { ok: false, status: 500, json: async () => ({}) };
+      throw new Error(`unexpected request: ${u.slice(0, 60)}`);
+    };
+    try {
+      const ok = await withCapturedWarnings(async () => pullLeadSimpleComps({ address: '1 Subject St, Testville, CA 93003', propertyType: 'condo', bedrooms: 2 }));
+      assert.deepEqual(ok.comps.map(c => [c.property_type, c.property_type_source]), [['condo', 'mls'], ['duplex', 'mls']], 'a Multi-Family lease the MLS calls a duplex is a duplex');
+      assert.equal(ok.partialFailure, undefined);
+      assert.equal(seen.filter(s => s.u.includes('/rest/v1/')).length, 1);
+      assert.ok(seen.every(s => s.method === 'GET'), 'nothing is written anywhere');
+      LS.clearMlsTypeCache();
+      mlsMode = 'down';
+      const down = await pullLeadSimpleComps({ address: '1 Subject St, Testville, CA 93003', propertyType: 'condo', bedrooms: 2 });
+      assert.equal(down.comps.length, 2, 'the comps are all still there');
+      assert.deepEqual(down.comps.map(c => c.property_type), ['single_family', 'apartment'], 'LeadSimple\'s label, and the Multi-Family rule, which needs no MLS');
+      assert.equal(down.partialFailure.length, 1);
+      assert.match(down.partialFailure[0].what, /type against the MLS/);
+    } finally {
+      global.fetch = originalFetch;
+      if (originalToken === undefined) delete process.env.RECORE_SERVER_TOKEN; else process.env.RECORE_SERVER_TOKEN = originalToken;
+      LS.clearMlsTypeCache();
+    }
+  });
+
+  await check('A failed MLS check is only a warning to the source loop: with comps present the analysis carries on (a plain note on the screen), and runActiveSources() still collects the comps', async () => {
+    LS.clearMlsTypeCache();
+    const originalFetch = global.fetch;
+    const originalToken = process.env.RECORE_SERVER_TOKEN;
+    process.env.RECORE_SERVER_TOKEN = 'test-token';
+    global.fetch = async url => {
+      const u = String(url);
+      if (u.includes('/rest/v1/leadsimple_new_leases')) return okJson([lrow('51 Loop Ave')]);
+      if (u.includes('recore.net')) return { ok: false, status: 502, json: async () => ({}) };
+      throw new Error('unexpected');
+    };
+    try {
+      const result = await withCapturedWarnings(async () => runActiveSources([{ id: 'ls', name: 'LeadSimple Move-Ins' }], { address: '1 Subject St, Testville, CA 93003', propertyType: 'condo', bedrooms: 2 }));
+      assert.equal(result.comps.length, 1);
+      assert.deepEqual(result.sourceErrors, []);
+      assert.equal(result.sourceWarnings.length, 1);
+      assert.equal(result.sourceWarnings[0].name, 'LeadSimple Move-Ins');
+      const { classifySourceResult, buildSourceNotes } = require('./lib/outcome');
+      assert.equal(classifySourceResult({ comps: result.comps, sourcesUsed: result.sourcesUsed, sourceErrors: result.sourceErrors, sourceWarnings: result.sourceWarnings }).kind, 'has_comps');
+      assert.deepEqual(buildSourceNotes({ sourceErrors: result.sourceErrors, sourceWarnings: result.sourceWarnings }), ["Rincon's own signed leases could not all be checked against the MLS (house, condo or townhouse) when this report ran, so some are counted under the type LeadSimple gives them, which is sometimes wrong. Run it again to redo that check."]);
+    } finally {
+      global.fetch = originalFetch;
+      if (originalToken === undefined) delete process.env.RECORE_SERVER_TOKEN; else process.env.RECORE_SERVER_TOKEN = originalToken;
+      LS.clearMlsTypeCache();
+    }
+  });
+
+  console.log('--- Rincon lease types: through the real counting rules ---');
+
+  const countsFor = (comps, subject, extras) => comps.map(c => exclusionReason(c, subject.bedrooms, subject.propertyType, extras));
+
+  await check('Through the real weighting: a Rincon lease the MLS shows to be a condo COUNTS for a condo subject and is left out ("property_type_mismatch") for a house or townhouse subject; "other" counts for no house, condo or townhouse subject; an unknown type still never excludes', async () => {
+    const built = async (records, over = {}) => (await LS.buildLeadSimpleComps([{ row: lrow('61 Count Ave', over), distanceMiles: 0.2 }], { propertyType: 'condo', bedrooms: 2 }, { lookup: liveLookupOver(records), log: null })).comps[0];
+    const condo = await built([mrec(61, 'Count')]);
+    assert.equal(condo.property_type, 'condo');
+    assert.equal(exclusionReason(condo, 2, 'condo'), null);
+    assert.equal(exclusionReason(condo, 2, 'single_family'), 'property_type_mismatch');
+    assert.equal(exclusionReason(condo, 2, 'townhouse'), 'property_type_mismatch');
+    const other = await built([mrec(61, 'Count'), mrec(61, 'Count', { subtype: 'Townhouse' })]);
+    assert.equal(other.property_type, 'other');
+    for (const subjectType of ['single_family', 'condo', 'townhouse']) assert.equal(exclusionReason(other, 2, subjectType), 'property_type_mismatch', subjectType);
+    assert.equal(exclusionReason(other, 2, 'other'), null);
+    // unknown never excludes, anywhere in the tool
+    assert.equal(exclusionReason({ property_type: null, bedrooms: 2, monthly_rent: 2400 }, 2, 'condo'), null);
+    assert.equal(propertyTypeMultiplier(null, 'single_family'), 1);
+    assert.equal(propertyTypeMultiplier('condo', null), 1);
+    const unknownLabel = (await LS.buildLeadSimpleComps([{ row: lrow('62 Count Ave', { property_type: 'Student' }), distanceMiles: 0.2 }], { propertyType: 'condo', bedrooms: 2 }, { lookup: null, log: null })).comps[0];
+    assert.equal(unknownLabel.property_type, null);
+    assert.equal(exclusionReason(unknownLabel, 2, 'condo'), null, 'a label LeadSimple gives that we do not understand is still "unknown", which still counts');
+  });
+
+  await check('Saratoga-shaped case end to end: a 2-bedroom condo subject with 8 nearby Rincon "Single Home" leases. Before the fix none counts; after it the three the MLS shows to be condos count, the townhouse and the condo/townhouse mix do not, and the three with no MLS record stay houses and do not', async () => {
+    const leases = [
+      lrow('1177 Alder Ave', { rent: 2400, sqft: 882 }), lrow('5232 Birch St', { rent: 2495, sqft: 903 }), lrow('4975 Cedar St', { rent: 3250, sqft: 1297 }),
+      lrow('5605 Dune St', { rent: 2800, sqft: 1100 }), lrow('1363 Elm Ct', { rent: 2600, sqft: 1000 }),
+      lrow('1267 Fir Way', { rent: 2300, sqft: 882 }), lrow('1222 Gum Rd', { rent: 2300, sqft: 882 }), lrow('943 Holly St', { rent: 2500, sqft: 900 }),
+    ];
+    const records = [
+      mrec(1177, 'Alder'), mrec(5232, 'Birch', { suffix: 'St' }), mrec(5232, 'Birch', { suffix: 'St' }), mrec(4975, 'Cedar', { suffix: 'St' }),
+      mrec(5605, 'Dune', { suffix: 'St', subtype: 'Townhouse' }), mrec(5605, 'Dune', { suffix: 'St', subtype: 'Townhouse' }),
+      mrec(1363, 'Elm', { suffix: 'Ct' }), mrec(1363, 'Elm', { suffix: 'Ct' }), mrec(1363, 'Elm', { suffix: 'Ct', subtype: 'Townhouse' }),
+    ];
+    const selected = leases.map((row, i) => ({ row, distanceMiles: 0.15 + i * 0.05 }));
+    const subject = { propertyType: 'condo', bedrooms: 2, sqft: 900 };
+    const before = (await LS.buildLeadSimpleComps(selected, subject, { lookup: null, log: null })).comps;
+    const after = (await LS.buildLeadSimpleComps(selected, subject, { lookup: liveLookupOver(records), log: null })).comps;
+    const extras = { sqft: 900 };
+    assert.deepEqual(countsFor(before, subject, extras), Array(8).fill('property_type_mismatch'), 'today: all 8 are "houses" and are left out of a condo report');
+    assert.deepEqual(countsFor(after, subject, extras), [null, null, 'size_sqft', 'property_type_mismatch', 'property_type_mismatch', 'property_type_mismatch', 'property_type_mismatch', 'property_type_mismatch']);
+    assert.deepEqual(after.map(c => c.property_type), ['condo', 'condo', 'condo', 'townhouse', 'other', 'single_family', 'single_family', 'single_family']);
+    const noSize = { propertyType: 'condo', bedrooms: 2 };
+    const afterNoSize = (await LS.buildLeadSimpleComps(selected, noSize, { lookup: liveLookupOver(records), log: null })).comps;
+    assert.equal(countsFor(afterNoSize, noSize).filter(r => r === null).length, 3, 'with no size rule, exactly the three confirmed condos count');
+    // the same leases for a HOUSE subject: the three condos are no longer counted as houses
+    const houseSubject = { propertyType: 'single_family', bedrooms: 2 };
+    const beforeHouse = (await LS.buildLeadSimpleComps(selected, houseSubject, { lookup: null, log: null })).comps;
+    const afterHouse = (await LS.buildLeadSimpleComps(selected, houseSubject, { lookup: liveLookupOver(records), log: null })).comps;
+    assert.equal(countsFor(beforeHouse, houseSubject).filter(r => r === null).length, 8);
+    assert.equal(countsFor(afterHouse, houseSubject).filter(r => r === null).length, 3, 'only the three with no MLS record, still treated as houses');
+  });
+
+  await check('Through computeNumbers(): the condo leases move a condo report\'s counted comps and range, and leave a house report counting fewer Rincon comps; every other comp is untouched', async () => {
+    const { computeNumbers } = require('./lib/analyze');
+    const crmlsLeased = rent => ({ address: `${rent} Mls Way, Testville, CA 93003`, property_type: 'condo', bedrooms: 2, sqft: 900, monthly_rent: rent, listing_status: 'leased', is_rincon_managed: false, distance_miles: 0.3, source_name: 'CRMLS', source_id: 'c' });
+    const mlsComps = [2300, 2350, 2450].map(crmlsLeased);
+    const rows = [lrow('1177 Alder Ave', { rent: 2400, sqft: 882 }), lrow('5232 Birch St', { rent: 2495, sqft: 903 }), lrow('4975 Cedar St', { rent: 2520, sqft: 950 }), lrow('1267 Fir Way', { rent: 2200, sqft: 900 })];
+    const records = [mrec(1177, 'Alder'), mrec(5232, 'Birch', { suffix: 'St' }), mrec(4975, 'Cedar', { suffix: 'St' })];
+    const asComps = async (subject, lookup) => (await LS.buildLeadSimpleComps(rows.map(row => ({ row, distanceMiles: 0.2 })), subject, { lookup, log: null })).comps.map(c => ({ ...c, source_name: 'LeadSimple Move-Ins', source_id: 'l' }));
+    const condoSubject = { address: '1 Subject St, Testville, CA 93003', propertyType: 'condo', bedrooms: 2, sqft: 900 };
+    const condoBefore = computeNumbers({ comps: [...mlsComps, ...await asComps(condoSubject, null)], subject: condoSubject });
+    const condoAfter = computeNumbers({ comps: [...mlsComps, ...await asComps(condoSubject, liveLookupOver(records))], subject: condoSubject });
+    assert.equal(condoBefore.counted.total, 3);
+    assert.equal(condoAfter.counted.total, 6, '3 MLS leases + the 3 confirmed condo leases');
+    assert.equal(condoAfter.counted.leased, 6);
+    assert.ok(condoAfter.headline, 'with 6 counted comps a range exists (it needs 4)');
+    assert.equal(condoBefore.headline, null, 'before the fix this condo report had only 3 counted comps and so no range at all');
+    const houseSubject = { address: '1 Subject St, Testville, CA 93003', propertyType: 'single_family', bedrooms: 2, sqft: 900 };
+    const houseComps = (await asComps(houseSubject, null)).map((c, i) => ({ ...c, address: `${i} House Ln, Testville, CA 93003` }));
+    const houseBefore = computeNumbers({ comps: houseComps, subject: houseSubject });
+    const houseAfter = computeNumbers({ comps: (await asComps(houseSubject, liveLookupOver(records))).map((c, i) => ({ ...c, address: `${i} House Ln, Testville, CA 93003` })), subject: houseSubject });
+    assert.equal(houseBefore.counted.total, 4, 'today all four Rincon leases count as houses');
+    assert.equal(houseAfter.counted.total, 1, 'after: only the one with no MLS record is still a house');
+  });
+
+  console.log('--- Rincon lease types: leases whose rent cannot be right ---');
+
+  await check('The rent screen: under $800 or over $12,000 a month, or under $0.80 / over $6.00 a square foot (when the size is known), is a data error; a lease with no size is judged on its rent alone; the limits are the ones the accuracy test uses', () => {
+    const { RINCON_RENT_SCREEN } = require('./lib/constants');
+    assert.deepEqual(RINCON_RENT_SCREEN, { minRent: 800, maxRent: 12000, minRentPerSqft: 0.8, maxRentPerSqft: 6 });
+    const bad = [[99, 1000], [199, 613], [280, 1528], [675, 1416], [993, 1507], [799, null], [12001, 5000], [2895, 100], [3000, 400], [1202, 1996]];
+    for (const [rent, sqft] of bad) assert.equal(LS.rentLooksImplausible(rent, sqft), true, `${rent} / ${sqft}`);
+    const good = [[800, 1000], [800, null], [12000, 5000], [12000, null], [3865, 1850], [2400, 900], [1500, 1875], [4800, 800], [1200, undefined], [1200, 0]];
+    for (const [rent, sqft] of good) assert.equal(LS.rentLooksImplausible(rent, sqft), false, `${rent} / ${sqft}`);
+    assert.equal(LS.rentLooksImplausible(1000, 1250), false, 'exactly $0.80 a square foot is fine');
+    assert.equal(LS.rentLooksImplausible(999, 1250), true);
+    assert.equal(LS.rentLooksImplausible(NaN, 900), true);
+    const K = require('./backtest/constants');
+    for (const k of ['minRent', 'maxRent', 'minRentPerSqft', 'maxRentPerSqft']) assert.equal(K.RINCON[k], RINCON_RENT_SCREEN[k], `the accuracy test's ${k} is the product's`);
+  });
+
+  await check('The accuracy test and the product share one screen: buildRinconTargets() leaves out exactly the leases rentLooksImplausible() marks (counting why), and mapComparable() marks the same leases', () => {
+    const rows = [
+      lrow('71 Shared Ave', { id: 'a', rent: 2400, sqft: 900 }), lrow('72 Shared Ave', { id: 'b', rent: 280, sqft: 1528 }), lrow('73 Shared Ave', { id: 'c', rent: 2895, sqft: 100 }),
+      lrow('74 Shared Ave', { id: 'd', rent: 700, sqft: 900 }), lrow('75 Shared Ave', { id: 'e', rent: 3100, sqft: 1500 }),
+    ].map(r => ({ ...r, lease_start_date: '2026-09-01' }));
+    const { targets, screenedOut } = btA.targets.buildRinconTargets(rows, { today: '2026-10-17' });
+    assert.deepEqual(targets.map(t => t.key), ['a', 'e']);
+    assert.equal(screenedOut.rentOutOfRange, 2, '$280 and $700');
+    assert.equal(screenedOut.rentPerSqftOutOfRange, 1, '$2,895 for 100 sq ft');
+    for (const r of rows) assert.equal(LS.mapComparable(r).implausible_rent, LS.rentLooksImplausible(r.rent, r.sqft), r.id);
+  });
+
+  await check('A lease with a rent that cannot be right is still a comp (shown as "not used", reason "implausible_rent", ahead of a type or size reason) but counts in no range, no radius stop and no duplicate choice; ordinary comps carry no mark and are unaffected', () => {
+    const junk = LS.mapComparable(lrow('81 Junk Ave', { rent: 280, sqft: 1528, bedrooms: 3 }), 0.2);
+    assert.equal(junk.implausible_rent, true);
+    assert.equal(junk.monthly_rent, 280);
+    assert.equal(exclusionReason(junk, 3, 'single_family'), 'implausible_rent');
+    assert.equal(exclusionReason(junk, 3, 'condo'), 'implausible_rent', 'the more basic problem is the one reported');
+    assert.equal(exclusionReason({ ...junk, is_rincon_managed: true, source_name: 'CRMLS' }, 3, 'single_family'), 'rincon_managed', 'a Rincon-managed copy from another source is still reported first');
+    const fine = [3000, 3100, 3200, 3300].map((rent, i) => ({ ...LS.mapComparable(lrow(`${90 + i} Fine Ave`, { rent, sqft: 1500, bedrooms: 3 }), 0.2), source_name: 'LeadSimple Move-Ins', is_rincon_managed: true }));
+    const withJunk = [...fine, { ...junk, source_name: 'LeadSimple Move-Ins', is_rincon_managed: true }];
+    assert.deepEqual(computeRecommendedRange(withJunk, 3, 'single_family'), computeRecommendedRange(fine, 3, 'single_family'), 'the junk rent does not pull the range down');
+    assert.deepEqual(computeRawRange(withJunk, 3, 'single_family'), computeRawRange(fine, 3, 'single_family'));
+    assert.equal(computeRawRange(withJunk, 3, 'single_family').low, 3000, 'the lowest counted rent is a real one, not $280');
+    assert.equal(computeRecommendedRange(withJunk, 3, 'single_family', { sqft: 1500 }).low, computeRecommendedRange(fine, 3, 'single_family', { sqft: 1500 }).low);
+    // the radius search does not count it as a genuine comp
+    const ladder = chooseRadiusRung(withJunk.map(c => ({ ...c, distance_miles: 0.3 })), { bedrooms: 3, propertyType: 'single_family' });
+    assert.equal(ladder.genuineCount, 4);
+    // a copy of the same home that counts beats the junk-rent copy in a duplicate choice
+    const twin = { ...fine[0], address: junk.address, monthly_rent: 3150, source_name: 'CRMLS', is_rincon_managed: false, listing_status: 'off_market', implausible_rent: undefined };
+    const kept = dedupeComps([{ ...junk, source_name: 'LeadSimple Move-Ins' }, twin], 3, 'single_family');
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].monthly_rent, 3150, 'the copy that can count is kept even though the junk one has the higher status weight');
+    // nothing built by hand elsewhere carries the mark
+    assert.equal(exclusionReason({ property_type: 'single_family', bedrooms: 3, monthly_rent: 280, listing_status: 'leased' }, 3, 'single_family'), null);
+  });
+
+  await check('The screened-out lease is saved with its real facts, the mark is not a database column, and it is described to the writer as not counted (never as a real $280 rent)', () => {
+    const { buildCompRow, COMP_ROW_COLUMNS } = require('./lib/comp-rows');
+    const junk = { ...LS.mapComparable(lrow('82 Junk Ave', { rent: 280, sqft: 1528, bedrooms: 3 }), 0.2, 'condo', 'mls'), source_id: 's1' };
+    const row = buildCompRow(junk, { analysisId: 'an-1' });
+    assert.deepEqual(Object.keys(row), COMP_ROW_COLUMNS);
+    assert.equal(row.monthly_rent, 280);
+    assert.equal(row.property_type, 'condo');
+    assert.ok(!('implausible_rent' in row) && !('property_type_source' in row));
+    const text = describeComp({ ...junk, exclusion_reason: 'implausible_rent' }, 0);
+    assert.match(text, /looks like a data entry mistake[^|]*NOT COUNTED in the range/);
+    assert.doesNotMatch(text, /implausible_rent/);
+    assert.ok(require('./lib/constants').PROPERTY_TYPES.includes(row.property_type));
+  });
+
+  await check('The writer is told a screened-out lease is NOT COUNTED and why in plain words, and the counts line names the reason as "rent or size looks like a data error", never the code', () => {
+    const comps = [
+      { address: '1 A St', monthly_rent: 280, listing_status: 'leased', property_type: 'single_family', bedrooms: 3, exclusion_reason: 'implausible_rent' },
+      { address: '2 B St', monthly_rent: 3100, listing_status: 'leased', property_type: 'single_family', bedrooms: 3, exclusion_reason: null },
+    ];
+    const facts = compFactsBlock(comps);
+    assert.match(facts, /NOT COUNTED by reason: rent or size looks like a data error 1\./);
+    assert.doesNotMatch(facts, /implausible_rent/);
+  });
+
+  console.log('--- Rincon lease types: "Multi-Family" leases ---');
+
+  await check('A Multi-Family lease is no longer an unknown type that counts for every subject: it is an apartment unless the MLS clearly names another type (duplex, condo ...); an MLS answer of "single family house" is a conflict with the label and does not make it a house', async () => {
+    assert.equal(LS.labelType({ property_type: 'Multi-Family' }), 'apartment');
+    assert.equal(LS.labelType({ property_type: 'Multi-Family 2-4 units' }), 'apartment');
+    assert.equal(LS.labelType({ property_type: 'Single Home' }), 'single_family');
+    assert.equal(LS.labelType({ property_type: null }), null);
+    const mf = over => lrow('101 Multi Ave', { property_type: 'Multi-Family', bedrooms: 3, sqft: 1728, rent: 4085, ...over });
+    assert.deepEqual(LS.resolveLeaseType(mf(), []), { type: 'apartment', source: 'label' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), null), { type: 'apartment', source: 'label' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Single Family Residence' })]), { type: 'apartment', source: 'label' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Duplex' })]), { type: 'duplex', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Quadruplex' })]), { type: 'fourplex', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Condominium' })]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Condominium' }), mrec(101, 'Multi', { subtype: 'Townhouse' })]), { type: 'other', source: 'mls' });
+    assert.deepEqual(LS.resolveLeaseType(mf(), [mrec(101, 'Multi', { subtype: 'Duplex' }), mrec(101, 'Multi', { subtype: 'Single Family Residence' })]), { type: 'apartment', source: 'label' }, 'mixed answers: the label\'s fallback');
+    assert.deepEqual(LS.resolveLeaseType(mf({ address: '101 Multi Ave #2' }), []), { type: 'apartment', source: 'label' }, 'a unit number changes nothing for a lease already known to be in a multi-unit building');
+  });
+
+  await check('Multi-Family leases through the real rules: never counted for a house, condo or townhouse subject (the Oct 1 Saratoga case: a 3-bedroom house-sized lease at $4,085 counted for a 2-bedroom condo); counted for an apartment subject; a duplex subject follows the ordinary exact-type rule', async () => {
+    const mfComps = (await LS.buildLeadSimpleComps([
+      { row: lrow('111 Multi Ave', { property_type: 'Multi-Family', bedrooms: 3, sqft: 1728, rent: 4085 }), distanceMiles: 0.3 },
+      { row: lrow('112 Multi Ave', { property_type: 'Multi-Family', bedrooms: 2, sqft: 800, rent: 2300 }), distanceMiles: 0.4 },
+    ], { propertyType: 'condo', bedrooms: 2 }, { lookup: null, log: null })).comps;
+    assert.deepEqual(mfComps.map(c => c.property_type), ['apartment', 'apartment']);
+    for (const subjectType of ['single_family', 'condo', 'townhouse', 'duplex', 'triplex', 'fourplex']) {
+      assert.deepEqual(mfComps.map(c => exclusionReason(c, 2, subjectType)), ['property_type_mismatch', 'property_type_mismatch'], subjectType);
+    }
+    assert.deepEqual(mfComps.map(c => exclusionReason(c, 2, 'apartment')), [null, null], 'an apartment subject counts both (the 3-bedroom one at half weight, being one bedroom off)');
+    // before this change they counted for the condo subject
+    const before = { ...mfComps[1], property_type: null };
+    assert.equal(exclusionReason(before, 2, 'condo'), null, 'the old behavior: an unknown type counted for everything');
+  });
+
+  console.log('--- Rincon lease types: the accuracy test uses the same code ---');
+
+  const rinconMlsLib = require('./backtest/rincon-mls');
+
+  await check('The replay\'s Rincon pool is built by the product\'s own buildLeadSimpleComps(), with the SAVED MLS evidence standing in for the live lookup: condos come out as condos, a lease with no saved entry keeps its label, and a world with no evidence at all types everything by label', async () => {
+    const leases = [lrow('121 Replay Ave', { id: 'a', lease_start_date: '2026-06-01', closed_at: '2026-06-05' }), lrow('122 Replay Ave', { id: 'b', lease_start_date: '2026-06-01', closed_at: '2026-06-05' }), lrow('123 Replay Ave', { id: 'c', lease_start_date: '2026-06-01', closed_at: '2026-06-05', rent: 250 })];
+    const evidence = { schema: 1, entries: { [LS.mlsQueryFor(leases[0]).key]: { at: '2026-10-17', records: [mrec(121, 'Replay')] } } };
+    const subject = { address: '500 Target Street, Testville, CA 93003', propertyType: 'condo', bedrooms: 2, bathrooms: 1, latitude: 34.2, longitude: -119.2 };
+    const run = async world => {
+      btA.asof.setContext({ T: '2026-10-01', target: { address: subject.address, key: 'x' }, pool: { rinconMonths: 24 }, method: null, subjectFacts: {} });
+      try { return (await btA.asof.leadsimpleHandler(world)(subject)).comps; } finally { btA.asof.clearContext(); }
+    };
+    const withEvidence = await run(btA.asof.createWorld({ closed: [], leadsimple: leases, rinconMls: evidence }));
+    assert.deepEqual(withEvidence.map(c => [c.address.split(',')[0], c.property_type, c.property_type_source, c.implausible_rent]), [['121 Replay Ave', 'condo', 'mls', false], ['122 Replay Ave', 'single_family', 'label', false], ['123 Replay Ave', 'single_family', 'label', true]]);
+    const noEvidence = await run(btA.asof.createWorld({ closed: [], leadsimple: leases }));
+    assert.deepEqual(noEvidence.map(c => c.property_type), ['single_family', 'single_family', 'single_family']);
+    assert.deepEqual(noEvidence, (await LS.buildLeadSimpleComps(withEvidence.map((c, i) => ({ row: leases[i], distanceMiles: c.distance_miles })), subject, { lookup: null, log: null })).comps, 'identical to the product\'s builder with no lookup');
+    assert.deepEqual(withEvidence, (await LS.buildLeadSimpleComps(withEvidence.map((c, i) => ({ row: leases[i], distanceMiles: c.distance_miles })), subject, { lookup: rinconMlsLib.evidenceLookup(evidence), log: null })).comps, 'identical to the product\'s builder with the saved evidence');
+  });
+
+  await check('Saved evidence = live lookup: the product\'s live lookup, run against a pretend Recore that serves the saved evidence, gives the same comps as the saved-evidence path (the same proof backtest/phase-b-equivalence.js runs on the real data)', async () => {
+    const leases = [lrow('131 Same Ave', { id: 'a' }), lrow('132 Same Ave', { id: 'b' }), lrow('133 Same Ave #4', { id: 'c' }), lrow('134 Same Ave', { id: 'd', property_type: 'Multi-Family' })];
+    const records = [mrec(131, 'Same'), mrec(132, 'Same', { subtype: 'Single Family Residence' }), mrec(133, 'Same', { unit: '4', subtype: 'Townhouse' }), mrec(134, 'Same', { subtype: 'Duplex' })];
+    const pulled = await rinconMlsLib.pullRinconMls({ client: { async get(params) { return fakeRecoreFor(records)(`${require('./lib/crmls').CRMLS_BASE_URL}?${new URLSearchParams(params).toString()}`).then(r => r.json()); } }, rows: leases, now: new Date('2026-10-17T12:00:00Z') });
+    const selected = leases.map(row => ({ row, distanceMiles: 0.4 }));
+    for (const subject of [{ propertyType: 'condo', bedrooms: 2 }, { propertyType: 'single_family', bedrooms: 2 }]) {
+      const live = await LS.buildLeadSimpleComps(selected, subject, { lookup: liveLookupOver(records), log: null });
+      const saved = await LS.buildLeadSimpleComps(selected, subject, { lookup: rinconMlsLib.evidenceLookup(pulled.evidence), log: null });
+      assert.deepEqual(saved.comps, live.comps);
+      assert.deepEqual(live.comps.map(c => c.property_type), ['condo', 'single_family', 'townhouse', 'duplex']);
+    }
+  });
+
+  await check('pullRinconMls(): asks in batches of 20, skips addresses that cannot be searched, reuses answers under two weeks old (no request for them) and re-asks older ones, splits a batch that is too big, and saves only street, zip, unit and the MLS kind of home', async () => {
+    const leases = many(45, i => lrow(`${300 + i} Pull${i}x Ave`, { id: `p${i}` }));
+    leases.push(lrow('77-79 Odd St', { id: 'odd' }));
+    const records = leases.slice(0, 45).map((r, i) => mrec(300 + i, `Pull${i}x`, { subtype: 'Townhouse' }));
+    const calls = [];
+    const client = { async get(params) { calls.push(params); return fakeRecoreFor(records)(`${require('./lib/crmls').CRMLS_BASE_URL}?${new URLSearchParams(params).toString()}`).then(r => r.json()); } };
+    const first = await rinconMlsLib.pullRinconMls({ client, rows: leases, now: new Date('2026-10-17T12:00:00Z') });
+    assert.equal(calls.length, 3);
+    assert.equal(first.asked, 45);
+    assert.equal(first.skipped, 1);
+    assert.equal(Object.keys(first.evidence.entries).length, 45);
+    assert.deepEqual(Object.keys(Object.values(first.evidence.entries)[0].records[0]).sort(), ['dirPrefix', 'dirSuffix', 'number', 'street', 'subtype', 'suffix', 'unit', 'zip']);
+    const text = JSON.stringify(first.evidence);
+    assert.ok(!/rent|lease_start|closed_at|ListingKey/i.test(text), 'no rents, dates or listing keys in the saved file');
+    calls.length = 0;
+    const second = await rinconMlsLib.pullRinconMls({ client, rows: leases, existing: first.evidence, now: new Date('2026-10-25T12:00:00Z') });
+    assert.equal(calls.length, 0, 'answers 8 days old are reused');
+    assert.equal(second.reused, 45);
+    const third = await rinconMlsLib.pullRinconMls({ client, rows: leases, existing: first.evidence, now: new Date('2026-11-05T12:00:00Z') });
+    assert.equal(calls.length, 3, 'answers 19 days old are asked for again');
+    assert.equal(third.reused, 0);
+    // a batch whose pages never end is split in two, and an address that alone never ends gets no entry (it keeps its label)
+    const crowded = many(1100, i => mrec(5, 'Crowded', { unit: String(i) }));
+    const crowdedRows = [lrow('5 Crowded Ave', { id: 'big' }), lrow('6 Calm Ave', { id: 'calm' })];
+    const calmRecords = [...crowded, mrec(6, 'Calm')];
+    const crowdedCalls = [];
+    const crowdedPull = await rinconMlsLib.pullRinconMls({ client: { async get(params) { crowdedCalls.push(params); return fakeRecoreFor(calmRecords)(`${require('./lib/crmls').CRMLS_BASE_URL}?${new URLSearchParams(params).toString()}`).then(r => r.json()); } }, rows: crowdedRows, now: new Date('2026-10-17T12:00:00Z') });
+    const crowdedKeys = Object.keys(crowdedPull.evidence.entries);
+    assert.deepEqual(crowdedKeys, [LS.mlsQueryFor(crowdedRows[1]).key], 'the calm address is answered, the one with a thousand records is not');
+    assert.ok(crowdedCalls.length >= 7, 'the big batch was read page by page, then split');
+  });
+
+  await check('Evidence helpers: an address with no saved entry is "could not be checked" (so the lease keeps its label), coverage counts the searchable leases with an entry and the oldest answer, and a damaged file is recognized', () => {
+    const rows = [lrow('141 Cover Ave'), lrow('142 Cover Ave'), lrow('77-79 Odd St')];
+    const evidence = { schema: 1, entries: { [LS.mlsQueryFor(rows[0]).key]: { at: '2026-10-10', records: [mrec(141, 'Cover')] } } };
+    const cov = rinconMlsLib.coverageOf(evidence, rows);
+    assert.deepEqual(cov, { total: 2, covered: 1, uncovered: 1, oldest: '2026-10-10', newest: '2026-10-10' });
+    assert.deepEqual(rinconMlsLib.resolverFor(evidence)(rows[0]), { type: 'condo', source: 'mls' });
+    assert.deepEqual(rinconMlsLib.resolverFor(evidence)(rows[1]), { type: 'single_family', source: 'label' });
+    assert.deepEqual(rinconMlsLib.resolverFor(null)(rows[0]), { type: 'single_family', source: 'label' });
+    assert.equal(rinconMlsLib.looksLikeEvidence(evidence), true);
+    for (const bad of [null, [], {}, { schema: 2, entries: {} }, { schema: 1, entries: [] }, 'x']) assert.equal(rinconMlsLib.looksLikeEvidence(bad), false);
+  });
+
+  await check('Rincon test targets are typed the way the product types them: a lease the MLS shows to be a condo is a condo target, a townhouse a townhouse target; one that is not a house, condo or townhouse (a mix, a duplex) is left out and counted as "typeNotTested"; without evidence every target is a single-family home as before', () => {
+    const rows = [lrow('151 Target Ave', { id: 'a' }), lrow('152 Target Ave', { id: 'b' }), lrow('153 Target Ave', { id: 'c' }), lrow('154 Target Ave', { id: 'd' }), lrow('155 Target Ave', { id: 'e' })].map(r => ({ ...r, lease_start_date: '2026-09-01' }));
+    const records = [mrec(151, 'Target'), mrec(152, 'Target', { subtype: 'Townhouse' }), mrec(153, 'Target'), mrec(153, 'Target', { subtype: 'Townhouse' }), mrec(154, 'Target', { subtype: 'Duplex' })];
+    const evidence = { schema: 1, entries: Object.fromEntries(rows.map((r, i) => { const q = LS.mlsQueryFor(r); return [q.key, { at: '2026-10-17', records: records.filter(rec => rec.number === q.number) }]; })) };
+    const typed = btA.targets.buildRinconTargets(rows, { today: '2026-10-17', resolveType: rinconMlsLib.resolverFor(evidence) });
+    assert.deepEqual(typed.targets.map(t => [t.key, t.propertyType, t.typeSource]), [['a', 'condo', 'mls'], ['b', 'townhouse', 'mls'], ['e', 'single_family', 'label']]);
+    assert.equal(typed.screenedOut.typeNotTested, 2, 'the condo/townhouse mix and the duplex');
+    const plain = btA.targets.buildRinconTargets(rows, { today: '2026-10-17' });
+    assert.deepEqual(plain.targets.map(t => t.propertyType), ['single_family', 'single_family', 'single_family', 'single_family', 'single_family']);
+    assert.equal(plain.screenedOut.typeNotTested, 0);
+  });
+
+  await check('Trust: the scorecard is not trusted without the saved MLS answers about Rincon lease types, with more than 2% of the searchable leases missing from them, or with answers older than 45 days; a few missing leases are allowed', () => {
+    const good = btA.report.buildScorecard(fakeResults());
+    assert.equal(good.trusted, true);
+    const missing = fakeResults(); missing.rinconTypes = { present: false, total: 0, covered: 0, uncovered: 0, oldest: null, newest: null, typedByMls: 0, targetsByType: {} };
+    const scMissing = btA.report.buildScorecard(missing);
+    assert.equal(scMissing.trusted, false);
+    assert.match(scMissing.trustReasons.join(' '), /saved MLS answers about what kind of home each Rincon lease is are missing/);
+    const gone = fakeResults(); delete gone.rinconTypes;
+    assert.equal(btA.report.buildScorecard(gone).trusted, false, 'a run that does not even say is not trusted');
+    const holes = fakeResults(); holes.rinconTypes = { ...holes.rinconTypes, covered: 240, uncovered: 10 };
+    assert.match(btA.report.buildScorecard(holes).trustReasons.join(' '), /10 of 250 searchable Rincon lease addresses have no saved MLS answer/);
+    const few = fakeResults(); few.rinconTypes = { ...few.rinconTypes, covered: 247, uncovered: 3 };
+    assert.equal(btA.report.buildScorecard(few).trusted, true, '3 of 250 is under 2%');
+    const old = fakeResults(); old.rinconTypes = { ...old.rinconTypes, oldest: '2026-08-01' };
+    assert.match(btA.report.buildScorecard(old).trustReasons.join(' '), /older than 45 days \(oldest 2026-08-01\)/);
+    assert.ok(!JSON.stringify(good).includes('"rinconTypes"'), 'the published scorecard carries no per-type counts');
+  });
+
+  await check('Saved data: the MLS evidence is optional to read (an older saved folder loads, with no evidence), a damaged one is refused with the fix named, and the code hash that ties the fidelity check to the code now covers the new replay file', () => {
+    const fs = require('fs'), path = require('path'), os = require('os');
+    const data = require('./backtest/data');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rincon-types-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'closed.json'), JSON.stringify([{ ListingKey: 'k1', CloseDate: '2026-09-01' }]));
+      for (const f of ['active', 'leadsimple', 'properties', 'analyses']) fs.writeFileSync(path.join(dir, `${f}.json`), '[]');
+      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ pulledAt: '2026-10-17T00:00:00Z' }));
+      assert.equal(data.loadCache(dir).rinconMls, null);
+      fs.writeFileSync(path.join(dir, 'rincon-mls.json'), JSON.stringify({ schema: 1, entries: {} }));
+      assert.deepEqual(data.loadCache(dir).rinconMls, { schema: 1, entries: {} });
+      fs.writeFileSync(path.join(dir, 'rincon-mls.json'), '{ not json');
+      assert.throws(() => data.loadCache(dir), err => err.code === 'BAD_CACHE' && /rincon-mls\.json is damaged .* --refresh-types/.test(err.message));
+      fs.writeFileSync(path.join(dir, 'rincon-mls.json'), JSON.stringify([1, 2]));
+      assert.throws(() => data.loadCache(dir), err => err.code === 'BAD_CACHE');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    const { TRACKED_FILES } = require('./backtest/provenance');
+    assert.ok(TRACKED_FILES.includes('backtest/rincon-mls.js') && TRACKED_FILES.includes('lib/leadsimple.js') && TRACKED_FILES.includes('lib/weighting.js'));
+    const { parseArgs } = require('./backtest/cli');
+    assert.ok(parseArgs(['--refresh-types']).flags.has('refresh-types'));
+  });
+
+  console.log('--- Rincon lease types: hardening, the cap wording, the screen note, the method version ---');
+
+  await check('Hardening: words from outside (a label or an MLS kind of "constructor", "toString", "__proto__", "hasOwnProperty") never find one of JavaScript\'s own built-in properties and become a function or object type; the type that comes out is always one of the nine allowed words or unknown', () => {
+    const { PROPERTY_TYPES } = require('./lib/constants');
+    const nasty = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf', 'prototype'];
+    for (const word of nasty) {
+      assert.equal(LS.labelType({ property_type: word }), null, `label ${word}`);
+      assert.equal(LS.labelType({ property_type: { toString: () => 'Single Home' } }), null, 'an object is never a label');
+      assert.deepEqual(LS.classifyRinconLease(lrow('1 Safe Ave', { property_type: word }), null), { type: null, source: 'label' }, `label ${word}`);
+      // an MLS kind with that name is a kind the tool does not know: it says nothing, it is ignored
+      assert.deepEqual(LS.resolveLeaseType(lrow('2 Safe Ave'), [mrec(2, 'Safe', { subtype: word })]), { type: 'single_family', source: 'label' }, `MLS kind ${word}`);
+      assert.deepEqual(LS.resolveLeaseType(lrow('3 Safe Ave'), [mrec(3, 'Safe', { subtype: word }), mrec(3, 'Safe', { subtype: 'Condominium' })]), { type: 'condo', source: 'mls' }, `MLS kind ${word} beside a real one`);
+      assert.deepEqual(LS.resolveLeaseType(lrow('4 Safe Ave #5'), [mrec(4, 'Safe', { subtype: word, unit: '5' })]), { type: 'other', source: 'unit_number' }, `MLS kind ${word} with a unit number`);
+      assert.deepEqual(LS.resolveLeaseType(lrow('5 Safe Ave', { property_type: 'Multi-Family' }), [mrec(5, 'Safe', { subtype: word })]), { type: 'apartment', source: 'label' });
+    }
+    for (const odd of [{ __proto__: null }, [], 42, true, null, undefined, { subtype: 'Condominium' }]) {
+      assert.deepEqual(LS.resolveLeaseType(lrow('6 Safe Ave'), [mrec(6, 'Safe', { subtype: odd })]), { type: 'single_family', source: 'label' });
+    }
+    // every kind the MLS table can give, and every label, comes out as an allowed word
+    for (const kind of Object.keys(FROM_CRMLS_PROPERTY_TYPE)) assert.ok(PROPERTY_TYPES.includes(LS.resolveLeaseType(lrow('7 Safe Ave'), [mrec(7, 'Safe', { subtype: kind })]).type), kind);
+    // the final guard: a type that is not an allowed word, handed in from outside, is not kept
+    assert.equal(LS.mapComparable(lrow('8 Safe Ave'), 0.1, 'constructor', 'mls').property_type, 'single_family', 'a made-up type falls back to the label');
+    assert.equal(LS.mapComparable(lrow('8 Safe Ave'), 0.1, () => 'condo', 'mls').property_type, 'single_family');
+    assert.equal(LS.mapComparable(lrow('8 Safe Ave'), 0.1, 'condo', 'mls').property_type, 'condo');
+    assert.equal(LS.mapComparable(lrow('8 Safe Ave'), 0.1, null, 'label').property_type, null, 'unknown is a real answer');
+  });
+
+  await check('Hardening: a street named "Constructor", "__proto__" or "toString" is searched for as plain text (never a function in the search), and still matches its own MLS record, in both the search word and the exact street check', () => {
+    for (const name of ['Constructor', '__proto__', 'toString', 'hasOwnProperty', 'Prototype']) {
+      const row = lrow(`9 ${name} Ave`);
+      const q = LS.mlsQueryFor(row);
+      assert.ok(q && q.words.every(w => typeof w === 'string' && /^[a-z0-9]+$/.test(w)), name);
+      const filter = LS.buildMlsLookupFilter([q]);
+      assert.match(filter, /^\(StreetNumberNumeric eq 9 and PostalCode eq '93003' and contains\(tolower\(StreetName\),'[a-z0-9]+'\)\)$/, name);
+      assert.ok(!/function|native code|\[object/.test(filter), name);
+      assert.equal(LS.recordsAtAddress(row, [mrec(9, name.toUpperCase(), { suffix: 'Avenue' })]).length, 1, `${name}: its own record matches`);
+      assert.equal(LS.recordsAtAddress(row, [mrec(9, 'Other', { suffix: 'Avenue' })]).length, 0, `${name}: another street does not`);
+      assert.equal(LS.resolveLeaseType(row, [mrec(9, name, { suffix: 'Ave' })]).type, 'condo');
+    }
+    const parts = require('./lib/property-matching').streetParts('9 Constructor Ave');
+    assert.deepEqual(parts, { name: 'constructor', direction: null, suffix: 'ave' });
+    assert.deepEqual(require('./lib/property-matching').streetParts('9 N __proto__ Ave'), { name: '__proto__', direction: 'n', suffix: 'ave' });
+    // a street word that really is a built-in name in the middle of an address still finds the right suffix and direction
+    assert.deepEqual(require('./lib/property-matching').streetParts('9 East toString St'), { name: 'tostring', direction: 'e', suffix: 'st' });
+  });
+
+  await check('Hardening: a street word of more than 40 characters (thousands of letters of nonsense in an address) is not searched for at all: no query, the lease keeps its LeadSimple type, and nothing slow happens; 40 characters is still searched', async () => {
+    assert.equal(LS.MAX_STREET_WORD_LENGTH, 40);
+    const huge = lrow(`12 ${'a'.repeat(5000)} St`);
+    const started = Date.now();
+    assert.equal(LS.mlsQueryFor(huge), null);
+    assert.equal(LS.mlsQueryFor(lrow(`12 Oak ${'b'.repeat(41)} St`)), null, 'any long word of the name, not only the one that would be searched');
+    assert.equal(LS.mlsQueryFor(lrow(`12 ${'c'.repeat(41)} St`)), null);
+    assert.ok(LS.mlsQueryFor(lrow(`12 ${'d'.repeat(40)} St`)), 'exactly 40 is fine');
+    assert.equal(LS.mlsQueryFor(lrow(`12 ${'e'.repeat(5000)}`)), null);
+    assert.equal(LS.mlsQueryFor(lrow(`12 Oak St ${'f'.repeat(5000)}`)).words[0], 'oak', 'a long word after the street (a unit note) is not part of the name');
+    assert.equal(LS.mlsQueryFor(lrow(`12 ${'g'.repeat(5000)}-${'h'.repeat(5000)} St`)), null);
+    assert.ok(Date.now() - started < 500, 'refusing a huge word takes no time');
+    let asked = 0;
+    const built = await LS.buildLeadSimpleComps([{ row: huge, distanceMiles: 0.2 }], { propertyType: 'condo', bedrooms: 2 }, { lookup: async () => { asked++; return { byKey: new Map() }; }, log: null });
+    assert.equal(asked, 0, 'nothing to ask');
+    assert.equal(built.comps.length, 1);
+    assert.deepEqual([built.comps[0].property_type, built.comps[0].property_type_source], ['single_family', 'label']);
+    assert.equal(built.partialFailure, null, 'an address that cannot be searched is not a failure');
+  });
+
+  await check('The cap wording: when the 6-request cap (not the clock) ends the check, the log line and the warning say "the limit for the check was reached" (never "time limit"), and the screen note is the same one as for any unfinished check', async () => {
+    const addresses = many(130, i => lrow(`${200 + i} Cap${i}x Ave`));
+    const selected = addresses.map(row => ({ row, distanceMiles: 0.3 }));
+    const lines = [];
+    const built = await LS.buildLeadSimpleComps(selected, { propertyType: 'condo', bedrooms: 2 }, { lookup: liveLookupOver([]), log: msg => lines.push(msg) });
+    assert.equal(built.stats.requests, 6);
+    assert.equal(built.stats.ceilingHit, true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /; the limit for the check was reached\.$/);
+    assert.doesNotMatch(lines[0], /time limit/);
+    assert.match(built.partialFailure[0].message, /\(the limit for the check was reached\)/);
+    assert.doesNotMatch(built.partialFailure[0].message, /time limit/);
+    const lookupDirect = await LS.lookupMlsRecords(selected.map(x => LS.mlsQueryFor(x.row)), { fetchImpl: fakeRecoreFor([]), token: 'test-token', cache: new Map(), limits: { maxRequests: 1 } });
+    assert.equal(lookupDirect.ceilingHit, true);
+    assert.equal(built.partialFailure[0].what, LS.TYPE_CHECK_WHAT);
+  });
+
+  await check('The screen note for an unfinished MLS type check is written for it: grammatical, true (every comp is still there, some keep LeadSimple\'s type), and used for every way the check can end early; other sources keep the "only partly available" wording', () => {
+    const { buildSourceNotes } = require('./lib/outcome');
+    const NOTE = "Rincon's own signed leases could not all be checked against the MLS (house, condo or townhouse) when this report ran, so some are counted under the type LeadSimple gives them, which is sometimes wrong. Run it again to redo that check.";
+    assert.equal(LS.TYPE_CHECK_WHAT, "its check of each home's type against the MLS");
+    const typeWarning = { name: 'LeadSimple Move-Ins', what: LS.TYPE_CHECK_WHAT, message: '2 of 5 homes could not be checked' };
+    assert.deepEqual(buildSourceNotes({ sourceWarnings: [typeWarning] }), [NOTE]);
+    assert.deepEqual(buildSourceNotes({ sourceWarnings: [typeWarning, typeWarning] }), [NOTE], 'said once');
+    assert.doesNotMatch(NOTE, /was only partly|fewer comparable/);
+    // the other sources, and a different problem of the same source, read exactly as before
+    assert.deepEqual(buildSourceNotes({ sourceWarnings: [{ name: 'RentCast', what: 'its search of nearby rental listings', message: 'x' }] }), ['RentCast was only partly available when this report ran (its search of nearby rental listings could not be loaded), so it may use fewer comparable homes. Run it again to include them.']);
+    assert.deepEqual(buildSourceNotes({ sourceWarnings: [typeWarning, { name: 'LeadSimple Move-Ins', what: 'its leases', message: 'x' }] }), [NOTE, "Rincon's own move-in records was only partly available when this report ran (its leases could not be loaded), so it may use fewer comparable homes. Run it again to include them."]);
+    assert.deepEqual(buildSourceNotes({ sourceErrors: [{ name: 'LeadSimple Move-Ins', error: 'down' }], sourceWarnings: [typeWarning] }), ["Rincon's own move-in records was unavailable when this report ran, so it uses fewer comparable homes. Run it again to include them."], 'a source that is down is still reported as down');
+    assert.deepEqual(buildSourceNotes({}), []);
+  });
+
+  await check('The method version is bumped because this change alters which comps count: cma-2026-10-v2, still within the 40 characters the database allows, and nothing else pins the old name', () => {
+    const { METHOD_VERSION } = require('./lib/constants');
+    assert.equal(METHOD_VERSION, 'cma-2026-10-v2');
+    assert.ok(METHOD_VERSION.length <= 40);
+    const walk = dir => fsB.readdirSync(dir, { withFileTypes: true }).flatMap(e => (e.name === 'node_modules' || e.name === 'cache' || e.name === 'out' ? [] : e.isDirectory() ? walk(pathB.join(dir, e.name)) : /\.(js|json|md|html)$/.test(e.name) ? [pathB.join(dir, e.name)] : []));
+    // (lib/history.js names the old version on purpose: a report saved as v1 was counted without the junk-rent screen and is reopened without it)
+    const stale = walk(__dirname).filter(f => !f.endsWith('q-mapping-unit-test.js') && !f.endsWith(pathB.join('lib', 'history.js')) && fsB.readFileSync(f, 'utf8').includes('cma-2026-10-v1'));
+    assert.deepEqual(stale, [], 'the old version name is not used anywhere');
+  });
+
+  console.log('--- Rincon lease types: what the screen says ---');
+
+  await check('Dashboards: both pages say "rent or size looks like a data error" for a screened-out lease; for a lease left out because the MLS lists it as another kind of home they say which kind (a mix of condo and townhouse records says so); "so it is not a house" is said ONLY to a house subject; everything else reads as before; and the small-screen layout keeps a long reason inside its card', () => {
+    const standalone = fsB.readFileSync(pathB.join(__dirname, 'dashboard', 'index.html'), 'utf8');
+    const hubPath = pathB.join(__dirname, '..', 'hub', 'rental-analysis', 'dashboard', 'index.html');
+    const pages = [standalone, ...(fsB.existsSync(hubPath) ? [fsB.readFileSync(hubPath, 'utf8')] : [])];
+    for (const html of pages) {
+      const start = html.indexOf('const EXCLUSION_REASON_LABELS');
+      const end = html.indexOf('// The goal sentence with the suggested price in bold.');
+      assert.ok(start > 0 && end > start);
+      const run = new Function('esc', 'fmtMoney', 'fmtNum', `${html.slice(start, end)}\nreturn buildNotUsedRow;`)(s => String(s), n => `$${n}`, n => String(n));
+      const reasonOf = (c, subjectType = 'single_family') => (run(c, { size_band_pct: 25, subject_sqft: 900, subject_property_type: subjectType }).match(/cn-reason">([^<]*)</) || [])[1];
+      const mismatch = (property_type, property_type_source) => ({ address: 'a', monthly_rent: 2400, exclusion_reason: 'property_type_mismatch', property_type, property_type_source });
+      assert.equal(reasonOf({ address: 'a', monthly_rent: 280, exclusion_reason: 'implausible_rent' }), 'rent or size looks like a data error');
+      assert.equal(reasonOf(mismatch('condo', 'mls')), 'different property type (the MLS lists it as a condo)');
+      assert.equal(reasonOf(mismatch('townhouse', 'mls')), 'different property type (the MLS lists it as a townhouse)');
+      assert.equal(reasonOf(mismatch('other', 'mls')), 'different property type (the MLS lists both condos and townhouses at this address)');
+      assert.equal(reasonOf(mismatch('other', 'mls'), 'condo'), 'different property type (the MLS lists both condos and townhouses at this address)', 'a mix of condo and townhouse records reads the same for any subject');
+      // the unit-number case: the "not a house" reason is true, and explains the exclusion, only for a house subject
+      assert.equal(reasonOf(mismatch('other', 'unit_number'), 'single_family'), 'different property type (it has a unit number, so it is not a house)');
+      for (const subjectType of ['condo', 'townhouse', 'duplex', 'triplex', 'fourplex', 'apartment', 'manufactured', 'other']) {
+        assert.equal(reasonOf(mismatch('other', 'unit_number'), subjectType), 'different property type (it has a unit number, but the MLS does not clearly say it is a condo or townhouse)', `subject ${subjectType}`);
+      }
+      assert.equal((run(mismatch('other', 'unit_number')) .match(/cn-reason">([^<]*)</) || [])[1], 'different property type (it has a unit number, but the MLS does not clearly say it is a condo or townhouse)', 'no analysis row at all: never the house wording');
+      assert.equal(reasonOf(mismatch('single_family', 'label')), 'different property type', 'a type from LeadSimple\'s label reads as before');
+      assert.equal(reasonOf(mismatch('condo')), 'different property type', 'a comp from another source reads as before');
+      assert.equal(reasonOf({ address: 'a', monthly_rent: 2400, exclusion_reason: 'size_mismatch' }), 'different size');
+      assert.equal(reasonOf({ address: 'a', monthly_rent: 2400, exclusion_reason: 'size_sqft', sqft: 1500 }), 'too large (1500 sq ft)');
+      // the row wraps (a long reason drops to its own line) with a 2px gap between the lines and 10px between the pieces; no separate row-gap line
+      const baseRule = html.slice(html.indexOf('.comp-notused-row {'), html.indexOf('.comp-notused-row .cn-addr {'));
+      assert.match(baseRule, /flex-wrap: wrap;/);
+      assert.match(baseRule, /gap: 2px 10px;/);
+      assert.doesNotMatch(baseRule, /row-gap/);
+      // on a phone-width screen the reason may shrink and wrap inside the card instead of running past its edge
+      const phone = html.slice(html.indexOf('@media (max-width: 640px)'), html.indexOf('/* ── Print ── */'));
+      assert.match(phone, /\.comp-notused-row \.cn-addr \{ flex-basis: 100%; white-space: normal; \}\s*\.comp-notused-row \.cn-reason \{ flex: 0 1 auto; min-width: 0; \}/);
+    }
+    // (the existing dashboard check earlier in this file proves the two pages differ only in the Leaflet lines)
+  });
+
+  await check('The comp row the screen is sent carries the type\'s source and the reason, and both entry points add it the same way; neither saves it', () => {
+    for (const file of ['server.js', pathB.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+      const p = pathB.join(__dirname, file);
+      if (!fsB.existsSync(p)) continue;
+      const src = fsB.readFileSync(p, 'utf8');
+      assert.match(src, /property_type_source: compsWithMatch\[i\]\.property_type_source \|\| null/, file);
+      assert.ok(src.indexOf('property_type_source:') > src.indexOf('const responseComps'), `${file}: added to the answer, after the comps are saved`);
+    }
+    const { COMP_ROW_COLUMNS } = require('./lib/comp-rows');
+    assert.ok(!COMP_ROW_COLUMNS.includes('property_type_source') && !COMP_ROW_COLUMNS.includes('implausible_rent'));
+  });
+
+  await check('No migration is needed: every type a lease can now get is one the database already accepts, and nothing under supabase/ is touched', () => {
+    const fs = require('fs'), path = require('path');
+    const { PROPERTY_TYPES } = require('./lib/constants');
+    const sql = fs.readFileSync(path.join(__dirname, '..', '..', 'supabase', 'migrations', '20260812010000_rental_analysis_schema.sql'), 'utf8');
+    const at = sql.search(/property_type\s+TEXT CHECK/);
+    assert.ok(at > 0);
+    const list = sql.slice(at, at + 700);
+    for (const t of PROPERTY_TYPES) assert.ok(list.includes(`'${t}'`), `the comps table accepts ${t}`);
+    const everyType = new Set(['single_family', 'apartment', 'condo', 'townhouse', 'duplex', 'triplex', 'fourplex', 'other', 'manufactured', null]);
+    for (const subtype of Object.keys(FROM_CRMLS_PROPERTY_TYPE)) {
+      const t = LS.resolveLeaseType(lrow('1 Db Ave'), [mrec(1, 'Db', { suffix: 'Ave', subtype })]).type;
+      assert.ok(everyType.has(t) && (t === null || PROPERTY_TYPES.includes(t)), `${subtype} -> ${t}`);
+    }
+    assert.ok(PROPERTY_TYPES.includes(LS.MULTI_FAMILY_TYPE));
+    assert.equal(['implausible_rent'].every(code => !sql.includes(code)), true, 'the exclusion reason is never a saved column');
+  });
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Past reports (read-only list and reopen). Added after the entry-point harness checks; the
   // harness (node q-entry-point-harness.js router) runs the real Hub router against a pretend database.
@@ -9673,6 +10585,7 @@ async function main() {
     const OcH = require('./lib/outcome');
     const { computeNumbers: computeNumbersH } = require('./lib/analyze');
     const { buildCompRows: buildCompRowsH } = require('./lib/comp-rows');
+    const { rentLooksImplausible: rentLooksImplausibleH } = require('./lib/leadsimple');
     const { sizeBandPctFor: sizeBandPctForH } = require('./lib/weighting');
     const hubDirH = pathH.join(__dirname, '..', 'hub', 'rental-analysis');
     const hubExistsH = fsH.existsSync(hubDirH);
@@ -9791,12 +10704,21 @@ async function main() {
       const count = Math.floor(rand() * 26);
       const comps = Array.from({ length: count }, (_, i) => {
         const src = pick(sourcesH);
+        // (drawn in the same order as before, so every random report is the one this test has always made)
+        const compType = rand() < 0.93 ? subject.propertyType : pick(['single_family', 'condo', 'townhouse', 'duplex', null]);
+        const compBedrooms = rand() < 0.1 ? null : Math.max(0, subject.bedrooms + pick([0, 0, 0, 0, 0, 0, 0, 1, -1, 2]));
+        const compSqft = rand() < 0.2 ? null : Math.round(subject.sqft * (0.72 + rand() * 0.56));
+        const compDistance = rand() < 0.1 ? null : Math.round(rand() * 150) / 100;
+        const compRent = 4000 + Math.round((rand() - 0.5) * 40 * spread) * 50;
         return {
           address: `${100 + i} Test St, Ventura, CA 93003`, source_id: src.id, source_name: src.name,
-          property_type: rand() < 0.93 ? subject.propertyType : pick(['single_family', 'condo', 'townhouse', 'duplex', null]),
-          bedrooms: rand() < 0.1 ? null : Math.max(0, subject.bedrooms + pick([0, 0, 0, 0, 0, 0, 0, 1, -1, 2])), bathrooms: 2,
-          sqft: rand() < 0.2 ? null : Math.round(subject.sqft * (0.72 + rand() * 0.56)), distance_miles: rand() < 0.1 ? null : Math.round(rand() * 150) / 100,
-          monthly_rent: 4000 + Math.round((rand() - 0.5) * 40 * spread) * 50, is_estimated_price: false,
+          property_type: compType,
+          bedrooms: compBedrooms, bathrooms: 2,
+          // CHANGED (CONDO-LEASE-TYPE work): a lease from Rincon's own records carries the junk-rent mark that lib/leadsimple.js mapComparable()
+          // sets on every one of them (never saved), exactly as the real pipeline hands it on; so the live run and the reopened report agree.
+          ...(src.name === 'LeadSimple Move-Ins' ? { implausible_rent: rentLooksImplausibleH(compRent, compSqft) } : {}),
+          sqft: compSqft, distance_miles: compDistance,
+          monthly_rent: compRent, is_estimated_price: false,
           listing_status: src.name === 'RentCast' ? pick(['active', 'off_market']) : pick(['leased', 'leased', 'leased', 'active']),
           is_rincon_managed: rand() < 0.04, furnished_status: pick([null, null, null, null, 'unfurnished', 'unfurnished', 'partial', 'either', 'furnished']),
           lease_term_class: pick([null, null, null, 'long', 'long', 'six_month', 'short']), age_restricted: pick([null, null, null, false, false, true]),
@@ -9857,6 +10779,77 @@ async function main() {
         seen.excluded += report.comps.filter(c => c.exclusion_reason).length;
       }
       assert.ok(seen.range >= 120 && seen.high >= 15 && seen.medium >= 15 && seen.low >= 15 && seen.thin >= 15 && seen.none >= 5 && seen.stretch >= 15 && seen.hiddenStretch >= 15 && seen.excluded >= 300 && seen.goals.size === 3, JSON.stringify({ ...seen, goals: [...seen.goals] }));
+    });
+
+    // CONDO-LEASE-TYPE work: the junk-rent mark on a Rincon lease is not saved, so reopening a report puts it back, but only for a report
+    // saved by a method that applies the screen (cma-2026-10-v2 and later). One report with a $280 Rincon lease, made by the real pipeline.
+    const rentScreenFixture = methodVersion => {
+      const subject = { address: '77 Screen Way, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, furnished: false, leaseTermMonths: 12, ageRestricted: false, ownerGoal: 'balanced' };
+      const mk = (n, rent, name, over = {}) => ({ address: `${300 + n} Screen Ln, Ventura, CA 93003`, source_id: sourcesH.find(x => x.name === name).id, source_name: name, property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.2 + n / 10, monthly_rent: rent, is_estimated_price: false, listing_status: 'leased', is_rincon_managed: false, mls_flags: [], condition_tags: [], ...over });
+      // the Rincon lease: with the screen (v2) it carries the mark the way lib/leadsimple.js mapComparable() sets it; a v1 report never had the mark
+      const rincon = mk(9, 280, 'LeadSimple Move-Ins', { sqft: 1450, is_rincon_managed: true, ...(methodVersion === 'cma-2026-10-v1' ? {} : { implausible_rent: rentLooksImplausibleH(280, 1450) }) });
+      // another source with an odd rent per square foot is never marked: the screen is for Rincon's own leases only
+      const oddMls = mk(8, 9000, 'CRMLS', { sqft: 1400, bedrooms: 3 });
+      const comps = [mk(1, 3900, 'CRMLS'), mk(2, 3950, 'CRMLS'), mk(3, 4000, 'CRMLS'), mk(4, 4050, 'CRMLS'), mk(5, 4100, 'CRMLS'), oddMls, rincon];
+      const numbers = computeNumbersH({ comps, subject, properties: [] });
+      const analysisId = 'dddddddd-0000-4000-8000-000000000001';
+      const compRows = buildCompRowsH(numbers.compsWithMatch, { analysisId }).map((r, i) => ({ ...r, id: `scr-${i}`, created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:00Z' }));
+      const patch = OcH.buildCompletionPatch({ numbers, ownerGoal: 'balanced', propertyId: null, subjectEstimatedRent: null, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003', rationale: 'Saved explanation.' });
+      const analysisRow = {
+        id: analysisId, subject_address: subject.address, subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, subject_property_type: 'single_family', subject_year_built: null,
+        lease_term_months: 12, furnished: false, run_by: 'u-1', subject_age_restricted: false, subject_subdivision: null, size_band_pct: sizeBandPctForH('single_family', 1500),
+        created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:30Z', property_id: null, ...patch, method_version: methodVersion,
+      };
+      const reopen = (row = analysisRow) => H.rebuildReport({ analysis: pickCols(row, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH, runByName: 'Pat Runner', marketData: null });
+      const addressOf = c => c.address.split(',')[0];
+      return { numbers, analysisRow, compRows, reopen, addressOf };
+    };
+
+    await check('Past reports / junk-rent mark: a report saved at cma-2026-10-v2 with a $280 Rincon lease reopens with that lease under "not used" (implausible_rent), the counts the report saved, and no counts flag; a lease from any other source is never marked', () => {
+      const f = rentScreenFixture('cma-2026-10-v2');
+      assert.equal(f.analysisRow.method_version, 'cma-2026-10-v2');
+      assert.equal(f.numbers.counted.total, 6, 'live: the five MLS leases and the one MLS lease at an odd rent per square foot; the junk Rincon lease is left out');
+      assert.equal(f.analysisRow.counted_comp_count, 6);
+      const { report, flags } = f.reopen();
+      assert.deepEqual(flags, [], 'the recount agrees with what was saved');
+      assert.equal(report.counted.total, 6);
+      assert.equal(report.counted.leased, 6);
+      const junk = report.comps.find(c => c.address.startsWith('309 Screen Ln'));
+      assert.equal(junk.exclusion_reason, 'implausible_rent');
+      assert.equal(junk.monthly_rent, 280, 'shown with its real saved rent, under the not-used list');
+      assert.equal(report.comps.find(c => c.address.startsWith('308 Screen Ln')).exclusion_reason, null, 'an MLS lease with a high rent per square foot counts, as saved');
+      assert.equal(report.comps.filter(c => c.exclusion_reason).length, 1);
+      assert.ok(!report.sourceNotes.includes(H.NOT_MATCHING_NOTE), 'no "worked out again and did not match" note');
+      for (const k of ['headline', 'confidence']) assert.deepEqual(report[k], OcH.buildApiResponse({ analysis: f.analysisRow, comps: [], marketData: null, numbers: f.numbers, sourceNotes: [] })[k], k);
+      // later versions are treated the same way
+      const later = f.reopen({ ...f.analysisRow, method_version: 'cma-2026-11-v1' });
+      assert.deepEqual(later.flags, []);
+      assert.equal(later.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, 'implausible_rent');
+    });
+
+    await check('Past reports / junk-rent mark: a report saved at cma-2026-10-v1 (before the screen) with the same lease reopens as before, the lease counted and no flag; a report with no saved method, an older-format report and an unfinished one never get the mark', () => {
+      const v1 = rentScreenFixture('cma-2026-10-v1');
+      assert.equal(v1.numbers.counted.total, 7, 'live under v1: the junk lease counted');
+      const { report, flags } = v1.reopen();
+      assert.deepEqual(flags, [], 'rebuilt WITHOUT the screen, so its saved counts still match');
+      assert.equal(report.counted.total, 7);
+      assert.equal(report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null, 'counted, exactly as it was on the day');
+      // had it been rebuilt with the screen it would have disagreed with the saved counts: the flag is what a wrong rule would raise
+      const wrong = rentScreenFixture('cma-2026-10-v2');
+      const withWrongCounts = wrong.reopen({ ...wrong.analysisRow, counted_comp_count: 7, counted_leased_count: 7 });
+      assert.ok(withWrongCounts.flags.includes('counts'));
+      // no saved method at all (an older-format report), or any other kind: the original three reasons only, nothing marked
+      const older = rentScreenFixture('cma-2026-10-v2');
+      const olderRow = { ...older.analysisRow, method_version: null, headline_range_low: null, headline_range_high: null, suggested_list_price: null, stretch_price: null, confidence_label: null, confidence_spread: null, counted_comp_count: null, counted_leased_count: null, owner_goal: null, recommended_rent_low: 3800, recommended_rent_mid: 4000, recommended_rent_high: 4200 };
+      const olderOut = older.reopen(olderRow);
+      assert.equal(olderOut.report.format, 'older');
+      assert.equal(olderOut.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      const unfinished = older.reopen({ ...olderRow, status: 'failed', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null });
+      assert.equal(unfinished.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      // a new-format report that somehow has no method text is treated as the earlier method too
+      const noMethod = older.reopen({ ...older.analysisRow, method_version: null });
+      assert.equal(noMethod.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      assert.equal(H.METHOD_BEFORE_RENT_SCREEN, 'cma-2026-10-v1');
     });
 
     await check('Past reports / saved values win: a recount that disagrees (counts, label, size band) is flagged and noted on the screen, and the saved figures are the ones shown', () => {

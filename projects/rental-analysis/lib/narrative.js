@@ -119,6 +119,7 @@ const EXCLUSION_LABELS = {
   furnished_mismatch: `this comp's furnished status does not match the subject's (furnished against unfurnished) — NOT COUNTED in the range`,
   short_term_lease: `this comp is a month-to-month, vacation or other short-term lease, unlike the subject's lease — NOT COUNTED in the range`,
   age_restricted: `this comp is in a 55+ community and the subject is not — NOT COUNTED in the range`,
+  implausible_rent: `this comp's rent (or its listed size) looks like a data entry mistake for a home like this — NOT COUNTED in the range`,
 };
 
 // c.exclusion_reason is set by the caller (server.js/router.js, POST /run)
@@ -209,6 +210,7 @@ const FACT_REASON_LABELS = {
   furnished_mismatch: `furnished status differs from the subject's`,
   short_term_lease: 'short-term lease',
   age_restricted: '55+ community',
+  implausible_rent: 'rent or size looks like a data error',
   rincon_managed: 'Rincon-managed internal reference',
 };
 

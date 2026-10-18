@@ -21,8 +21,12 @@ run.js - the permanent blind accuracy test for the rent-comp tool
 USAGE
   node backtest/run.js                 run on the data already in backtest/cache (no network; about 2 minutes on an idle machine,
                                        longer when the computer is busy)
-  node backtest/run.js --refresh       pull fresh data first (about 30 free Recore reads, 3 Supabase reads),
-                                       then run everything incl. the fidelity check (about 10 more Recore reads)
+  node backtest/run.js --refresh       pull fresh data first (about 30 free Recore reads, 3 Supabase reads, and about
+                                       a dozen more to ask the MLS what kind of home each Rincon lease is), then run
+                                       everything incl. the fidelity check (about 10 more Recore reads)
+  node backtest/run.js --refresh-types ask the MLS again what kind of home each saved Rincon lease is (a dozen or so free
+                                       Recore reads; answers under two weeks old are reused), then run on the data already
+                                       saved. Nothing else in the saved data changes.
   node backtest/run.js --refresh --publish
                                        the monthly routine: refresh, run, and (only if THIS run's scorecard is trusted and the
                                        run was complete) copy that scorecard into lib/accuracy-scorecard.json in BOTH lib folders.
@@ -83,6 +87,7 @@ const C = require('./candidates');
 const M = require('./metrics');
 const selftests = require('./selftests');
 const outcomes = require('./outcomes');
+const rinconMlsLib = require('./rincon-mls');
 const report = require('./report');
 const provenance = require('./provenance');
 const judging = require('./judging');
@@ -169,6 +174,13 @@ async function main() {
     recoreRequests += client.requests;
     log(`Cache written: ${JSON.stringify(meta.counts)}`);
   }
+  if (args.flags.has('refresh-types') && !args.flags.has('refresh')) {
+    guard.setPhase('refresh');
+    const { client, asked, reused, skipped } = await data.refreshRinconMls({ log });
+    guard.setPhase('replay');
+    recoreRequests += client.requests;
+    log(`Rincon lease types saved: ${asked} addresses asked, ${reused} reused from the earlier pull, ${skipped} leases with an address that cannot be searched; ${client.requests} Recore requests.`);
+  }
   let cache;
   try {
     cache = data.loadCache();
@@ -178,10 +190,15 @@ async function main() {
   }
   log(`Using cache pulled ${cache.meta.pulledAt}: ${JSON.stringify(cache.meta.counts)}`);
 
-  const world = asof.createWorld({ closed: cache.closed, leadsimple: cache.leadsimple, properties: cache.properties });
+  const world = asof.createWorld({ closed: cache.closed, leadsimple: cache.leadsimple, properties: cache.properties, rinconMls: cache.rinconMls });
   let mlsTargets = T.buildMlsTargets(cache.closed, { targetFrom, today });
   if (args.values.limit) mlsTargets = mlsTargets.filter((_, i) => i % Math.max(1, Math.floor(mlsTargets.length / Number(args.values.limit))) === 0).slice(0, Number(args.values.limit));
-  const { targets: rinconTargets, screenedOut } = T.buildRinconTargets(cache.leadsimple, { today });
+  // Rincon test leases are typed the way the product types them: by what the MLS says is at the address (saved evidence), else LeadSimple's label.
+  const { targets: rinconTargets, screenedOut } = T.buildRinconTargets(cache.leadsimple, { today, resolveType: cache.rinconMls ? rinconMlsLib.resolverFor(cache.rinconMls) : null });
+  // What the report needs to know about that evidence, to decide whether the scorecard describes the tool that really runs.
+  const rinconTypes = cache.rinconMls
+    ? { present: true, ...rinconMlsLib.coverageOf(cache.rinconMls, cache.leadsimple), typedByMls: rinconTargets.filter(t => t.typeSource === 'mls').length, targetsByType: rinconTargets.reduce((m, t) => { m[t.propertyType] = (m[t.propertyType] || 0) + 1; return m; }, {}) }
+    : { present: false, total: 0, covered: 0, uncovered: 0, oldest: null, newest: null, typedByMls: 0, targetsByType: {} };
   const holdoutStart = args.values['holdout-from'] || T.holdoutStartFor(mlsTargets, HOLDOUT_MONTHS);
   const split = T.splitWalkForward(mlsTargets, holdoutStart);
   const dataThrough = mlsTargets.reduce((m, t) => (t.date > m ? t.date : m), targetFrom);
@@ -338,6 +355,7 @@ async function main() {
       coreTargets: mlsTargets.filter(t => t.area === 'core').length,
       rinconTargets: rinconTargets.length,
       rinconScreenedOut: screenedOut,
+      rinconTargetsByType: rinconTypes.targetsByType,
       tune: split.tune.length,
       holdout: split.holdout.length,
     },
@@ -356,6 +374,7 @@ async function main() {
     staffRunMix,
     countyFill,
     dataFacts: { enteredAfterClose },
+    rinconTypes,
     network: guard.counts(),
   };
 

@@ -675,9 +675,13 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     // / null). Positional match against compsWithMatch, same assumption
     // narrativesByIndex[i] above already relies on (compRows was built by
     // mapping compsWithMatch in this exact order).
+    // property_type_source ('mls', 'unit_number' or 'label') is how the screen can say, beside a Rincon
+    // lease that is not used, that the MLS lists it as a different kind of home. Like exclusion_reason it
+    // is sent to the screen only; there is no column for it.
     const responseComps = insertedComps.map((row, i) => ({
       ...row,
       exclusion_reason: exclusionReasons[i],
+      property_type_source: compsWithMatch[i].property_type_source || null,
     }));
 
     // ONE update marks the analysis complete and carries the whole outcome with it:

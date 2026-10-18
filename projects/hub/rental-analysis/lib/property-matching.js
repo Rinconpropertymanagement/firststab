@@ -327,6 +327,10 @@ function dedupeComps(comps, subjectBedrooms, subjectPropertyType, subjectExtras)
 // "123 Maine St", "123 Main Ave", "123 S Main St" (for "123 N Main St") and "Oak Hill Dr" (for "Oak Park Dr") all pass it
 // for the subject "123 Main St". Before a comp is dropped as the subject's own listing the street itself must agree too:
 // the same street NAME, the same direction when both have one, and the same suffix when both have one.
+// A word from an address ("constructor", "__proto__", "toString") must never find one of JavaScript's own built-in properties in
+// the tables below and come back as a function: only the table's own entries count.
+const ownEntry = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key) ? table[key] : undefined);
+
 const STREET_SUFFIX = {
   st: 'st', street: 'st', ave: 'ave', av: 'ave', avenue: 'ave', blvd: 'blvd', boulevard: 'blvd', dr: 'dr', drive: 'dr', rd: 'rd', road: 'rd',
   ln: 'ln', lane: 'ln', ct: 'ct', court: 'ct', pl: 'pl', place: 'pl', cir: 'cir', circle: 'cir', ter: 'ter', terr: 'ter', terrace: 'ter',
@@ -360,12 +364,12 @@ function streetParts(address) {
   while (i < tokens.length && (isHouseNumberToken(tokens[i]) || (tokens[i] === 'and' && i > 0 && isHouseNumberToken(tokens[i + 1])))) i++;
   // the first suffix word after at least one name word ends the street ("100 Court St" is the street "court", suffix "st")
   let suffixAt = -1;
-  for (let j = i + 1; j < tokens.length; j++) if (STREET_SUFFIX[tokens[j]]) { suffixAt = j; break; }
+  for (let j = i + 1; j < tokens.length; j++) if (ownEntry(STREET_SUFFIX, tokens[j])) { suffixAt = j; break; }
   const end = suffixAt === -1 ? tokens.length : suffixAt;
-  const suffix = suffixAt === -1 ? null : STREET_SUFFIX[tokens[suffixAt]];
+  const suffix = suffixAt === -1 ? null : ownEntry(STREET_SUFFIX, tokens[suffixAt]);
   let direction = null;
-  if (STREET_DIRECTION[tokens[i]] && end - i >= 2) { direction = STREET_DIRECTION[tokens[i]]; i++; }
-  return { name: tokens.slice(i, end).map(t => STREET_NAME_SYNONYM[t] || t).join(' '), direction, suffix };
+  if (ownEntry(STREET_DIRECTION, tokens[i]) && end - i >= 2) { direction = ownEntry(STREET_DIRECTION, tokens[i]); i++; }
+  return { name: tokens.slice(i, end).map(t => ownEntry(STREET_NAME_SYNONYM, t) || t).join(' '), direction, suffix };
 }
 
 function sameStreet(addressA, addressB) {
@@ -429,6 +433,9 @@ function dropSubjectsOwnListing(comps, subjectAddress) {
 module.exports = {
   isSameHome,
   streetParts,
+  STREET_SUFFIX,
+  STREET_DIRECTION,
+  STREET_NAME_SYNONYM,
   dropSubjectsOwnListing,
   normalizeAddress,
   addressWordScore,

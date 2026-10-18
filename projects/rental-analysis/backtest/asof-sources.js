@@ -25,7 +25,10 @@
  *              measured to T.
  *   LeadSimple Rincon's own leases that started before T, whose move-in
  *              record closed before T, inside the 24-month lookback, same
- *              zip, within 2 miles, mapped by the real mapper.
+ *              zip, within 2 miles, turned into comps by the product's own
+ *              buildLeadSimpleComps(): the real type of each lease from the SAVED
+ *              MLS evidence (backtest/rincon-mls.js) in place of the live MLS
+ *              lookup, the rent screen, the Multi-Family rule, the real mapper.
  *
  * No-peeking rules (A.3), all enforced here and re-checked by the engine:
  *   1. every comp that reaches the tool carries a date before T, else THROW
@@ -45,6 +48,7 @@ const { addressesMatch, houseNumber, normalizeAddress, unitIdentifier } = requir
 const { WIDE_SEARCH_RADIUS_MILES } = require('../lib/constants');
 const { DUPLICATE_DISTANCE_METERS } = require('./constants');
 const { factsFromRecord } = require('./mls-facts-ref');
+const rinconMls = require('./rincon-mls');
 
 const METERS_PER_MILE = 1609.344;
 const REPLAY_SOURCE_NAMES = ['RentCast', 'CRMLS', 'LeadSimple Move-Ins'];
@@ -238,8 +242,8 @@ function planLeak(ctx, subject) {
   const { target, pool } = ctx;
   if (!pool.plantLeak) return [];
   if (target.kind === 'rincon' && target.row) {
-    // The signed lease itself, mapped by the real LeadSimple mapper, at distance 0.
-    const comp = leadsimple.mapComparable(target.row, 0);
+    // The signed lease itself, mapped by the real LeadSimple mapper, at distance 0, with the same type the test gave the target.
+    const comp = leadsimple.mapComparable(target.row, 0, target.propertyType, target.typeSource);
     if (!comp) return [];
     comp._planted = true;
     return [comp];
@@ -273,6 +277,10 @@ function crmlsHandler(world) {
 }
 
 function leadsimpleHandler(world) {
+  // The product looks each lease's real type up in the MLS while an analysis runs. The replay never touches the network, so
+  // the same answers are read from the saved evidence instead (backtest/rincon-mls.js) and handed to the SAME function the
+  // product calls. A world with no evidence (an older saved data folder) gets no lookup at all: every type from LeadSimple's label.
+  const lookup = world.rinconMls ? rinconMls.evidenceLookup(world.rinconMls) : null;
   return async function replayLeadSimple(subject) {
     const ctx = CURRENT;
     const { T, target, pool } = ctx;
@@ -289,19 +297,18 @@ function leadsimpleHandler(world) {
       return !isTargetOrDuplicate(leaseRowAsCandidate(row), target);
     });
     const hasSubjectCoords = typeof subject.latitude === 'number' && typeof subject.longitude === 'number';
-    let comps;
+    let selected;
     if (hasSubjectCoords) {
-      comps = rows
+      selected = rows
         .map(row => {
           const hasRowCoords = typeof row.latitude === 'number' && typeof row.longitude === 'number';
-          return { row, distance: hasRowCoords ? crmls.haversineMiles(subject.latitude, subject.longitude, row.latitude, row.longitude) : null };
+          return { row, distanceMiles: hasRowCoords ? crmls.haversineMiles(subject.latitude, subject.longitude, row.latitude, row.longitude) : null };
         })
-        .filter(({ distance }) => distance === null || distance <= WIDE_SEARCH_RADIUS_MILES)
-        .map(({ row, distance }) => leadsimple.mapComparable(row, distance))
-        .filter(Boolean);
+        .filter(({ distanceMiles }) => distanceMiles === null || distanceMiles <= WIDE_SEARCH_RADIUS_MILES);
     } else {
-      comps = rows.map(row => leadsimple.mapComparable(row)).filter(Boolean);
+      selected = rows.map(row => ({ row, distanceMiles: null }));
     }
+    let { comps } = await leadsimple.buildLeadSimpleComps(selected, subject, { lookup, log: null });
     comps = ctx.method && ctx.method.keep ? comps.filter(c => ctx.method.keep(c, ctx.subjectFacts)) : comps;
     return { comps, subjectEstimatedRent: null, subjectLatitude: null, subjectLongitude: null, subjectZip: zip };
   };
@@ -321,13 +328,13 @@ function rentcastHandler() {
 }
 
 // Prepares a world from raw arrays: sorted copies the selectors rely on.
-function createWorld({ closed, leadsimple: leaseRows = [], properties = [] }) {
+function createWorld({ closed, leadsimple: leaseRows = [], properties = [], rinconMls: rinconTypeEvidence = null }) {
   const byCloseDesc = [...closed].sort((a, b) => (a.CloseDate < b.CloseDate ? 1 : a.CloseDate > b.CloseDate ? -1 : a.ListingKey < b.ListingKey ? -1 : 1));
   const listedOf = r => (r.OnMarketDate || r.ListingContractDate || '').slice(0, 10);
   const asking = closed
     .filter(r => listedOf(r) && r.CloseDate)
     .sort((a, b) => (listedOf(a) < listedOf(b) ? 1 : listedOf(a) > listedOf(b) ? -1 : a.ListingKey < b.ListingKey ? -1 : 1));
-  return { closed: byCloseDesc, asking, leadsimple: leaseRows, properties };
+  return { closed: byCloseDesc, asking, leadsimple: leaseRows, properties, rinconMls: rinconTypeEvidence };
 }
 
 /**

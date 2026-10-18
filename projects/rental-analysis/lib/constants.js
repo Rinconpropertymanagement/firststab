@@ -151,7 +151,21 @@ const CONFIDENCE_LABELS = ['high', 'medium', 'low'];
 // (rental_analyses.method_version, 40 characters at most). Change it whenever the
 // way the range, prices or label are worked out changes, so the accuracy test can
 // tell the old reports from the new ones.
-const METHOD_VERSION = 'cma-2026-10-v1';
+const METHOD_VERSION = 'cma-2026-10-v2';
+
+// ─── Rincon's own signed leases: the "does this rent make sense" screen ───────
+// A handful of Rincon's own lease records carry a rent that cannot be right for
+// the home (a 3-bedroom house at $280 a month, a 613 sq ft condo at $199). The
+// first two limits are the rent itself, the last two are the rent per square
+// foot. A lease outside any of them is a data error: it is still shown on the
+// report as "not used", but it never counts. ONE definition: the accuracy test
+// (backtest/) uses these same four numbers to pick the leases it tests, and the
+// report page uses them to leave such leases out, through rentLooksImplausible()
+// in lib/leadsimple.js.
+const RINCON_RENT_SCREEN = {
+  minRent: 800, maxRent: 12000,
+  minRentPerSqft: 0.80, maxRentPerSqft: 6.00,
+};
 
 // Numeric guards that mirror rental_comps' CHECK constraints exactly
 // (sqft > 0; bedrooms, bathrooms, distance_miles, original_price and
@@ -185,6 +199,7 @@ module.exports = {
   RADIUS_LADDER_MILES,
   MIN_COMPS_FOR_NARROW_RADIUS,
   MIN_LEASED_COMPS_FOR_NARROW_RADIUS,
+  RINCON_RENT_SCREEN,
   SQFT_BAND_PCT,
   SQFT_BAND_PROPERTY_TYPES,
   FURNISHED_STATUSES,

@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "generatedAt": "2026-10-18T01:02:58.089Z",
+  "generatedAt": "2026-10-18T05:37:32.534Z",
   "testedOn": "2026-10-17",
   "dataPulledOn": "2026-10-17",
-  "dataPulledAt": "2026-10-17T19:22:02.575Z",
+  "dataPulledAt": "2026-10-18T04:48:11.353Z",
   "dataThrough": "2026-10-17",
   "trusted": true,
   "trustReasons": [],
@@ -32,8 +32,8 @@
     "leak": {
       "pass": true,
       "sample": 300,
-      "cleanTypicalMiss": 425,
-      "singleLeakTypicalMiss": 200,
+      "cleanTypicalMiss": 450,
+      "singleLeakTypicalMiss": 205,
       "heavyLeakTypicalMiss": 0
     },
     "fidelity": {
@@ -45,24 +45,24 @@
   "split": {
     "holdoutStart": "2026-07-17",
     "tuneTargets": 589,
-    "holdoutTargets": 516
+    "holdoutTargets": 517
   },
   "minGroupN": 20,
   "overall": {
     "baseline": {
       "county": {
-        "targets": 1105,
-        "estimated": 1089,
+        "targets": 1106,
+        "estimated": 1090,
         "thin": 80,
-        "rangedCount": 1009,
+        "rangedCount": 1010,
         "coveragePct": 91.3,
         "all": {
-          "n": 1089,
+          "n": 1090,
           "typicalMiss": 450,
-          "meanMiss": 817,
+          "meanMiss": 819,
           "within100Pct": 15.3,
           "within200Pct": 26.6,
-          "within300Pct": 37.4,
+          "within300Pct": 37.3,
           "within300CiPct": [
             34.5,
             40.3
@@ -73,14 +73,14 @@
           "medianBias": 95
         },
         "ranged": {
-          "n": 1009,
+          "n": 1010,
           "typicalMiss": 450,
-          "within300Pct": 38.2,
-          "rangeHit200Pct": 16.3,
+          "within300Pct": 38.1,
+          "rangeHit200Pct": 16.2,
           "rangeHit200Count": 164,
           "rangeHit200CiPct": [
             14.1,
-            18.7
+            18.6
           ],
           "within300OfSuggestedPct": 38.9,
           "within300OfSuggestedCount": 393,
@@ -135,42 +135,42 @@
     },
     "size25_item2": {
       "county": {
-        "targets": 1105,
-        "estimated": 1035,
+        "targets": 1106,
+        "estimated": 1036,
         "thin": 196,
-        "rangedCount": 839,
+        "rangedCount": 840,
         "coveragePct": 75.9,
         "all": {
-          "n": 1035,
+          "n": 1036,
           "typicalMiss": 325,
           "meanMiss": 635,
           "within100Pct": 20.5,
-          "within200Pct": 35,
-          "within300Pct": 49.4,
+          "within200Pct": 34.9,
+          "within300Pct": 49.3,
           "within300CiPct": [
             46.3,
             52.4
           ],
           "band200Pct": 22.9,
           "band300EvalPct": 27.6,
-          "band500EvalPct": 41.4,
+          "band500EvalPct": 41.3,
           "medianBias": 100
         },
         "ranged": {
-          "n": 839,
+          "n": 840,
           "typicalMiss": 300,
-          "within300Pct": 50.7,
-          "rangeHit200Pct": 24.1,
+          "within300Pct": 50.6,
+          "rangeHit200Pct": 24,
           "rangeHit200Count": 202,
           "rangeHit200CiPct": [
             21.3,
             27.1
           ],
-          "within300OfSuggestedPct": 51.6,
+          "within300OfSuggestedPct": 51.5,
           "within300OfSuggestedCount": 433,
           "within300OfSuggestedCiPct": [
             48.2,
-            55
+            54.9
           ],
           "medianBiasVsSuggested": 100
         }
@@ -222,15 +222,15 @@
     "mls+asking": {
       "baseline": {
         "county": {
-          "targets": 1105,
-          "estimated": 1094,
+          "targets": 1106,
+          "estimated": 1095,
           "thin": 62,
-          "rangedCount": 1032,
+          "rangedCount": 1033,
           "coveragePct": 93.4,
           "all": {
-            "n": 1094,
+            "n": 1095,
             "typicalMiss": 475,
-            "meanMiss": 792,
+            "meanMiss": 794,
             "within100Pct": 16.8,
             "within200Pct": 27.5,
             "within300Pct": 36.9,
@@ -238,13 +238,13 @@
               34.1,
               39.8
             ],
-            "band200Pct": 17.5,
+            "band200Pct": 17.4,
             "band300EvalPct": 20.7,
             "band500EvalPct": 31.4,
             "medianBias": 50
           },
           "ranged": {
-            "n": 1032,
+            "n": 1033,
             "typicalMiss": 450,
             "within300Pct": 37.8,
             "rangeHit200Pct": 17.6,
@@ -253,11 +253,11 @@
               15.4,
               20.1
             ],
-            "within300OfSuggestedPct": 38.6,
+            "within300OfSuggestedPct": 38.5,
             "within300OfSuggestedCount": 398,
             "within300OfSuggestedCiPct": [
               35.6,
-              41.6
+              41.5
             ],
             "medianBiasVsSuggested": 50
           }
@@ -306,42 +306,42 @@
       },
       "size25_item2": {
         "county": {
-          "targets": 1105,
-          "estimated": 1051,
+          "targets": 1106,
+          "estimated": 1052,
           "thin": 171,
-          "rangedCount": 880,
-          "coveragePct": 79.6,
+          "rangedCount": 881,
+          "coveragePct": 79.7,
           "all": {
-            "n": 1051,
+            "n": 1052,
             "typicalMiss": 325,
             "meanMiss": 643,
             "within100Pct": 20.7,
             "within200Pct": 35.1,
-            "within300Pct": 49.3,
+            "within300Pct": 49.2,
             "within300CiPct": [
-              46.3,
+              46.2,
               52.3
             ],
             "band200Pct": 22.9,
             "band300EvalPct": 27.6,
-            "band500EvalPct": 41.5,
+            "band500EvalPct": 41.4,
             "medianBias": 100
           },
           "ranged": {
-            "n": 880,
+            "n": 881,
             "typicalMiss": 300,
             "within300Pct": 51,
             "rangeHit200Pct": 24,
             "rangeHit200Count": 211,
             "rangeHit200CiPct": [
-              21.3,
+              21.2,
               26.9
             ],
-            "within300OfSuggestedPct": 51.7,
+            "within300OfSuggestedPct": 51.6,
             "within300OfSuggestedCount": 455,
             "within300OfSuggestedCiPct": [
-              48.4,
-              55
+              48.3,
+              54.9
             ],
             "medianBiasVsSuggested": 100
           }
@@ -392,126 +392,126 @@
     "full": {
       "baseline": {
         "county": {
-          "targets": 1105,
-          "estimated": 1097,
-          "thin": 52,
-          "rangedCount": 1045,
-          "coveragePct": 94.6,
+          "targets": 1106,
+          "estimated": 1098,
+          "thin": 56,
+          "rangedCount": 1042,
+          "coveragePct": 94.2,
           "all": {
-            "n": 1097,
+            "n": 1098,
             "typicalMiss": 450,
             "meanMiss": 784,
-            "within100Pct": 15.8,
-            "within200Pct": 27.2,
-            "within300Pct": 37.6,
+            "within100Pct": 15.9,
+            "within200Pct": 27.8,
+            "within300Pct": 37.9,
             "within300CiPct": [
-              34.7,
-              40.5
+              35.1,
+              40.8
             ],
-            "band200Pct": 16.8,
-            "band300EvalPct": 20.1,
-            "band500EvalPct": 31.5,
-            "medianBias": 100
+            "band200Pct": 17.2,
+            "band300EvalPct": 20.6,
+            "band500EvalPct": 32.1,
+            "medianBias": 95
           },
           "ranged": {
-            "n": 1045,
+            "n": 1042,
             "typicalMiss": 450,
-            "within300Pct": 38.3,
-            "rangeHit200Pct": 17,
-            "rangeHit200Count": 178,
+            "within300Pct": 38.5,
+            "rangeHit200Pct": 17.2,
+            "rangeHit200Count": 179,
             "rangeHit200CiPct": [
-              14.9,
-              19.4
+              15,
+              19.6
             ],
-            "within300OfSuggestedPct": 39.2,
-            "within300OfSuggestedCount": 410,
+            "within300OfSuggestedPct": 39.4,
+            "within300OfSuggestedCount": 411,
             "within300OfSuggestedCiPct": [
-              36.3,
-              42.2
+              36.5,
+              42.4
             ],
-            "medianBiasVsSuggested": 100
+            "medianBiasVsSuggested": 97
           }
         },
         "core": {
           "targets": 233,
           "estimated": 229,
-          "thin": 13,
-          "rangedCount": 216,
-          "coveragePct": 92.7,
+          "thin": 17,
+          "rangedCount": 212,
+          "coveragePct": 91,
           "all": {
             "n": 229,
-            "typicalMiss": 350,
-            "meanMiss": 512,
-            "within100Pct": 20.5,
-            "within200Pct": 32.3,
-            "within300Pct": 47.6,
+            "typicalMiss": 303,
+            "meanMiss": 498,
+            "within100Pct": 22.3,
+            "within200Pct": 35.4,
+            "within300Pct": 49.8,
             "within300CiPct": [
-              41.2,
-              54.1
+              43.4,
+              56.2
             ],
-            "band200Pct": 21.8,
-            "band300EvalPct": 26.2,
-            "band500EvalPct": 39.7,
-            "medianBias": 100
+            "band200Pct": 23.6,
+            "band300EvalPct": 28.4,
+            "band500EvalPct": 42.8,
+            "medianBias": 83
           },
           "ranged": {
-            "n": 216,
-            "typicalMiss": 304,
-            "within300Pct": 49.5,
-            "rangeHit200Pct": 22.7,
-            "rangeHit200Count": 49,
+            "n": 212,
+            "typicalMiss": 300,
+            "within300Pct": 51.9,
+            "rangeHit200Pct": 23.6,
+            "rangeHit200Count": 50,
             "rangeHit200CiPct": [
-              17.6,
-              28.7
+              18.4,
+              29.7
             ],
-            "within300OfSuggestedPct": 50.9,
-            "within300OfSuggestedCount": 110,
+            "within300OfSuggestedPct": 53.3,
+            "within300OfSuggestedCount": 113,
             "within300OfSuggestedCiPct": [
-              44.3,
-              57.5
+              46.6,
+              59.9
             ],
-            "medianBiasVsSuggested": 98
+            "medianBiasVsSuggested": 95
           }
         }
       },
       "size25_item2": {
         "county": {
-          "targets": 1105,
-          "estimated": 1061,
-          "thin": 159,
-          "rangedCount": 902,
+          "targets": 1106,
+          "estimated": 1063,
+          "thin": 160,
+          "rangedCount": 903,
           "coveragePct": 81.6,
           "all": {
-            "n": 1061,
-            "typicalMiss": 350,
-            "meanMiss": 647,
-            "within100Pct": 20,
-            "within200Pct": 34.4,
-            "within300Pct": 48.1,
+            "n": 1063,
+            "typicalMiss": 330,
+            "meanMiss": 644,
+            "within100Pct": 20.6,
+            "within200Pct": 35.2,
+            "within300Pct": 48.4,
             "within300CiPct": [
-              45.1,
-              51.1
+              45.5,
+              51.5
             ],
-            "band200Pct": 22,
-            "band300EvalPct": 26.6,
-            "band500EvalPct": 41.8,
+            "band200Pct": 23,
+            "band300EvalPct": 27.7,
+            "band500EvalPct": 42,
             "medianBias": 100
           },
           "ranged": {
-            "n": 902,
-            "typicalMiss": 305,
-            "within300Pct": 49.8,
-            "rangeHit200Pct": 22.6,
-            "rangeHit200Count": 204,
+            "n": 903,
+            "typicalMiss": 300,
+            "within300Pct": 50.1,
+            "rangeHit200Pct": 23.7,
+            "rangeHit200Count": 214,
             "rangeHit200CiPct": [
-              20,
-              25.5
+              21,
+              26.6
             ],
-            "within300OfSuggestedPct": 50.7,
-            "within300OfSuggestedCount": 457,
+            "within300OfSuggestedPct": 51.1,
+            "within300OfSuggestedCount": 461,
             "within300OfSuggestedCiPct": [
-              47.4,
-              53.9
+              47.8,
+              54.3
             ],
             "medianBiasVsSuggested": 100
           }
@@ -519,42 +519,42 @@
         "core": {
           "targets": 233,
           "estimated": 219,
-          "thin": 40,
-          "rangedCount": 179,
-          "coveragePct": 76.8,
+          "thin": 39,
+          "rangedCount": 180,
+          "coveragePct": 77.3,
           "all": {
             "n": 219,
-            "typicalMiss": 265,
-            "meanMiss": 406,
-            "within100Pct": 24.2,
-            "within200Pct": 40.2,
-            "within300Pct": 55.7,
+            "typicalMiss": 250,
+            "meanMiss": 400,
+            "within100Pct": 25.1,
+            "within200Pct": 42.9,
+            "within300Pct": 57.5,
             "within300CiPct": [
-              49.1,
-              62.1
+              50.9,
+              63.9
             ],
-            "band200Pct": 25.6,
-            "band300EvalPct": 31.1,
-            "band500EvalPct": 50.7,
-            "medianBias": 110
+            "band200Pct": 27.4,
+            "band300EvalPct": 33.8,
+            "band500EvalPct": 52.1,
+            "medianBias": 100
           },
           "ranged": {
-            "n": 179,
-            "typicalMiss": 250,
-            "within300Pct": 60.3,
-            "rangeHit200Pct": 26.8,
-            "rangeHit200Count": 48,
+            "n": 180,
+            "typicalMiss": 205,
+            "within300Pct": 63.3,
+            "rangeHit200Pct": 30,
+            "rangeHit200Count": 54,
             "rangeHit200CiPct": [
-              20.9,
-              33.7
+              23.8,
+              37.1
             ],
-            "within300OfSuggestedPct": 60.3,
-            "within300OfSuggestedCount": 108,
+            "within300OfSuggestedPct": 63.3,
+            "within300OfSuggestedCount": 114,
             "within300OfSuggestedCiPct": [
-              53,
-              67.2
+              56.1,
+              70
             ],
-            "medianBiasVsSuggested": 100
+            "medianBiasVsSuggested": 98
           }
         }
       }
@@ -606,42 +606,42 @@
             }
           },
           "Other counties (LA-border area)": {
-            "targets": 231,
-            "estimated": 228,
+            "targets": 232,
+            "estimated": 229,
             "thin": 15,
-            "rangedCount": 213,
+            "rangedCount": 214,
             "coveragePct": 92.2,
             "all": {
-              "n": 228,
+              "n": 229,
               "typicalMiss": 750,
-              "meanMiss": 1459,
-              "within100Pct": 7.5,
-              "within200Pct": 12.3,
-              "within300Pct": 18,
+              "meanMiss": 1466,
+              "within100Pct": 7.4,
+              "within200Pct": 12.2,
+              "within300Pct": 17.9,
               "within300CiPct": [
                 13.5,
-                23.5
+                23.4
               ],
               "band200Pct": 7.9,
               "band300EvalPct": 9.2,
-              "band500EvalPct": 14.9,
-              "medianBias": 138
+              "band500EvalPct": 14.8,
+              "medianBias": 125
             },
             "ranged": {
-              "n": 213,
+              "n": 214,
               "typicalMiss": 750,
-              "within300Pct": 18.8,
-              "rangeHit200Pct": 8,
+              "within300Pct": 18.7,
+              "rangeHit200Pct": 7.9,
               "rangeHit200Count": 17,
               "rangeHit200CiPct": [
                 5,
                 12.4
               ],
-              "within300OfSuggestedPct": 18.8,
+              "within300OfSuggestedPct": 18.7,
               "within300OfSuggestedCount": 40,
               "within300OfSuggestedCiPct": [
-                14.1,
-                24.6
+                14,
+                24.5
               ],
               "medianBiasVsSuggested": 200
             }
@@ -690,17 +690,17 @@
             }
           },
           "LA-border cities": {
-            "targets": 303,
-            "estimated": 299,
+            "targets": 304,
+            "estimated": 300,
             "thin": 17,
-            "rangedCount": 282,
+            "rangedCount": 283,
             "coveragePct": 93.1,
             "all": {
-              "n": 299,
-              "typicalMiss": 700,
-              "meanMiss": 1374,
-              "within100Pct": 8.4,
-              "within200Pct": 13.4,
+              "n": 300,
+              "typicalMiss": 714,
+              "meanMiss": 1380,
+              "within100Pct": 8.3,
+              "within200Pct": 13.3,
               "within300Pct": 18.7,
               "within300CiPct": [
                 14.7,
@@ -712,10 +712,10 @@
               "medianBias": 100
             },
             "ranged": {
-              "n": 282,
+              "n": 283,
               "typicalMiss": 700,
               "within300Pct": 19.1,
-              "rangeHit200Pct": 8.2,
+              "rangeHit200Pct": 8.1,
               "rangeHit200Count": 23,
               "rangeHit200CiPct": [
                 5.5,
@@ -724,7 +724,7 @@
               "within300OfSuggestedPct": 19.1,
               "within300OfSuggestedCount": 54,
               "within300OfSuggestedCiPct": [
-                15,
+                14.9,
                 24.1
               ],
               "medianBiasVsSuggested": 100
@@ -733,31 +733,31 @@
         },
         "area": {
           "Ventura-area outside the core": {
-            "targets": 872,
-            "estimated": 861,
+            "targets": 873,
+            "estimated": 862,
             "thin": 58,
-            "rangedCount": 803,
+            "rangedCount": 804,
             "coveragePct": 92.1,
             "all": {
-              "n": 861,
+              "n": 862,
               "typicalMiss": 500,
-              "meanMiss": 895,
-              "within100Pct": 13.4,
+              "meanMiss": 897,
+              "within100Pct": 13.3,
               "within200Pct": 24.5,
               "within300Pct": 34.7,
               "within300CiPct": [
                 31.6,
-                38
+                37.9
               ],
-              "band200Pct": 14.8,
+              "band200Pct": 14.7,
               "band300EvalPct": 17.9,
               "band500EvalPct": 28,
               "medianBias": 100
             },
             "ranged": {
-              "n": 803,
+              "n": 804,
               "typicalMiss": 495,
-              "within300Pct": 35.5,
+              "within300Pct": 35.4,
               "rangeHit200Pct": 14.7,
               "rangeHit200Count": 118,
               "rangeHit200CiPct": [
@@ -767,8 +767,8 @@
               "within300OfSuggestedPct": 36.1,
               "within300OfSuggestedCount": 290,
               "within300OfSuggestedCiPct": [
-                32.9,
-                39.5
+                32.8,
+                39.4
               ],
               "medianBiasVsSuggested": 100
             }
@@ -858,44 +858,44 @@
             }
           },
           "Calabasas": {
-            "targets": 70,
-            "estimated": 69,
+            "targets": 71,
+            "estimated": 70,
             "thin": 6,
-            "rangedCount": 63,
-            "coveragePct": 90,
+            "rangedCount": 64,
+            "coveragePct": 90.1,
             "all": {
-              "n": 69,
+              "n": 70,
               "typicalMiss": 1000,
-              "meanMiss": 1905,
-              "within100Pct": 7.2,
-              "within200Pct": 11.6,
-              "within300Pct": 14.5,
+              "meanMiss": 1921,
+              "within100Pct": 7.1,
+              "within200Pct": 11.4,
+              "within300Pct": 14.3,
               "within300CiPct": [
-                8.1,
-                24.7
+                7.9,
+                24.3
               ],
-              "band200Pct": 7.2,
-              "band300EvalPct": 8.7,
-              "band500EvalPct": 13,
-              "medianBias": 200
+              "band200Pct": 7.1,
+              "band300EvalPct": 8.6,
+              "band500EvalPct": 12.9,
+              "medianBias": 150
             },
             "ranged": {
-              "n": 63,
-              "typicalMiss": 1000,
-              "within300Pct": 15.9,
-              "rangeHit200Pct": 7.9,
+              "n": 64,
+              "typicalMiss": 1088,
+              "within300Pct": 15.6,
+              "rangeHit200Pct": 7.8,
               "rangeHit200Count": 5,
               "rangeHit200CiPct": [
                 3.4,
-                17.3
+                17
               ],
-              "within300OfSuggestedPct": 15.9,
+              "within300OfSuggestedPct": 15.6,
               "within300OfSuggestedCount": 10,
               "within300OfSuggestedCiPct": [
-                8.9,
-                26.8
+                8.7,
+                26.4
               ],
-              "medianBiasVsSuggested": 200
+              "medianBiasVsSuggested": 150
             }
           },
           "Newbury Park": {
@@ -1393,29 +1393,29 @@
             }
           },
           "single_family": {
-            "targets": 730,
-            "estimated": 720,
+            "targets": 731,
+            "estimated": 721,
             "thin": 44,
-            "rangedCount": 676,
+            "rangedCount": 677,
             "coveragePct": 92.6,
             "all": {
-              "n": 720,
-              "typicalMiss": 548,
-              "meanMiss": 985,
+              "n": 721,
+              "typicalMiss": 550,
+              "meanMiss": 987,
               "within100Pct": 11.4,
               "within200Pct": 21.8,
-              "within300Pct": 30.3,
+              "within300Pct": 30.2,
               "within300CiPct": [
                 27,
                 33.7
               ],
               "band200Pct": 12.2,
               "band300EvalPct": 15.1,
-              "band500EvalPct": 24.6,
+              "band500EvalPct": 24.5,
               "medianBias": 125
             },
             "ranged": {
-              "n": 676,
+              "n": 677,
               "typicalMiss": 500,
               "within300Pct": 30.9,
               "rangeHit200Pct": 12.1,
@@ -1424,11 +1424,11 @@
                 9.9,
                 14.8
               ],
-              "within300OfSuggestedPct": 32,
+              "within300OfSuggestedPct": 31.9,
               "within300OfSuggestedCount": 216,
               "within300OfSuggestedCiPct": [
                 28.5,
-                35.6
+                35.5
               ],
               "medianBiasVsSuggested": 150
             }
@@ -1518,42 +1518,42 @@
             }
           },
           "5,000 and up": {
-            "targets": 366,
-            "estimated": 363,
+            "targets": 367,
+            "estimated": 364,
             "thin": 21,
-            "rangedCount": 342,
-            "coveragePct": 93.4,
+            "rangedCount": 343,
+            "coveragePct": 93.5,
             "all": {
-              "n": 363,
-              "typicalMiss": 975,
-              "meanMiss": 1529,
-              "within100Pct": 6.1,
+              "n": 364,
+              "typicalMiss": 985,
+              "meanMiss": 1533,
+              "within100Pct": 6,
               "within200Pct": 12.4,
               "within300Pct": 17.6,
               "within300CiPct": [
-                14.1,
-                21.9
+                14,
+                21.8
               ],
               "band200Pct": 6.6,
               "band300EvalPct": 7.7,
               "band500EvalPct": 14,
-              "medianBias": 600
+              "medianBias": 588
             },
             "ranged": {
-              "n": 342,
-              "typicalMiss": 963,
+              "n": 343,
+              "typicalMiss": 975,
               "within300Pct": 17.8,
               "rangeHit200Pct": 7,
               "rangeHit200Count": 24,
               "rangeHit200CiPct": [
-                4.8,
+                4.7,
                 10.2
               ],
               "within300OfSuggestedPct": 18.7,
               "within300OfSuggestedCount": 64,
               "within300OfSuggestedCiPct": [
                 14.9,
-                23.2
+                23.1
               ],
               "medianBiasVsSuggested": 600
             }
@@ -1643,42 +1643,42 @@
         },
         "compCount": {
           "6-11 comps": {
-            "targets": 489,
-            "estimated": 489,
+            "targets": 490,
+            "estimated": 490,
             "thin": 0,
-            "rangedCount": 489,
+            "rangedCount": 490,
             "coveragePct": 100,
             "all": {
-              "n": 489,
+              "n": 490,
               "typicalMiss": 450,
-              "meanMiss": 754,
-              "within100Pct": 16.2,
-              "within200Pct": 27.4,
-              "within300Pct": 38.9,
+              "meanMiss": 759,
+              "within100Pct": 16.1,
+              "within200Pct": 27.3,
+              "within300Pct": 38.8,
               "within300CiPct": [
                 34.6,
                 43.2
               ],
-              "band200Pct": 17.2,
+              "band200Pct": 17.1,
               "band300EvalPct": 20.2,
-              "band500EvalPct": 31.1,
+              "band500EvalPct": 31,
               "medianBias": 100
             },
             "ranged": {
-              "n": 489,
+              "n": 490,
               "typicalMiss": 450,
-              "within300Pct": 38.9,
-              "rangeHit200Pct": 17.2,
+              "within300Pct": 38.8,
+              "rangeHit200Pct": 17.1,
               "rangeHit200Count": 84,
               "rangeHit200CiPct": [
                 14.1,
-                20.8
+                20.7
               ],
-              "within300OfSuggestedPct": 39.5,
+              "within300OfSuggestedPct": 39.4,
               "within300OfSuggestedCount": 193,
               "within300OfSuggestedCiPct": [
                 35.2,
-                43.9
+                43.8
               ],
               "medianBiasVsSuggested": 100
             }
@@ -1792,38 +1792,38 @@
         },
         "agreement": {
           "disagree (spread 500 or more)": {
-            "targets": 765,
-            "estimated": 765,
+            "targets": 766,
+            "estimated": 766,
             "thin": 31,
-            "rangedCount": 734,
-            "coveragePct": 95.9,
+            "rangedCount": 735,
+            "coveragePct": 96,
             "all": {
-              "n": 765,
+              "n": 766,
               "typicalMiss": 500,
-              "meanMiss": 933,
+              "meanMiss": 935,
               "within100Pct": 11.9,
-              "within200Pct": 21.6,
+              "within200Pct": 21.5,
               "within300Pct": 30.8,
               "within300CiPct": [
-                27.7,
+                27.6,
                 34.2
               ],
               "band200Pct": 12.5,
-              "band300EvalPct": 15.6,
-              "band500EvalPct": 24.6,
+              "band300EvalPct": 15.5,
+              "band500EvalPct": 24.5,
               "medianBias": 100
             },
             "ranged": {
-              "n": 734,
+              "n": 735,
               "typicalMiss": 500,
               "within300Pct": 30.9,
-              "rangeHit200Pct": 12.3,
+              "rangeHit200Pct": 12.2,
               "rangeHit200Count": 90,
               "rangeHit200CiPct": [
                 10.1,
                 14.8
               ],
-              "within300OfSuggestedPct": 31.5,
+              "within300OfSuggestedPct": 31.4,
               "within300OfSuggestedCount": 231,
               "within300OfSuggestedCiPct": [
                 28.2,
@@ -1917,38 +1917,38 @@
         },
         "confidence": {
           "Low": {
-            "targets": 813,
-            "estimated": 813,
+            "targets": 814,
+            "estimated": 814,
             "thin": 0,
-            "rangedCount": 813,
+            "rangedCount": 814,
             "coveragePct": 100,
             "all": {
-              "n": 813,
+              "n": 814,
               "typicalMiss": 500,
-              "meanMiss": 874,
+              "meanMiss": 877,
               "within100Pct": 13,
               "within200Pct": 23.1,
               "within300Pct": 33.2,
               "within300CiPct": [
-                30.1,
+                30,
                 36.5
               ],
-              "band200Pct": 13.7,
+              "band200Pct": 13.6,
               "band300EvalPct": 17,
-              "band500EvalPct": 26.6,
-              "medianBias": 95
+              "band500EvalPct": 26.5,
+              "medianBias": 85
             },
             "ranged": {
-              "n": 813,
+              "n": 814,
               "typicalMiss": 500,
               "within300Pct": 33.2,
-              "rangeHit200Pct": 13.7,
+              "rangeHit200Pct": 13.6,
               "rangeHit200Count": 111,
               "rangeHit200CiPct": [
-                11.5,
+                11.4,
                 16.2
               ],
-              "within300OfSuggestedPct": 34.1,
+              "within300OfSuggestedPct": 34,
               "within300OfSuggestedCount": 277,
               "within300OfSuggestedCiPct": [
                 30.9,
@@ -2042,38 +2042,38 @@
         },
         "confidenceSimple": {
           "Low": {
-            "targets": 734,
-            "estimated": 734,
+            "targets": 735,
+            "estimated": 735,
             "thin": 0,
-            "rangedCount": 734,
+            "rangedCount": 735,
             "coveragePct": 100,
             "all": {
-              "n": 734,
+              "n": 735,
               "typicalMiss": 500,
-              "meanMiss": 919,
+              "meanMiss": 922,
               "within100Pct": 11.6,
               "within200Pct": 21.5,
               "within300Pct": 30.9,
               "within300CiPct": [
                 27.7,
-                34.4
+                34.3
               ],
-              "band200Pct": 12.3,
+              "band200Pct": 12.2,
               "band300EvalPct": 15.4,
-              "band500EvalPct": 24.7,
+              "band500EvalPct": 24.6,
               "medianBias": 100
             },
             "ranged": {
-              "n": 734,
+              "n": 735,
               "typicalMiss": 500,
               "within300Pct": 30.9,
-              "rangeHit200Pct": 12.3,
+              "rangeHit200Pct": 12.2,
               "rangeHit200Count": 90,
               "rangeHit200CiPct": [
                 10.1,
                 14.8
               ],
-              "within300OfSuggestedPct": 31.5,
+              "within300OfSuggestedPct": 31.4,
               "within300OfSuggestedCount": 231,
               "within300OfSuggestedCiPct": [
                 28.2,
@@ -2167,18 +2167,18 @@
         },
         "sourceMix": {
           "MLS leases only": {
-            "targets": 1089,
-            "estimated": 1089,
+            "targets": 1090,
+            "estimated": 1090,
             "thin": 80,
-            "rangedCount": 1009,
+            "rangedCount": 1010,
             "coveragePct": 92.7,
             "all": {
-              "n": 1089,
+              "n": 1090,
               "typicalMiss": 450,
-              "meanMiss": 817,
+              "meanMiss": 819,
               "within100Pct": 15.3,
               "within200Pct": 26.6,
-              "within300Pct": 37.4,
+              "within300Pct": 37.3,
               "within300CiPct": [
                 34.5,
                 40.3
@@ -2189,14 +2189,14 @@
               "medianBias": 95
             },
             "ranged": {
-              "n": 1009,
+              "n": 1010,
               "typicalMiss": 450,
-              "within300Pct": 38.2,
-              "rangeHit200Pct": 16.3,
+              "within300Pct": 38.1,
+              "rangeHit200Pct": 16.2,
               "rangeHit200Count": 164,
               "rangeHit200CiPct": [
                 14.1,
-                18.7
+                18.6
               ],
               "within300OfSuggestedPct": 38.9,
               "within300OfSuggestedCount": 393,
@@ -2210,18 +2210,18 @@
         },
         "targetKind": {
           "MLS-only": {
-            "targets": 1105,
-            "estimated": 1089,
+            "targets": 1106,
+            "estimated": 1090,
             "thin": 80,
-            "rangedCount": 1009,
+            "rangedCount": 1010,
             "coveragePct": 91.3,
             "all": {
-              "n": 1089,
+              "n": 1090,
               "typicalMiss": 450,
-              "meanMiss": 817,
+              "meanMiss": 819,
               "within100Pct": 15.3,
               "within200Pct": 26.6,
-              "within300Pct": 37.4,
+              "within300Pct": 37.3,
               "within300CiPct": [
                 34.5,
                 40.3
@@ -2232,14 +2232,14 @@
               "medianBias": 95
             },
             "ranged": {
-              "n": 1009,
+              "n": 1010,
               "typicalMiss": 450,
-              "within300Pct": 38.2,
-              "rangeHit200Pct": 16.3,
+              "within300Pct": 38.1,
+              "rangeHit200Pct": 16.2,
               "rangeHit200Count": 164,
               "rangeHit200CiPct": [
                 14.1,
-                18.7
+                18.6
               ],
               "within300OfSuggestedPct": 38.9,
               "within300OfSuggestedCount": 393,
@@ -3414,42 +3414,42 @@
             }
           },
           "Other counties (LA-border area)": {
-            "targets": 231,
-            "estimated": 220,
+            "targets": 232,
+            "estimated": 221,
             "thin": 19,
-            "rangedCount": 201,
-            "coveragePct": 87,
+            "rangedCount": 202,
+            "coveragePct": 87.1,
             "all": {
-              "n": 220,
-              "typicalMiss": 560,
-              "meanMiss": 1045,
-              "within100Pct": 14.1,
-              "within200Pct": 20.5,
-              "within300Pct": 30,
+              "n": 221,
+              "typicalMiss": 550,
+              "meanMiss": 1043,
+              "within100Pct": 14,
+              "within200Pct": 20.4,
+              "within300Pct": 29.9,
               "within300CiPct": [
-                24.3,
-                36.4
+                24.2,
+                36.2
               ],
               "band200Pct": 14.5,
-              "band300EvalPct": 17.3,
-              "band500EvalPct": 27.3,
-              "medianBias": 76
+              "band300EvalPct": 17.2,
+              "band500EvalPct": 27.1,
+              "medianBias": 100
             },
             "ranged": {
-              "n": 201,
+              "n": 202,
               "typicalMiss": 550,
-              "within300Pct": 30.8,
+              "within300Pct": 30.7,
               "rangeHit200Pct": 14.4,
               "rangeHit200Count": 29,
               "rangeHit200CiPct": [
                 10.2,
-                20
+                19.9
               ],
-              "within300OfSuggestedPct": 31.3,
+              "within300OfSuggestedPct": 31.2,
               "within300OfSuggestedCount": 63,
               "within300OfSuggestedCiPct": [
-                25.3,
-                38.1
+                25.2,
+                37.9
               ],
               "medianBiasVsSuggested": 50
             }
@@ -3498,42 +3498,42 @@
             }
           },
           "LA-border cities": {
-            "targets": 303,
-            "estimated": 289,
+            "targets": 304,
+            "estimated": 290,
             "thin": 23,
-            "rangedCount": 266,
+            "rangedCount": 267,
             "coveragePct": 87.8,
             "all": {
-              "n": 289,
+              "n": 290,
               "typicalMiss": 550,
-              "meanMiss": 1003,
-              "within100Pct": 14.9,
-              "within200Pct": 21.1,
-              "within300Pct": 31.5,
+              "meanMiss": 1001,
+              "within100Pct": 14.8,
+              "within200Pct": 21,
+              "within300Pct": 31.4,
               "within300CiPct": [
-                26.4,
-                37.1
+                26.3,
+                36.9
               ],
-              "band200Pct": 15.6,
-              "band300EvalPct": 18,
-              "band500EvalPct": 27.3,
-              "medianBias": 100
+              "band200Pct": 15.5,
+              "band300EvalPct": 17.9,
+              "band500EvalPct": 27.2,
+              "medianBias": 106
             },
             "ranged": {
-              "n": 266,
+              "n": 267,
               "typicalMiss": 550,
-              "within300Pct": 32,
+              "within300Pct": 31.8,
               "rangeHit200Pct": 15.4,
               "rangeHit200Count": 41,
               "rangeHit200CiPct": [
-                11.6,
+                11.5,
                 20.2
               ],
-              "within300OfSuggestedPct": 32.7,
+              "within300OfSuggestedPct": 32.6,
               "within300OfSuggestedCount": 87,
               "within300OfSuggestedCiPct": [
-                27.3,
-                38.6
+                27.2,
+                38.4
               ],
               "medianBiasVsSuggested": 100
             }
@@ -3541,17 +3541,17 @@
         },
         "area": {
           "Ventura-area outside the core": {
-            "targets": 872,
-            "estimated": 822,
+            "targets": 873,
+            "estimated": 823,
             "thin": 133,
-            "rangedCount": 689,
+            "rangedCount": 690,
             "coveragePct": 79,
             "all": {
-              "n": 822,
+              "n": 823,
               "typicalMiss": 350,
-              "meanMiss": 694,
+              "meanMiss": 693,
               "within100Pct": 19.3,
-              "within200Pct": 33.1,
+              "within200Pct": 33,
               "within300Pct": 46.7,
               "within300CiPct": [
                 43.3,
@@ -3563,20 +3563,20 @@
               "medianBias": 105
             },
             "ranged": {
-              "n": 689,
+              "n": 690,
               "typicalMiss": 350,
-              "within300Pct": 47.3,
+              "within300Pct": 47.2,
               "rangeHit200Pct": 22.6,
               "rangeHit200Count": 156,
               "rangeHit200CiPct": [
-                19.7,
+                19.6,
                 25.9
               ],
-              "within300OfSuggestedPct": 48.5,
+              "within300OfSuggestedPct": 48.4,
               "within300OfSuggestedCount": 334,
               "within300OfSuggestedCiPct": [
-                44.8,
-                52.2
+                44.7,
+                52.1
               ],
               "medianBiasVsSuggested": 100
             }
@@ -3666,42 +3666,42 @@
             }
           },
           "Calabasas": {
-            "targets": 70,
-            "estimated": 67,
+            "targets": 71,
+            "estimated": 68,
             "thin": 8,
-            "rangedCount": 59,
-            "coveragePct": 84.3,
+            "rangedCount": 60,
+            "coveragePct": 84.5,
             "all": {
-              "n": 67,
+              "n": 68,
               "typicalMiss": 500,
-              "meanMiss": 1330,
-              "within100Pct": 20.9,
-              "within200Pct": 22.4,
-              "within300Pct": 28.4,
+              "meanMiss": 1317,
+              "within100Pct": 20.6,
+              "within200Pct": 22.1,
+              "within300Pct": 27.9,
               "within300CiPct": [
-                19,
-                40.1
+                18.7,
+                39.6
               ],
-              "band200Pct": 20.9,
-              "band300EvalPct": 20.9,
-              "band500EvalPct": 26.9,
-              "medianBias": 0
+              "band200Pct": 20.6,
+              "band300EvalPct": 20.6,
+              "band500EvalPct": 26.5,
+              "medianBias": 25
             },
             "ranged": {
-              "n": 59,
+              "n": 60,
               "typicalMiss": 500,
-              "within300Pct": 30.5,
-              "rangeHit200Pct": 22,
+              "within300Pct": 30,
+              "rangeHit200Pct": 21.7,
               "rangeHit200Count": 13,
               "rangeHit200CiPct": [
-                13.4,
-                34.1
+                13.1,
+                33.6
               ],
-              "within300OfSuggestedPct": 30.5,
+              "within300OfSuggestedPct": 30,
               "within300OfSuggestedCount": 18,
               "within300OfSuggestedCiPct": [
-                20.3,
-                43.1
+                19.9,
+                42.5
               ],
               "medianBiasVsSuggested": 50
             }
@@ -4201,42 +4201,42 @@
             }
           },
           "single_family": {
-            "targets": 730,
-            "estimated": 685,
+            "targets": 731,
+            "estimated": 686,
             "thin": 102,
-            "rangedCount": 583,
+            "rangedCount": 584,
             "coveragePct": 79.9,
             "all": {
-              "n": 685,
+              "n": 686,
               "typicalMiss": 400,
               "meanMiss": 747,
-              "within100Pct": 15.8,
+              "within100Pct": 15.7,
               "within200Pct": 28,
-              "within300Pct": 41.5,
+              "within300Pct": 41.4,
               "within300CiPct": [
                 37.8,
-                45.2
+                45.1
               ],
               "band200Pct": 18.4,
-              "band300EvalPct": 21.5,
-              "band500EvalPct": 34.5,
+              "band300EvalPct": 21.4,
+              "band500EvalPct": 34.4,
               "medianBias": 150
             },
             "ranged": {
-              "n": 583,
+              "n": 584,
               "typicalMiss": 400,
-              "within300Pct": 42.9,
-              "rangeHit200Pct": 19.6,
+              "within300Pct": 42.8,
+              "rangeHit200Pct": 19.5,
               "rangeHit200Count": 114,
               "rangeHit200CiPct": [
                 16.5,
-                23
+                22.9
               ],
-              "within300OfSuggestedPct": 44.3,
+              "within300OfSuggestedPct": 44.2,
               "within300OfSuggestedCount": 258,
               "within300OfSuggestedCiPct": [
-                40.3,
-                48.3
+                40.2,
+                48.2
               ],
               "medianBiasVsSuggested": 150
             }
@@ -4326,21 +4326,21 @@
             }
           },
           "5,000 and up": {
-            "targets": 366,
-            "estimated": 346,
+            "targets": 367,
+            "estimated": 347,
             "thin": 45,
-            "rangedCount": 301,
-            "coveragePct": 82.2,
+            "rangedCount": 302,
+            "coveragePct": 82.3,
             "all": {
-              "n": 346,
-              "typicalMiss": 763,
-              "meanMiss": 1186,
-              "within100Pct": 9,
+              "n": 347,
+              "typicalMiss": 753,
+              "meanMiss": 1184,
+              "within100Pct": 8.9,
               "within200Pct": 15.3,
-              "within300Pct": 24,
+              "within300Pct": 23.9,
               "within300CiPct": [
-                19.8,
-                28.8
+                19.7,
+                28.7
               ],
               "band200Pct": 10.4,
               "band300EvalPct": 11,
@@ -4348,20 +4348,20 @@
               "medianBias": 450
             },
             "ranged": {
-              "n": 301,
-              "typicalMiss": 705,
-              "within300Pct": 25.6,
-              "rangeHit200Pct": 11,
+              "n": 302,
+              "typicalMiss": 703,
+              "within300Pct": 25.5,
+              "rangeHit200Pct": 10.9,
               "rangeHit200Count": 33,
               "rangeHit200CiPct": [
                 7.9,
-                15
+                14.9
               ],
-              "within300OfSuggestedPct": 26.6,
+              "within300OfSuggestedPct": 26.5,
               "within300OfSuggestedCount": 80,
               "within300OfSuggestedCiPct": [
-                21.9,
-                31.8
+                21.8,
+                31.7
               ],
               "medianBiasVsSuggested": 400
             }
@@ -4492,42 +4492,42 @@
             }
           },
           "4-5 comps": {
-            "targets": 412,
-            "estimated": 412,
+            "targets": 413,
+            "estimated": 413,
             "thin": 0,
-            "rangedCount": 412,
+            "rangedCount": 413,
             "coveragePct": 100,
             "all": {
-              "n": 412,
+              "n": 413,
               "typicalMiss": 300,
-              "meanMiss": 591,
-              "within100Pct": 21.4,
-              "within200Pct": 39.8,
-              "within300Pct": 53.9,
+              "meanMiss": 590,
+              "within100Pct": 21.3,
+              "within200Pct": 39.7,
+              "within300Pct": 53.8,
               "within300CiPct": [
-                49.1,
-                58.6
+                48.9,
+                58.5
               ],
               "band200Pct": 24.5,
-              "band300EvalPct": 31.8,
-              "band500EvalPct": 46.4,
-              "medianBias": 104
+              "band300EvalPct": 31.7,
+              "band500EvalPct": 46.2,
+              "medianBias": 105
             },
             "ranged": {
-              "n": 412,
+              "n": 413,
               "typicalMiss": 300,
-              "within300Pct": 53.9,
+              "within300Pct": 53.8,
               "rangeHit200Pct": 24.5,
               "rangeHit200Count": 101,
               "rangeHit200CiPct": [
                 20.6,
-                28.9
+                28.8
               ],
-              "within300OfSuggestedPct": 55.1,
+              "within300OfSuggestedPct": 55,
               "within300OfSuggestedCount": 227,
               "within300OfSuggestedCiPct": [
-                50.3,
-                59.8
+                50.1,
+                59.7
               ],
               "medianBiasVsSuggested": 100
             }
@@ -4600,42 +4600,42 @@
         },
         "agreement": {
           "disagree (spread 500 or more)": {
-            "targets": 510,
-            "estimated": 510,
+            "targets": 511,
+            "estimated": 511,
             "thin": 55,
-            "rangedCount": 455,
+            "rangedCount": 456,
             "coveragePct": 89.2,
             "all": {
-              "n": 510,
+              "n": 511,
               "typicalMiss": 450,
-              "meanMiss": 791,
+              "meanMiss": 790,
               "within100Pct": 15.3,
-              "within200Pct": 27.3,
-              "within300Pct": 39.6,
+              "within200Pct": 27.2,
+              "within300Pct": 39.5,
               "within300CiPct": [
-                35.5,
-                43.9
+                35.4,
+                43.8
               ],
-              "band200Pct": 17.1,
+              "band200Pct": 17,
               "band300EvalPct": 20.2,
               "band500EvalPct": 33.3,
-              "medianBias": 126
+              "medianBias": 128
             },
             "ranged": {
-              "n": 455,
+              "n": 456,
               "typicalMiss": 450,
-              "within300Pct": 39.8,
-              "rangeHit200Pct": 17.4,
+              "within300Pct": 39.7,
+              "rangeHit200Pct": 17.3,
               "rangeHit200Count": 79,
               "rangeHit200CiPct": [
-                14.2,
+                14.1,
                 21.1
               ],
-              "within300OfSuggestedPct": 40.7,
+              "within300OfSuggestedPct": 40.6,
               "within300OfSuggestedCount": 185,
               "within300OfSuggestedCiPct": [
                 36.2,
-                45.2
+                45.1
               ],
               "medianBiasVsSuggested": 100
             }
@@ -4725,42 +4725,42 @@
         },
         "confidence": {
           "Low": {
-            "targets": 569,
-            "estimated": 569,
+            "targets": 570,
+            "estimated": 570,
             "thin": 0,
-            "rangedCount": 569,
+            "rangedCount": 570,
             "coveragePct": 100,
             "all": {
-              "n": 569,
+              "n": 570,
               "typicalMiss": 375,
-              "meanMiss": 689,
+              "meanMiss": 688,
               "within100Pct": 18.1,
-              "within200Pct": 32.7,
-              "within300Pct": 45.5,
+              "within200Pct": 32.6,
+              "within300Pct": 45.4,
               "within300CiPct": [
-                41.5,
-                49.6
+                41.4,
+                49.5
               ],
               "band200Pct": 20,
               "band300EvalPct": 25.1,
-              "band500EvalPct": 39.2,
-              "medianBias": 103
+              "band500EvalPct": 39.1,
+              "medianBias": 104
             },
             "ranged": {
-              "n": 569,
+              "n": 570,
               "typicalMiss": 375,
-              "within300Pct": 45.5,
+              "within300Pct": 45.4,
               "rangeHit200Pct": 20,
               "rangeHit200Count": 114,
               "rangeHit200CiPct": [
-                17,
+                16.9,
                 23.5
               ],
-              "within300OfSuggestedPct": 46.6,
+              "within300OfSuggestedPct": 46.5,
               "within300OfSuggestedCount": 265,
               "within300OfSuggestedCiPct": [
-                42.5,
-                50.7
+                42.4,
+                50.6
               ],
               "medianBiasVsSuggested": 100
             }
@@ -4850,42 +4850,42 @@
         },
         "confidenceSimple": {
           "Low": {
-            "targets": 455,
-            "estimated": 455,
+            "targets": 456,
+            "estimated": 456,
             "thin": 0,
-            "rangedCount": 455,
+            "rangedCount": 456,
             "coveragePct": 100,
             "all": {
-              "n": 455,
+              "n": 456,
               "typicalMiss": 450,
-              "meanMiss": 767,
+              "meanMiss": 766,
               "within100Pct": 15.4,
               "within200Pct": 27.9,
-              "within300Pct": 39.8,
+              "within300Pct": 39.7,
               "within300CiPct": [
-                35.4,
+                35.3,
                 44.3
               ],
-              "band200Pct": 17.4,
-              "band300EvalPct": 20.9,
-              "band500EvalPct": 34.1,
+              "band200Pct": 17.3,
+              "band300EvalPct": 20.8,
+              "band500EvalPct": 34,
               "medianBias": 125
             },
             "ranged": {
-              "n": 455,
+              "n": 456,
               "typicalMiss": 450,
-              "within300Pct": 39.8,
-              "rangeHit200Pct": 17.4,
+              "within300Pct": 39.7,
+              "rangeHit200Pct": 17.3,
               "rangeHit200Count": 79,
               "rangeHit200CiPct": [
-                14.2,
+                14.1,
                 21.1
               ],
-              "within300OfSuggestedPct": 40.7,
+              "within300OfSuggestedPct": 40.6,
               "within300OfSuggestedCount": 185,
               "within300OfSuggestedCiPct": [
                 36.2,
-                45.2
+                45.1
               ],
               "medianBiasVsSuggested": 100
             }
@@ -4975,42 +4975,42 @@
         },
         "sourceMix": {
           "MLS leases only": {
-            "targets": 1035,
-            "estimated": 1035,
+            "targets": 1036,
+            "estimated": 1036,
             "thin": 196,
-            "rangedCount": 839,
+            "rangedCount": 840,
             "coveragePct": 81.1,
             "all": {
-              "n": 1035,
+              "n": 1036,
               "typicalMiss": 325,
               "meanMiss": 635,
               "within100Pct": 20.5,
-              "within200Pct": 35,
-              "within300Pct": 49.4,
+              "within200Pct": 34.9,
+              "within300Pct": 49.3,
               "within300CiPct": [
                 46.3,
                 52.4
               ],
               "band200Pct": 22.9,
               "band300EvalPct": 27.6,
-              "band500EvalPct": 41.4,
+              "band500EvalPct": 41.3,
               "medianBias": 100
             },
             "ranged": {
-              "n": 839,
+              "n": 840,
               "typicalMiss": 300,
-              "within300Pct": 50.7,
-              "rangeHit200Pct": 24.1,
+              "within300Pct": 50.6,
+              "rangeHit200Pct": 24,
               "rangeHit200Count": 202,
               "rangeHit200CiPct": [
                 21.3,
                 27.1
               ],
-              "within300OfSuggestedPct": 51.6,
+              "within300OfSuggestedPct": 51.5,
               "within300OfSuggestedCount": 433,
               "within300OfSuggestedCiPct": [
                 48.2,
-                55
+                54.9
               ],
               "medianBiasVsSuggested": 100
             }
@@ -5018,42 +5018,42 @@
         },
         "targetKind": {
           "MLS-only": {
-            "targets": 1105,
-            "estimated": 1035,
+            "targets": 1106,
+            "estimated": 1036,
             "thin": 196,
-            "rangedCount": 839,
+            "rangedCount": 840,
             "coveragePct": 75.9,
             "all": {
-              "n": 1035,
+              "n": 1036,
               "typicalMiss": 325,
               "meanMiss": 635,
               "within100Pct": 20.5,
-              "within200Pct": 35,
-              "within300Pct": 49.4,
+              "within200Pct": 34.9,
+              "within300Pct": 49.3,
               "within300CiPct": [
                 46.3,
                 52.4
               ],
               "band200Pct": 22.9,
               "band300EvalPct": 27.6,
-              "band500EvalPct": 41.4,
+              "band500EvalPct": 41.3,
               "medianBias": 100
             },
             "ranged": {
-              "n": 839,
+              "n": 840,
               "typicalMiss": 300,
-              "within300Pct": 50.7,
-              "rangeHit200Pct": 24.1,
+              "within300Pct": 50.6,
+              "rangeHit200Pct": 24,
               "rangeHit200Count": 202,
               "rangeHit200CiPct": [
                 21.3,
                 27.1
               ],
-              "within300OfSuggestedPct": 51.6,
+              "within300OfSuggestedPct": 51.5,
               "within300OfSuggestedCount": 433,
               "within300OfSuggestedCiPct": [
                 48.2,
-                55
+                54.9
               ],
               "medianBiasVsSuggested": 100
             }
@@ -6139,20 +6139,20 @@
   },
   "regions": {
     "definition": "\"LA-border cities\" are Westlake Village, Agoura Hills, Calabasas, West Hills, Woodland Hills, Malibu, Hidden Hills, Canoga Park, Agoura, Los Angeles; \"Ventura-area excluding LA-border\" is every other city in the box",
-    "shareOfLeasesPct": 27.4,
+    "shareOfLeasesPct": 27.5,
     "baseline": {
       "laBorder": {
-        "targets": 303,
-        "estimated": 299,
+        "targets": 304,
+        "estimated": 300,
         "thin": 17,
-        "rangedCount": 282,
+        "rangedCount": 283,
         "coveragePct": 93.1,
         "all": {
-          "n": 299,
-          "typicalMiss": 700,
-          "meanMiss": 1374,
-          "within100Pct": 8.4,
-          "within200Pct": 13.4,
+          "n": 300,
+          "typicalMiss": 714,
+          "meanMiss": 1380,
+          "within100Pct": 8.3,
+          "within200Pct": 13.3,
           "within300Pct": 18.7,
           "within300CiPct": [
             14.7,
@@ -6164,10 +6164,10 @@
           "medianBias": 100
         },
         "ranged": {
-          "n": 282,
+          "n": 283,
           "typicalMiss": 700,
           "within300Pct": 19.1,
-          "rangeHit200Pct": 8.2,
+          "rangeHit200Pct": 8.1,
           "rangeHit200Count": 23,
           "rangeHit200CiPct": [
             5.5,
@@ -6176,7 +6176,7 @@
           "within300OfSuggestedPct": 19.1,
           "within300OfSuggestedCount": 54,
           "within300OfSuggestedCiPct": [
-            15,
+            14.9,
             24.1
           ],
           "medianBiasVsSuggested": 100
@@ -6228,42 +6228,42 @@
     },
     "size25_item2": {
       "laBorder": {
-        "targets": 303,
-        "estimated": 289,
+        "targets": 304,
+        "estimated": 290,
         "thin": 23,
-        "rangedCount": 266,
+        "rangedCount": 267,
         "coveragePct": 87.8,
         "all": {
-          "n": 289,
+          "n": 290,
           "typicalMiss": 550,
-          "meanMiss": 1003,
-          "within100Pct": 14.9,
-          "within200Pct": 21.1,
-          "within300Pct": 31.5,
+          "meanMiss": 1001,
+          "within100Pct": 14.8,
+          "within200Pct": 21,
+          "within300Pct": 31.4,
           "within300CiPct": [
-            26.4,
-            37.1
+            26.3,
+            36.9
           ],
-          "band200Pct": 15.6,
-          "band300EvalPct": 18,
-          "band500EvalPct": 27.3,
-          "medianBias": 100
+          "band200Pct": 15.5,
+          "band300EvalPct": 17.9,
+          "band500EvalPct": 27.2,
+          "medianBias": 106
         },
         "ranged": {
-          "n": 266,
+          "n": 267,
           "typicalMiss": 550,
-          "within300Pct": 32,
+          "within300Pct": 31.8,
           "rangeHit200Pct": 15.4,
           "rangeHit200Count": 41,
           "rangeHit200CiPct": [
-            11.6,
+            11.5,
             20.2
           ],
-          "within300OfSuggestedPct": 32.7,
+          "within300OfSuggestedPct": 32.6,
           "within300OfSuggestedCount": 87,
           "within300OfSuggestedCiPct": [
-            27.3,
-            38.6
+            27.2,
+            38.4
           ],
           "medianBiasVsSuggested": 100
         },
@@ -6316,7 +6316,7 @@
   "counties": {
     "field": "CountyOrParish",
     "definition": "\"Ventura County\" and \"Other counties (LA-border area)\" are grouped by the county the MLS records for each lease (CountyOrParish), so Westlake Village homes on the Ventura side count as Ventura County; a lease whose record has no county is placed by the old city list (Westlake Village, Agoura Hills, Calabasas, West Hills, Woodland Hills, Malibu, Hidden Hills, Canoga Park, Agoura, Los Angeles count as other counties) and is counted under unknown. Grouping only: no comp rule and no headline number uses the county.",
-    "shareOfLeasesPct": 20.9,
+    "shareOfLeasesPct": 21,
     "unknown": {
       "leases": 0,
       "sharePct": 0,
@@ -6497,87 +6497,87 @@
       },
       "otherCounties": {
         "label": "Other counties (LA-border area)",
-        "targets": 231,
-        "estimated": 228,
+        "targets": 232,
+        "estimated": 229,
         "thin": 15,
-        "rangedCount": 213,
+        "rangedCount": 214,
         "coveragePct": 92.2,
         "all": {
-          "n": 228,
+          "n": 229,
           "typicalMiss": 750,
-          "meanMiss": 1459,
-          "within100Pct": 7.5,
-          "within200Pct": 12.3,
-          "within300Pct": 18,
+          "meanMiss": 1466,
+          "within100Pct": 7.4,
+          "within200Pct": 12.2,
+          "within300Pct": 17.9,
           "within300CiPct": [
             13.5,
-            23.5
+            23.4
           ],
           "band200Pct": 7.9,
           "band300EvalPct": 9.2,
-          "band500EvalPct": 14.9,
-          "medianBias": 138
+          "band500EvalPct": 14.8,
+          "medianBias": 125
         },
         "ranged": {
-          "n": 213,
+          "n": 214,
           "typicalMiss": 750,
-          "within300Pct": 18.8,
-          "rangeHit200Pct": 8,
+          "within300Pct": 18.7,
+          "rangeHit200Pct": 7.9,
           "rangeHit200Count": 17,
           "rangeHit200CiPct": [
             5,
             12.4
           ],
-          "within300OfSuggestedPct": 18.8,
+          "within300OfSuggestedPct": 18.7,
           "within300OfSuggestedCount": 40,
           "within300OfSuggestedCiPct": [
-            14.1,
-            24.6
+            14,
+            24.5
           ],
           "medianBiasVsSuggested": 200
         },
-        "medianRent": 5900,
+        "medianRent": 5948,
         "leasesFromCityRule": 0,
         "confidence": {
           "Low": {
-            "targets": 191,
-            "estimated": 191,
+            "targets": 192,
+            "estimated": 192,
             "thin": 0,
-            "rangedCount": 191,
+            "rangedCount": 192,
             "coveragePct": 100,
             "all": {
-              "n": 191,
+              "n": 192,
               "typicalMiss": 800,
-              "meanMiss": 1460,
+              "meanMiss": 1468,
               "within100Pct": 6.3,
               "within200Pct": 11.5,
-              "within300Pct": 17.8,
+              "within300Pct": 17.7,
               "within300CiPct": [
                 13,
-                23.8
+                23.7
               ],
               "band200Pct": 6.8,
-              "band300EvalPct": 8.4,
+              "band300EvalPct": 8.3,
               "band500EvalPct": 14.1,
-              "medianBias": 250
+              "medianBias": 225
             },
             "ranged": {
-              "n": 191,
+              "n": 192,
               "typicalMiss": 800,
-              "within300Pct": 17.8,
+              "within300Pct": 17.7,
               "rangeHit200Pct": 6.8,
               "rangeHit200Count": 13,
               "rangeHit200CiPct": [
                 4,
-                11.3
+                11.2
               ],
-              "within300OfSuggestedPct": 17.8,
+              "within300OfSuggestedPct": 17.7,
               "within300OfSuggestedCount": 34,
               "within300OfSuggestedCiPct": [
                 13,
-                23.8
+                23.7
               ],
-              "medianBiasVsSuggested": 250
+              "medianBiasVsSuggested": 225
             }
           }
         }
@@ -6755,87 +6755,87 @@
       },
       "otherCounties": {
         "label": "Other counties (LA-border area)",
-        "targets": 231,
-        "estimated": 220,
+        "targets": 232,
+        "estimated": 221,
         "thin": 19,
-        "rangedCount": 201,
-        "coveragePct": 87,
+        "rangedCount": 202,
+        "coveragePct": 87.1,
         "all": {
-          "n": 220,
-          "typicalMiss": 560,
-          "meanMiss": 1045,
-          "within100Pct": 14.1,
-          "within200Pct": 20.5,
-          "within300Pct": 30,
+          "n": 221,
+          "typicalMiss": 550,
+          "meanMiss": 1043,
+          "within100Pct": 14,
+          "within200Pct": 20.4,
+          "within300Pct": 29.9,
           "within300CiPct": [
-            24.3,
-            36.4
+            24.2,
+            36.2
           ],
           "band200Pct": 14.5,
-          "band300EvalPct": 17.3,
-          "band500EvalPct": 27.3,
-          "medianBias": 76
+          "band300EvalPct": 17.2,
+          "band500EvalPct": 27.1,
+          "medianBias": 100
         },
         "ranged": {
-          "n": 201,
+          "n": 202,
           "typicalMiss": 550,
-          "within300Pct": 30.8,
+          "within300Pct": 30.7,
           "rangeHit200Pct": 14.4,
           "rangeHit200Count": 29,
           "rangeHit200CiPct": [
             10.2,
-            20
+            19.9
           ],
-          "within300OfSuggestedPct": 31.3,
+          "within300OfSuggestedPct": 31.2,
           "within300OfSuggestedCount": 63,
           "within300OfSuggestedCiPct": [
-            25.3,
-            38.1
+            25.2,
+            37.9
           ],
           "medianBiasVsSuggested": 50
         },
-        "medianRent": 5900,
+        "medianRent": 5948,
         "leasesFromCityRule": 0,
         "confidence": {
           "Low": {
-            "targets": 160,
-            "estimated": 160,
+            "targets": 161,
+            "estimated": 161,
             "thin": 0,
-            "rangedCount": 160,
+            "rangedCount": 161,
             "coveragePct": 100,
             "all": {
-              "n": 160,
+              "n": 161,
               "typicalMiss": 650,
-              "meanMiss": 1021,
-              "within100Pct": 12.5,
-              "within200Pct": 18.8,
-              "within300Pct": 28.1,
+              "meanMiss": 1018,
+              "within100Pct": 12.4,
+              "within200Pct": 18.6,
+              "within300Pct": 28,
               "within300CiPct": [
-                21.7,
-                35.5
+                21.6,
+                35.3
               ],
-              "band200Pct": 12.5,
-              "band300EvalPct": 15,
-              "band500EvalPct": 25.6,
-              "medianBias": 35
+              "band200Pct": 12.4,
+              "band300EvalPct": 14.9,
+              "band500EvalPct": 25.5,
+              "medianBias": 50
             },
             "ranged": {
-              "n": 160,
+              "n": 161,
               "typicalMiss": 650,
-              "within300Pct": 28.1,
-              "rangeHit200Pct": 12.5,
+              "within300Pct": 28,
+              "rangeHit200Pct": 12.4,
               "rangeHit200Count": 20,
               "rangeHit200CiPct": [
                 8.2,
-                18.5
+                18.4
               ],
-              "within300OfSuggestedPct": 28.8,
+              "within300OfSuggestedPct": 28.6,
               "within300OfSuggestedCount": 46,
               "within300OfSuggestedCiPct": [
-                22.3,
-                36.2
+                22.2,
+                36
               ],
-              "medianBiasVsSuggested": 48
+              "medianBiasVsSuggested": 50
             }
           },
           "Medium": {
@@ -6891,119 +6891,119 @@
     }
   },
   "rincon": {
-    "targets": 79,
-    "description": "Rincon single-home leases started in the last 12 months after the plausibility screen; signed rent is the target; pool = full (24-month Rincon lookback)",
+    "targets": 76,
+    "description": "Rincon single-home leases started in the last 12 months after the plausibility screen, each typed as a house, condo or townhouse by what the MLS says is at its address (LeadSimple's label where the MLS has no clear answer; leases the MLS shows to be some other kind of home are not tested); signed rent is the target; pool = full (24-month Rincon lookback, Rincon leases typed the same way, implausible rents left out)",
     "baseline": {
-      "targets": 79,
-      "estimated": 79,
-      "thin": 5,
-      "rangedCount": 74,
-      "coveragePct": 93.7,
+      "targets": 76,
+      "estimated": 73,
+      "thin": 9,
+      "rangedCount": 64,
+      "coveragePct": 84.2,
       "all": {
-        "n": 79,
-        "typicalMiss": 305,
-        "meanMiss": 565,
-        "within100Pct": 19,
-        "within200Pct": 36.7,
-        "within300Pct": 46.8,
+        "n": 73,
+        "typicalMiss": 295,
+        "meanMiss": 497,
+        "within100Pct": 17.8,
+        "within200Pct": 38.4,
+        "within300Pct": 50.7,
         "within300CiPct": [
-          36.2,
-          57.7
+          39.5,
+          61.8
         ],
-        "band200Pct": 22.8,
-        "band300EvalPct": 30.4,
-        "band500EvalPct": 40.5,
-        "medianBias": -110
+        "band200Pct": 19.2,
+        "band300EvalPct": 24.7,
+        "band500EvalPct": 42.5,
+        "medianBias": -200
       },
       "ranged": {
-        "n": 74,
+        "n": 64,
         "typicalMiss": 305,
-        "within300Pct": 47.3,
-        "rangeHit200Pct": 23,
-        "rangeHit200Count": 17,
+        "within300Pct": 48.4,
+        "rangeHit200Pct": 18.8,
+        "rangeHit200Count": 12,
         "rangeHit200CiPct": [
-          14.9,
-          33.7
+          11.1,
+          30
         ],
-        "within300OfSuggestedPct": 48.6,
-        "within300OfSuggestedCount": 36,
+        "within300OfSuggestedPct": 48.4,
+        "within300OfSuggestedCount": 31,
         "within300OfSuggestedCiPct": [
-          37.6,
-          59.8
+          36.6,
+          60.4
         ],
-        "medianBiasVsSuggested": -112
+        "medianBiasVsSuggested": -227
       }
     },
     "size25_item2": {
-      "targets": 79,
-      "estimated": 78,
-      "thin": 19,
-      "rangedCount": 59,
-      "coveragePct": 74.7,
+      "targets": 76,
+      "estimated": 67,
+      "thin": 23,
+      "rangedCount": 44,
+      "coveragePct": 57.9,
       "all": {
-        "n": 78,
-        "typicalMiss": 280,
-        "meanMiss": 414,
-        "within100Pct": 24.4,
-        "within200Pct": 43.6,
-        "within300Pct": 55.1,
+        "n": 67,
+        "typicalMiss": 255,
+        "meanMiss": 378,
+        "within100Pct": 25.4,
+        "within200Pct": 41.8,
+        "within300Pct": 61.2,
         "within300CiPct": [
-          44.1,
-          65.7
+          49.2,
+          72
         ],
-        "band200Pct": 29.5,
-        "band300EvalPct": 35.9,
-        "band500EvalPct": 46.2,
-        "medianBias": -110
+        "band200Pct": 23.9,
+        "band300EvalPct": 29.9,
+        "band500EvalPct": 50.7,
+        "medianBias": -205
       },
       "ranged": {
-        "n": 59,
-        "typicalMiss": 270,
-        "within300Pct": 57.6,
-        "rangeHit200Pct": 28.8,
-        "rangeHit200Count": 17,
+        "n": 44,
+        "typicalMiss": 258,
+        "within300Pct": 61.4,
+        "rangeHit200Pct": 25,
+        "rangeHit200Count": 11,
         "rangeHit200CiPct": [
-          18.8,
-          41.4
+          14.6,
+          39.4
         ],
-        "within300OfSuggestedPct": 59.3,
-        "within300OfSuggestedCount": 35,
+        "within300OfSuggestedPct": 63.6,
+        "within300OfSuggestedCount": 28,
         "within300OfSuggestedCiPct": [
-          46.6,
-          70.9
+          48.9,
+          76.2
         ],
-        "medianBiasVsSuggested": -110
+        "medianBiasVsSuggested": -180
       }
     },
     "note": "signed rent is not always market rent: a unit re-priced after sitting vacant signs below its first ask (no asking-price history exists yet, A3)"
   },
   "outcomes": {
-    "analyses": 71,
-    "complete": 69,
+    "analyses": 74,
+    "complete": 72,
     "analysesWithAnyAddressMatch": 10,
     "retrospectiveMatches": 10,
     "forwardMatches": 0
   },
   "listingTimeCheck": {
     "description": "MLS leases re-run as of the day they went on the market instead of the day before they closed",
-    "leases": 1093,
+    "leases": 1094,
     "skipped": 12,
     "medianDaysListedBeforeClose": 33,
     "closeDateBasis": {
       "baseline": {
         "county": {
-          "targets": 1093,
-          "estimated": 1078,
+          "targets": 1094,
+          "estimated": 1079,
           "thin": 78,
-          "rangedCount": 1000,
+          "rangedCount": 1001,
           "coveragePct": 91.5,
           "all": {
-            "n": 1078,
+            "n": 1079,
             "typicalMiss": 450,
-            "meanMiss": 814,
+            "meanMiss": 816,
             "within100Pct": 15.3,
             "within200Pct": 26.5,
-            "within300Pct": 37.4,
+            "within300Pct": 37.3,
             "within300CiPct": [
               34.5,
               40.3
@@ -7014,7 +7014,7 @@
             "medianBias": 95
           },
           "ranged": {
-            "n": 1000,
+            "n": 1001,
             "typicalMiss": 450,
             "within300Pct": 38.2,
             "rangeHit200Pct": 16.3,
@@ -7027,7 +7027,7 @@
             "within300OfSuggestedCount": 390,
             "within300OfSuggestedCiPct": [
               36,
-              42.1
+              42
             ],
             "medianBiasVsSuggested": 95
           }
@@ -7076,42 +7076,42 @@
       },
       "size25_item2": {
         "county": {
-          "targets": 1093,
-          "estimated": 1025,
+          "targets": 1094,
+          "estimated": 1026,
           "thin": 195,
-          "rangedCount": 830,
-          "coveragePct": 75.9,
+          "rangedCount": 831,
+          "coveragePct": 76,
           "all": {
-            "n": 1025,
+            "n": 1026,
             "typicalMiss": 325,
             "meanMiss": 636,
             "within100Pct": 20.6,
             "within200Pct": 34.8,
-            "within300Pct": 49.4,
+            "within300Pct": 49.3,
             "within300CiPct": [
               46.3,
               52.4
             ],
             "band200Pct": 22.9,
             "band300EvalPct": 27.5,
-            "band500EvalPct": 41.3,
+            "band500EvalPct": 41.2,
             "medianBias": 100
           },
           "ranged": {
-            "n": 830,
+            "n": 831,
             "typicalMiss": 300,
-            "within300Pct": 50.6,
+            "within300Pct": 50.5,
             "rangeHit200Pct": 24.1,
             "rangeHit200Count": 200,
             "rangeHit200CiPct": [
               21.3,
               27.1
             ],
-            "within300OfSuggestedPct": 51.6,
+            "within300OfSuggestedPct": 51.5,
             "within300OfSuggestedCount": 428,
             "within300OfSuggestedCiPct": [
-              48.2,
-              55
+              48.1,
+              54.9
             ],
             "medianBiasVsSuggested": 100
           }
@@ -7162,32 +7162,32 @@
     "listingTimeBasis": {
       "baseline": {
         "county": {
-          "targets": 1093,
-          "estimated": 1072,
+          "targets": 1094,
+          "estimated": 1073,
           "thin": 88,
-          "rangedCount": 984,
+          "rangedCount": 985,
           "coveragePct": 90,
           "all": {
-            "n": 1072,
-            "typicalMiss": 478,
-            "meanMiss": 842,
+            "n": 1073,
+            "typicalMiss": 480,
+            "meanMiss": 844,
             "within100Pct": 15,
-            "within200Pct": 25.5,
+            "within200Pct": 25.4,
             "within300Pct": 35.5,
             "within300CiPct": [
               32.7,
-              38.5
+              38.4
             ],
             "band200Pct": 16.3,
             "band300EvalPct": 19.2,
             "band500EvalPct": 29.4,
-            "medianBias": 123
+            "medianBias": 120
           },
           "ranged": {
-            "n": 984,
-            "typicalMiss": 464,
-            "within300Pct": 36.3,
-            "rangeHit200Pct": 16.2,
+            "n": 985,
+            "typicalMiss": 473,
+            "within300Pct": 36.2,
+            "rangeHit200Pct": 16.1,
             "rangeHit200Count": 159,
             "rangeHit200CiPct": [
               14,
@@ -7197,7 +7197,7 @@
             "within300OfSuggestedCount": 365,
             "within300OfSuggestedCiPct": [
               34.1,
-              40.2
+              40.1
             ],
             "medianBiasVsSuggested": 100
           }
@@ -7246,20 +7246,20 @@
       },
       "size25_item2": {
         "county": {
-          "targets": 1093,
-          "estimated": 1012,
+          "targets": 1094,
+          "estimated": 1013,
           "thin": 208,
-          "rangedCount": 804,
+          "rangedCount": 805,
           "coveragePct": 73.6,
           "all": {
-            "n": 1012,
+            "n": 1013,
             "typicalMiss": 350,
             "meanMiss": 636,
-            "within100Pct": 19.3,
+            "within100Pct": 19.2,
             "within200Pct": 33.1,
             "within300Pct": 47.4,
             "within300CiPct": [
-              44.4,
+              44.3,
               50.5
             ],
             "band200Pct": 22.1,
@@ -7268,9 +7268,9 @@
             "medianBias": 128
           },
           "ranged": {
-            "n": 804,
+            "n": 805,
             "typicalMiss": 350,
-            "within300Pct": 47.8,
+            "within300Pct": 47.7,
             "rangeHit200Pct": 22.4,
             "rangeHit200Count": 180,
             "rangeHit200CiPct": [
@@ -7280,8 +7280,8 @@
             "within300OfSuggestedPct": 48.6,
             "within300OfSuggestedCount": 391,
             "within300OfSuggestedCiPct": [
-              45.2,
-              52.1
+              45.1,
+              52
             ],
             "medianBiasVsSuggested": 150
           }

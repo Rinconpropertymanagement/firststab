@@ -37,10 +37,11 @@
  */
 
 const { HEADLINE_RANGE_WIDTH, NEAR_RANGE_DOLLARS, CONFIDENCE_LABELS } = require('./constants');
-const { exclusionReason, subjectExtrasFrom, goalSentenceFor, normalizeOwnerGoal, sizeBandPctFor } = require('./weighting');
+const { exclusionReason, subjectExtrasFrom, goalSentenceFor, normalizeOwnerGoal, sizeBandPctFor, computeRecommendedRange } = require('./weighting');
 const { computeConfidence } = require('./confidence');
 const { buildApiResponse } = require('./outcome');
 const { rentLooksImplausible } = require('./leadsimple');
+const { NOTES: OWNER_VIEW_NOTES } = require('./owner-view');
 
 // ─── Paging and search limits ────────────────────────────────────────────────
 const DEFAULT_LIMIT = 50;
@@ -350,7 +351,24 @@ function rebuildReport({ analysis, comps, sourceNamesById = {}, runByName = null
 
   // `scorecard` is passed on as given: left out, buildApiResponse() uses the CURRENT published accuracy scorecard
   // (the same one a live run quotes today), so the accuracy sentences describe the tool as it stands now.
-  const report = buildApiResponse({ analysis: cleanAnalysis, comps: outComps, marketData: marketData || null, numbers, scorecard, sourceNotes: notes });
+  // The owner view (lib/owner-view.js) is rebuilt from the saved data and is offered for a new-format report only. It
+  // uses the saved date the analysis was run (never today's date) and the saved middle of the comps (only to leave odd-priced
+  // homes off the page). A report whose recount does not match its saved counts gets no owner view (the page would not
+  // add up); lib/owner-view.js checks that.
+  let ownerMidpoint = null;
+  if (format === 'new') {
+    ownerMidpoint = num(row.recommended_rent_mid);
+    if (ownerMidpoint === null && numbers.headline) {
+      // a damaged saved home can only mean "no owner view" (the page says so); it must never cost the reopened report
+      try {
+        ownerMidpoint = num(computeRecommendedRange(countedComps, row.subject_bedrooms, row.subject_property_type, extras).mid);
+      } catch (err) {
+        console.error(`[rental-analysis] past report ${row.id}: the middle of the comparable rents could not be worked out, so there is no owner view: ${err.message}`);
+        ownerMidpoint = null;
+      }
+    }
+  }
+  const report = buildApiResponse({ analysis: cleanAnalysis, comps: outComps, marketData: marketData || null, numbers, scorecard, sourceNotes: notes, ownerMidpoint });
 
   report.format = format;
   if (format === 'new' && flags.includes('range_not_valid')) {
@@ -367,11 +385,15 @@ function rebuildReport({ analysis, comps, sourceNamesById = {}, runByName = null
     report.accuracyLine = null; // the accuracy results are about the current method
     report.sizeBand = null;
     report.sizeNote = null; // the size rule did not exist when this report was run
+    report.ownerView = null;
+    report.ownerViewNote = OWNER_VIEW_NOTES.older;
   } else if (format === 'unfinished') {
     report.noRange = row.status === 'failed' ? UNFINISHED_NO_RANGE.failed : UNFINISHED_NO_RANGE.other;
     report.accuracyLine = null;
     report.sizeBand = null;
     report.sizeNote = null;
+    report.ownerView = null;
+    report.ownerViewNote = OWNER_VIEW_NOTES.unfinished;
   }
   return { report, flags };
 }

@@ -18,6 +18,7 @@ const { SQFT_BAND_PROPERTY_TYPES } = require('./constants');
 const { FIRM_UP_LINE } = require('./confidence');
 const { loadAccuracyScorecard, staffSentences } = require('./accuracy-sentences');
 const { TYPE_CHECK_WHAT } = require('./leadsimple');
+const { buildOwnerView, NOTES: OWNER_VIEW_NOTES } = require('./owner-view');
 
 // The published accuracy results, read once when the server starts. null when the
 // file is missing or damaged; the sentences that depend on it are then left out.
@@ -238,12 +239,32 @@ function sizeBandNote(analysis) {
  * @param {object} args.numbers - the result of computeNumbers()
  * @param {object|null} [args.scorecard] - override for tests; defaults to the published results
  * @param {string[]} [args.sourceNotes] - from buildSourceNotes(): which source did not fully come back
+ * @param {number|null} [args.ownerMidpoint] - the internal middle of the counted comps, used only to leave odd-priced
+ *   homes off the owner view. Left out for a live run (it is taken from numbers.recommended); a reopened report passes
+ *   the one saved with it.
  */
-function buildApiResponse({ analysis, comps, marketData, numbers, scorecard = PUBLISHED_SCORECARD, sourceNotes = [] }) {
+function buildApiResponse({ analysis, comps, marketData, numbers, scorecard = PUBLISHED_SCORECARD, sourceNotes = [], ownerMidpoint }) {
   const { headline, confidence, counted } = numbers;
   const label = confidence ? confidence.label : null;
   const countedComps = (comps || []).filter(c => !c.exclusion_reason);
   const sentences = staffSentences(scorecard, label);
+  // The one-page owner view (lib/owner-view.js): built here, for a live run and a reopened report alike, so both
+  // entry points and the past-reports page get the same thing. null (with a plain note) when it cannot be offered.
+  // A fault in building it must never cost staff the report that is already saved, so it is caught here.
+  let owner;
+  try {
+    owner = buildOwnerView({
+      analysis,
+      comps,
+      headline,
+      confidenceLabel: label,
+      midpoint: ownerMidpoint !== undefined ? ownerMidpoint : (numbers.recommended ? numbers.recommended.mid : null),
+      countedTotal: counted.total,
+    });
+  } catch (err) {
+    console.error(`[rental-analysis] The owner view could not be built: ${err.message}`);
+    owner = { ownerView: null, ownerViewNote: OWNER_VIEW_NOTES.error };
+  }
   return {
     analysis: stripAuditColumns(analysis),
     comps,
@@ -269,6 +290,9 @@ function buildApiResponse({ analysis, comps, marketData, numbers, scorecard = PU
     accuracyLine: sentences.accuracyLine,
     // plain notes about a source that did not fully come back (screen only, nothing saved)
     sourceNotes: Array.isArray(sourceNotes) ? sourceNotes : [],
+    // the one-page owner view, ready to format (nothing staff-only in it), or null with the reason in ownerViewNote
+    ownerView: owner.ownerView,
+    ownerViewNote: owner.ownerViewNote,
   };
 }
 

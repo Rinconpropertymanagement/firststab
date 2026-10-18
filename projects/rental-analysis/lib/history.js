@@ -40,6 +40,7 @@ const { HEADLINE_RANGE_WIDTH, NEAR_RANGE_DOLLARS, CONFIDENCE_LABELS } = require(
 const { exclusionReason, subjectExtrasFrom, goalSentenceFor, normalizeOwnerGoal, sizeBandPctFor } = require('./weighting');
 const { computeConfidence } = require('./confidence');
 const { buildApiResponse } = require('./outcome');
+const { rentLooksImplausible } = require('./leadsimple');
 
 // ─── Paging and search limits ────────────────────────────────────────────────
 const DEFAULT_LIMIT = 50;
@@ -151,6 +152,17 @@ function reportFormat(row) {
   return r.status === 'complete' ? 'older' : 'unfinished';
 }
 
+// The junk-rent mark on one of Rincon's own leases (lib/leadsimple.js) is worked out while a report runs and is NOT saved, so a
+// reopened report has to work it out again from the saved rent and size, or a lease the report left out as a data error would
+// show as counted and the recount would no longer match the saved counts. Only reports saved by a method that applies the screen
+// (METHOD_VERSION cma-2026-10-v2 and later) get it: a report saved as cma-2026-10-v1 was counted without the screen, and rebuilding
+// it WITH the screen would break its counts. An older-format or unfinished report never gets it.
+const METHOD_BEFORE_RENT_SCREEN = 'cma-2026-10-v1';
+const RINCON_SOURCE_NAME = 'LeadSimple Move-Ins';
+function savedWithRentScreen(row, format) {
+  return format === 'new' && typeof row.method_version === 'string' && row.method_version !== '' && row.method_version !== METHOD_BEFORE_RENT_SCREEN;
+}
+
 // A saved recommended range that may be shown: all three prices saved, exactly $200 wide, the price inside it.
 function savedHeadlineNumbers(row) {
   const low = num(row.headline_range_low), high = num(row.headline_range_high), listPrice = num(row.suggested_list_price);
@@ -256,10 +268,15 @@ function rebuildReport({ analysis, comps, sourceNamesById = {}, runByName = null
   const extras = format === 'new'
     ? subjectExtrasFrom({ sqft: row.subject_sqft, furnished: row.furnished, leaseTermMonths: row.lease_term_months, ageRestricted: row.subject_age_restricted })
     : undefined;
-  const outComps = (Array.isArray(comps) ? comps : []).map(c => ({
-    ...c,
-    exclusion_reason: exclusionReason({ ...c, source_name: sourceNamesById[c.source_id] }, row.subject_bedrooms, row.subject_property_type, extras),
-  })).sort(compareComps);
+  const withRentScreen = savedWithRentScreen(row, format);
+  const outComps = (Array.isArray(comps) ? comps : []).map(saved => {
+    const sourceName = sourceNamesById[saved.source_id];
+    // the junk-rent mark, put back (see savedWithRentScreen above); a comp that is not marked is left exactly as saved
+    const c = withRentScreen && sourceName === RINCON_SOURCE_NAME && rentLooksImplausible(Number(saved.monthly_rent), typeof saved.sqft === 'number' ? saved.sqft : null)
+      ? { ...saved, implausible_rent: true }
+      : saved;
+    return { ...c, exclusion_reason: exclusionReason({ ...c, source_name: sourceName }, row.subject_bedrooms, row.subject_property_type, extras) };
+  }).sort(compareComps);
   const countedComps = outComps.filter(c => !c.exclusion_reason);
   const recounted = { total: countedComps.length, leased: countedComps.filter(c => c.listing_status === 'leased').length };
 
@@ -363,5 +380,5 @@ module.exports = {
   DEFAULT_LIMIT, MAX_LIMIT, MAX_OFFSET, MAX_SEARCH_LENGTH, MAX_SEARCH_WORDS, MAX_SEARCH_WORD_LENGTH,
   LIST_COLUMNS, REPORT_COLUMNS, COMP_COLUMNS,
   OLDER_NO_RANGE, UNFINISHED_NO_RANGE, RANGE_NOT_SHOWN, NOT_MATCHING_NOTE, NO_MARKET_NOTE, MARKET_FAILED_NOTE, ORDER_NOTE,
-  isUuid, searchWords, parseHistoryQuery, buildListQuery, reportFormat, savedHeadlineNumbers, shapeListRow, rebuildReport,
+  METHOD_BEFORE_RENT_SCREEN, isUuid, searchWords, parseHistoryQuery, buildListQuery, reportFormat, savedHeadlineNumbers, shapeListRow, rebuildReport,
 };

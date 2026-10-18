@@ -10497,7 +10497,8 @@ async function main() {
     assert.equal(METHOD_VERSION, 'cma-2026-10-v2');
     assert.ok(METHOD_VERSION.length <= 40);
     const walk = dir => fsB.readdirSync(dir, { withFileTypes: true }).flatMap(e => (e.name === 'node_modules' || e.name === 'cache' || e.name === 'out' ? [] : e.isDirectory() ? walk(pathB.join(dir, e.name)) : /\.(js|json|md|html)$/.test(e.name) ? [pathB.join(dir, e.name)] : []));
-    const stale = walk(__dirname).filter(f => !f.endsWith('q-mapping-unit-test.js') && fsB.readFileSync(f, 'utf8').includes('cma-2026-10-v1'));
+    // (lib/history.js names the old version on purpose: a report saved as v1 was counted without the junk-rent screen and is reopened without it)
+    const stale = walk(__dirname).filter(f => !f.endsWith('q-mapping-unit-test.js') && !f.endsWith(pathB.join('lib', 'history.js')) && fsB.readFileSync(f, 'utf8').includes('cma-2026-10-v1'));
     assert.deepEqual(stale, [], 'the old version name is not used anywhere');
   });
 
@@ -10529,6 +10530,11 @@ async function main() {
       assert.equal(reasonOf(mismatch('condo')), 'different property type', 'a comp from another source reads as before');
       assert.equal(reasonOf({ address: 'a', monthly_rent: 2400, exclusion_reason: 'size_mismatch' }), 'different size');
       assert.equal(reasonOf({ address: 'a', monthly_rent: 2400, exclusion_reason: 'size_sqft', sqft: 1500 }), 'too large (1500 sq ft)');
+      // the row wraps (a long reason drops to its own line) with a 2px gap between the lines and 10px between the pieces; no separate row-gap line
+      const baseRule = html.slice(html.indexOf('.comp-notused-row {'), html.indexOf('.comp-notused-row .cn-addr {'));
+      assert.match(baseRule, /flex-wrap: wrap;/);
+      assert.match(baseRule, /gap: 2px 10px;/);
+      assert.doesNotMatch(baseRule, /row-gap/);
       // on a phone-width screen the reason may shrink and wrap inside the card instead of running past its edge
       const phone = html.slice(html.indexOf('@media (max-width: 640px)'), html.indexOf('/* ── Print ── */'));
       assert.match(phone, /\.comp-notused-row \.cn-addr \{ flex-basis: 100%; white-space: normal; \}\s*\.comp-notused-row \.cn-reason \{ flex: 0 1 auto; min-width: 0; \}/);
@@ -10579,6 +10585,7 @@ async function main() {
     const OcH = require('./lib/outcome');
     const { computeNumbers: computeNumbersH } = require('./lib/analyze');
     const { buildCompRows: buildCompRowsH } = require('./lib/comp-rows');
+    const { rentLooksImplausible: rentLooksImplausibleH } = require('./lib/leadsimple');
     const { sizeBandPctFor: sizeBandPctForH } = require('./lib/weighting');
     const hubDirH = pathH.join(__dirname, '..', 'hub', 'rental-analysis');
     const hubExistsH = fsH.existsSync(hubDirH);
@@ -10697,12 +10704,21 @@ async function main() {
       const count = Math.floor(rand() * 26);
       const comps = Array.from({ length: count }, (_, i) => {
         const src = pick(sourcesH);
+        // (drawn in the same order as before, so every random report is the one this test has always made)
+        const compType = rand() < 0.93 ? subject.propertyType : pick(['single_family', 'condo', 'townhouse', 'duplex', null]);
+        const compBedrooms = rand() < 0.1 ? null : Math.max(0, subject.bedrooms + pick([0, 0, 0, 0, 0, 0, 0, 1, -1, 2]));
+        const compSqft = rand() < 0.2 ? null : Math.round(subject.sqft * (0.72 + rand() * 0.56));
+        const compDistance = rand() < 0.1 ? null : Math.round(rand() * 150) / 100;
+        const compRent = 4000 + Math.round((rand() - 0.5) * 40 * spread) * 50;
         return {
           address: `${100 + i} Test St, Ventura, CA 93003`, source_id: src.id, source_name: src.name,
-          property_type: rand() < 0.93 ? subject.propertyType : pick(['single_family', 'condo', 'townhouse', 'duplex', null]),
-          bedrooms: rand() < 0.1 ? null : Math.max(0, subject.bedrooms + pick([0, 0, 0, 0, 0, 0, 0, 1, -1, 2])), bathrooms: 2,
-          sqft: rand() < 0.2 ? null : Math.round(subject.sqft * (0.72 + rand() * 0.56)), distance_miles: rand() < 0.1 ? null : Math.round(rand() * 150) / 100,
-          monthly_rent: 4000 + Math.round((rand() - 0.5) * 40 * spread) * 50, is_estimated_price: false,
+          property_type: compType,
+          bedrooms: compBedrooms, bathrooms: 2,
+          // CHANGED (CONDO-LEASE-TYPE work): a lease from Rincon's own records carries the junk-rent mark that lib/leadsimple.js mapComparable()
+          // sets on every one of them (never saved), exactly as the real pipeline hands it on; so the live run and the reopened report agree.
+          ...(src.name === 'LeadSimple Move-Ins' ? { implausible_rent: rentLooksImplausibleH(compRent, compSqft) } : {}),
+          sqft: compSqft, distance_miles: compDistance,
+          monthly_rent: compRent, is_estimated_price: false,
           listing_status: src.name === 'RentCast' ? pick(['active', 'off_market']) : pick(['leased', 'leased', 'leased', 'active']),
           is_rincon_managed: rand() < 0.04, furnished_status: pick([null, null, null, null, 'unfurnished', 'unfurnished', 'partial', 'either', 'furnished']),
           lease_term_class: pick([null, null, null, 'long', 'long', 'six_month', 'short']), age_restricted: pick([null, null, null, false, false, true]),
@@ -10763,6 +10779,77 @@ async function main() {
         seen.excluded += report.comps.filter(c => c.exclusion_reason).length;
       }
       assert.ok(seen.range >= 120 && seen.high >= 15 && seen.medium >= 15 && seen.low >= 15 && seen.thin >= 15 && seen.none >= 5 && seen.stretch >= 15 && seen.hiddenStretch >= 15 && seen.excluded >= 300 && seen.goals.size === 3, JSON.stringify({ ...seen, goals: [...seen.goals] }));
+    });
+
+    // CONDO-LEASE-TYPE work: the junk-rent mark on a Rincon lease is not saved, so reopening a report puts it back, but only for a report
+    // saved by a method that applies the screen (cma-2026-10-v2 and later). One report with a $280 Rincon lease, made by the real pipeline.
+    const rentScreenFixture = methodVersion => {
+      const subject = { address: '77 Screen Way, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, furnished: false, leaseTermMonths: 12, ageRestricted: false, ownerGoal: 'balanced' };
+      const mk = (n, rent, name, over = {}) => ({ address: `${300 + n} Screen Ln, Ventura, CA 93003`, source_id: sourcesH.find(x => x.name === name).id, source_name: name, property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, distance_miles: 0.2 + n / 10, monthly_rent: rent, is_estimated_price: false, listing_status: 'leased', is_rincon_managed: false, mls_flags: [], condition_tags: [], ...over });
+      // the Rincon lease: with the screen (v2) it carries the mark the way lib/leadsimple.js mapComparable() sets it; a v1 report never had the mark
+      const rincon = mk(9, 280, 'LeadSimple Move-Ins', { sqft: 1450, is_rincon_managed: true, ...(methodVersion === 'cma-2026-10-v1' ? {} : { implausible_rent: rentLooksImplausibleH(280, 1450) }) });
+      // another source with an odd rent per square foot is never marked: the screen is for Rincon's own leases only
+      const oddMls = mk(8, 9000, 'CRMLS', { sqft: 1400, bedrooms: 3 });
+      const comps = [mk(1, 3900, 'CRMLS'), mk(2, 3950, 'CRMLS'), mk(3, 4000, 'CRMLS'), mk(4, 4050, 'CRMLS'), mk(5, 4100, 'CRMLS'), oddMls, rincon];
+      const numbers = computeNumbersH({ comps, subject, properties: [] });
+      const analysisId = 'dddddddd-0000-4000-8000-000000000001';
+      const compRows = buildCompRowsH(numbers.compsWithMatch, { analysisId }).map((r, i) => ({ ...r, id: `scr-${i}`, created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:00Z' }));
+      const patch = OcH.buildCompletionPatch({ numbers, ownerGoal: 'balanced', propertyId: null, subjectEstimatedRent: null, subjectLatitude: 34.2, subjectLongitude: -119.2, subjectZip: '93003', rationale: 'Saved explanation.' });
+      const analysisRow = {
+        id: analysisId, subject_address: subject.address, subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, subject_property_type: 'single_family', subject_year_built: null,
+        lease_term_months: 12, furnished: false, run_by: 'u-1', subject_age_restricted: false, subject_subdivision: null, size_band_pct: sizeBandPctForH('single_family', 1500),
+        created_at: '2026-10-18T12:00:00Z', updated_at: '2026-10-18T12:00:30Z', property_id: null, ...patch, method_version: methodVersion,
+      };
+      const reopen = (row = analysisRow) => H.rebuildReport({ analysis: pickCols(row, H.REPORT_COLUMNS), comps: compRows.map(r => pickCols(r, H.COMP_COLUMNS)), sourceNamesById: namesH, runByName: 'Pat Runner', marketData: null });
+      const addressOf = c => c.address.split(',')[0];
+      return { numbers, analysisRow, compRows, reopen, addressOf };
+    };
+
+    await check('Past reports / junk-rent mark: a report saved at cma-2026-10-v2 with a $280 Rincon lease reopens with that lease under "not used" (implausible_rent), the counts the report saved, and no counts flag; a lease from any other source is never marked', () => {
+      const f = rentScreenFixture('cma-2026-10-v2');
+      assert.equal(f.analysisRow.method_version, 'cma-2026-10-v2');
+      assert.equal(f.numbers.counted.total, 6, 'live: the five MLS leases and the one MLS lease at an odd rent per square foot; the junk Rincon lease is left out');
+      assert.equal(f.analysisRow.counted_comp_count, 6);
+      const { report, flags } = f.reopen();
+      assert.deepEqual(flags, [], 'the recount agrees with what was saved');
+      assert.equal(report.counted.total, 6);
+      assert.equal(report.counted.leased, 6);
+      const junk = report.comps.find(c => c.address.startsWith('309 Screen Ln'));
+      assert.equal(junk.exclusion_reason, 'implausible_rent');
+      assert.equal(junk.monthly_rent, 280, 'shown with its real saved rent, under the not-used list');
+      assert.equal(report.comps.find(c => c.address.startsWith('308 Screen Ln')).exclusion_reason, null, 'an MLS lease with a high rent per square foot counts, as saved');
+      assert.equal(report.comps.filter(c => c.exclusion_reason).length, 1);
+      assert.ok(!report.sourceNotes.includes(H.NOT_MATCHING_NOTE), 'no "worked out again and did not match" note');
+      for (const k of ['headline', 'confidence']) assert.deepEqual(report[k], OcH.buildApiResponse({ analysis: f.analysisRow, comps: [], marketData: null, numbers: f.numbers, sourceNotes: [] })[k], k);
+      // later versions are treated the same way
+      const later = f.reopen({ ...f.analysisRow, method_version: 'cma-2026-11-v1' });
+      assert.deepEqual(later.flags, []);
+      assert.equal(later.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, 'implausible_rent');
+    });
+
+    await check('Past reports / junk-rent mark: a report saved at cma-2026-10-v1 (before the screen) with the same lease reopens as before, the lease counted and no flag; a report with no saved method, an older-format report and an unfinished one never get the mark', () => {
+      const v1 = rentScreenFixture('cma-2026-10-v1');
+      assert.equal(v1.numbers.counted.total, 7, 'live under v1: the junk lease counted');
+      const { report, flags } = v1.reopen();
+      assert.deepEqual(flags, [], 'rebuilt WITHOUT the screen, so its saved counts still match');
+      assert.equal(report.counted.total, 7);
+      assert.equal(report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null, 'counted, exactly as it was on the day');
+      // had it been rebuilt with the screen it would have disagreed with the saved counts: the flag is what a wrong rule would raise
+      const wrong = rentScreenFixture('cma-2026-10-v2');
+      const withWrongCounts = wrong.reopen({ ...wrong.analysisRow, counted_comp_count: 7, counted_leased_count: 7 });
+      assert.ok(withWrongCounts.flags.includes('counts'));
+      // no saved method at all (an older-format report), or any other kind: the original three reasons only, nothing marked
+      const older = rentScreenFixture('cma-2026-10-v2');
+      const olderRow = { ...older.analysisRow, method_version: null, headline_range_low: null, headline_range_high: null, suggested_list_price: null, stretch_price: null, confidence_label: null, confidence_spread: null, counted_comp_count: null, counted_leased_count: null, owner_goal: null, recommended_rent_low: 3800, recommended_rent_mid: 4000, recommended_rent_high: 4200 };
+      const olderOut = older.reopen(olderRow);
+      assert.equal(olderOut.report.format, 'older');
+      assert.equal(olderOut.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      const unfinished = older.reopen({ ...olderRow, status: 'failed', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null });
+      assert.equal(unfinished.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      // a new-format report that somehow has no method text is treated as the earlier method too
+      const noMethod = older.reopen({ ...older.analysisRow, method_version: null });
+      assert.equal(noMethod.report.comps.find(c => c.address.startsWith('309 Screen Ln')).exclusion_reason, null);
+      assert.equal(H.METHOD_BEFORE_RENT_SCREEN, 'cma-2026-10-v1');
     });
 
     await check('Past reports / saved values win: a recount that disagrees (counts, label, size band) is flagged and noted on the screen, and the saved figures are the ones shown', () => {

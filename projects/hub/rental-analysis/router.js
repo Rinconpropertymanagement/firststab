@@ -92,7 +92,7 @@ const { findBestPropertyMatch, hasParseableHouseNumber, hasStreetName } = requir
 const { computeNumbers } = require('./lib/analyze');
 const { buildCompRows } = require('./lib/comp-rows');
 const { parseAgeRestrictedInput, parseSubdivisionInput } = require('./lib/mls-facts');
-const { stripControlChars, checkSubjectLimits, parseFurnishedInput, MAX_ADDRESS_LENGTH } = require('./lib/subject-inputs');
+const { stripControlChars, checkSubjectLimits, parseFurnishedInput, parseSubjectConditionInput, MAX_ADDRESS_LENGTH } = require('./lib/subject-inputs');
 const { sizeBandPctFor } = require('./lib/weighting');
 const { parseOwnerGoalInput, classifySourceResult, noCompsRationale, buildCompletionPatch, headlineForDisplay, buildApiResponse, buildSourceNotes } = require('./lib/outcome');
 const { generateNarrative } = require('./lib/narrative');
@@ -431,6 +431,7 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
     furnished,
     subject_age_restricted,
     subject_subdivision,
+    subject_condition,
     owner_goal,
     run_by,
     property_id,
@@ -490,6 +491,12 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
   const subdivisionInput = parseSubdivisionInput(subject_subdivision);
   if (subdivisionInput.error) return validationError(res, subdivisionInput.error);
   const subjectSubdivision = subdivisionInput.value;
+  // "Condition of your home" (optional, only if someone has seen it). Same check as the standalone server.js. Saved and
+  // shown for reference; it is deliberately NOT put in `subject` below, so nothing that works out a number, a label or
+  // the written explanation can ever read it.
+  const subjectConditionInput = parseSubjectConditionInput(subject_condition);
+  if (subjectConditionInput.error) return validationError(res, subjectConditionInput.error);
+  const subjectCondition = subjectConditionInput.value;
   // "Owner goal" (optional): which price inside the recommended range to suggest. Empty means Balanced.
   const ownerGoalInput = parseOwnerGoalInput(owner_goal);
   if (ownerGoalInput.error) return validationError(res, ownerGoalInput.error);
@@ -562,6 +569,7 @@ router.post('/api/rental-analysis/run', requireRentalAnalysisAccess, async (req,
       furnished: isFurnished,
       subject_age_restricted: ageRestricted, // always true or false, never blank (the database does not accept a blank here)
       subject_subdivision: subjectSubdivision,
+      subject_condition: subjectCondition, // one of the six grades, or null for "not seen / not sure"
       size_band_pct: sizeBandPctFor(subject_property_type, sqft), // 25, or null when the size rule does not apply to this property type
       owner_goal: ownerGoal,
       property_id: resolvedPropertyId,

@@ -69,7 +69,12 @@ const FLAGS = ['furnished', 'partly_furnished', 'short_term', 'age_restricted', 
 const TAGS = ['remodeled', 'new_build', 'stone_counters', 'new_flooring', 'new_cabinets', 'updated_kitchen', 'updated_baths', 'cosmetic_updates', 'original_finishes', 'needs_repair'];
 const refuse = message => { const e = new Error(message); e.db = true; throw e; };
 
+// The two condition rules of the migration (chk_rental_analyses_subject_condition, chk_rental_comps_mls_condition_len).
+const PRETEND_GRADES = ['A+', 'A', 'B', 'C', 'D', 'F'];
+const PRETEND_MLS_CONDITION_MAX = 80;
+
 function checkCompRow(r) {
+  if (r.mls_condition != null && (typeof r.mls_condition !== 'string' || r.mls_condition.length > PRETEND_MLS_CONDITION_MAX)) refuse('mls_condition length');
   for (const k of ['analysis_id', 'source_id', 'address', 'monthly_rent', 'is_estimated_price', 'had_price_cut', 'listing_status', 'is_rincon_managed', 'mls_flags', 'condition_tags']) {
     if (r[k] === null || r[k] === undefined) refuse(`NOT NULL violated: ${k}`);
   }
@@ -88,6 +93,7 @@ function checkCompRow(r) {
 
 // The same rules as supabase/migrations/20261018000000_rental_cma_quality.sql
 function checkAnalysis(a) {
+  if (a.subject_condition != null && !PRETEND_GRADES.includes(a.subject_condition)) refuse('subject_condition');
   if (typeof a.subject_age_restricted !== 'boolean') refuse('subject_age_restricted must be true or false');
   if (a.subject_subdivision != null && a.subject_subdivision.length > 120) refuse('subject_subdivision');
   if (a.size_band_pct != null && !(a.size_band_pct >= 1 && a.size_band_pct <= 100)) refuse('size_band_pct');
@@ -670,6 +676,174 @@ function assertNoWideRange(body) {
   assert.equal(log.analysisInserts[0].subject_age_restricted, true);
   assert.equal(log.analysisInserts[0].subject_subdivision, 'Hueneme Bay 1');
   assert.equal(log.analysisInserts[0].owner_goal, 'balanced');
+
+  // ═══ Condition (Phase E): the grade a person types for the home, and the MLS's own words on the comps. DISPLAY ONLY ═══
+  // Proves, through the real request handler and a pretend database that enforces the migration's rules: every grade is
+  // saved and echoed exactly; bad values are refused before anything is saved; the database's own list is the one the
+  // check uses; and NOTHING else moves (range, prices, label, counts, which homes count, the writer's prompt, the owner view).
+  {
+    const fsE = require('node:fs');
+    const GRADES = ['A+', 'A', 'B', 'C', 'D', 'F'];
+    const MEANING = { 'A+': 'completely remodeled with the best upgrades', A: 'very nice finishes', B: 'some nice finishes but some dated fixtures', C: 'completely dated', D: 'run down', F: 'trashed' };
+    const analysesBefore = db.analyses.length, compsBefore = db.comps.length;
+
+    // (0) the pretend database's two condition rules are the applied migration's, word for word
+    const sqlFile = path.join(__dirname, '..', '..', 'supabase', 'migrations', '20261018000000_rental_cma_quality.sql');
+    if (fsE.existsSync(sqlFile)) {
+      const sql = fsE.readFileSync(sqlFile, 'utf8');
+      assert.deepEqual(sql.match(/subject_condition IS NULL OR subject_condition IN \(([^)]*)\)/)[1].split(',').map(x => x.trim().replace(/^'|'$/g, '')), PRETEND_GRADES, 'the pretend database accepts the migration\'s grades');
+      assert.equal(Number(sql.match(/mls_condition IS NULL OR char_length\(mls_condition\) <= (\d+)/)[1]), PRETEND_MLS_CONDITION_MAX);
+    }
+    // ... and the pretend database really refuses what the migration refuses (a row built by hand, so the handler's own checks are not in the way)
+    reset();
+    for (const badGrade of ['E', 'a', 'A+ ', 'AA', '']) {
+      const res = await global.fetch('http://mock-supabase.test/rest/v1/rental_analyses', { method: 'POST', body: JSON.stringify({ subject_address: '1 A St', subject_age_restricted: false, status: 'running', subject_condition: badGrade }) });
+      assert.equal(res.status, 400, `the database refuses subject_condition ${JSON.stringify(badGrade)}`);
+    }
+    const tooLong = await global.fetch('http://mock-supabase.test/rest/v1/rental_comps', { method: 'POST', body: JSON.stringify({ analysis_id: 'x', source_id: 'x', address: 'x', monthly_rent: 1, is_estimated_price: false, had_price_cut: false, listing_status: 'leased', is_rincon_managed: false, mls_flags: [], condition_tags: [], mls_condition: 'x'.repeat(81) }) });
+    assert.equal(tooLong.status, 400, 'the database refuses an 81-character mls_condition');
+    assert.equal(db.analyses.length, analysesBefore, 'a refused save leaves nothing behind');
+
+    // (a) every grade is checked, saved exactly, echoed in the answer, and described in the plain words
+    const six = [4300, 4350, 4400, 4400, 4450, 4500];
+    for (const g of GRADES) {
+      reset();
+      scenario = { crmlsComps: crmlsComps(six) };
+      const x = await post({ ...good, subject_condition: g });
+      assert.equal(x.status, 200, `${g}: ${JSON.stringify(x.body).slice(0, 200)}`);
+      assert.equal(log.analysisInserts.length, 1);
+      assert.equal(log.analysisInserts[0].subject_condition, g, `${g}: saved at creation`);
+      assert.equal(x.body.analysis.subject_condition, g, `${g}: echoed in the answer`);
+      assert.deepEqual(x.body.subjectCondition, { grade: g, description: MEANING[g], line: `Condition (entered by staff): ${g}, ${MEANING[g]}` });
+    }
+    for (const [name, extra] of [['empty text', { subject_condition: '' }], ['null', { subject_condition: null }], ['left out', {}]]) {
+      reset();
+      scenario = { crmlsComps: crmlsComps(six) };
+      const x = await post({ ...good, ...extra });
+      assert.equal(x.status, 200, name);
+      assert.equal(log.analysisInserts[0].subject_condition, null, `${name}: saved as nothing (NULL)`);
+      assert.equal(x.body.analysis.subject_condition, null);
+      assert.equal(x.body.subjectCondition, null, `${name}: nothing to show`);
+    }
+    // bad values: refused with the one plain message, before any lookup, save or writer call
+    const REFUSAL = /^subject_condition must be one of A\+, A, B, C, D or F, or left blank \(not seen \/ not sure\)\.$/;
+    for (const bad of ['a', 'b', 'A+ ', ' B', 'E', 'AA', 'A-', 'B+', 'Not seen', 'null', 'A\u0000', 7, 0, 1.5, true, false, ['A'], [], {}, { grade: 'A' }, 'x'.repeat(100000), 'A'.repeat(5000)]) {
+      reset();
+      scenario = { crmlsComps: crmlsComps(six) };
+      const x = await post({ ...good, subject_condition: bad });
+      assert.equal(x.status, 400, JSON.stringify(bad).slice(0, 40));
+      assert.match(x.body.error, REFUSAL);
+      assert.ok(x.body.error.length < 120, 'a short message however much was sent');
+      assert.doesNotMatch(x.body.error, /violat|constraint|postgres|column/i, 'plain wording, never database wording');
+      assert.equal(log.analysisInserts.length, 0, 'nothing saved');
+      assert.equal(log.compInserts.length, 0);
+      assert.equal(log.narrativeCalls, 0);
+      assert.equal(log.mlsRequests.length, 0);
+    }
+
+    // (b) NOTHING else moves. One reference report; then the same report with every grade, and with MLS words on the comps.
+    const CONDS = [['Turnkey', 'Updated/Remodeled'], ['Updated/Remodeled'], [], ['Original'], ['Fixer', 'Repairs Cosmetic'], ['Termite Clearance', 'Turnkey']];
+    const dressedComps = (rents, status = 'Closed') => rents.map((rent, i) => crmls.mapComparable(
+      rec({ ListingKey: `k${i}`, ListingId: `V1-${i}`, StreetNumberNumeric: 10 + i, StandardStatus: status, ClosePrice: status === 'Closed' ? rent : null, ListPrice: rent, CloseDate: status === 'Closed' ? '2026-09-01' : null, PropertyCondition: CONDS[i % CONDS.length] }),
+      0.1 + i * 0.03));
+    const takeAll = async (comps, extra) => {
+      reset();
+      scenario = { crmlsComps: comps };
+      const x = await post({ ...good, ...extra });
+      assert.equal(x.status, 200, JSON.stringify(x.body).slice(0, 200));
+      const input = narrativeInputs[0];
+      return {
+        x,
+        // everything about the numbers and the explanation, nothing that is only an id
+        answer: JSON.stringify({
+          headline: x.body.headline, confidence: x.body.confidence, counted: x.body.counted, noRange: x.body.noRange, sizeBand: x.body.sizeBand, sizeNote: x.body.sizeNote,
+          accuracyLine: x.body.accuracyLine, sourceNotes: x.body.sourceNotes, ownerView: x.body.ownerView, ownerViewNote: x.body.ownerViewNote,
+          homes: x.body.comps.map(c => [c.address, c.monthly_rent, c.listing_status, c.distance_miles, c.exclusion_reason, c.narrative]),
+        }),
+        saved: JSON.stringify(lastUpdate()),
+        insert: JSON.stringify({ ...log.analysisInserts[0], subject_condition: undefined }),
+        compRows: JSON.stringify(log.compInserts[0].rows.map(r => ({ ...r, mls_condition: null, analysis_id: null }))),
+        writer: JSON.stringify({ prompt: narrative.buildPrompt(input), headline: input.headline, confidence: input.confidence, sourcesUsed: input.sourcesUsed, subject: input.subject, rent: input.subjectEstimatedRent }),
+        subjectToWriter: JSON.stringify(input.subject),
+      };
+    };
+    const reference = await takeAll(crmlsComps(six), {});
+    assert.ok(reference.x.body.headline && reference.x.body.confidence, 'the reference report has a range');
+    assert.ok(reference.x.body.ownerView, 'and an owner view, so the byte-for-byte check below means something');
+    for (const [label, comps] of [['plain comps', crmlsComps(six)], ['comps carrying the MLS\'s words', dressedComps(six)]]) {
+      for (const g of [undefined, '', ...GRADES]) {
+        const r = await takeAll(comps, g === undefined ? {} : { subject_condition: g });
+        const where = `${label}, grade ${JSON.stringify(g)}`;
+        assert.equal(r.answer, reference.answer, `${where}: range, prices, label, counts, homes, explanation and owner view are identical`);
+        assert.equal(r.saved, reference.saved, `${where}: the saved numbers are identical`);
+        assert.equal(r.insert, reference.insert, `${where}: the saved analysis is identical apart from the grade itself`);
+        assert.equal(r.compRows, reference.compRows, `${where}: the saved comps are identical apart from the MLS words`);
+        assert.equal(r.writer, reference.writer, `${where}: the writer is told exactly the same (the full prompt)`);
+        assert.ok(!/ondition/.test(r.subjectToWriter), 'the home\'s details given to the writer carry no condition');
+        assert.equal(JSON.stringify(r.x.body.ownerView), JSON.stringify(reference.x.body.ownerView), `${where}: the owner view is byte-for-byte the same`);
+        assert.ok(!/Turnkey|Remodeled|Fixer|Cosmetic|entered by staff|MLS lists/.test(JSON.stringify(r.x.body.ownerView)), 'no condition word on the owner page');
+      }
+    }
+    // a Low report and a thin report too
+    for (const rents of [[4300, 4400, 4350, 4450], [4300, 4400, 4500]]) {
+      const a = await takeAll(crmlsComps(rents), {});
+      const b = await takeAll(dressedComps(rents), { subject_condition: 'A+' });
+      assert.equal(b.answer, a.answer, `${rents.length} comps`);
+      assert.equal(b.saved, a.saved);
+      assert.equal(b.writer, a.writer);
+    }
+
+    // (c) the MLS's words: what the real mapper saved, and what the card line says
+    const dressed = await takeAll(dressedComps(six), { subject_condition: 'B' });
+    const savedWords = new Map(log.compInserts[0].rows.map(row => [row.address.split(' ')[0], row.mls_condition]));
+    assert.deepEqual([...savedWords.entries()].sort(), [['10', 'Turnkey, Updated/Remodeled'], ['11', 'Updated/Remodeled'], ['12', null], ['13', 'Original'], ['14', 'Fixer, Repairs Cosmetic'], ['15', 'Termite Clearance, Turnkey']], 'the empty list saves nothing; an unknown word or a paperwork note may be saved (it fits)');
+    const lineFor = n => dressed.x.body.comps.find(c => c.address.startsWith(`${n} `)).mls_condition_line;
+    assert.deepEqual([10, 11, 12, 13, 14, 15].map(lineFor), ['MLS lists: Turnkey, Updated/Remodeled', 'MLS lists: Updated/Remodeled', null, null, 'MLS lists: Fixer, Repairs Cosmetic', 'MLS lists: Turnkey'], 'condition words only, as the MLS spells them; the unknown word and the paperwork note (Termite Clearance) are not shown');
+    assert.deepEqual(dressed.x.body.subjectCondition, { grade: 'B', description: MEANING.B, line: `Condition (entered by staff): B, ${MEANING.B}` });
+    assert.ok(dressed.x.body.comps.every(c => !/[A-F]\+? \(|rated|graded/.test(c.mls_condition_line || '')), 'never turned into a grade');
+    assertNoWideRange(dressed.x.body);
+
+    // (d) a report reopened from the Hub's past-reports list shows the same saved facts the same way (the standalone app has no such page)
+    if (MODE === 'router') {
+      const open = async id => { const res = await realFetch(`http://127.0.0.1:${PORT}/api/rental-analysis/history/${id}`); return { status: res.status, body: await res.json() }; };
+      const reopened = await open(dressed.x.body.analysis.id);
+      assert.equal(reopened.status, 200);
+      assert.equal(reopened.body.format, 'new');
+      assert.deepEqual(reopened.body.subjectCondition, dressed.x.body.subjectCondition);
+      assert.equal(reopened.body.analysis.subject_condition, 'B');
+      assert.deepEqual(reopened.body.comps.map(c => [c.address, c.mls_condition_line]).sort(), dressed.x.body.comps.map(c => [c.address, c.mls_condition_line]).sort());
+      for (const k of ['headline', 'confidence', 'counted', 'noRange', 'sizeBand', 'sizeNote', 'accuracyLine', 'ownerView', 'ownerViewNote']) assert.deepEqual(reopened.body[k], dressed.x.body[k], `reopened: ${k}`);
+      // the grade and the words are read by name from the pretend database (it refuses a column it does not have, and never serves "*")
+      const asked = log2.requests.filter(u => u.includes('/rental_analyses?') && u.includes(`id=eq.${dressed.x.body.analysis.id}`)).pop();
+      assert.ok(new URLSearchParams(asked.split('?')[1]).get('select').split(',').includes('subject_condition'));
+      assert.ok(!/select=\*|select=%2A/.test(asked));
+      // a report saved with no grade reopens with none
+      const none = await takeAll(dressedComps(six), {});
+      const reopenedNone = await open(none.x.body.analysis.id);
+      assert.equal(reopenedNone.body.subjectCondition, null);
+      assert.equal(reopenedNone.body.analysis.subject_condition, null);
+      assert.equal(reopenedNone.body.comps.filter(c => c.mls_condition_line).length, 4);
+      // a report that failed shows nothing about condition even though the grade and the words were saved with it
+      reset();
+      scenario = { rentcast: 'throw', crmls: 'throw' };
+      const failedRun = await post({ ...good, subject_condition: 'C' });
+      assert.equal(failedRun.status, 500);
+      assert.equal(log.analysisInserts[0].subject_condition, 'C', 'the grade was saved with the failed analysis');
+      const reopenedFailed = await open(failedRun.body.analysis_id);
+      assert.equal(reopenedFailed.status, 200);
+      assert.equal(reopenedFailed.body.format, 'unfinished');
+      assert.equal(reopenedFailed.body.subjectCondition, null, 'a failed report shows no grade');
+      assert.ok(reopenedFailed.body.comps.every(c => c.mls_condition_line === null));
+      assert.doesNotMatch(JSON.stringify(reopenedFailed.body), /Condition \(entered by staff\)|MLS lists/);
+      // a past report is read-only: nothing was written by opening it
+    }
+
+    // leave the pretend database exactly as it was, so the past-reports checks below see the same reports as before
+    db.analyses.length = analysesBefore;
+    db.comps.length = compsBefore;
+    reset();
+    console.log(`  condition: every grade saved and echoed, ${MODE === 'router' ? 'reopened from past reports, ' : ''}bad values refused, and nothing else moves (range, prices, label, counts, writer prompt, owner view)`);
+  }
 
 
   // ═══ Past reports: list and reopen saved reports (read-only, Hub only) ═══

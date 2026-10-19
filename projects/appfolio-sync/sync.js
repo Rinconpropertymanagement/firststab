@@ -18,6 +18,11 @@
  * multi-tenant bug where leases.tenant_id could only ever hold one
  * tenant per lease).
  *
+ * Also, at the very end of each run, saves a daily snapshot of the
+ * unit_vacancy report (asking rent per vacant unit per day) into
+ * unit_vacancy_snapshots — see vacancy-snapshot.js. That step can never
+ * fail or change this sync: it is fenced off in its own try/catch.
+ *
  * Usage:
  *   node sync.js              Run the full sync — fetch all reports and write to Supabase
  *   node sync.js --discover   Print the exact field names AppFolio returns, then exit (no writes)
@@ -1336,6 +1341,7 @@ async function main() {
 
   const summary = [];
   let   initialRequestCount = 0;
+  let   vacancyReportRows = null; // raw unit_vacancy rows, kept for the daily snapshot at the end
 
   for (const config of REPORT_CONFIG) {
     const { reportName, table } = config;
@@ -1356,6 +1362,8 @@ async function main() {
       summary.push({ reportName, status: 'FETCH_ERROR', error: err.message });
       continue;
     }
+
+    if (reportName === 'unit_vacancy') vacancyReportRows = rows;
 
     if (isDiscover) {
       const keys = rows.length > 0 ? Object.keys(rows[0]) : [];
@@ -1565,6 +1573,20 @@ async function main() {
     } catch (err) {
       console.error(`[owner-email-fk-resolution] ERROR: ${err.message}\n`);
       summary.push({ reportName: 'owner-email-fk-resolution', status: 'ERROR', error: err.message });
+    }
+  }
+
+  // ── Daily vacancy snapshot — runs last, only if the unit_vacancy report was
+  // fetched this run. Fenced off on purpose: it adds nothing to `summary`, so
+  // it cannot change the exit code or trigger the warning email, and the
+  // require() is inside the try so even a missing or broken vacancy-snapshot.js
+  // can only cost this one log line. In --dry-run it only reads.
+  if (!isDiscover && vacancyReportRows) {
+    try {
+      const { runVacancySnapshot } = require('./vacancy-snapshot');
+      await runVacancySnapshot({ rows: vacancyReportRows, dryRun: isDryRun, sbUrl: SB_URL, sbKey: SB_KEY });
+    } catch (err) {
+      console.error(`[vacancy-snapshot] snapshot step failed, nothing else affected: ${err.message}`);
     }
   }
 

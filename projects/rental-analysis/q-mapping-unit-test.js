@@ -12115,6 +12115,8 @@ async function main() {
         // the staff-only line ("The owner view is not available because ...") and the owner page are NOT in the full report's print
         assert.match(print, /\.header, \.report-toolbar, \.form-view, \.history-view, \.saved-banner, \.owner-note \{ display: none !important; \}/, 'the owner-view note is hidden in print');
         assert.match(print, /body:not\(\.owner-mode\) \.owner-doc \{ display: none !important; \}/, 'outside owner mode the owner page is not printed');
+        // ADDED (Phase E): the staff-only condition lines (the typed grade, the MLS words) are on the screen but not in the printed staff report
+        assert.match(print, /\.subject-condition, \.comp-mls-condition \{ display: none !important; \}/, 'the condition lines are not printed on the full staff report');
         assert.match(html, /<div class="owner-doc" id="ownerDoc" style="display:none"><\/div>/);
         assert.match(html, /<div class="owner-note" id="ownerViewNote" role="status"><\/div>/);
         assert.match(html, /<button class="btn-secondary" id="ownerViewBtn" style="display:none">/);
@@ -12145,6 +12147,499 @@ async function main() {
       const strip = html => html.slice(0, html.indexOf('</title>')) + html.slice(html.indexOf('<style>'));
       assert.equal(strip(hub), strip(standalone));
       for (const html of [standalone, hub]) for (const piece of ['function buildOwnerHtml(', 'function setOwnerMode(', 'function renderOwnerView(', 'id="ownerDoc"', 'id="ownerViewNote"', 'renderOwnerView(extras);']) assert.ok(html.includes(piece), piece);
+    });
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Condition (Phase E, CMA-QUALITY-SPEC.md Item 3): DISPLAY ONLY. The condition a staff member types in for the home
+    // being priced, and the MLS's own condition words on the comparable homes. Neither one may move any number.
+    // ══════════════════════════════════════════════════════════════════════════
+    console.log('--- Condition (display only): the staff-entered grade and the MLS words ---');
+    const CD = require('./lib/condition-display');
+    const SIE = require('./lib/subject-inputs');
+    const NarrE = require('./lib/narrative');
+    const MlsE = require('./lib/mls-facts');
+    const CrmlsE = require('./lib/crmls');
+    const CompRowsE = require('./lib/comp-rows');
+    const { CONDITION_RATINGS: GRADES_E, MAX_MLS_CONDITION_LENGTH: MAX_MLS_E } = require('./lib/constants');
+    const GRADE_WORDS_E = {
+      'A+': 'completely remodeled with the best upgrades', 'A': 'very nice finishes', 'B': 'some nice finishes but some dated fixtures',
+      'C': 'completely dated', 'D': 'run down', 'F': 'trashed',
+    };
+    // the seven condition words seen in the real MLS feed (CRMLS through Recore, read-only look on 2026-10-18: about 1,400 lease records and 400 sale records)
+    const SEEN_LIVE_E = ['Turnkey', 'Updated/Remodeled', 'Additions/Alterations', 'Repairs Cosmetic', 'Repairs Major', 'Fixer', 'Under Construction'];
+    // the two paperwork notes the feed also puts in that list: saved with the comp, never shown (treated like any unknown word)
+    const PAPERWORK_E = ['Building Permit', 'Termite Clearance'];
+    const ALL_SEEN_E = [...SEEN_LIVE_E, ...PAPERWORK_E];
+    const SUBJECT_E = { address: '2461 Bunting Avenue, Ventura, CA 93003', propertyType: 'single_family', bedrooms: 4, bathrooms: 2, sqft: 1636, furnished: false, leaseTermMonths: 12, ageRestricted: false, ownerGoal: 'balanced' };
+    // one stable report, then the same comps dressed with condition facts
+    const dressedE = raws => raws.map((c, i) => ({ ...c, mls_condition: [ALL_SEEN_E[i % ALL_SEEN_E.length], 'Turnkey, Updated/Remodeled', 'Fixer, Repairs Cosmetic', null, 'Some Word The MLS Added Later'][i % 5], condition_rating: i % 2 ? 'A+' : null, condition_basis: i % 2 ? 'listing_text' : null, condition_tags: i % 2 ? ['remodeled'] : [] }));
+
+    await check('Condition / the six grades are exactly the list the database accepts (read from the applied migration), the plain meanings are the six the spec gives, and the MLS word column limit is the migration\'s 80', () => {
+      assert.deepEqual(GRADES_E, ['A+', 'A', 'B', 'C', 'D', 'F']);
+      const sqlFile = pathO.join(__dirname, '..', '..', 'supabase', 'migrations', '20261018000000_rental_cma_quality.sql');
+      if (fsO.existsSync(sqlFile)) {
+        const sql = fsO.readFileSync(sqlFile, 'utf8');
+        const grades = sql.match(/subject_condition IS NULL OR subject_condition IN \(([^)]*)\)/);
+        assert.ok(grades, 'the CHECK for subject_condition is in the migration');
+        assert.deepEqual(grades[1].split(',').map(x => x.trim().replace(/^'|'$/g, '')), GRADES_E);
+        const len = sql.match(/mls_condition IS NULL OR char_length\(mls_condition\) <= (\d+)/);
+        assert.ok(len, 'the CHECK for mls_condition is in the migration');
+        assert.equal(Number(len[1]), MAX_MLS_E);
+        // the comp-side columns the screen reads already exist (no database change is part of this build)
+        for (const col of ['subject_condition', 'mls_condition']) assert.ok(new RegExp(`ADD COLUMN IF NOT EXISTS ${col}\\b`).test(sql), col);
+      }
+      assert.deepEqual(CD.SUBJECT_CONDITION_DESCRIPTIONS, GRADE_WORDS_E);
+      assert.deepEqual(Object.keys(CD.SUBJECT_CONDITION_DESCRIPTIONS), GRADES_E);
+      assert.ok(Object.isFrozen(CD.SUBJECT_CONDITION_DESCRIPTIONS) && Object.isFrozen(CD.MLS_CONDITION_WORDS));
+      assert.deepEqual([...CD.MLS_CONDITION_WORDS].sort(), [...SEEN_LIVE_E].sort(), 'the words shown are the seven condition words the real feed uses, spelled as it spells them');
+      for (const w of PAPERWORK_E) assert.ok(!CD.MLS_CONDITION_WORDS.includes(w), `${w} is paperwork, not condition, and is not on the shown list`);
+    });
+
+    await check('Condition / validation: every grade is accepted exactly as written; blank (empty, missing, null) means not seen and is saved as nothing; everything else gets one plain refusal that never repeats what was sent', () => {
+      for (const g of GRADES_E) assert.deepEqual(SIE.parseSubjectConditionInput(g), { value: g }, g);
+      for (const blank of ['', undefined, null]) assert.deepEqual(SIE.parseSubjectConditionInput(blank), { value: null }, String(blank));
+      assert.deepEqual(SIE.parseSubjectConditionInput(), { value: null });
+      const REFUSAL = /^subject_condition must be one of A\+, A, B, C, D or F, or left blank \(not seen \/ not sure\)\.$/;
+      const bad = ['a', 'b', 'c', 'd', 'f', 'a+', 'A+ ', ' A+', 'A ', '\tA', 'A\n', 'A\u0000', '\u0000', 'E', 'G', 'S', 'AA', 'A-', 'B+', 'C-', 'D+', 'A+A', 'A,B', 'A B', 'Not seen', 'not seen / not sure', 'null', 'undefined', 'NULL', 'none', 'N/A',
+        '0', '1', ' ', '   ', 'Ａ', 'Å', 'A​', '＋', 'A＋', 'Ａ+', 'Α', 'Α', "A'; DROP TABLE rental_analyses; --", '<script>alert(1)</script>', '__proto__', 'constructor', 'toString',
+        0, 1, 2, 2.5, -1, NaN, Infinity, true, false, [], ['A'], ['A', 'B'], [''], [['A']], {}, { grade: 'A' }, { toString() { return 'A'; } }, { valueOf() { return 'A'; } }, () => 'A', 10n,
+        'x'.repeat(100000), 'A'.repeat(100000), 'A+'.repeat(50000)];
+      for (const input of bad) {
+        const r = SIE.parseSubjectConditionInput(input);
+        assert.ok(r && typeof r.error === 'string' && !('value' in r), `refused: ${typeof input === 'string' ? JSON.stringify(input.slice(0, 20)) : String(typeof input)}`);
+        assert.match(r.error, REFUSAL);
+        assert.ok(r.error.length < 120, 'a short message, however much was sent');
+        assert.doesNotMatch(r.error, /violat|constraint|postgres|column|check/i, 'plain wording, never database wording');
+      }
+      // never the same words as the other optional boxes, and the other boxes are unchanged
+      assert.deepEqual(SIE.parseFurnishedInput(undefined), { value: false });
+    });
+
+    await check('Condition / the staff line: exactly "Condition (entered by staff): B, some nice finishes but some dated fixtures" for each grade; nothing at all for anything else', () => {
+      for (const g of GRADES_E) {
+        assert.deepEqual(CD.subjectConditionForAnswer(g), { grade: g, description: GRADE_WORDS_E[g], line: `Condition (entered by staff): ${g}, ${GRADE_WORDS_E[g]}` });
+      }
+      assert.equal(CD.subjectConditionForAnswer('B').line, 'Condition (entered by staff): B, some nice finishes but some dated fixtures');
+      for (const none of [null, undefined, '', 'a', 'E', 'A+ ', 7, [], {}, true, '__proto__', 'constructor', 'toString', 'hasOwnProperty']) assert.equal(CD.subjectConditionForAnswer(none), null, String(none));
+    });
+
+    await check('Condition / MLS words, mapping table: the seven real condition words map to themselves, the two paperwork notes (Building Permit, Termite Clearance) are never shown; capitals, spacing, stored (joined) and list shapes are read; unknown, look-alike and wrong-kind values are NOT shown', () => {
+      const W = CD.mlsConditionWords;
+      const TABLE = [
+        // every real word alone, and the real combinations seen in the feed
+        ...SEEN_LIVE_E.map(w => [[w], [w]]),
+        ...SEEN_LIVE_E.map(w => [w, [w]]),
+        [['Turnkey', 'Updated/Remodeled'], ['Turnkey', 'Updated/Remodeled']],
+        [['Updated/Remodeled', 'Turnkey'], ['Updated/Remodeled', 'Turnkey']],
+        [['Termite Clearance', 'Turnkey', 'Updated/Remodeled'], ['Turnkey', 'Updated/Remodeled']],
+        [['Building Permit', 'Updated/Remodeled'], ['Updated/Remodeled']],
+        [['Building Permit', 'Termite Clearance', 'Turnkey'], ['Turnkey']],
+        [['Fixer', 'Repairs Cosmetic'], ['Fixer', 'Repairs Cosmetic']],
+        [['Additions/Alterations', 'Turnkey'], ['Additions/Alterations', 'Turnkey']],
+        // the way it is saved (joined with ", ") and other spellings of the same thing
+        ['Turnkey, Updated/Remodeled', ['Turnkey', 'Updated/Remodeled']],
+        ['Turnkey,Updated/Remodeled', ['Turnkey', 'Updated/Remodeled']],
+        ['  turnkey  ', ['Turnkey']], ['TURNKEY', ['Turnkey']], ['updated/remodeled', ['Updated/Remodeled']], ['Repairs   Cosmetic', ['Repairs Cosmetic']], ['\tFixer\n', ['Fixer']],
+        [['  UNDER   CONSTRUCTION '], ['Under Construction']],
+        [['Turnkey', 'turnkey', 'TURNKEY'], ['Turnkey']],
+        // unknown words (never shown), alone or beside a known one
+        [['Building Permit'], []], [['Termite Clearance'], []], [['Building Permit', 'Termite Clearance'], []], ['Building Permit, Termite Clearance', []], ['building permit', []], [['TERMITE CLEARANCE'], []],
+        [['Original'], []], [['Tear Down'], []], [['Some New Word'], []], ['Brand New', []], [['Turnkey', 'Some New Word'], ['Turnkey']], ['Some New Word, Fixer', ['Fixer']],
+        // look-alikes must not match
+        [['Turnkey!'], []], [['Turnkeys'], []], [['Turn key'], []], [['Updated Remodeled'], []], [['Updated / Remodeled'], []], [['Updated'], []], [['Remodeled'], []],
+        [['Fixer Upper'], []], [['not Turnkey'], []], [['Repairs'], []], [['Repairs Minor'], []], [['Turnkey Updated/Remodeled'], []],
+        // nothing
+        [[], []], [null, []], [undefined, []], ['', []], [',', []], [' , ,', []], [[''], []], [['', null], []],
+        // wrong kinds of value
+        [5, []], [{}, []], [true, []], [[1, null, {}, ['Turnkey']], []], [{ 0: 'Turnkey' }, []], [{ toString() { return 'Turnkey'; } }, []], [() => 'Turnkey', []],
+        // hostile text is just an unknown word
+        [['<script>alert(1)</script>'], []], [["Turnkey'; DROP TABLE x; --"], []], [['__proto__', 'constructor', 'toString', 'hasOwnProperty'], []],
+        // very large values are read quickly and safely
+        ['x'.repeat(100000), []], [Array(10000).fill('Turnkey'), ['Turnkey']], ['Turnkey,'.repeat(100000), ['Turnkey']],
+      ];
+      for (const [input, expected] of TABLE) {
+        assert.deepEqual(W(input), expected, `${typeof input === 'string' ? JSON.stringify(input.slice(0, 40)) : Array.isArray(input) ? JSON.stringify(input).slice(0, 60) : String(input)}`);
+        assert.equal(CD.mlsConditionLine(input), expected.length ? `MLS lists: ${expected.join(', ')}` : null);
+      }
+      // the line never turns words into a grade or a summary
+      for (const w of SEEN_LIVE_E) assert.equal(CD.mlsConditionLine([w]), `MLS lists: ${w}`);
+      assert.doesNotMatch(CD.mlsConditionLine(['Turnkey', 'Updated/Remodeled']), /grade|rated|rating|score|similar|same/i);
+    });
+
+    await check('Condition / MLS words through the real code: the MLS\'s list becomes the saved column and then the shown line; an empty list and an unknown word save nothing to show; an over-long list is saved as unknown', () => {
+      const shown = value => {
+        const comp = CrmlsE.mapComparable({ ListingId: 'X1', StandardStatus: 'Closed', PropertySubType: 'Single Family Residence', ClosePrice: 4000, ListPrice: 4000, CloseDate: '2026-09-01', PropertyCondition: value });
+        const row = CompRowsE.buildCompRow({ ...comp, source_id: 's1', listing_status: 'leased' }, { analysisId: 'a1' });
+        assert.ok(row.mls_condition === null || row.mls_condition.length <= MAX_MLS_E, 'always within what the database accepts');
+        return { saved: row.mls_condition, line: CD.mlsConditionLine(row.mls_condition) };
+      };
+      assert.deepEqual(shown(['Turnkey', 'Updated/Remodeled']), { saved: 'Turnkey, Updated/Remodeled', line: 'MLS lists: Turnkey, Updated/Remodeled' });
+      assert.deepEqual(shown(['Updated/Remodeled']), { saved: 'Updated/Remodeled', line: 'MLS lists: Updated/Remodeled' });
+      assert.deepEqual(shown([]), { saved: null, line: null }, 'the feed sends an empty list for most homes');
+      assert.deepEqual(shown(null), { saved: null, line: null });
+      assert.deepEqual(shown(undefined), { saved: null, line: null });
+      assert.deepEqual(shown('Turnkey'), { saved: 'Turnkey', line: 'MLS lists: Turnkey' });
+      assert.deepEqual(shown(['Original']), { saved: 'Original', line: null }, 'an unknown word may be saved (it fits) but is never shown');
+      assert.deepEqual(shown(['Fixer', 'Original']), { saved: 'Fixer, Original', line: 'MLS lists: Fixer' });
+      assert.deepEqual(shown(['Termite Clearance', 'Turnkey']), { saved: 'Termite Clearance, Turnkey', line: 'MLS lists: Turnkey' }, 'a paperwork note stays saved but is not shown');
+      assert.deepEqual(shown(['Building Permit']), { saved: 'Building Permit', line: null });
+      assert.deepEqual(shown(['Turnkey', 'x'.repeat(100)]), { saved: null, line: null }, 'text too long for its column is unknown');
+      assert.deepEqual(shown([7, null, {}]), { saved: null, line: null });
+    });
+
+    await check('Condition / numbers cannot move: the same comps with and without MLS words, ratings and a typed grade give the same range, prices, label, counts, which homes count and order', () => {
+      const plain = computeNumbersO({ comps: agreeingRaw(), subject: SUBJECT_E, properties: [] });
+      const dressed = computeNumbersO({ comps: dressedE(agreeingRaw()), subject: { ...SUBJECT_E, condition: 'F', subject_condition: 'F', subjectCondition: { grade: 'F' } }, properties: [] });
+      const key = n => JSON.stringify({ headline: n.headline, confidence: n.confidence, counted: n.counted, recommended: n.recommended, raw: n.raw, exclusionReasons: n.exclusionReasons, matchedCount: n.matchedCount, order: n.compsWithMatch.map(c => `${c.address}|${c.monthly_rent}|${c.listing_status}`) });
+      assert.ok(plain.headline && plain.confidence, 'the fixture really produces a range');
+      assert.equal(key(dressed), key(plain));
+      for (const g of [null, ...GRADES_E]) {
+        const withGrade = computeNumbersO({ comps: agreeingRaw(), subject: { ...SUBJECT_E, subject_condition: g }, properties: [] });
+        assert.equal(key(withGrade), key(plain), `grade ${g}`);
+      }
+      // thin and Low reports too
+      for (const n of [3, 4, 5]) {
+        const a = computeNumbersO({ comps: agreeingRaw().slice(0, n), subject: SUBJECT_E, properties: [] });
+        const b = computeNumbersO({ comps: dressedE(agreeingRaw().slice(0, n)), subject: { ...SUBJECT_E, subject_condition: 'A+' }, properties: [] });
+        assert.equal(key(b), key(a), `${n} comps`);
+      }
+    });
+
+    await check('Condition / the written explanation is told nothing about condition: the full writer prompt is identical with and without a typed grade, MLS words and ratings; it carries the one rule "do not describe condition" and no condition word, grade meaning or MLS word', () => {
+      const promptFor = (comps, subjectExtra = {}) => {
+        const n = computeNumbersO({ comps, subject: SUBJECT_E, properties: [] });
+        return NarrE.buildPrompt({
+          subject: { address: SUBJECT_E.address, bedrooms: 4, bathrooms: 2, sqft: 1636, propertyType: 'single_family', yearBuilt: null, leaseTermMonths: 12, furnished: false, ...subjectExtra },
+          comps: n.compsWithMatch.map((c, i) => ({ ...c, exclusion_reason: n.exclusionReasons[i] })),
+          headline: OutO.headlineForDisplay(n), confidence: n.confidence, subjectEstimatedRent: 4100, sourcesUsed: ['CRMLS'],
+        });
+      };
+      const base = promptFor(agreeingRaw());
+      for (const g of [null, ...GRADES_E]) assert.equal(promptFor(dressedE(agreeingRaw()), { condition: g, subject_condition: g, subjectCondition: g }), base, `grade ${g}`);
+      const RULE = 'Do not describe the condition, finish quality or remodeling of any home; condition is shown separately on the report.';
+      assert.equal(base.split(RULE).length - 1, 1, 'the rule is there exactly once');
+      assert.ok(base.includes(`\n- ${RULE}\n`), 'as one of the hard rules');
+      const rest = base.replace(RULE, '');
+      assert.doesNotMatch(rest, /condition/i, 'no other mention of condition anywhere in the prompt');
+      for (const w of [...ALL_SEEN_E, ...Object.values(GRADE_WORDS_E), 'entered by staff', 'MLS lists']) assert.ok(!rest.includes(w), `the prompt must not contain "${w}"`);
+      // the writer gets the same facts no matter what is dressed on a comp (the comp line reads named fields only)
+      const compLine = c => NarrE.describeComp(c, 0);
+      for (const c of dressedE(agreeingRaw())) assert.equal(compLine(c), compLine({ ...c, mls_condition: null, condition_rating: null, condition_basis: null, condition_tags: [] }));
+    });
+
+    await check('Condition / structure: no file that works out a number, a label, a count, the writer\'s facts or the owner page reads the condition; the request handlers keep the typed grade out of `subject`, the numbers call and the writer call', () => {
+      const code = f => fsO.readFileSync(pathO.join(__dirname, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      const IDS = /subject_condition|subjectCondition|mls_condition|mlsCondition|condition_rating|condition_basis|condition_tags|condition-display|SUBJECT_CONDITION|MLS_CONDITION/;
+      for (const f of ['analyze.js', 'weighting.js', 'confidence.js', 'sources.js', 'property-matching.js', 'owner-view.js', 'narrative.js', 'accuracy-sentences.js', 'rentcast.js', 'leadsimple.js', 'market-data.js']) {
+        assert.doesNotMatch(code(pathO.join('lib', f)), IDS, `lib/${f} must not read the condition`);
+      }
+      // the only things that may read it: the display wording, the answer builder, the saved-report rebuild, the row mapper, the facts cleaner, the request checks
+      const readers = fsO.readdirSync(pathO.join(__dirname, 'lib')).filter(f => f.endsWith('.js') && IDS.test(code(pathO.join('lib', f)))).sort();
+      const MAY_READ = ['comp-rows.js', 'condition-display.js', 'constants.js', 'crmls.js', 'history.js', 'mls-facts.js', 'outcome.js', 'subject-inputs.js'];
+      assert.deepEqual(readers.filter(f => !MAY_READ.includes(f)), [], 'only the wording, the answer builder, the saved-report rebuild, the row mapper, the fact cleaner and the request checks');
+      for (const f of ['outcome.js', 'condition-display.js', 'history.js', 'subject-inputs.js']) assert.ok(readers.includes(f), f);
+      for (const f of ['server.js', pathO.join('..', 'hub', 'rental-analysis', 'router.js')]) {
+        const src = code(f);
+        assert.equal((src.match(/parseSubjectConditionInput\(subject_condition\)/g) || []).length, 1, `${f}: checked once`);
+        assert.match(src, /subject_condition: subjectCondition,/, `${f}: saved with the analysis`);
+        const grab = (start, endMark) => { const at = src.indexOf(start); assert.ok(at >= 0, `${f}: ${start}`); return src.slice(at, src.indexOf(endMark, at)); };
+        for (const block of [grab('const subject = {', '};'), grab('computeNumbers({', '});'), grab('generateNarrative({', '});')]) assert.doesNotMatch(block, /ondition/, `${f}: the typed grade is not given to the numbers or the writer`);
+        // every use of the typed grade: read from the body, checked, saved
+        const uses = src.match(/\bsubjectCondition\b|subject_condition/g) || [];
+        assert.ok(uses.length <= 9, `${f}: ${uses.length} uses`);
+      }
+    });
+
+    await check('Condition / owner page: the owner view is byte-for-byte the same with and without a typed grade (all six), MLS words and ratings, and carries no condition word; the stretch price and every other staff-only fact stay out', () => {
+      const base = reportO({ comps: agreeingRaw() });
+      assert.ok(base.response.ownerView, 'the fixture produces an owner view');
+      const ownerJson = (analysisOver, comps) => JSON.stringify(OutO.buildApiResponse({ analysis: { ...base.analysis, ...analysisOver }, comps, marketData: null, numbers: base.numbers }).ownerView);
+      const reference = ownerJson({}, base.responseComps);
+      assert.equal(reference, JSON.stringify(base.response.ownerView));
+      const dressedComps = base.responseComps.map((c, i) => ({ ...c, mls_condition: ['Turnkey, Updated/Remodeled', 'Fixer', null, 'Unknown Thing'][i % 4], condition_rating: i % 2 ? 'A+' : null, condition_basis: i % 2 ? 'listing_text' : null, condition_tags: i % 2 ? ['remodeled'] : [] }));
+      for (const g of [null, ...GRADES_E]) {
+        assert.equal(ownerJson({ subject_condition: g }, base.responseComps), reference, `grade ${g}`);
+        assert.equal(ownerJson({ subject_condition: g }, dressedComps), reference, `grade ${g} with MLS words and ratings on the comps`);
+      }
+      // the same through the real saved-report rebuild
+      const text = textOf(base.response.ownerView).toLowerCase();
+      for (const w of [...ALL_SEEN_E, ...Object.values(GRADE_WORDS_E), 'entered by staff', 'mls lists']) assert.ok(!text.includes(w.toLowerCase()), `the owner page must not say "${w}"`);
+      assert.doesNotMatch(text, /\bcondition [a-f]\b|\bcondition: /i);
+      assert.ok(text.includes('condition of your home'), 'the disclaimer still says condition is not considered');
+      // and the page that draws it
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        const draw = response => renderedOwnerHtml(page, response);
+        const plainHtml = draw(base.response);
+        const dressedResponse = OutO.buildApiResponse({ analysis: { ...base.analysis, subject_condition: 'B' }, comps: dressedComps, marketData: null, numbers: base.numbers });
+        assert.equal(draw(dressedResponse), plainHtml, f);
+        assert.ok(!/Turnkey|Remodeled|entered by staff|MLS lists/.test(plainHtml));
+      }
+    });
+
+    await check('Condition / the answer: subjectCondition is null unless a grade was saved; every comp carries its ready line or null; the comps passed in are not changed; the numbers part of the answer is identical either way', () => {
+      const base = reportO({ comps: agreeingRaw() });
+      const comps = base.responseComps.map((c, i) => ({ ...c, mls_condition: i === 0 ? 'Turnkey, Updated/Remodeled' : i === 1 ? 'Original' : i === 2 ? 'Fixer' : null }));
+      const snapshot = JSON.stringify(comps);
+      const without = OutO.buildApiResponse({ analysis: base.analysis, comps, marketData: null, numbers: base.numbers });
+      assert.equal(JSON.stringify(comps), snapshot, 'the comps handed in are not changed');
+      assert.equal(without.subjectCondition, null);
+      assert.deepEqual(without.comps.map(c => c.mls_condition_line), ['MLS lists: Turnkey, Updated/Remodeled', null, 'MLS lists: Fixer', ...comps.slice(3).map(() => null)]);
+      assert.deepEqual(without.comps.map(c => c.id), comps.map(c => c.id), 'same homes in the same order');
+      for (const g of GRADES_E) {
+        const withG = OutO.buildApiResponse({ analysis: { ...base.analysis, subject_condition: g }, comps, marketData: null, numbers: base.numbers });
+        assert.deepEqual(withG.subjectCondition, CD.subjectConditionForAnswer(g));
+        assert.equal(withG.analysis.subject_condition, g, 'the saved grade is echoed in the analysis');
+        for (const k of Object.keys(without)) if (!['analysis', 'subjectCondition'].includes(k)) assert.deepEqual(withG[k], without[k], `${g}: ${k} is unchanged`);
+        const a1 = { ...withG.analysis }, a0 = { ...without.analysis };
+        delete a1.subject_condition; delete a0.subject_condition;
+        assert.deepEqual(a1, a0);
+      }
+      // a damaged saved value is simply not shown
+      assert.equal(OutO.buildApiResponse({ analysis: { ...base.analysis, subject_condition: 'E' }, comps, marketData: null, numbers: base.numbers }).subjectCondition, null);
+      assert.equal(OutO.buildApiResponse({ analysis: { ...base.analysis, subject_condition: ['A'] }, comps, marketData: null, numbers: base.numbers }).subjectCondition, null);
+    });
+
+    // ── Past reports ──
+    const pickE = (row, cols) => Object.fromEntries(cols.split(',').map(c => [c, row[c] === undefined ? null : row[c]]));
+    const NAMES_E = { 'src-crmls': 'CRMLS' };
+    await check('Condition / past reports: the saved grade is read by column name (never *), the comps\' MLS column was already read, and a reopened new-format report shows exactly what the live run showed, with nothing else changed', () => {
+      const cols = HistO.REPORT_COLUMNS.split(',');
+      assert.ok(cols.includes('subject_condition') && !cols.includes('*') && new Set(cols).size === cols.length);
+      assert.ok(HistO.COMP_COLUMNS.split(',').includes('mls_condition') && !HistO.COMP_COLUMNS.split(',').includes('*'));
+      assert.ok(!HistO.LIST_COLUMNS.split(',').includes('subject_condition'), 'the list of past reports does not read it');
+      const base = reportO({ comps: agreeingRaw() });
+      const savedComps = base.responseComps.map((c, i) => ({ ...c, mls_condition: ['Turnkey, Updated/Remodeled', 'Original', 'Fixer', null][i % 4] }));
+      for (const grade of [null, ...GRADES_E]) {
+        const analysisRow = { ...base.analysis, subject_condition: grade, run_by: 'u-1' };
+        const live = OutO.buildApiResponse({ analysis: { ...analysisRow }, comps: savedComps, marketData: null, numbers: base.numbers });
+        const { report, flags } = HistO.rebuildReport({ analysis: pickE(analysisRow, HistO.REPORT_COLUMNS), comps: savedComps.map(c => pickE(c, HistO.COMP_COLUMNS)), sourceNamesById: NAMES_E, runByName: 'Pat Runner', marketData: null });
+        assert.deepEqual(flags, [], `grade ${grade}: nothing disagrees`);
+        assert.equal(report.format, 'new');
+        assert.deepEqual(report.subjectCondition, live.subjectCondition, `grade ${grade}`);
+        assert.equal(report.analysis.subject_condition, grade);
+        for (const c of report.comps) assert.equal(c.mls_condition_line, live.comps.find(x => x.id === c.id).mls_condition_line, c.address);
+        assert.deepEqual(report.comps.map(c => c.mls_condition_line).filter(Boolean).sort(), ['MLS lists: Fixer', 'MLS lists: Fixer', 'MLS lists: Turnkey, Updated/Remodeled', 'MLS lists: Turnkey, Updated/Remodeled'].sort());
+        for (const k of ['headline', 'confidence', 'counted', 'noRange', 'sizeBand', 'sizeNote', 'accuracyLine', 'ownerView', 'ownerViewNote']) assert.deepEqual(report[k], live[k], `grade ${grade}: ${k}`);
+      }
+      // the reopened owner view does not depend on the grade either
+      const ov = grade => JSON.stringify(HistO.rebuildReport({ analysis: pickE({ ...base.analysis, subject_condition: grade, run_by: 'u-1' }, HistO.REPORT_COLUMNS), comps: savedComps.map(c => pickE(c, HistO.COMP_COLUMNS)), sourceNamesById: NAMES_E }).report.ownerView);
+      for (const g of GRADES_E) assert.equal(ov(g), ov(null));
+    });
+
+    await check('Condition / past reports: an older-format report is unchanged (no condition line, none on its homes, even if a value were somehow present); a failed or unfinished report shows nothing new even when a grade and MLS words were saved', () => {
+      const older = {
+        id: 'cccccccc-0000-4000-8000-0000000000e1', subject_address: '77 Old Method Way, Ventura, CA 93001', subject_bedrooms: 3, subject_bathrooms: 2, subject_sqft: 1500, subject_property_type: 'single_family', subject_year_built: null,
+        lease_term_months: 12, furnished: false, run_by: 'u-9', status: 'complete', rationale: 'OLD', subject_estimated_rent: 4100, subject_latitude: 34.2, subject_longitude: -119.2, subject_zip: '93001', subject_age_restricted: false,
+        subject_subdivision: null, subject_condition: null, size_band_pct: null, owner_goal: null, headline_range_low: null, headline_range_high: null, suggested_list_price: null, stretch_price: null, confidence_label: null, confidence_spread: null,
+        counted_comp_count: null, counted_leased_count: null, method_version: null, recommended_rent_low: 3800, recommended_rent_mid: 4200, recommended_rent_high: 4650, created_at: '2026-09-02T17:00:00Z', updated_at: '2026-09-02T17:00:30Z',
+      };
+      const comp = (id, over = {}) => ({ id, source_id: 'src-crmls', address: `${id} Old Lane`, property_type: 'single_family', bedrooms: 3, bathrooms: 2, sqft: 1500, monthly_rent: 4100, listing_status: 'leased', is_rincon_managed: false, narrative: null, mls_flags: [], condition_tags: [], mls_condition: null, ...over });
+      const comps = ['a', 'b', 'c'].map(id => comp(id));
+      const first = HistO.rebuildReport({ analysis: older, comps, sourceNamesById: NAMES_E }).report;
+      assert.equal(first.format, 'older');
+      assert.equal(first.subjectCondition, null);
+      assert.ok(first.comps.every(c => c.mls_condition_line === null));
+      // even a value that should not exist on an older report is not drawn
+      const odd = HistO.rebuildReport({ analysis: { ...older, subject_condition: 'B' }, comps: comps.map(c => ({ ...c, mls_condition: 'Turnkey' })), sourceNamesById: NAMES_E }).report;
+      assert.equal(odd.subjectCondition, null);
+      assert.ok(odd.comps.every(c => c.mls_condition_line === null));
+      assert.doesNotMatch(JSON.stringify(odd), /Condition \(entered by staff\)|MLS lists/);
+      for (const k of ['headline', 'confidence', 'counted', 'noRange', 'legacyRange', 'sizeBand', 'sizeNote', 'accuracyLine', 'ownerView', 'ownerViewNote', 'olderFormat']) assert.deepEqual(odd[k], first[k], k);
+      // a failed or never-finished run: whatever was saved (a typed grade, MLS words on its homes), nothing new is shown
+      for (const status of ['failed', 'running']) {
+        const unfinishedRow = { ...older, status, subject_condition: 'C', recommended_rent_low: null, recommended_rent_mid: null, recommended_rent_high: null, rationale: null };
+        const unfinished = HistO.rebuildReport({ analysis: unfinishedRow, comps: comps.map(c => ({ ...c, mls_condition: 'Turnkey, Updated/Remodeled' })), sourceNamesById: NAMES_E }).report;
+        assert.equal(unfinished.format, 'unfinished', status);
+        assert.equal(unfinished.headline, null);
+        assert.equal(unfinished.subjectCondition, null, `${status}: no grade shown`);
+        assert.ok(unfinished.comps.length === 3 && unfinished.comps.every(c => c.mls_condition_line === null), `${status}: no MLS words shown`);
+        assert.doesNotMatch(JSON.stringify(unfinished), /Condition \(entered by staff\)|MLS lists/);
+        const bare = HistO.rebuildReport({ analysis: { ...unfinishedRow, subject_condition: null }, comps: comps.map(c => ({ ...c, mls_condition: null })), sourceNamesById: NAMES_E }).report;
+        for (const k of ['headline', 'confidence', 'counted', 'noRange', 'ownerView', 'ownerViewNote', 'sourceNotes']) assert.deepEqual(unfinished[k], bare[k], `${status}: ${k} does not depend on the saved condition`);
+      }
+    });
+
+    // ── the pages ──
+    const formHtmlOf = file => fsO.readFileSync(file, 'utf8');
+    const decodeE = s => s.replace(/&mdash;/g, '—').replace(/&hellip;/g, '…').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+    await check('Condition / the form, both pages: one optional select "Condition of your home (only if someone has seen it)" with Not seen / not sure first and chosen, then A+ to F with the one-line meanings (identical to the wording the server shows), and plain helper text', () => {
+      for (const f of pagesO) {
+        const html = formHtmlOf(f);
+        const sel = html.match(/<div class="field span-2">\s*<label for="f_subject_condition">([\s\S]*?)<\/label>\s*<select id="f_subject_condition" name="subject_condition">([\s\S]*?)<\/select>\s*<span class="hint">([\s\S]*?)<\/span>\s*<\/div>/);
+        assert.ok(sel, `${f}: the box is there`);
+        assert.equal(decodeE(sel[1].replace(/<[^>]+>/g, '')), 'Condition of your home (only if someone has seen it)');
+        const options = [...sel[2].matchAll(/<option value="([^"]*)"( selected)?>([\s\S]*?)<\/option>/g)].map(m => ({ value: m[1], selected: !!m[2], text: decodeE(m[3]) }));
+        assert.deepEqual(options.map(o => o.value), ['', ...GRADES_E]);
+        assert.deepEqual(options.map(o => o.selected), [true, false, false, false, false, false, false], 'Not seen / not sure is the default');
+        assert.equal(options[0].text, 'Not seen / not sure');
+        for (const o of options.slice(1)) assert.equal(o.text, `${o.value} — ${CD.SUBJECT_CONDITION_DESCRIPTIONS[o.value]}`, 'same words as lib/condition-display.js');
+        assert.equal(decodeE(sel[3]), 'Shown on the staff report for reference. It does not change the recommended range, any price or the confidence label, and it is not on the owner page.');
+        assert.ok(!/<select id="f_subject_condition"[^>]*required/.test(html), 'optional');
+        assert.equal((html.match(/name="subject_condition"/g) || []).length, 1);
+        assert.ok(/subject_condition: form\.subject_condition\.value,/.test(html), 'sent with the request');
+      }
+    });
+
+    // a pretend page that records the form's submit handler, so the page's own request code can be run
+    function loadFormPageE(file) {
+      const html = fsO.readFileSync(file, 'utf8');
+      const script = [...html.matchAll(/<script(?![^>]*src)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+      const els = {}, listeners = {};
+      const mk = id => {
+        const t = { id, style: {}, options: [], children: [], value: '', checked: false, dataset: {}, innerHTML: '', textContent: '',
+          classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+          addEventListener(type, fn) { (listeners[`${id}:${type}`] = listeners[`${id}:${type}`] || []).push(fn); } };
+        return new Proxy(t, { get(o, k) { if (k in o) return o[k]; if (['appendChild', 'setAttribute', 'focus', 'scrollIntoView', 'removeChild', 'remove'].includes(k)) return () => {}; if (k === 'querySelector' || k === 'closest') return () => null; if (k === 'querySelectorAll') return () => []; return undefined; }, set(o, k, v) { o[k] = v; return true; } });
+      };
+      const document = { getElementById: id => (els[id] = els[id] || mk(id)), querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, createElement: () => mk('x'), body: mk('body') };
+      const ctx = vmO.createContext({ document, window: { scrollTo() {}, print() {}, addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: () => Promise.reject(new Error('no network')),
+        setTimeout: () => 0, clearTimeout() {}, console: { log() {}, error() {}, warn() {} }, URLSearchParams, Number, Math, Date, JSON, String, Array, Object, Set, Map, isNaN, parseInt, parseFloat, encodeURIComponent, L: undefined });
+      vmO.runInContext(script, ctx);
+      return { ctx, els, listeners };
+    }
+    await check('Condition / the form, both pages: the request carries exactly what was chosen ("" for Not seen), the box returns to Not seen after a finished report, and stays as chosen when the request is refused', async () => {
+      const base = reportO({ comps: agreeingRaw() });
+      for (const f of pagesO) {
+        const page = loadFormPageE(f);
+        const handler = (page.listeners['analysisForm:submit'] || [])[0];
+        assert.equal(typeof handler, 'function', 'the form has a submit handler');
+        const fetched = [];
+        let reply = { ok: true, status: 200, json: async () => ({ ...base.response, analysis: { ...base.response.analysis, subject_condition: 'B' }, subjectCondition: CD.subjectConditionForAnswer('B') }) };
+        page.ctx.fetch = async (url, opts) => { fetched.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null }); return reply; };
+        const formWith = value => ({
+          run_by: { value: 'u1' }, subject_address: { value: ' 2461 Bunting Avenue, Ventura, CA 93003 ' }, subject_bedrooms: { value: '4' }, subject_bathrooms: { value: '2' }, subject_sqft: { value: '1636' },
+          subject_property_type: { value: 'single_family' }, lease_term_months: { value: '12' }, furnished: { checked: false }, subject_age_restricted: { checked: false },
+          subject_condition: { value }, owner_goal: { value: 'balanced' }, subject_year_built: { value: '' },
+        });
+        const submit = async value => { const form = formWith(value); await handler({ preventDefault() {}, target: form }); return form; };
+        let form = await submit('B');
+        assert.equal(fetched[0].body.subject_condition, 'B');
+        assert.equal(form.subject_condition.value, '', 'after a finished report the next analysis starts at Not seen');
+        assert.match(page.els.reportDoc.innerHTML, /Condition \(entered by staff\): B, some nice finishes but some dated fixtures/);
+        form = await submit('');
+        assert.equal(fetched[1].body.subject_condition, '', 'Not seen / not sure is sent as blank');
+        for (const g of GRADES_E) { await submit(g); assert.equal(fetched[fetched.length - 1].body.subject_condition, g); }
+        // a refused request leaves the choice where it was so it can be corrected and sent again
+        reply = { ok: false, status: 400, json: async () => ({ error: 'subject_sqft is required and must be a whole number > 0.' }) };
+        form = await submit('C');
+        assert.equal(form.subject_condition.value, 'C');
+      }
+    });
+
+    await check('Condition / the staff report, both pages: the line sits with the home facts only when a grade was entered; MLS words appear on the counted homes\' cards only when the MLS gave a known word; nothing else on the page changes', () => {
+      const base = reportO({ comps: agreeingRaw() });
+      const comps = base.responseComps.map((c, i) => ({ ...c, mls_condition: i === 0 ? 'Turnkey, Updated/Remodeled' : i === 1 ? 'Original' : i === 2 ? 'Fixer' : null }));
+      const answer = grade => OutO.buildApiResponse({ analysis: { ...base.analysis, subject_condition: grade }, comps, marketData: null, numbers: base.numbers });
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        const show = r => { page.run('renderReport(__a, __c, __m, __x)', { __a: r.analysis, __c: r.comps, __m: null, __x: r }); return page.els.reportDoc.innerHTML; };
+        const none = show(answer(null));
+        assert.ok(!none.includes('Condition (entered by staff)') && !none.includes('subject-condition'), 'nothing when not entered');
+        const lineDivs = html => (html.match(/<div class="comp-mls-condition">[^<]*<\/div>/g) || []);
+        assert.deepEqual(lineDivs(none), ['<div class="comp-mls-condition">MLS lists: Turnkey, Updated/Remodeled</div>', '<div class="comp-mls-condition">MLS lists: Fixer</div>'], 'known words only; "Original" is unknown and not shown');
+        assert.ok(!/MLS lists: [^<]*Original/.test(none));
+        for (const g of GRADES_E) {
+          const html = show(answer(g));
+          const line = `Condition (entered by staff): ${g}, ${GRADE_WORDS_E[g]}`;
+          assert.equal(html.split(line).length - 1, 1, `${g}: shown once`);
+          const at = html.indexOf(line);
+          assert.ok(at > html.indexOf('class="report-band"') && at < html.indexOf('class="report-body"'), `${g}: with the home facts at the top`);
+          assert.ok(html.indexOf('class="subject-meta"') < at, `${g}: right after the bed/bath/size facts`);
+          // take the new line out and the page is exactly the page without it
+          assert.equal(html.replace(`<div class="subject-meta subject-condition">${line.replace(/&/g, '&amp;')}</div>`, ''), none, `${g}: the only difference is the one line`);
+        }
+        // the words are the MLS's own: never an A to F grade, never a comparison
+        const cards = none.slice(none.indexOf('class="comp-cards"'));
+        assert.doesNotMatch(cards, /Condition \(entered by staff\)|\bcondition [A-F]\+?\b|graded|rated/i);
+        // a home that is not counted gets no MLS line (its compact row is unchanged)
+        const excluded = comps.map((c, i) => (i === 0 ? { ...c, exclusion_reason: 'size_sqft' } : c));
+        const r2 = OutO.buildApiResponse({ analysis: base.analysis, comps: excluded, marketData: null, numbers: { ...base.numbers, counted: { total: base.numbers.counted.total - 1, leased: base.numbers.counted.leased - 1 } } });
+        assert.ok(!show(r2).includes('MLS lists: Turnkey'), 'only the counted homes\' cards show the MLS words');
+        // an answer from a server that does not send the fields at all (an older one) draws no new element
+        const bare = { ...answer('B') }; delete bare.subjectCondition; bare.comps = bare.comps.map(c => { const x = { ...c }; delete x.mls_condition_line; return x; });
+        const html = show(bare);
+        assert.ok(!html.includes('subject-condition') && !html.includes('comp-mls-condition'));
+      }
+    });
+
+    await check('Condition / printing: the screen shows the grade line and the MLS words, the printed staff report hides both (one rule inside @media print, none outside it), in both pages', () => {
+      for (const f of pagesO) {
+        const html = formHtmlOf(f);
+        const printAt = html.indexOf('@media print');
+        assert.ok(printAt > 0);
+        const rule = /\.subject-condition, \.comp-mls-condition \{ display: none !important; \}/g;
+        assert.equal((html.match(rule) || []).length, 1, 'exactly one such rule');
+        assert.ok(html.search(rule) > printAt, 'and it sits inside the print block');
+        // the screen styles for the same two classes do not hide them
+        const screenCss = html.slice(0, printAt);
+        for (const cls of ['subject-condition', 'comp-mls-condition']) assert.ok(screenCss.includes(`.${cls}`) && !new RegExp(`\\.${cls}[^{]*\\{[^}]*display:\\s*none`).test(screenCss), `${cls} is visible on screen`);
+        // both classes are the ones the page's own code puts on the two lines
+        assert.ok(html.includes('class="subject-meta subject-condition"') && html.includes('class="comp-mls-condition"'));
+      }
+    });
+
+    await check('Condition / XSS: the grade line, the MLS line and the saved value are put on the page as plain text only, in both pages', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'&<script>alert(2)</script>';
+      const base = reportO({ comps: agreeingRaw() });
+      for (const f of pagesO) {
+        const page = loadPageO(f);
+        const r = OutO.buildApiResponse({ analysis: base.analysis, comps: base.responseComps, marketData: null, numbers: base.numbers });
+        r.subjectCondition = { grade: evil, description: evil, line: evil };
+        r.comps = r.comps.map((c, i) => (i < 3 ? { ...c, mls_condition_line: evil } : c));
+        r.analysis = { ...r.analysis, subject_condition: evil };
+        page.run('renderReport(__a, __c, __m, __x)', { __a: r.analysis, __c: r.comps, __m: null, __x: r });
+        const html = page.els.reportDoc.innerHTML;
+        assert.ok(!html.includes('<img') && !html.includes('<script') && !/onerror=\w/.test(html.replace(/&lt;[^]*?&gt;/g, '')), 'no tag from the data survives');
+        assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'shown as plain text');
+        assert.equal((html.match(/&lt;img src=x onerror=alert\(1\)&gt;/g) || []).length, 1 + 3, 'once for the grade line and once for each of the three cards');
+      }
+    });
+
+    await check('Condition / wording: every new piece of on-screen text passes the forbidden-terms scan (the company\'s language-to-avoid list and the Mason review\'s Appendix B words) and says nothing that compares the home with its comps or adjusts anything', () => {
+      const texts = [
+        CD.SUBJECT_CONDITION_PREFIX, CD.MLS_CONDITION_PREFIX, ...Object.values(CD.SUBJECT_CONDITION_DESCRIPTIONS), ...CD.MLS_CONDITION_WORDS,
+        ...GRADES_E.map(g => CD.subjectConditionForAnswer(g).line), ...CD.MLS_CONDITION_WORDS.map(w => CD.mlsConditionLine([w])),
+        CD.mlsConditionLine(['Turnkey', 'Updated/Remodeled']),
+      ];
+      for (const f of pagesO) {
+        const html = formHtmlOf(f);
+        const sel = html.match(/<label for="f_subject_condition">([\s\S]*?)<\/label>\s*<select id="f_subject_condition" name="subject_condition">([\s\S]*?)<\/select>\s*<span class="hint">([\s\S]*?)<\/span>/);
+        texts.push(decodeE(sel[1].replace(/<[^>]+>/g, '')), ...[...sel[2].matchAll(/<option[^>]*>([\s\S]*?)<\/option>/g)].map(m => decodeE(m[1])), decodeE(sel[3]));
+      }
+      assert.ok(texts.length > 40);
+      const COMPARING = /similar|same condition|comparable condition|adjust|better|worse|higher|lower|than|compared|equivalent|inferior|superior|match|in line with|on par|average|typical|above|below|premium|discount|worth|value|\+\s?\$|\$/i;
+      for (const t of texts) {
+        assert.deepEqual(OV.findForbiddenTerms(t, { includePagePhrases: true }), [], `owner-view scan: ${t}`);
+        assert.deepEqual(forbiddenIn(t), [], `own scan: ${t}`);
+        assert.doesNotMatch(t, COMPARING, `no comparing or adjusting words: ${t}`);
+        assert.doesNotMatch(t, /\b55\b|\bsenior|\bfamil|\bchild/i);
+      }
+    });
+
+    await check('Condition / both entry points: server.js and router.js check, save and describe the box the same way, and the two lib folders and the two pages stay identical (the pages differ only in the Leaflet lines)', () => {
+      const srcOf = f => fsO.readFileSync(pathO.join(__dirname, f), 'utf8');
+      const [server, router] = [srcOf('server.js'), srcOf(pathO.join('..', 'hub', 'rental-analysis', 'router.js'))];
+      const piece = src => {
+        const a = src.indexOf('const subjectConditionInput'); assert.ok(a > 0);
+        return src.slice(a, src.indexOf('const subjectCondition = subjectConditionInput.value;', a) + 60).replace(/\s+/g, ' ');
+      };
+      assert.equal(piece(server), piece(router), 'the same check in both');
+      for (const src of [server, router]) {
+        assert.match(src, /const \{ stripControlChars, checkSubjectLimits, parseFurnishedInput, parseSubjectConditionInput, MAX_ADDRESS_LENGTH \} = require\('\.\/lib\/subject-inputs'\);/);
+        assert.match(src, /\n    subject_condition,\n    owner_goal,/);
+        assert.match(src, /subject_condition: subjectCondition, \/\/ one of the six grades, or null/);
+      }
+      assert.match(server, /subject_condition +\(optional: A\+, A, B, C, D or F/, 'the standalone --help text lists the new field');
+      const libFiles = dir => fsO.readdirSync(dir).filter(f => f.endsWith('.js') || f.endsWith('.json')).sort();
+      if (hubExistsO) {
+        const [a, b] = [pathO.join(__dirname, 'lib'), pathO.join(hubDirO, 'lib')];
+        assert.deepEqual(libFiles(a), libFiles(b));
+        for (const f of libFiles(a)) assert.equal(fsO.readFileSync(pathO.join(a, f), 'utf8'), fsO.readFileSync(pathO.join(b, f), 'utf8'), `lib/${f} is the same in both folders`);
+        const [standalone, hub] = pagesO.map(f => fsO.readFileSync(f, 'utf8'));
+        const strip = html => html.slice(0, html.indexOf('</title>')) + html.slice(html.indexOf('<style>'));
+        assert.equal(strip(hub), strip(standalone));
+      }
     });
   }
 

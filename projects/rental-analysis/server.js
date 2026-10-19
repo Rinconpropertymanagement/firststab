@@ -115,6 +115,11 @@ POST /api/rental-analysis/run
                              count. Otherwise 55+ comps are left out.)
     subject_subdivision    (text, optional, up to 120 characters — the
                              subject's neighborhood name, when known)
+    subject_condition      (optional: A+, A, B, C, D or F, exactly as written —
+                             how a person who has SEEN the home rates it; blank
+                             means not seen / not sure. Shown on the staff
+                             report only. It never changes any number, price,
+                             label or count, and it is not on the owner page.)
     run_by                 (string UUID, required — a real users.id)
     property_id            (string UUID, optional — only if you already know
                              this address matches an existing Rincon property)
@@ -179,7 +184,7 @@ const { findBestPropertyMatch, hasParseableHouseNumber, hasStreetName } = requir
 const { computeNumbers } = require('./lib/analyze');
 const { buildCompRows } = require('./lib/comp-rows');
 const { parseAgeRestrictedInput, parseSubdivisionInput } = require('./lib/mls-facts');
-const { stripControlChars, checkSubjectLimits, parseFurnishedInput, MAX_ADDRESS_LENGTH } = require('./lib/subject-inputs');
+const { stripControlChars, checkSubjectLimits, parseFurnishedInput, parseSubjectConditionInput, MAX_ADDRESS_LENGTH } = require('./lib/subject-inputs');
 const { sizeBandPctFor } = require('./lib/weighting');
 const { parseOwnerGoalInput, classifySourceResult, noCompsRationale, buildCompletionPatch, headlineForDisplay, buildApiResponse, buildSourceNotes } = require('./lib/outcome');
 const { generateNarrative } = require('./lib/narrative');
@@ -395,6 +400,7 @@ app.post('/api/rental-analysis/run', async (req, res) => {
     furnished,
     subject_age_restricted,
     subject_subdivision,
+    subject_condition,
     owner_goal,
     run_by,
     property_id,
@@ -466,6 +472,11 @@ app.post('/api/rental-analysis/run', async (req, res) => {
   const subdivisionInput = parseSubdivisionInput(subject_subdivision);
   if (subdivisionInput.error) return validationError(res, subdivisionInput.error);
   const subjectSubdivision = subdivisionInput.value;
+  // "Condition of your home" (optional, only if someone has seen it). Saved and shown for reference; it is deliberately
+  // NOT put in `subject` below, so nothing that works out a number, a label or the written explanation can ever read it.
+  const subjectConditionInput = parseSubjectConditionInput(subject_condition);
+  if (subjectConditionInput.error) return validationError(res, subjectConditionInput.error);
+  const subjectCondition = subjectConditionInput.value;
   // "Owner goal" (optional): which price inside the recommended range to suggest. Empty means Balanced.
   const ownerGoalInput = parseOwnerGoalInput(owner_goal);
   if (ownerGoalInput.error) return validationError(res, ownerGoalInput.error);
@@ -541,6 +552,7 @@ app.post('/api/rental-analysis/run', async (req, res) => {
       furnished: isFurnished,
       subject_age_restricted: ageRestricted, // always true or false, never blank (the database does not accept a blank here)
       subject_subdivision: subjectSubdivision,
+      subject_condition: subjectCondition, // one of the six grades, or null for "not seen / not sure"
       size_band_pct: sizeBandPctFor(subject_property_type, sqft), // 25, or null when the size rule does not apply to this property type
       owner_goal: ownerGoal,
       property_id: resolvedPropertyId,

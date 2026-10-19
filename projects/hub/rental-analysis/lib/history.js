@@ -67,7 +67,7 @@ const REPORT_COLUMNS = [
   'id', 'created_at', 'updated_at', 'subject_address', 'subject_bedrooms', 'subject_bathrooms', 'subject_sqft',
   'subject_property_type', 'subject_year_built', 'lease_term_months', 'furnished', 'run_by', 'status', 'rationale',
   'subject_estimated_rent', 'subject_latitude', 'subject_longitude', 'subject_zip', 'subject_age_restricted',
-  'subject_subdivision', 'size_band_pct', 'owner_goal', 'headline_range_low', 'headline_range_high',
+  'subject_subdivision', 'subject_condition', 'size_band_pct', 'owner_goal', 'headline_range_low', 'headline_range_high',
   'suggested_list_price', 'stretch_price', 'confidence_label', 'confidence_spread', 'counted_comp_count',
   'counted_leased_count', 'method_version', 'recommended_rent_low', 'recommended_rent_mid', 'recommended_rent_high',
 ].join(',');
@@ -387,6 +387,9 @@ function rebuildReport({ analysis, comps, sourceNamesById = {}, runByName = null
     report.sizeNote = null; // the size rule did not exist when this report was run
     report.ownerView = null;
     report.ownerViewNote = OWNER_VIEW_NOTES.older;
+    // the condition lines belong to the current method; an older report never shows them
+    report.subjectCondition = null;
+    report.comps = report.comps.map(c => ({ ...c, mls_condition_line: null }));
   } else if (format === 'unfinished') {
     report.noRange = row.status === 'failed' ? UNFINISHED_NO_RANGE.failed : UNFINISHED_NO_RANGE.other;
     report.accuracyLine = null;
@@ -394,6 +397,9 @@ function rebuildReport({ analysis, comps, sourceNamesById = {}, runByName = null
     report.sizeNote = null;
     report.ownerView = null;
     report.ownerViewNote = OWNER_VIEW_NOTES.unfinished;
+    // a report that did not finish shows nothing about condition, saved or not (same as an older report)
+    report.subjectCondition = null;
+    report.comps = report.comps.map(c => ({ ...c, mls_condition_line: null }));
   }
   return { report, flags };
 }

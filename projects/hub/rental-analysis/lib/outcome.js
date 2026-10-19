@@ -19,6 +19,7 @@ const { FIRM_UP_LINE } = require('./confidence');
 const { loadAccuracyScorecard, staffSentences } = require('./accuracy-sentences');
 const { TYPE_CHECK_WHAT } = require('./leadsimple');
 const { buildOwnerView, NOTES: OWNER_VIEW_NOTES } = require('./owner-view');
+const { subjectConditionForAnswer, mlsConditionLine } = require('./condition-display');
 
 // The published accuracy results, read once when the server starts. null when the
 // file is missing or damaged; the sentences that depend on it are then left out.
@@ -265,9 +266,24 @@ function buildApiResponse({ analysis, comps, marketData, numbers, scorecard = PU
     console.error(`[rental-analysis] The owner view could not be built: ${err.message}`);
     owner = { ownerView: null, ownerViewNote: OWNER_VIEW_NOTES.error };
   }
+  // The two condition facts the staff report shows (lib/condition-display.js). They are worked out AFTER the owner view
+  // above and from the saved columns only, so they cannot reach any number, label, count or the owner page. The
+  // comps are copied (never changed in place) so each carries its ready-to-show MLS line, or null. Display only: a fault
+  // here leaves the lines out and never costs staff the report.
+  let subjectCondition = null;
+  let shownComps = comps;
+  try {
+    subjectCondition = subjectConditionForAnswer(analysis && analysis.subject_condition);
+    if (Array.isArray(comps)) shownComps = comps.map(c => ({ ...c, mls_condition_line: mlsConditionLine(c && c.mls_condition) }));
+  } catch (err) {
+    console.error(`[rental-analysis] The condition lines could not be built (the report is unaffected): ${err.message}`);
+    subjectCondition = null;
+    shownComps = comps;
+  }
   return {
     analysis: stripAuditColumns(analysis),
-    comps,
+    comps: shownComps,
+    subjectCondition,
     marketData,
     headline: headlineForDisplay(numbers),
     confidence: confidence ? {

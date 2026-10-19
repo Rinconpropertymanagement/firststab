@@ -281,6 +281,8 @@
       font-size: 13px;
       color: rgba(255,255,255,0.85);
     }
+    /* the condition a staff member typed in for this home (shown only when entered; display only) */
+    .report-band .subject-meta.subject-condition { margin-top: 4px; }
 
     .report-body { padding: 28px; }
 
@@ -514,6 +516,8 @@
     .comp-card .comp-addr { font-size: 13px; font-weight: 700; color: #111827; margin-bottom: 2px; }
     .comp-card .comp-city { font-size: 11px; color: #9ca3af; margin-bottom: 8px; }
     .comp-card .comp-meta { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+    /* the MLS's own condition words, copied as the MLS spells them (display only: never graded, never compared) */
+    .comp-card .comp-mls-condition { font-size: 11.5px; color: #4b5563; margin: -2px 0 8px; }
     .comp-card .comp-price {
       font-size: 19px; font-weight: 800; color: var(--sienna-dark); margin-bottom: 8px;
     }
@@ -845,6 +849,8 @@
       .page { max-width: 100%; padding: 0; }
       .report-doc { border: none; }
       .map-wrap { display: none !important; }
+      /* the staff-only condition lines (the grade a person typed, the MLS's own words) are for the screen; the printed staff report does not carry them */
+      .subject-condition, .comp-mls-condition { display: none !important; }
 
       /* Owner view: print only the one-page owner document, on one Letter sheet, colors kept. */
       body.owner-mode { min-height: 0; background: #fff; }
@@ -960,6 +966,20 @@
             <option value="maximize_rent">Maximize rent</option>
           </select>
           <span class="hint">Sets which price inside the range we suggest listing at.</span>
+        </div>
+
+        <div class="field span-2">
+          <label for="f_subject_condition">Condition of your home <span class="hint">(only if someone has seen it)</span></label>
+          <select id="f_subject_condition" name="subject_condition">
+            <option value="" selected>Not seen / not sure</option>
+            <option value="A+">A+ &mdash; completely remodeled with the best upgrades</option>
+            <option value="A">A &mdash; very nice finishes</option>
+            <option value="B">B &mdash; some nice finishes but some dated fixtures</option>
+            <option value="C">C &mdash; completely dated</option>
+            <option value="D">D &mdash; run down</option>
+            <option value="F">F &mdash; trashed</option>
+          </select>
+          <span class="hint">Shown on the staff report for reference. It does not change the recommended range, any price or the confidence label, and it is not on the owner page.</span>
         </div>
 
         <div class="field span-2">
@@ -1409,6 +1429,7 @@
       lease_term_months: Number(form.lease_term_months.value),
       furnished: form.furnished.checked,
       subject_age_restricted: form.subject_age_restricted.checked,
+      subject_condition: form.subject_condition.value,
       owner_goal: form.owner_goal.value,
       run_by: runBy,
     };
@@ -1439,6 +1460,8 @@
       renderReport(data.analysis, data.comps || [], data.marketData || null, data);
       hideSavedBanner();
       showView('report');
+      // The condition is about one particular home: the next analysis starts at "Not seen / not sure".
+      form.subject_condition.value = '';
     } catch (err) {
       console.error(err);
       showView('form');
@@ -1872,6 +1895,23 @@
   // weight) — the RINCON MANAGED badge below stays for that real case, it's
   // just no longer paired with any "internal reference only" caveat, since
   // a comp that reaches this function was never excluded to begin with.
+  // The two condition facts the server sends ready to show (lib/condition-display.js). Neither is a grade this page works
+  // out, neither is compared with anything, and neither is used for a number. Nothing is drawn when the server sent nothing.
+  // The MLS's own words, as the MLS spells them, on a comp's card.
+  function mlsConditionHtml(c) {
+    return typeof c.mls_condition_line === 'string' && c.mls_condition_line
+      ? '<div class="comp-mls-condition">' + esc(c.mls_condition_line) + '</div>'
+      : '';
+  }
+
+  // "Condition (entered by staff): B, some nice finishes but some dated fixtures", under the home facts, only when entered.
+  function subjectConditionHtml(extras) {
+    const sc = extras && extras.subjectCondition;
+    return sc && typeof sc.line === 'string' && sc.line
+      ? '<div class="subject-meta subject-condition">' + esc(sc.line) + '</div>'
+      : '';
+  }
+
   // The MLS facts saved with a comp (mls_flags), in plain words. Display only.
   const MLS_FLAG_LABELS = {
     hoa: 'HOA',
@@ -1908,6 +1948,7 @@
         '<div class="comp-addr">' + esc(c.address || 'Unknown address') + '</div>' +
         (c.distance_miles != null ? '<div class="comp-city">' + Number(c.distance_miles).toFixed(2) + ' mi from subject</div>' : '') +
         '<div class="comp-meta">' + esc(propertyTypeLabel(c.property_type)) + ' &middot; ' + fmtBath(c.bedrooms) + ' bd / ' + fmtBath(c.bathrooms) + ' ba' + (c.sqft ? ' &middot; ' + fmtNum(c.sqft) + ' sqft' : '') + '</div>' +
+        mlsConditionHtml(c) +
         '<div class="comp-price">' + priceHtml + (c.monthly_rent != null ? '<span style="font-size:12px;font-weight:500;color:#9ca3af"> /mo</span>' : '') +
           (c.monthly_rent != null && c.sqft ? '<span style="font-size:12px;font-weight:500;color:#9ca3af"> &middot; ' + pricePerSqft(c.monthly_rent, c.sqft) + '</span>' : '') +
         '</div>' +
@@ -2106,6 +2147,7 @@
         '<div class="eyebrow">Rental Market Analysis</div>' +
         '<h2>' + esc(analysis.subject_address) + '</h2>' +
         '<div class="subject-meta">' + subjectMeta + '</div>' +
+        subjectConditionHtml(extras) +
       '</div>' +
       '<div class="report-body">' +
 

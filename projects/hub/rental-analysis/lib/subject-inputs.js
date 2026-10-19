@@ -10,6 +10,8 @@
  * functions, so they refuse the same things.
  */
 
+const { CONDITION_RATINGS } = require('./constants');
+
 // The most any of these may be. Real homes are far below every one of them; the
 // point is only to stop absurd values from ever reaching the database.
 const MAX_SQFT = 20000;
@@ -52,8 +54,22 @@ function parseFurnishedInput(raw) {
   return { error: 'furnished must be true or false, or omitted.' };
 }
 
+/**
+ * "Condition of your home" box (only for a home someone has actually seen). Left blank means
+ * "not seen / not sure" and is saved as nothing (NULL). Otherwise it must be exactly one of the
+ * six grades the database accepts, spelled exactly: "a", "A+ " and "B+" are all refused, as is
+ * anything that is not text. The refusal never repeats what was typed. The grade is shown on the
+ * staff report for reference only; it is never used in any rent number.
+ * @returns {{value: string|null}|{error: string}}
+ */
+function parseSubjectConditionInput(raw) {
+  if (raw === undefined || raw === null || raw === '') return { value: null };
+  if (typeof raw === 'string' && CONDITION_RATINGS.includes(raw)) return { value: raw };
+  return { error: `subject_condition must be one of ${CONDITION_RATINGS.slice(0, -1).join(', ')} or ${CONDITION_RATINGS[CONDITION_RATINGS.length - 1]}, or left blank (not seen / not sure).` };
+}
+
 // The typed address is read by many pattern matches and goes into the writer's prompt, so an address of thousands of
 // characters is refused with a plain message (real addresses are far shorter).
 const MAX_ADDRESS_LENGTH = 300;
 
-module.exports = { MAX_ADDRESS_LENGTH, MAX_SQFT, MAX_BEDROOMS, MAX_BATHROOMS, MAX_LEASE_TERM_MONTHS, stripControlChars, checkSubjectLimits, parseFurnishedInput };
+module.exports = { MAX_ADDRESS_LENGTH, MAX_SQFT, MAX_BEDROOMS, MAX_BATHROOMS, MAX_LEASE_TERM_MONTHS, stripControlChars, checkSubjectLimits, parseFurnishedInput, parseSubjectConditionInput };

@@ -539,6 +539,20 @@ require('./last-touched-tests').register({ test, asyncTest: serialAsyncTest, cal
 // arrangement.
 require('./manual-report-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
 
+// "Close old items" — the bulk close of old, unworked, non-sensitive open
+// complaints, with a preview and an undo (lib/bulk-close.js and its four
+// routes) — same arrangement.
+require('./bulk-close-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
+
+// "Close old items" — server hardening (the write's own guards, the start row,
+// the lock clock, the batch list, no audit row written twice) — same arrangement.
+require('./bulk-close-hardening-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
+
+// "Close old items" — the contract between the server's answers and the
+// dashboard's panel (the page's own code run against the real service) — same
+// arrangement.
+require('./bulk-close-contract-tests').register({ test, asyncTest: serialAsyncTest, callRouterHandler });
+
 // ─── Report ──────────────────────────────────────────────────────────────
 async function main() {
   const resolvedAsync = await Promise.all(asyncResults);

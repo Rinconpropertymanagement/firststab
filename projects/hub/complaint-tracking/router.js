@@ -77,6 +77,7 @@ const { TOPIC_CATEGORIES: CATEGORIES } = require('../archive-search/lib/signific
 const { findPossibleDuplicate } = require('./lib/duplicate-check');
 const { createSourceEmailDates } = require('./lib/source-email-dates');
 const { findLatestAuditRows } = require('./lib/last-touched');
+const { mountBulkCloseRoutes } = require('./lib/bulk-close');
 const { lookupSingleDirectorOfOperations } = require('./lib/process-pending-messages');
 const { GLOBAL_SEARCH_WIDGET_HTML } = require('../lib/global-search-widget');
 // Triage redesign build (2026-10): "View original email" link. Reusing
@@ -865,6 +866,13 @@ router.get('/api/complaint-tracking/property/:property_id', requireComplaintTrac
   await Promise.all([attachDisplayInfo(rows), sourceEmailDates.attach(rows)]);
   res.json({ complaints: rows });
 });
+
+// ─── "Close old items" — bulk close of old, unworked, non-sensitive open
+// complaints, with a preview and an undo (Peter, 2026-10-21: "90 days, hold
+// back the urgent ones"). All the rules live in lib/bulk-close.js; this only
+// mounts its four routes, behind the same access check as everything else
+// here. Registered before the /:id/... routes below on purpose.
+mountBulkCloseRoutes(router, { requireAccess: requireComplaintTrackingAccess, supabase, lookupUserId });
 
 // ─── POST /api/complaint-tracking/:id/stage — lifecycle transitions
 // (product doc Section 4, Design Decision 11). A held placeholder never

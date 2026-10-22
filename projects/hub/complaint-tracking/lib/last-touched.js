@@ -73,7 +73,7 @@ function failureText(kind, err, status) {
   return bits.length ? `${kind} (${bits.join(' ')})` : kind;
 }
 
-async function fetchPage(supabase, ids, from, pageSize, signal) {
+async function fetchPage(supabase, ids, from, pageSize, signal, excludeActions) {
   // created_at alone is not unique (rows written in one statement share it),
   // and paging over ties can skip or repeat a row between pages. The
   // hash-chain sequence_num is unique and rises with every insert, so the
@@ -83,7 +83,13 @@ async function fetchPage(supabase, ids, from, pageSize, signal) {
     .from('audit_log')
     .select(SELECT_COLUMNS)
     .eq('entity_type', 'complaint')
-    .in('entity_id', ids)
+    .in('entity_id', ids);
+  // Rows with these actions are left out, so the newest row that is NOT one of
+  // them is the one returned (the bulk close asks for its own rows to be
+  // ignored). Only plain action names are used, each in double quotes.
+  const skipActions = (Array.isArray(excludeActions) ? excludeActions : []).filter((a) => typeof a === 'string' && /^[A-Za-z0-9_.]{1,80}$/.test(a));
+  if (skipActions.length) query = query.not('action', 'in', `(${skipActions.map((a) => `"${a}"`).join(',')})`);
+  query = query
     .order('created_at', { ascending: false })
     .order('sequence_num', { ascending: false })
     .range(from, from + pageSize - 1);
@@ -109,7 +115,7 @@ async function resolveChunk(supabase, ids, cfg, signal) {
   const found = new Map();
   let reachedEnd = false;
   for (let page = 0; page < cfg.maxPages && found.size < wanted.size && !signal.aborted; page += 1) {
-    const rows = await fetchPage(supabase, ids, page * cfg.pageSize, cfg.pageSize, signal);
+    const rows = await fetchPage(supabase, ids, page * cfg.pageSize, cfg.pageSize, signal, cfg.excludeActions);
     for (const row of rows) {
       if (!row || !wanted.has(row.entity_id) || found.has(row.entity_id)) continue;
       found.set(row.entity_id, row);
@@ -139,11 +145,25 @@ function summaryLine(stats, cfg) {
 // Map of complaint id -> its newest audit_log row. A complaint with no row,
 // or in a chunk that failed or did not finish in time, is simply absent from
 // the map.
+//
+// A caller that must tell "has no history" apart from "could not be checked"
+// (the bulk close, which must never act on a complaint it could not check)
+// passes options.unverified, a Set. Every id whose answer is NOT trustworthy
+// (its chunk failed, did not finish in time, or the page limit stopped the
+// search before it was reached) is added to that Set. An id with a real row,
+// or one in a chunk that was read to the end and had no row, is not added.
+// Nothing changes for callers that do not pass it.
+//
+// options.excludeActions (an array of action names) leaves rows with those
+// actions out of the search: the newest row that is not one of them is the
+// answer. The bulk close uses it so that its own close and undo rows do not
+// count as "a person worked on this".
 async function findLatestAuditRows(supabase, complaintIds, options = {}) {
   const cfg = { ...DEFAULTS, ...options };
   const out = new Map();
   const ids = [...new Set((complaintIds || []).filter((id) => typeof id === 'string' && id))];
   if (!ids.length) return out;
+  const verified = options.unverified instanceof Set ? new Set() : null;
 
   const chunks = [];
   for (let i = 0; i < ids.length; i += cfg.chunkSize) chunks.push(ids.slice(i, i + cfg.chunkSize));
@@ -162,6 +182,7 @@ async function findLatestAuditRows(supabase, complaintIds, options = {}) {
         // Past the deadline: drop this batch whole and start no further one.
         if (stop.signal.aborted) return;
         for (const [id, row] of found) out.set(id, row);
+        if (verified) for (const id of (missedByLimit ? found.keys() : chunk)) verified.add(id);
         stats.finished += 1;
         if (missedByLimit) { stats.limitBatches += 1; stats.limitMissed += missedByLimit; }
       } catch (err) {
@@ -185,6 +206,7 @@ async function findLatestAuditRows(supabase, complaintIds, options = {}) {
     clearTimeout(timer);
   }
   stats.timedOut = stop.signal.aborted;
+  if (verified) for (const id of ids) if (!verified.has(id)) options.unverified.add(id);
 
   const line = summaryLine(stats, cfg);
   if (line) console.error(line);

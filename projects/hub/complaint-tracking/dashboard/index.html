@@ -329,6 +329,92 @@
     .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
     .toast-action { background: none; border: none; color: #93c5fd; font-weight: 700; margin-left: 10px; cursor: pointer; font-family: inherit; font-size: 13px; text-decoration: underline; padding: 0; }
 
+    /* ── "Close old items" panel (2026-10-21) ──
+       A centred window on a laptop, nearly full-screen on a phone. It lives
+       OUTSIDE #app (see the #closeOldOverlay div below the page) so the list
+       redrawing behind it never wipes what is typed in it. */
+    .btn-closeold { background: #fff; border: 1px solid #d1d5db; color: #374151; padding: 6px 14px; border-radius: 6px; font-weight: 600; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+    .btn-closeold:hover { background: #f3f4f6; }
+    .co-overlay { position: fixed; inset: 0; background: rgba(17,24,39,0.55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 900; }
+    .co-overlay[hidden] { display: none; }
+    .co-dialog { background: #fff; border-radius: 12px; width: 100%; max-width: 580px; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
+    .co-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #e5e7eb; flex: none; }
+    .co-head h2 { font-size: 17px; font-weight: 700; color: #111827; }
+    .co-x { background: none; border: 1px solid transparent; border-radius: 6px; width: 40px; height: 40px; font-size: 26px; line-height: 1; color: #6b7280; cursor: pointer; font-family: inherit; }
+    .co-x:hover { background: #f3f4f6; color: #111827; }
+    .co-x:disabled { opacity: 0.4; cursor: not-allowed; }
+    .co-body { padding: 16px 18px 18px; overflow-y: auto; flex: 1 1 auto; -webkit-overflow-scrolling: touch; font-size: 14px; line-height: 1.5; color: #111827; }
+    .co-foot { padding: 12px 18px; border-top: 1px solid #e5e7eb; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: flex-end; flex: none; }
+    .co-foot:empty { display: none; }
+    .co-foot-hint { flex: 1 1 100%; font-size: 12px; color: #6b7280; }
+    .co-dialog [tabindex="-1"]:focus { outline: none; }
+    .co-dialog .btn, .co-dialog .btn-primary, .co-dialog .btn-danger { min-height: 40px; padding: 8px 16px; font-size: 14px; border-radius: 6px; }
+    .co-dialog .btn-primary[aria-busy="true"] { opacity: 0.7; cursor: progress; }
+    .btn-danger { background: #dc2626; border: none; color: #fff; cursor: pointer; font-weight: 700; font-family: inherit; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-danger:disabled { background: #e5e7eb; color: #6b7280; cursor: not-allowed; }
+    .co-intro { color: #374151; margin: 0 0 14px; }
+    .co-field { margin-bottom: 14px; }
+    .co-field > label, .co-label { display: block; font-size: 13px; font-weight: 600; color: #111827; margin-bottom: 5px; }
+    .co-field input[type="number"] { width: 140px; max-width: 100%; font-size: 16px; font-family: inherit; padding: 8px 10px; border: 1px solid #9ca3af; border-radius: 6px; min-height: 42px; }
+    .co-field input[aria-invalid="true"] { border-color: #dc2626; }
+    .co-check label { display: flex; align-items: flex-start; gap: 9px; font-size: 14px; font-weight: 600; color: #111827; cursor: pointer; }
+    .co-check input { width: 20px; height: 20px; margin-top: 1px; flex: none; cursor: pointer; }
+    .co-hint { font-size: 12.5px; color: #6b7280; margin-top: 4px; line-height: 1.45; }
+    .co-check .co-hint { margin-left: 29px; }
+    .co-always { font-size: 13px; color: #374151; margin: 0 0 14px; padding: 8px 10px; background: #f3f4f6; border-radius: 6px; line-height: 1.45; }
+    .co-dialog code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; background: #f3f4f6; border-radius: 4px; padding: 1px 4px; }
+    .co-err { font-size: 12.5px; color: #991b1b; margin-top: 4px; font-weight: 600; }
+    .co-err:empty { display: none; }
+    .co-note { border-radius: 8px; padding: 10px 12px; font-size: 13.5px; line-height: 1.45; margin: 12px 0; border: 1px solid; }
+    .co-note-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .co-note-warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    .co-note-info { background: #eff6ff; border-color: #bfdbfe; color: #1e3a8a; }
+    .co-note-ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+    .co-status { color: #374151; margin: 14px 0; display: flex; align-items: center; }
+    .spinner.sm { width: 16px; height: 16px; border-width: 2px; margin: 0 9px 0 0; flex: none; }
+    .co-result { margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 14px; }
+    .co-bigcount { font-size: 17px; font-weight: 700; color: #111827; line-height: 1.3; }
+    .co-bigcount .co-num { font-size: 26px; }
+    .co-sub { font-size: 13px; color: #4b5563; margin: 4px 0 0; }
+    .co-years { border-collapse: collapse; width: 100%; max-width: 320px; margin: 12px 0 4px; font-size: 13.5px; }
+    .co-years th, .co-years td { text-align: left; padding: 5px 10px; border-bottom: 1px solid #f3f4f6; }
+    .co-years th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; font-weight: 700; border-bottom: 1px solid #e5e7eb; }
+    .co-years .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .co-years tbody th { font-size: 13.5px; text-transform: none; letter-spacing: 0; color: #111827; font-weight: 400; border-bottom: 1px solid #f3f4f6; }
+    .co-years tfoot td { font-weight: 700; border-top: 1px solid #d1d5db; border-bottom: none; }
+    .co-subhead { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 16px 0 6px; }
+    .co-skips { list-style: none; font-size: 13.5px; color: #374151; }
+    .co-skips li { padding: 3px 0; }
+    .co-skips li.co-zero { color: #6b7280; }
+    .co-phase-head { font-size: 17px; font-weight: 700; margin: 0 0 8px; line-height: 1.3; }
+    .co-body p { margin: 0 0 10px; }
+    .co-body ul.co-points { margin: 0 0 12px 20px; }
+    .co-body ul.co-points li { margin-bottom: 4px; }
+    .co-assure { font-weight: 700; }
+    .co-batches { margin-top: 22px; border-top: 1px solid #e5e7eb; padding-top: 14px; }
+    .co-batches h3 { font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+    .co-batch-list { list-style: none; }
+    .co-batch { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+    .co-batch-main { font-size: 13.5px; font-weight: 600; color: #111827; }
+    .co-batch-meta { font-size: 12.5px; color: #6b7280; margin: 2px 0 8px; line-height: 1.45; }
+    .co-batch .btn { min-height: 36px; padding: 6px 14px; font-size: 13px; }
+    .co-batch-unfinished { border-color: #fde68a; background: #fffbeb; }
+    .co-batch-msg { font-size: 13px; margin-top: 6px; color: #374151; }
+    .co-batch-msg:empty { display: none; }
+    .co-batch-msg.err { color: #991b1b; font-weight: 600; }
+    .co-batch-msg.warn { color: #92400e; font-weight: 600; }
+    .co-batch .btn { margin-right: 8px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    @media (max-width: 640px) {
+      .co-overlay { padding: 8px; }
+      .co-dialog { max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
+      .co-head, .co-foot { padding-left: 14px; padding-right: 14px; }
+      .co-body { padding: 14px 14px 16px; }
+      .co-foot .btn, .co-foot .btn-danger { flex: 1 1 auto; }
+    }
+
     @media (max-width: 640px) {
       .page { padding: 0 12px 48px; }
       .header { padding: 16px 0 12px; }
@@ -366,6 +452,12 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- "Close old items" panel (2026-10-21). Kept OUTSIDE .page / #app on
+       purpose: render() replaces #app's contents, and the page behind the
+       panel is switched off (inert) while the panel is open. Filled in by
+       coOpen() below; empty and hidden until then. -->
+  <div id="closeOldOverlay" class="co-overlay" hidden></div>
 
   <script>
     // ────────────────────────────────────────────────────────────────
@@ -1930,6 +2022,7 @@
       document.getElementById('headerRight').innerHTML =
         '<span class="last-updated" id="lastUpdatedStamp"></span>' +
         '<button class="btn-refresh" id="refreshBtn">&#8635; Refresh</button>' +
+        '<button type="button" class="btn-closeold" id="closeOldBtn" aria-haspopup="dialog">Close old items&hellip;</button>' +
         '<a class="btn-report" href="/complaint-tracking/report">+ Report an issue</a>' +
         '<div style="text-align:right;line-height:1.3;"><div class="hr-user">' + escapeHtml(me.name) + '</div>' +
         '<div class="hr-role">' + (me.role === 'admin' ? 'Admin' : 'Director of Operations') + '</div></div>' +
@@ -1938,6 +2031,9 @@
       document.getElementById('refreshBtn').addEventListener('click', function () {
         document.getElementById('app').innerHTML = '<div class="spinner-wrap"><span class="spinner"></span><div>Loading&hellip;</div></div>';
         loadComplaints().then(render).catch(function (err) { showLoadError(err.message); });
+      });
+      document.getElementById('closeOldBtn').addEventListener('click', function () {
+        coOpen(document.getElementById('closeOldBtn'));
       });
     }
 
@@ -2012,6 +2108,10 @@
     function refreshWouldInterrupt() {
       var app = document.getElementById('app');
       if (!app) return true;
+      // The "Close old items" panel is open (2026-10-21). Its preview numbers
+      // and any batch being closed or undone are on screen right now, and
+      // the panel refreshes the list itself when it changes anything.
+      if (coIsOpen()) return true;
       // The first load, or the Refresh button's own reload, is under way.
       if (app.querySelector('.spinner-wrap')) return true;
       // A save is still travelling to the server.
@@ -2088,6 +2188,831 @@
       if (!event.persisted) return;
       hiddenSince = null;
       refreshComplaintsQuietly();
+    });
+
+    // ────────────────────────────────────────────────────────────────
+    // "Close old items" panel (2026-10-21)
+    //
+    // Why: the open list holds hundreds of old, already-handled complaints
+    // and closing them one by one would take days. This panel asks the
+    // server (the bulk-close routes) which open items qualify, SHOWS the
+    // numbers, and only closes them after one explicit confirmation. Every
+    // batch can be undone. Nothing is deleted anywhere.
+    //
+    // What this page decides: nothing about WHICH items qualify. The server
+    // computes that, once, for both the preview and the real close. This
+    // panel only sends the three settings (days, hold back urgent, also hold
+    // back legal exposure) and what it showed (expected_count and the
+    // set_hash fingerprint of the exact items); if either has moved on since
+    // the preview, the server refuses (409) and the person previews again.
+    //
+    // Owner decision 2026-10-22: items tagged legal exposure, or with a
+    // rejected owner instruction, are NOT held back by default (the server
+    // counts both as ONE group, so every sentence here names both). The
+    // "Also hold back ..." box (off by default) lets a person keep them open.
+    // Fair Housing and accommodation items are always kept open by the server
+    // whatever this page sends.
+    //
+    // Words from the server: every answer is read by the field names
+    // lib/bulk-close.js really sends (close: closed, failed, skipped_changed,
+    // audit_failed, stopped_early; undo: reopened, skipped_changed, failed,
+    // audit_failed; batches: state, closed_at, closed, still_closed). The
+    // server test suite feeds the real answers of the real service through
+    // these functions, so a renamed field fails a test instead of misleading
+    // the person.
+    //
+    // Safety shape of the screen:
+    //   - nothing runs by itself: opening the panel only READS the list of
+    //     recent batches; the preview runs when Preview is pressed;
+    //   - the red Close button stays off until a preview exists for the
+    //     CURRENT settings. Any change to a setting throws the preview away;
+    //   - Close is a two-step action (button, then a confirm screen);
+    //   - while a batch is closing, the window cannot be dismissed;
+    //   - the panel counts as "busy" for the quiet auto-refresh
+    //     (refreshWouldInterrupt), so the list is never redrawn under it.
+    // The panel lives in #closeOldOverlay, outside #app, so render() never
+    // touches it.
+    // ────────────────────────────────────────────────────────────────
+    var CO_BASE = '/api/complaint-tracking/bulk-close';
+    var CO_DEFAULT_DAYS = 90;
+    var CO_MIN_DAYS = 30;
+    var CO_MAX_DAYS = 3650;
+    var CO_DEFAULT_CAP = 2000;
+    var coState = null;          // null = closed
+    var coSavedBodyOverflow = '';
+    var coBatchSeq = 0;
+
+    function coIsOpen() { return coState !== null; }
+    // Closing a batch or undoing one is on its way: the window stays put.
+    function coLocked() { return !!coState && (coState.phase === 'closing' || !!coState.undoing); }
+    function coNum(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
+    function coN(v) { return coNum(v).toLocaleString('en-US'); }
+    function coItems(v) { return coN(v) + (coNum(v) === 1 ? ' item' : ' items'); }
+    function coFocus(id) { var el = document.getElementById(id); if (el) el.focus(); }
+    // Focus a heading AND bring it to the top of the scrolling window, so on a
+    // phone the new numbers are what is on screen (focus alone only nudges the
+    // heading to the bottom edge).
+    function coFocusTop(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'start' });
+    }
+    // Whole number of days from 30 to 3650, or null.
+    function coParseDays(raw) {
+      var s = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
+      if (!/^\d{1,5}$/.test(s)) return null;
+      var n = parseInt(s, 10);
+      return (n >= CO_MIN_DAYS && n <= CO_MAX_DAYS) ? n : null;
+    }
+    // Plain text, to be escaped by the caller.
+    function coWhen(iso) {
+      var dt = new Date(iso);
+      if (!iso || isNaN(dt.getTime())) return 'an earlier date';
+      return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+        ' at ' + dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+
+    // Like post(), but tolerant of an answer that is not JSON (a login page,
+    // a proxy error): the caller gets { ok, status, body: {} } instead of a
+    // thrown parse error. Writes count in writesInFlight, same as post(), so
+    // the quiet auto-refresh also waits for them.
+    function coRequest(method, url, body) {
+      var isWrite = method !== 'GET';
+      var opts = { method: method, credentials: 'include' };
+      if (isWrite) {
+        opts.headers = { 'Content-Type': 'application/json' };
+        opts.body = JSON.stringify(body || {});
+        writesInFlight++;
+      } else {
+        opts.cache = 'no-store';
+      }
+      return fetch(url, opts).then(function (res) {
+        return res.text().then(function (txt) {
+          var json = null;
+          try { json = txt ? JSON.parse(txt) : null; } catch (e) { json = null; }
+          return { ok: res.ok, status: res.status, body: (json && typeof json === 'object') ? json : {} };
+        });
+      }).then(function (r) {
+        if (isWrite) writesInFlight--;
+        return r;
+      }, function (err) {
+        if (isWrite) writesInFlight--;
+        throw err;
+      });
+    }
+
+    function coFreshState(opener) {
+      return {
+        phase: 'form',               // form | confirm | closing | done
+        days: String(CO_DEFAULT_DAYS),
+        hold: true,
+        holdLegal: false,            // off by default (owner decision 2026-10-22)
+        preview: null,               // { days, hold, holdLegal, data } for the settings it was run with
+        stale: false,                // a preview was thrown away because a setting changed
+        previewing: false,
+        previewSeq: 0,
+        notice: null,                // { kind, text } shown above the preview area
+        daysErr: '',
+        result: null,                // the server's answer to a successful close
+        batches: { loading: true, error: '', list: [] },
+        undoing: null,               // batch_id being undone right now
+        undoMsgs: {},                // batch_id -> { kind: 'info'|'ok'|'err', text }
+        opener: opener || null
+      };
+    }
+    // A preview only counts if it was run with exactly the settings now on screen.
+    function coPreviewIsCurrent() {
+      var p = coState && coState.preview;
+      if (!p) return false;
+      var d = coParseDays(coState.days);
+      return d !== null && p.days === d && p.hold === coState.hold && p.holdLegal === coState.holdLegal;
+    }
+    function coCanClose() {
+      if (!coPreviewIsCurrent()) return false;
+      var d = coState.preview.data;
+      // A preview whose checks did not all finish is not a number to close on.
+      return coNum(d.eligible) > 0 && !d.over_cap && d.lookup_incomplete !== true;
+    }
+
+    // ── Open / close the window ──
+    function coOpen(opener) {
+      if (coState) return;
+      var ov = document.getElementById('closeOldOverlay');
+      if (!ov) return;
+      coState = coFreshState(opener);
+      ov.innerHTML =
+        '<div class="co-dialog" role="dialog" aria-modal="true" aria-labelledby="coTitle">' +
+        '<div class="co-head"><h2 id="coTitle" tabindex="-1">Close old items</h2>' +
+        '<button type="button" class="co-x" id="coX" data-co="dismiss" aria-label="Close this window">&times;</button></div>' +
+        '<div class="co-body" id="coBody"></div><div class="co-foot" id="coFoot"></div></div>';
+      ov.hidden = false;
+      // Switch the page behind it off for keyboards and screen readers.
+      var pageEl = document.querySelector('.page');
+      if (pageEl) { pageEl.setAttribute('inert', ''); pageEl.setAttribute('aria-hidden', 'true'); }
+      coSavedBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      coRenderPhase(true);
+      coFocus('coTitle');
+      coLoadBatches(false);
+    }
+    function coClose() {
+      var st = coState;
+      if (!st || coLocked()) return;
+      coState = null;
+      var ov = document.getElementById('closeOldOverlay');
+      if (ov) { ov.hidden = true; ov.innerHTML = ''; }
+      var pageEl = document.querySelector('.page');
+      if (pageEl) { pageEl.removeAttribute('inert'); pageEl.removeAttribute('aria-hidden'); }
+      document.body.style.overflow = coSavedBodyOverflow;
+      var op = st.opener;
+      if (op && document.body.contains(op)) op.focus();
+    }
+
+    // ── Pieces of HTML ──
+    function coFormHtml() {
+      var st = coState;
+      return '<form id="coForm" novalidate>' +
+        '<p class="co-intro">Closes complaints that nobody has emailed about for a long time. Nothing is deleted, and every batch can be undone.</p>' +
+        '<div class="co-field"><label for="coDays">Last email older than (days)</label>' +
+        '<input type="number" id="coDays" inputmode="numeric" min="' + CO_MIN_DAYS + '" max="' + CO_MAX_DAYS + '" step="1" value="' + escapeHtml(st.days) + '"' +
+        (st.daysErr ? ' aria-invalid="true"' : '') + ' aria-describedby="coDaysHint coDaysErr">' +
+        '<div class="co-hint" id="coDaysHint">At least ' + CO_MIN_DAYS + '. Only open items whose most recent email is older than this are looked at.</div>' +
+        '<div class="co-err" id="coDaysErr" role="alert">' + escapeHtml(st.daysErr) + '</div></div>' +
+        '<div class="co-field co-check"><label><input type="checkbox" id="coHold"' + (st.hold ? ' checked' : '') + ' aria-describedby="coHoldHint"> Hold back items rated urgent</label>' +
+        '<div class="co-hint" id="coHoldHint">Recommended. Items rated urgent stay open so a person can look at them.</div></div>' +
+        '<div class="co-field co-check"><label><input type="checkbox" id="coHoldLegal"' + (st.holdLegal ? ' checked' : '') + ' aria-describedby="coHoldLegalHint"> Also hold back items tagged legal exposure or with a rejected owner instruction</label>' +
+        '<div class="co-hint" id="coHoldLegalHint">Not ticked: items tagged legal exposure or with a rejected owner instruction are closed along with the rest if they are old and quiet. Tick this to keep them open for a person to look at.</div></div>' +
+        '<p class="co-always" id="coAlways">Items flagged for Fair Housing or marked as accommodation requests are always kept open.</p>' +
+        '<button type="submit" class="btn-primary" id="coPreviewBtn">Preview</button>' +
+        '<div id="coPreviewArea"></div>' +
+        '</form>' +
+        '<section class="co-batches" id="coBatches" aria-labelledby="coBatchHead"></section>';
+    }
+
+    // One line per reason an open item is not being closed. [key, label, note, shown].
+    // Every group the server counts gets its own line, so nothing is lumped
+    // together. The urgent and legal lines only appear when their box is ticked
+    // (the server only counts them then).
+    var CO_SKIP_ROWS = [
+      ['fair_housing_flagged', function () { return 'Flagged for Fair Housing or marked as accommodation requests'; }, ' (always kept open)', function () { return true; }],
+      ['legal_held_back', function () { return 'Tagged legal exposure or with a rejected owner instruction'; }, ' (held back, because that box is ticked)', function (p, n) { return p.holdLegal || n > 0; }],
+      ['urgent_held_back', function () { return 'Rated urgent'; }, ' (held back)', function (p) { return p.hold; }],
+      ['recent', function (days) { return 'Emailed within the last ' + days + ' days'; }, '', function () { return true; }],
+      ['manual_report', function () { return 'Typed in by a person, so no email date to go by'; }, '', function () { return true; }],
+      ['recently_worked_or_delegated', function () { return 'Recently worked on, or handed to a teammate'; }, '', function () { return true; }],
+      ['duplicate_pending', function () { return 'Possible duplicates waiting for a decision'; }, '', function () { return true; }],
+      ['kept_has_note', function () { return 'Already have a note written on them, so they are left as they are'; }, '', function () { return true; }],
+      ['not_open_or_other', function () { return 'Other reasons (for example, no email date on file)'; }, '', function () { return true; }]
+    ];
+
+    // "Of these, N items tagged legal exposure or with a rejected owner
+    // instruction will be closed too" (only meaningful when they are NOT being
+    // held back, i.e. they are part of the count above). The server counts
+    // both kinds as one number (legal_tagged_in_eligible), so the words name
+    // both.
+    function coLegalInCountText(p) {
+      var d = p.data, n = d.legal_tagged_in_eligible;
+      if (p.holdLegal || typeof n !== 'number' || !isFinite(n) || coNum(d.eligible) <= 0) return null;
+      return { n: n, text: n === 0 ? 'No items tagged legal exposure or with a rejected owner instruction are in this count.' :
+        'Of these, <strong>' + coN(n) + '</strong> ' + (n === 1 ? 'item' : 'items') + ' tagged legal exposure or with a rejected owner instruction will be closed too. ' +
+        'To keep ' + (n === 1 ? 'it' : 'them') + ' open, tick &ldquo;Also hold back items tagged legal exposure or with a rejected owner instruction&rdquo; and press Preview again.' };
+    }
+
+    function coPreviewHtml(p) {
+      var d = p.data, elig = coNum(d.eligible), cap = coNum(d.cap) || CO_DEFAULT_CAP, s = d.skipped || {};
+      var incomplete = d.lookup_incomplete === true;
+      var h = '<section class="co-result" aria-labelledby="coPrevHead">';
+      if (incomplete) {
+        h += '<h3 class="co-bigcount" id="coPrevHead" tabindex="-1">The check could not finish</h3>';
+      } else if (d.over_cap) {
+        h += '<h3 class="co-bigcount" id="coPrevHead" tabindex="-1"><span class="co-num">' + coN(elig) + '</span> items match: too many for one batch</h3>';
+      } else if (elig === 0) {
+        h += '<h3 class="co-bigcount" id="coPrevHead" tabindex="-1">Nothing to close with these settings</h3>';
+      } else {
+        h += '<h3 class="co-bigcount" id="coPrevHead" tabindex="-1"><span class="co-num">' + coN(elig) + '</span> ' + (elig === 1 ? 'item' : 'items') + ' will be closed</h3>';
+      }
+      if (incomplete) {
+        h += '<div class="co-note co-note-warn" id="coIncomplete">Some checks could not finish, so this count is lower than it should be. Try again.' +
+          (elig > 0 ? ' (Counted so far: ' + coItems(elig) + '. Nothing can be closed from this count.)' : '') + '</div>';
+      }
+      var looked = coNum(d.open_in_scope);
+      h += '<p class="co-sub">Open items in Needs a Call and Flagged for Review whose last email is more than ' + p.days + ' days old.' +
+        (looked ? ' Looked at ' + coN(looked) + ' open ' + (looked === 1 ? 'item' : 'items') + '.' : '') + '</p>';
+      if (d.over_cap) {
+        h += '<div class="co-note co-note-warn">One batch can close at most ' + coN(cap) + ' items. Try a larger number of days to make the batch smaller, then preview again.</div>';
+      }
+      if (!p.hold) {
+        h += '<div class="co-note co-note-warn">Items rated urgent are <strong>included</strong> in this count, because &ldquo;Hold back items rated urgent&rdquo; is turned off.</div>';
+      }
+      var legal = incomplete ? null : coLegalInCountText(p);
+      if (legal) h += '<div class="co-note ' + (legal.n > 0 ? 'co-note-warn' : 'co-note-info') + '" id="coLegalLine">' + legal.text + '</div>';
+      var years = d.eligible_by_year && typeof d.eligible_by_year === 'object' ? Object.keys(d.eligible_by_year) : [];
+      years.sort(function (a, b) { return (Number(a) - Number(b)) || (a < b ? -1 : a > b ? 1 : 0); });
+      if (elig > 0 && years.length) {
+        h += '<table class="co-years"><caption class="sr-only">Items to close, by year of the last email</caption>' +
+          '<thead><tr><th scope="col">Year of last email</th><th scope="col" class="num">Items</th></tr></thead><tbody>' +
+          years.map(function (y) { return '<tr><th scope="row">' + escapeHtml(y) + '</th><td class="num">' + coN(d.eligible_by_year[y]) + '</td></tr>'; }).join('') +
+          '</tbody><tfoot><tr><td>Total</td><td class="num">' + coN(elig) + '</td></tr></tfoot></table>';
+      }
+      h += '<h4 class="co-subhead">Not being closed</h4><ul class="co-skips">';
+      CO_SKIP_ROWS.forEach(function (row) {
+        var n = coNum(s[row[0]]);
+        if (!row[3](p, n)) return;
+        h += '<li' + (n === 0 ? ' class="co-zero"' : '') + '>' + escapeHtml(row[1](p.days)) + ': <strong>' + coN(n) + '</strong>' + escapeHtml(row[2]) + '</li>';
+      });
+      h += '</ul></section>';
+      return h;
+    }
+
+    function coConfirmHtml() {
+      var p = coState.preview, d = p.data, s = d.skipped || {};
+      var h = '<h3 class="co-phase-head" id="coPhaseHead" tabindex="-1">Close ' + coItems(d.eligible) + '?</h3>' +
+        '<p>These are open items whose last email is more than <strong>' + p.days + ' days</strong> old. Each one will be marked Resolved, with a note saying it was closed in bulk.</p>' +
+        '<ul class="co-points"><li>Items flagged for Fair Housing or marked as accommodation requests are always kept open (' + coN(s.fair_housing_flagged) + ' kept).</li>';
+      if (p.hold) h += '<li>Items rated urgent are not included (' + coN(s.urgent_held_back) + ' held back).</li>';
+      else h += '<li><strong>Items rated urgent are included</strong>, because that box is turned off.</li>';
+      if (p.holdLegal) h += '<li>Items tagged legal exposure or with a rejected owner instruction are not included (' + coN(s.legal_held_back) + ' held back).</li>';
+      else {
+        var lg = coLegalInCountText(p);
+        h += '<li>' + (lg && lg.n > 0 ? '<strong>' + coN(lg.n) + ' ' + (lg.n === 1 ? 'item' : 'items') + ' tagged legal exposure or with a rejected owner instruction will be closed too</strong>, because that box is not ticked.'
+          : 'Items tagged legal exposure or with a rejected owner instruction are not held back, because that box is not ticked' + (lg ? ' (none are in this batch).' : '.')) + '</li>';
+      }
+      h += '</ul><p class="co-assure">Nothing is deleted. You can undo this batch.</p>';
+      return h;
+    }
+    function coClosingHtml() {
+      var n = coNum(coState.preview && coState.preview.data.eligible);
+      return '<div role="status"><h3 class="co-phase-head" id="coPhaseHead" tabindex="-1">Closing ' + coItems(n) + '&hellip;</h3>' +
+        '<p class="co-status"><span class="spinner sm"></span>Please keep this page open. This can take a minute.</p></div>';
+    }
+    // The top of the "finished" screen. Re-drawn after an Undo so it never
+    // says "Closed N items" above a message saying they were reopened, and
+    // never says "This batch was undone" unless the server said every item it
+    // tried was put back (kind 'ok'; a partly failed undo is kind 'warn').
+    function coDoneTopHtml() {
+      var st = coState, r = st.result || {}, closed = coNum(r.closed), failed = coNum(r.failed), changed = coNum(r.skipped_changed);
+      var m = r.batch_id != null ? st.undoMsgs[String(r.batch_id)] : null;
+      var undone = !!(m && m.kind === 'ok');
+      var partly = !!(m && m.kind === 'warn');
+      var h = '';
+      if (undone) {
+        h += '<h3 class="co-phase-head" id="coPhaseHead" tabindex="-1">This batch was undone.</h3>' +
+          '<p>The items it closed were put back to Open. Nothing was deleted.</p>';
+      } else if (partly) {
+        h += '<h3 class="co-phase-head" id="coPhaseHead" tabindex="-1">This batch is only partly undone.</h3>' +
+          '<p>Some of the items it closed were put back to Open, and some are still closed. Press Undo again to finish. Nothing was deleted.</p>';
+      } else {
+        h += '<h3 class="co-phase-head" id="coPhaseHead" tabindex="-1">' + (closed > 0 ? 'Closed ' + coItems(closed) + '.' : 'No items were closed.') + '</h3>';
+        if (closed > 0) h += '<p>They are marked Resolved with a note, and nothing was deleted.</p>';
+      }
+      if (coNum(r.audit_failed) > 0) {
+        h += '<div class="co-note co-note-warn" role="alert" id="coAuditWarn">' +
+          (undone ? 'When this batch was closed, the record of it was not fully saved.' : 'The items were closed, but the record of it was not fully saved.') +
+          ' Batch id: <code>' + escapeHtml(String(r.batch_id)) + '</code>. Please tell Peter or Jarvis before closing anything else.</div>';
+      }
+      if (r.stopped_early === true) {
+        h += '<div class="co-note co-note-warn" role="alert" id="coStoppedEarly">The close stopped early (it was taking too long), so the items it had not reached were left open.</div>';
+      }
+      if (failed > 0) {
+        h += '<div class="co-note co-note-warn">' + coItems(failed) + (failed === 1 ? ' could not be closed and was' : ' could not be closed and were') +
+          ' left open. Use &ldquo;Close more items&rdquo; below to run a new preview and close the rest.</div>';
+      }
+      if (changed > 0) {
+        h += '<div class="co-note co-note-info">' + coItems(changed) + (changed === 1 ? ' was' : ' were') +
+          ' changed by someone while this ran, so ' + (changed === 1 ? 'it was' : 'they were') + ' left alone.</div>';
+      }
+      return h;
+    }
+    function coDoneHtml() {
+      var r = coState.result || {}, closed = coNum(r.closed);
+      var h = '<div id="coDoneTop">' + coDoneTopHtml() + '</div>';
+      if (closed > 0 && r.batch_id) {
+        h += '<div id="coFeaturedUndo">' + coUndoControl(String(r.batch_id), true, null) + '</div>';
+      }
+      h += '<section class="co-batches" id="coBatches" aria-labelledby="coBatchHead"></section>';
+      return h;
+    }
+
+    // The Undo button for one batch, or what happened when it was pressed.
+    // Shared by the "Closed N items" screen and every row in Recent batches.
+    // `target` is the end of the screen-reader label ("the batch of 5 items
+    // closed on ..."), or null. A message of kind 'ok' replaces the button
+    // (everything asked for was put back); kinds 'warn' (partly done) and
+    // 'err' keep the button so it can be pressed again.
+    function coUndoControl(id, enabled, target) {
+      var st = coState, m = st.undoMsgs[id], eid = escapeHtml(id);
+      if (m && m.kind === 'ok') {
+        return '<div class="co-note co-note-ok" role="status" tabindex="-1" data-co-msg="' + eid + '">' + escapeHtml(m.text) + '</div>';
+      }
+      var busy = st.undoing === id, again = !!(m && m.kind === 'warn');
+      var loud = !!(m && (m.kind === 'err' || m.kind === 'warn'));
+      return '<button type="button" class="btn" data-co="undo" data-batch="' + eid + '"' + (enabled && !st.undoing ? '' : ' disabled') +
+        (target ? ' aria-label="' + escapeHtml((again ? 'Undo again: ' : 'Undo ') + target) + '"' : '') + '>' + (busy ? 'Undoing&hellip;' : again ? 'Undo again' : 'Undo this batch') + '</button>' +
+        (m ? '<div class="co-batch-msg' + (m.kind === 'err' ? ' err' : m.kind === 'warn' ? ' warn' : '') + '" role="' + (loud ? 'alert' : 'status') + '" tabindex="-1" data-co-msg="' + eid + '">' + escapeHtml(m.text) + '</div>' : '');
+    }
+    // One row of Recent batches. The server lists a batch from the record it
+    // wrote when the batch STARTED, so a batch that stopped partway is still
+    // here. Fields read (the real ones, from listBatches in lib/bulk-close.js):
+    //   batch_id; closed_at = WHEN THE BATCH STARTED; closed_by_name;
+    //   state = 'finished' | 'unfinished' | 'running' | 'unknown';
+    //   closed = for a FINISHED batch the number it closed; for every other
+    //     state only the live count of items still closed (so it is NOT a
+    //     "closed N" claim there), or null;
+    //   still_closed = live count of items still closed, null when it could
+    //     not be counted;
+    //   older_than_days, hold_back_urgent, hold_back_legal (each may be null).
+    // Anything that is not clearly 'finished', 'unfinished' or 'running' is
+    // treated as 'unknown', and only a 'finished' batch ever says "Closed N".
+    function coBatchRowHtml(x) {
+      var id = String(x.batch_id);
+      var state = (x.state === 'finished' || x.state === 'unfinished' || x.state === 'running') ? x.state : 'unknown';
+      var closed = (state === 'finished' && typeof x.closed === 'number' && isFinite(x.closed) && x.closed >= 0) ? x.closed : null;
+      var still = (typeof x.still_closed === 'number' && isFinite(x.still_closed) && x.still_closed >= 0) ? x.still_closed : null;
+      var when = coWhen(x.closed_at);
+      var stillTxt;
+      if (still === null) stillTxt = 'could not check how many are still closed';
+      else if (closed !== null) stillTxt = still === 0 ? 'none still closed' : (still < closed ? coN(still) + ' of ' + coN(closed) + ' still closed' : 'all still closed');
+      else stillTxt = still === 0 ? 'nothing is still closed' : coItems(still) + ' still closed';
+      var who = x.closed_by_name ? escapeHtml(x.closed_by_name) : 'someone';
+      var settings = [];
+      if (typeof x.older_than_days === 'number' && isFinite(x.older_than_days)) settings.push('last email older than ' + coN(x.older_than_days) + ' days');
+      if (typeof x.hold_back_urgent === 'boolean') settings.push(x.hold_back_urgent ? 'urgent items held back' : 'urgent items included');
+      if (typeof x.hold_back_legal === 'boolean') settings.push(x.hold_back_legal ? 'items tagged legal exposure or with a rejected owner instruction held back' : 'items tagged legal exposure or with a rejected owner instruction included');
+      var undoHint = still === 0 ? '' : ' Undo puts back whatever it closed.';
+      var main, extra = '', target, attention = true, checkAgain = false;
+      if (state === 'finished' && closed !== null) {
+        main = 'Closed ' + coItems(closed) + ' on ' + escapeHtml(when);
+        target = 'the batch of ' + coItems(closed) + ' closed on ' + when;
+        attention = false;
+      } else if (state === 'finished') {
+        main = 'Batch started on ' + escapeHtml(when);
+        extra = 'The record of how many items it closed could not be read.';
+        target = 'the batch started on ' + when;
+      } else if (state === 'unfinished') {
+        main = 'Unfinished batch started on ' + escapeHtml(when);
+        extra = 'This batch stopped before its final record was saved, so the number closed is not known.' + undoHint;
+        target = 'the unfinished batch started on ' + when;
+      } else if (state === 'running') {
+        main = 'Batch started on ' + escapeHtml(when) + ' is still running';
+        extra = 'It is still being closed. Wait for it to finish, then press Check again.';
+        target = 'the batch started on ' + when + ', which is still running';
+        checkAgain = true;
+      } else {
+        main = 'Batch started on ' + escapeHtml(when);
+        extra = 'The record of how this batch ended could not be read, so we cannot say how many items it closed.' + undoHint;
+        target = 'the batch started on ' + when;
+        checkAgain = true;
+      }
+      return '<li class="co-batch' + (attention ? ' co-batch-unfinished' : '') + '"><div class="co-batch-main">' + main + '</div>' +
+        '<div class="co-batch-meta">By ' + who + (settings.length ? ' &middot; ' + settings.join(' &middot; ') : '') + ' &middot; ' + stillTxt + (extra ? '<br>' + extra : '') + '</div>' +
+        (checkAgain ? '<button type="button" class="btn" data-co="retry-batches">Check again</button>' : '') +
+        coUndoControl(id, still === null || still > 0, target) + '</li>';
+    }
+
+    // ── Partial renderers (never touch the settings fields, so typing and
+    //    focus survive) ──
+    function coFocusKey(ae) {
+      if (!ae || !ae.getAttribute) return null;
+      if (ae.getAttribute('data-co-msg')) return { msg: ae.getAttribute('data-co-msg') };
+      if (ae.getAttribute('data-co') === 'undo') return { undo: ae.getAttribute('data-batch') };
+      if (ae.getAttribute('data-co') === 'retry-batches') return { retry: true };
+      if (ae.id === 'coBatchHead') return { head: true };
+      return null;
+    }
+    function coRestoreFocus(container, key) {
+      if (!key) return;
+      var nodes = container.querySelectorAll('[data-co-msg], [data-co="undo"], [data-co="retry-batches"]');
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if ((key.msg && n.getAttribute('data-co-msg') === key.msg) ||
+            (key.undo && n.getAttribute('data-co') === 'undo' && n.getAttribute('data-batch') === key.undo) ||
+            (key.retry && n.getAttribute('data-co') === 'retry-batches')) { n.focus(); return; }
+      }
+    }
+    function coRenderBatches() {
+      var st = coState, el = document.getElementById('coBatches');
+      if (!st || !el) return;
+      var key = el.contains(document.activeElement) ? coFocusKey(document.activeElement) : null;
+      var b = st.batches, h = '<h3 id="coBatchHead" tabindex="-1">Recent batches</h3>';
+      if (b.loading) {
+        h += '<p class="co-status" role="status"><span class="spinner sm"></span>Loading&hellip;</p>';
+      } else if (b.error) {
+        h += '<div class="co-note co-note-error">' + escapeHtml(b.error) + '</div><button type="button" class="btn" data-co="retry-batches">Try again</button>';
+      } else {
+        var skipId = (st.phase === 'done' && st.result && st.result.batch_id) ? String(st.result.batch_id) : null;
+        var list = b.list.filter(function (x) { return x && x.batch_id != null && String(x.batch_id) !== skipId; });
+        if (!list.length) {
+          h += '<p class="co-hint">' + (skipId ? 'No earlier batches.' : 'No batches yet. Once you close a group of old items it is listed here, with an Undo button.') + '</p>';
+        } else {
+          h += '<ul class="co-batch-list">' + list.map(coBatchRowHtml).join('') + '</ul>';
+        }
+      }
+      el.innerHTML = h;
+      coRestoreFocus(el, key);
+      // "Check again" was pressed and its button is gone while the list reloads:
+      // keep the keyboard inside this section instead of dropping to the page.
+      if (key && (key.retry || key.head) && !el.contains(document.activeElement)) coFocus('coBatchHead');
+    }
+    function coRenderPreviewArea() {
+      var st = coState, el = document.getElementById('coPreviewArea');
+      if (!st || !el) return;
+      var h = '';
+      if (st.notice) h += '<div class="co-note co-note-' + st.notice.kind + '" id="coNotice" role="alert" tabindex="-1">' + escapeHtml(st.notice.text) + '</div>';
+      if (st.previewing) h += '<p class="co-status" role="status"><span class="spinner sm"></span>Checking which items qualify&hellip;</p>';
+      else if (st.preview) h += coPreviewHtml(st.preview);
+      else if (st.stale) h += '<p class="co-hint">You changed a setting, so the earlier numbers are gone. Press Preview to see the new ones.</p>';
+      else if (!st.notice) h += '<p class="co-hint">Press Preview to see what would be closed. Nothing happens until you confirm.</p>';
+      el.innerHTML = h;
+    }
+    function coSyncPreviewBtn() {
+      var st = coState, btn = document.getElementById('coPreviewBtn');
+      if (!st || !btn) return;
+      // Not `disabled` on purpose: a disabled button drops the keyboard focus
+      // the person is standing on. coDoPreview() ignores a second press while
+      // a check is already on its way.
+      if (st.previewing) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+      btn.textContent = st.previewing ? 'Checking…' : 'Preview';
+    }
+    function coShowDaysErr() {
+      var st = coState, err = document.getElementById('coDaysErr'), inp = document.getElementById('coDays');
+      if (err) err.textContent = st.daysErr;
+      if (inp) { if (st.daysErr) inp.setAttribute('aria-invalid', 'true'); else inp.removeAttribute('aria-invalid'); }
+    }
+    function coRenderFoot() {
+      var st = coState, foot = document.getElementById('coFoot');
+      if (!st || !foot) return;
+      var h = '';
+      if (st.phase === 'form') {
+        var can = coCanClose(), cur = coPreviewIsCurrent();
+        var hint = can ? '' : !cur ? 'Run a preview first. The red button turns on once the numbers are in.'
+          : st.preview.data.lookup_incomplete === true ? 'The check could not finish. Press Preview to try again.'
+          : st.preview.data.over_cap ? 'Too many for one batch.' : 'Nothing to close with these settings.';
+        h = (hint ? '<span class="co-foot-hint" id="coFootHint">' + hint + '</span>' : '') +
+          '<button type="button" class="btn" data-co="dismiss">Cancel</button>' +
+          '<button type="button" class="btn-danger" data-co="to-confirm"' + (can ? '' : ' disabled aria-describedby="coFootHint"') + '>' +
+          (can ? 'Close ' + coItems(st.preview.data.eligible) : 'Close items') + '</button>';
+      } else if (st.phase === 'confirm') {
+        h = '<button type="button" class="btn" data-co="back">Go back</button>' +
+          '<button type="button" class="btn-danger" data-co="do-close">Yes, close ' + coItems(st.preview.data.eligible) + '</button>';
+      } else if (st.phase === 'done') {
+        h = '<button type="button" class="btn" data-co="more">Close more items</button>' +
+          '<button type="button" class="btn-primary" data-co="dismiss">Done</button>';
+      }
+      foot.innerHTML = h;
+    }
+    function coRenderPhase(resetScroll) {
+      var st = coState, body = document.getElementById('coBody'), x = document.getElementById('coX');
+      if (!st || !body) return;
+      if (x) x.disabled = coLocked();
+      if (st.phase === 'confirm') body.innerHTML = coConfirmHtml();
+      else if (st.phase === 'closing') body.innerHTML = coClosingHtml();
+      else if (st.phase === 'done') body.innerHTML = coDoneHtml();
+      else { body.innerHTML = coFormHtml(); coRenderPreviewArea(); }
+      coRenderBatches();
+      coRenderFoot();
+      if (resetScroll !== false) body.scrollTop = 0;
+    }
+
+    // ── Server calls ──
+    // Rebuilds the main list the same way the quiet refresh does (same
+    // fetch, same render, tab/filters/sort/scroll kept), but on purpose, so
+    // it ignores refreshWouldInterrupt().
+    function coRefreshList() {
+      return fetchComplaintList(true).then(function (list) {
+        var scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+        applyComplaintList(list);
+        render();
+        window.scrollTo(0, scrollY);
+        return true;
+      }, function () {
+        showToast('Could not refresh the list behind this window. Press Refresh on the page.', { duration: 6000 });
+        return false;
+      });
+    }
+    function coLoadBatches(quiet) {
+      var st = coState;
+      if (!st) return;
+      var seq = ++coBatchSeq;
+      if (!quiet) { st.batches.loading = true; st.batches.error = ''; coRenderBatches(); }
+      return coRequest('GET', CO_BASE + '/batches').then(function (r) {
+        if (coState !== st || seq !== coBatchSeq) return;
+        st.batches.loading = false;
+        if (r.ok && Array.isArray(r.body.batches)) { st.batches.list = r.body.batches; st.batches.error = ''; }
+        else if (!quiet || !st.batches.list.length) st.batches.error = 'Could not load the recent batches.';
+        coRenderBatches();
+      }, function () {
+        if (coState !== st || seq !== coBatchSeq) return;
+        st.batches.loading = false;
+        if (!quiet || !st.batches.list.length) st.batches.error = 'Could not reach the server to load the recent batches.';
+        coRenderBatches();
+      });
+    }
+
+    function coOnInputsChanged() {
+      var st = coState;
+      if (!st) return;
+      st.previewSeq++;              // an answer still on its way is now out of date
+      st.previewing = false;
+      if (st.preview) st.stale = true;
+      st.preview = null;
+      st.notice = null;
+      if (st.daysErr && coParseDays(st.days) !== null) { st.daysErr = ''; coShowDaysErr(); }
+      coRenderPreviewArea();
+      coSyncPreviewBtn();
+      coRenderFoot();
+    }
+
+    function coPreviewProblem(r) {
+      if (!r) return 'We could not reach the server. Check your connection and try again. Nothing was changed.';
+      if (r.status === 401) return 'Your sign-in has expired. Reload the page and sign in again. Nothing was changed.';
+      if (r.status === 429) return 'That was a bit too quick. Wait a few seconds and press Preview again. Nothing was changed.';
+      if (r.status === 403) return coServerSaid(r) || 'You do not have permission to use this.';
+      if (r.status === 400 && coServerSaid(r)) return coServerSaid(r);
+      if (r.ok) return 'The server gave an answer we could not read. Reload the page and try again. Nothing was changed.';
+      return 'Something went wrong getting the preview. Nothing was changed. Please try again.';
+    }
+    function coPreviewLooksRight(b) {
+      if (!(b && typeof b.eligible === 'number' && isFinite(b.eligible) && b.eligible >= 0 &&
+        b.skipped && typeof b.skipped === 'object')) return false;
+      // Anything that can be closed comes with the fingerprint of the exact
+      // items; without it the close would be refused, so do not offer it.
+      if (b.eligible > 0 && !b.over_cap && b.lookup_incomplete !== true && !(typeof b.set_hash === 'string' && b.set_hash)) return false;
+      return true;
+    }
+    function coDoPreview() {
+      var st = coState;
+      if (!st || st.phase !== 'form' || st.previewing) return;
+      var n = coParseDays(st.days);
+      if (n === null) {
+        st.daysErr = 'Enter a whole number of days, from ' + CO_MIN_DAYS + ' to ' + CO_MAX_DAYS + '.';
+        coShowDaysErr();
+        coFocus('coDays');
+        return;
+      }
+      st.daysErr = ''; coShowDaysErr();
+      var hold = st.hold, holdLegal = st.holdLegal, seq = ++st.previewSeq;
+      st.previewing = true; st.preview = null; st.stale = false; st.notice = null;
+      coRenderPreviewArea(); coSyncPreviewBtn(); coRenderFoot();
+      function finish(r) {
+        if (coState !== st || st.previewSeq !== seq) return;   // settings changed or window closed meanwhile
+        st.previewing = false;
+        if (r && r.ok && coPreviewLooksRight(r.body)) {
+          st.preview = { days: n, hold: hold, holdLegal: holdLegal, data: r.body };
+          coRenderPreviewArea(); coSyncPreviewBtn(); coRenderFoot();
+          coFocusTop('coPrevHead');
+        } else {
+          st.notice = { kind: 'error', text: coPreviewProblem(r) };
+          coRenderPreviewArea(); coSyncPreviewBtn(); coRenderFoot();
+        }
+      }
+      coRequest('GET', CO_BASE + '/preview?older_than_days=' + n + '&hold_back_urgent=' + (hold ? 'true' : 'false') + '&hold_back_legal=' + (holdLegal ? 'true' : 'false')).then(finish, function () { finish(null); });
+    }
+
+    function coServerSaid(r) { return (r && r.body && typeof r.body.error === 'string' && r.body.error) ? r.body.error : ''; }
+    function coCloseProblem(r, sent) {
+      if (!r) return { text: 'We lost the connection before we heard back, so we cannot say how many items were closed. Nothing is deleted. Look at Recent batches below to see what happened, then preview again.', check: true };
+      if (r.status === 409) {
+        // Two different 409s: "the count moved since you previewed" (carries
+        // the new count) and "another close/undo is running" (carries only a
+        // sentence, which is already plain English, so it is shown as is).
+        if (typeof r.body.eligible !== 'number' && coServerSaid(r)) return { text: coServerSaid(r), check: true };
+        // The count can match while the items differ (one dropped out, another
+        // came in), so only quote the two numbers when they really differ.
+        var now = typeof r.body.eligible === 'number' ? r.body.eligible : null;
+        var numbers = (now !== null && now !== sent.expected_count) ? ' (it now has ' + coItems(now) + ' to close, not ' + coN(sent.expected_count) + ')' : '';
+        return { text: 'The list changed since you ran the preview' + numbers + ', so this attempt was refused and no items were closed by it. Please press Preview again and check the new numbers. Recent batches below shows anything that was closed earlier.', check: true };
+      }
+      if (r.status === 422) {
+        var cap = coNum(r.body.cap) || coNum(coState && coState.preview && coState.preview.data.cap) || CO_DEFAULT_CAP;
+        return { text: 'That is more than ' + coN(cap) + ' items, the most one batch can close. Nothing was closed. Try a larger number of days to make the batch smaller.', check: false };
+      }
+      if (r.status === 400) return { text: coServerSaid(r) || 'Those settings were not accepted. Nothing was closed.', check: false };
+      if (r.status === 401) return { text: 'Your sign-in has expired. Reload the page and sign in again. Nothing was closed.', check: false };
+      if (r.status === 429) return { text: 'That was a bit too quick. Wait a few seconds, then press Preview again. Nothing was closed.', check: false };
+      if (r.status === 403) return { text: coServerSaid(r) || 'You do not have permission to close items. Nothing was closed.', check: false };
+      // The server's own plain sentence for a 500 (for example: the record of
+      // the close could not be saved, so nothing was changed) is shown as it
+      // is. Only an answer with no such sentence gets the cautious wording.
+      if (r.status === 500 && coServerSaid(r)) return { text: coServerSaid(r), check: true };
+      return { text: 'Something went wrong while closing. Some items may already have been closed. Look at Recent batches below to see what happened, then preview again.', check: true };
+    }
+    function coDoClose() {
+      var st = coState;
+      if (!st || st.phase !== 'confirm' || !coPreviewIsCurrent()) return;
+      var p = st.preview;
+      var sent = { older_than_days: p.days, hold_back_urgent: p.hold, hold_back_legal: p.holdLegal, expected_count: coNum(p.data.eligible), expected_hash: String(p.data.set_hash || '') };
+      st.phase = 'closing';
+      coRenderPhase(true);
+      coFocus('coPhaseHead');
+      function failed(r) {
+        if (coState !== st) return;
+        var prob = coCloseProblem(r, sent);
+        st.phase = 'form'; st.preview = null; st.stale = false;
+        st.notice = { kind: 'error', text: prob.text };
+        coRenderPhase(true);
+        coFocus('coNotice');
+        if (prob.check) { coRefreshList(); coLoadBatches(true); }
+      }
+      coRequest('POST', CO_BASE, sent).then(function (r) {
+        if (coState !== st) return;
+        if (r.ok && typeof r.body.closed === 'number') {
+          st.result = r.body; st.phase = 'done'; st.preview = null; st.stale = false; st.notice = null;
+          coRenderPhase(true);
+          coFocus('coPhaseHead');
+          coRefreshList();
+          coLoadBatches(true);
+        } else {
+          failed(r.ok ? { ok: true, status: 0, body: {} } : r);
+        }
+      }, function () { failed(null); });
+    }
+
+    function coUndoRefresh(batchId) {
+      var st = coState;
+      if (!st) return;
+      var top = document.getElementById('coDoneTop');
+      if (top && st.phase === 'done') top.innerHTML = coDoneTopHtml();
+      var slot = document.getElementById('coFeaturedUndo');
+      if (slot && st.result && st.result.batch_id != null) {
+        var key = slot.contains(document.activeElement) ? coFocusKey(document.activeElement) : null;
+        slot.innerHTML = coUndoControl(String(st.result.batch_id), true, null);
+        coRestoreFocus(slot, key);
+      }
+      coRenderBatches();
+      // Land on the message so it is read out and the keyboard stays put.
+      var nodes = document.querySelectorAll('#closeOldOverlay [data-co-msg]');
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].getAttribute('data-co-msg') === batchId) { nodes[i].focus(); break; }
+      }
+    }
+    // What to tell the person after an Undo. Pure: takes the answer
+    // ({ ok, status, body }, or null when no answer came) and returns
+    // { kind, text, check }. kind 'ok' means every item that was asked for was
+    // put back (the server sent no `failed`); 'warn' means the undo only
+    // partly worked (`failed` above zero, or `stopped_early`) and the Undo
+    // button must stay so it can be pressed again; 'err' means it did not run
+    // or could not be told. `check` = reload the list and Recent batches.
+    function coUndoOutcome(r) {
+      if (!r) return { kind: 'err', text: 'We lost the connection, so we cannot say whether the undo finished. Check Recent batches, then try again if items are still closed.', check: true };
+      var b = r.body || {};
+      if (r.ok && typeof b.reopened === 'number') {
+        var failed = coNum(b.failed), stopped = b.stopped_early === true, partial = failed > 0 || stopped;
+        var text = 'Reopened ' + coItems(b.reopened) + '.';
+        if (failed > 0) text += ' ' + coItems(failed) + (failed === 1 ? ' could not be reopened and is still closed.' : ' could not be reopened and are still closed.');
+        if (stopped) text += ' The undo stopped early (it was taking too long).';
+        if (partial) text += ' Press Undo again to finish.';
+        var ch = coNum(b.skipped_changed);
+        if (ch > 0) text += ' ' + coItems(ch) + (ch === 1 ? ' was' : ' were') + ' left as ' + (ch === 1 ? 'it is' : 'they are') + ' because someone changed ' + (ch === 1 ? 'it' : 'them') + ' after the batch ran.';
+        if (coNum(b.audit_failed) > 0) text += ' The record of this undo was not fully saved, so please tell Peter or Jarvis.';
+        return { kind: partial ? 'warn' : 'ok', text: text, check: partial };
+      }
+      if (r.status === 404) return { kind: 'err', text: 'We could not find that batch. Nothing was changed.', check: false };
+      if (r.status === 403) return { kind: 'err', text: coServerSaid(r) || 'You do not have permission to undo this. Nothing was changed.', check: false };
+      if (r.status === 409 && coServerSaid(r)) return { kind: 'err', text: coServerSaid(r), check: true };
+      if (r.status === 400 && coServerSaid(r)) return { kind: 'err', text: coServerSaid(r), check: false };
+      return { kind: 'err', text: 'Something went wrong, and the undo may not have finished. Check the list, then try again.', check: true };
+    }
+    function coDoUndo(batchId) {
+      var st = coState;
+      if (!st || st.undoing || !batchId) return;
+      st.undoing = batchId;
+      st.undoMsgs[batchId] = { kind: 'info', text: 'Undoing this batch. This can take a moment.' };
+      var x = document.getElementById('coX'); if (x) x.disabled = true;
+      var footBtns = document.querySelectorAll('#coFoot button');
+      for (var fb = 0; fb < footBtns.length; fb++) footBtns[fb].disabled = true;
+      coUndoRefresh(batchId);
+      function finishUndo(o) {
+        if (coState !== st) return;
+        st.undoing = null;
+        st.undoMsgs[batchId] = { kind: o.kind, text: o.text };
+        var x2 = document.getElementById('coX'); if (x2) x2.disabled = false;
+        coRenderFoot();
+        coUndoRefresh(batchId);
+        if (o.kind === 'ok' || o.check) { coRefreshList(); coLoadBatches(true); }
+      }
+      coRequest('POST', CO_BASE + '/' + encodeURIComponent(batchId) + '/undo', {}).then(function (r) {
+        finishUndo(coUndoOutcome(r));
+      }, function () {
+        finishUndo(coUndoOutcome(null));
+      });
+    }
+
+    // ── Wiring (once, on the overlay; everything inside is re-drawn freely) ──
+    (function wireCloseOldPanel() {
+      var ov = document.getElementById('closeOldOverlay');
+      if (!ov) return;
+      ov.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target.closest('[data-co]') : null;
+        var st = coState;
+        if (!t || !st || t.disabled) return;
+        var act = t.getAttribute('data-co');
+        if (act === 'dismiss') { coClose(); }
+        else if (act === 'to-confirm') {
+          if (!coCanClose()) return;
+          st.phase = 'confirm'; coRenderPhase(true); coFocus('coPhaseHead');
+        }
+        else if (act === 'back') {
+          st.phase = 'form'; coRenderPhase(true);
+          if (document.getElementById('coPrevHead')) coFocusTop('coPrevHead'); else coFocus('coTitle');
+        }
+        else if (act === 'do-close') { coDoClose(); }
+        else if (act === 'more') {
+          st.phase = 'form'; st.preview = null; st.stale = false; st.notice = null; st.result = null;
+          coRenderPhase(true); coFocus('coTitle');
+        }
+        else if (act === 'undo') { coDoUndo(t.getAttribute('data-batch')); }
+        else if (act === 'retry-batches') { coLoadBatches(false); }
+      });
+      ov.addEventListener('submit', function (e) {
+        e.preventDefault();
+        if (e.target && e.target.id === 'coForm') coDoPreview();
+      });
+      ov.addEventListener('input', function (e) {
+        if (!coState || !e.target || e.target.id !== 'coDays') return;
+        coState.days = e.target.value;
+        coOnInputsChanged();
+      });
+      ov.addEventListener('change', function (e) {
+        if (!coState || !e.target) return;
+        if (e.target.id === 'coHold') coState.hold = !!e.target.checked;
+        else if (e.target.id === 'coHoldLegal') coState.holdLegal = !!e.target.checked;
+        else return;
+        coOnInputsChanged();
+      });
+      // Tapping the dark area outside the window closes it, but only on the
+      // two calm screens (settings, finished), never mid-confirm or mid-close.
+      ov.addEventListener('mousedown', function (e) {
+        if (e.target === ov && coState && (coState.phase === 'form' || coState.phase === 'done')) coClose();
+      });
+    })();
+    document.addEventListener('keydown', function (e) {
+      if (!coState) return;
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        if (coLocked()) return;
+        e.preventDefault();
+        coClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      // Keep Tab inside the window (the page behind is also marked inert;
+      // this is the fallback for browsers that ignore that).
+      var dlg = document.querySelector('#closeOldOverlay .co-dialog');
+      if (!dlg) return;
+      var all = dlg.querySelectorAll('a[href], button, input, select, textarea, [tabindex]');
+      var list = [];
+      for (var i = 0; i < all.length; i++) {
+        var n = all[i];
+        if (n.disabled || n.getAttribute('tabindex') === '-1') continue;
+        if (n.offsetWidth === 0 && n.offsetHeight === 0) continue;
+        list.push(n);
+      }
+      var active = document.activeElement, title = document.getElementById('coTitle');
+      if (!list.length) { e.preventDefault(); if (title) title.focus(); return; }
+      var first = list[0], last = list[list.length - 1];
+      if (!dlg.contains(active)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && (active === first || active === title)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
     });
 
     init();

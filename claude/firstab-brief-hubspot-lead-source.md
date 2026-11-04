@@ -58,6 +58,7 @@ Pre-checks before creating: no `lead_source` existed on deals or contacts; `geek
 | Direct Phone Call, PMW - Inbound Call | Phone |
 | Owner Referral, Realtor Referral, Other Referral | Referral partner |
 | Sales Networking, Events | Networking/Events |
+| Meta Ads (added 2026-11-03, set automatically by the "Meta Ads call - tag import type" workflow) | Meta Ads |
 | Purchased Lists, cold email reply, high intent competitor, high intent website visitor, N/A, blank | leave blank |
 
 Plus the two known Yelp deals (326812009180, 247930462968). Never overwrite a non-empty value. Dry run → Peter approves list → write in batches of 10 → log every write.

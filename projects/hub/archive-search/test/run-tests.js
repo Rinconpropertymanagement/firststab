@@ -7693,6 +7693,117 @@ await runSerialCheck('significance-pass — applyCall1Result: flag ON, property 
   }
 });
 
+// ─── 23d-ii — regression (2026-11-06): an active lease whose tenant_id is
+// NULL (leases.tenant_id is nullable — see 20260720000001_nullable_fks.sql;
+// 3 of 415 real active leases had none) used to put a literal null into
+// the tenants .in('id', [...]) list, which real Postgres rejects with
+// 22P02 'invalid input syntax for type uuid: "null"' — failing the WHOLE
+// conversation before any significance row was saved, every hour.
+// makeNameMatchDataFakeClient's own .in() is a plain JS array filter and
+// would never have caught this, so this wraps ONLY the tenants table to
+// behave like Postgres here: a null/undefined/'null' in an .in() list
+// resolves with that exact 22P02 error, and every tenants query is
+// recorded so a test can also prove a query was (or was not) issued. ────
+function makeNullTenantStrictClient(tableData) {
+  const fake = makeNameMatchDataFakeClient(tableData);
+  const tenantsQueries = [];
+  const realFrom = fake.client.from;
+  fake.client.from = (table) => {
+    const chain = realFrom(table);
+    if (table !== 'tenants') return chain;
+    const query = { inList: null };
+    tenantsQueries.push(query);
+    const realIn = chain.in;
+    const realThen = chain.then;
+    chain.in = (field, values) => { query.inList = values; return realIn(field, values); };
+    chain.then = (resolve, reject) => {
+      if (query.inList && query.inList.some((v) => v === null || v === undefined || v === 'null')) {
+        return Promise.resolve({ data: null, error: { code: '22P02', message: 'invalid input syntax for type uuid: "null"' } }).then(resolve, reject);
+      }
+      return realThen(resolve, reject);
+    };
+    return chain;
+  };
+  return { client: fake.client, tenantsQueries };
+}
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: a property with an active lease whose tenant_id is NULL (and one with it missing entirely) AND a lease with a real tenant — no throw, the real tenant is still found, and the tenants query never carries a null', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases.push({ unit_id: 'unit-1', tenant_id: null, status: 'active' });
+  tableData.leases.push({ unit_id: 'unit-1', status: 'active' }); // tenant_id key absent -> undefined, same guard.
+  const { client, tenantsQueries } = makeNullTenantStrictClient(tableData);
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.deepStrictEqual(result, { subject_type: 'tenant', candidate_ids: ['tenant-1'] });
+    assert.strictEqual(tenantsQueries.length, 1, 'expected exactly one tenants query');
+    assert.deepStrictEqual(tenantsQueries[0].inList, ['tenant-1'], 'expected the id list sent to the database to hold only the real tenant id');
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: a property whose active leases ALL have a NULL tenant_id returns no tenant candidates, never throws, and never issues a tenants query at all (owner matching at the same property is unaffected)', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases = [
+    { unit_id: 'unit-1', tenant_id: null, status: 'active' },
+    { unit_id: 'unit-1', tenant_id: null, status: 'active' },
+  ];
+  const { client, tenantsQueries } = makeNullTenantStrictClient(tableData);
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const tenantNameResult = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.strictEqual(tenantNameResult, null);
+    assert.strictEqual(tenantsQueries.length, 0, 'expected the tenants table to never be queried when no lease carries a tenant id');
+
+    const ownerNameResult = await significancePass.findNameMatchCandidates({ nameText: 'spoke with John Owner this morning', propertyId: 'prop-1' });
+    assert.deepStrictEqual(ownerNameResult, { subject_type: 'owner', candidate_ids: ['owner-1'] });
+    assert.strictEqual(tenantsQueries.length, 0);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — findNameMatchCandidates: normal case with no null tenant_id is unchanged — two distinct real tenants are both found, and a duplicate lease for the same tenant still produces one de-duplicated id in the tenants query', async () => {
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases.push({ unit_id: 'unit-1', tenant_id: 'tenant-1', status: 'active' }); // duplicate of the fixture lease above.
+  tableData.leases.push({ unit_id: 'unit-1', tenant_id: 'tenant-2', status: 'active' });
+  tableData.tenants.push({ id: 'tenant-2', first_name: 'Jane', last_name: 'Doe' });
+  const { client, tenantsQueries } = makeNullTenantStrictClient(tableData);
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const result = await significancePass.findNameMatchCandidates({ nameText: 'Jane Doe called about a leak', propertyId: 'prop-1' });
+    assert.strictEqual(result.subject_type, 'tenant');
+    assert.deepStrictEqual(result.candidate_ids.slice().sort(), ['tenant-1', 'tenant-2']);
+    assert.strictEqual(tenantsQueries.length, 1);
+    assert.deepStrictEqual(tenantsQueries[0].inList, ['tenant-1', 'tenant-2'], 'expected de-duplicated ids in first-seen order, exactly as before the fix');
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+  }
+});
+
+await runSerialCheck('significance-pass — applyCall1Result: flag ON, property corroborated, and the property has an active lease with a NULL tenant_id — the conversation no longer fails; the real tenant is still suggested (the exact end-to-end path that stalled the hourly job)', async () => {
+  const prevFlag = process.env.NAME_MATCH_SUGGESTIONS_ENABLED;
+  process.env.NAME_MATCH_SUGGESTIONS_ENABLED = 'true';
+  const tableData = BASE_TABLE_DATA();
+  tableData.leases.push({ unit_id: 'unit-1', tenant_id: null, status: 'active' });
+  const { client } = makeNullTenantStrictClient(tableData);
+  significancePass._setSupabaseClientForTesting(client);
+  try {
+    const result = await significancePass.applyCall1Result({
+      ...APPLY_CALL1_BASE_ARGS,
+      call1: { resolution_status: 'open', category: 'dispute', why: 'A routine test.', tone_trend: null, identification: { property_text: 'Sunset Apartments', vendor_text: null, name_text: 'Jane Doe called about a leak' } },
+    });
+    assert.strictEqual(result.property_id, 'prop-1');
+    assert.ok(result.nameMatchSuggestion, 'expected the real tenant to still be suggested');
+    assert.strictEqual(result.nameMatchSuggestion.suggested_subject_type, 'tenant');
+    assert.deepStrictEqual(result.nameMatchSuggestion.suggested_subject_candidate_ids, ['tenant-1']);
+  } finally {
+    significancePass._setSupabaseClientForTesting(null);
+    if (prevFlag === undefined) delete process.env.NAME_MATCH_SUGGESTIONS_ENABLED; else process.env.NAME_MATCH_SUGGESTIONS_ENABLED = prevFlag;
+  }
+});
+
 // ─── 23e — createComplaintRow's nameMatchSuggestion merge: reuses PART
 // 15's existing makeFakeSupabaseClient/withFakeSignificancePass harness
 // (require.cache-swap-based — a DIFFERENT DI seam from _setSupabaseClient

@@ -857,7 +857,8 @@ function namesPlausiblyMatch(citedText, candidateName) {
 // expired one" discipline subject-match.js's own resolveActivePropertyForTenant()
 // already applies in the other direction). A tenant with no name on file
 // can't happen (tenants.first_name/last_name are both NOT NULL) so no null
-// filtering is needed here the way fetchOwnersAtProperty() needs it below.
+// filtering of names is needed here the way fetchOwnersAtProperty() needs it
+// below. (A lease with no tenant at all CAN exist — see the tenantIds filter.)
 async function fetchActiveTenantsAtProperty(propertyId) {
   const { data: units, error: unitErr } = await supabase.from('units').select('id').eq('property_id', propertyId);
   if (unitErr) throw unitErr;
@@ -866,7 +867,8 @@ async function fetchActiveTenantsAtProperty(propertyId) {
 
   const { data: leases, error: leaseErr } = await supabase.from('leases').select('tenant_id').in('unit_id', unitIds).eq('status', 'active');
   if (leaseErr) throw leaseErr;
-  const tenantIds = [...new Set((leases || []).map((l) => l.tenant_id))];
+  // leases.tenant_id is nullable (20260720000001_nullable_fks.sql); a literal null in .in() reaches Postgres as the string "null" and fails the whole query with 22P02.
+  const tenantIds = [...new Set((leases || []).map((l) => l.tenant_id).filter((id) => id != null))];
   if (!tenantIds.length) return [];
 
   const { data: tenants, error: tenantErr } = await supabase.from('tenants').select('id, first_name, last_name').in('id', tenantIds);
